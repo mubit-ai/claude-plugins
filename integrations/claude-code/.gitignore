@@ -1,0 +1,18 @@
+# Local dev scratch (scripts/local-mubit.sh)
+.local/
+
+# Dependencies. Note what is deliberately NOT here: the build output.
+# Claude Code installs a plugin by fetching the marketplace source.path from GitHub —
+# no install step, no npm install, no build. Whatever is committed is what runs, so
+# hooks/dist, mcp/dist and bin/statusline.mjs are committed artifacts (build-guide §11.3).
+node_modules/
+
+# The repo-root .gitignore excludes the build output of every Python/JS package in the
+# tree. This plugin's is committed on purpose (§11.3), so re-include it here — a deeper
+# .gitignore wins, and without these two lines the plugin installs with no hooks at all.
+!hooks/dist/
+!mcp/dist/
+
+# Editor / OS noise
+.DS_Store
+*.log

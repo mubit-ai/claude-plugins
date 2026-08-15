@@ -1,0 +1,643 @@
+// @ts-check
+/**
+ * `bin/auth.src.mjs` — what `/mubit-memory:auth` runs. Bundled to `bin/auth.mjs`.
+ *
+ * Setting the plugin up is two values, `endpoint` and `apiKey`, and until this command
+ * existed the only way to supply them was: open the console, find the instance, issue a
+ * key, copy it, run `/plugin`, find Mubit Memory, choose configure, paste into two
+ * fields. Seven steps, each one a place to stop.
+ *
+ * ## Why this does not use `lib/http.mjs`
+ *
+ * That module is built for hooks: it caches health for 30 s, and it sits behind a
+ * circuit breaker so a dead instance cannot slow every prompt down. Both are wrong
+ * here. A user runs `/auth` *because* something is not working, which is exactly when
+ * the breaker is open and the cached health result is stale — and "I refuse to check
+ * because checking failed recently" is a terrible answer to "please log me in". So this
+ * file dials directly, with an injected `fetchImpl` the tests substitute.
+ *
+ * ## Why the key is checked against an authenticated route
+ *
+ * `GET /v2/core/health` is the one route the access policy allowlists — it answers `OK`
+ * for a wrong key, an expired key, and no key at all, because the plugin needs it as a
+ * readiness probe *before* a key exists. Validating a key against it would make this
+ * command a machine for producing false confidence. So health answers "is anything
+ * there?", and a second, authenticated call answers "is this key good?". Two questions,
+ * two calls, and the failure modes stay distinguishable.
+ *
+ * Nothing here logs the key, and no returned object contains it.
+ */
+
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
+import { hostname } from 'node:os';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import {
+  clearCredentials, credentialsPath, readCredentials, writeCredentials,
+} from '../lib/credentials.mjs';
+
+/** Where keys are issued. `MUBIT_CONSOLE_URL` overrides it for staging. */
+export const CONSOLE_URL = 'https://console.mubit.ai';
+
+/** Used when the user does not name an instance. */
+export const DEFAULT_ENDPOINT = 'https://api.mubit.ai';
+
+/** Mubit API keys are `mbt_`-prefixed. */
+export const KEY_PREFIX = 'mbt_';
+
+/** The authenticated probe: a read, no side effects, and no LLM call. */
+export const PROBE_ROUTE = '/v2/control/lessons';
+export const HEALTH_ROUTE = '/v2/core/health';
+
+const DEFAULT_TIMEOUT_MS = 8000;
+
+// ---------------------------------------------------------------------------
+// Shape
+// ---------------------------------------------------------------------------
+
+/**
+ * A cheap gate so an obvious typo — a pasted URL, an Anthropic key, the word `Bearer`
+ * left on the front — costs a round trip to nobody and gets a precise message instead
+ * of a generic `auth_failed`.
+ *
+ * It only checks shape. A well-formed key can still be revoked, and only the server
+ * knows that.
+ *
+ * @param {unknown} v
+ * @returns {boolean}
+ */
+export function looksLikeKey(v) {
+  if (typeof v !== 'string') return false;
+  const s = v.trim();
+  return s.startsWith(KEY_PREFIX) && s.length > KEY_PREFIX.length && !/\s/.test(s);
+}
+
+/**
+ * Normalize what a user pastes into something `new URL()` accepts.
+ *
+ * A bare hostname is upgraded to **https**, never http: silently downgrading the
+ * transport a credential travels over is worse than refusing to guess.
+ *
+ * @param {unknown} v
+ * @returns {string}
+ */
+export function normalizeEndpoint(v) {
+  const s = typeof v === 'string' ? v.trim() : '';
+  if (!s) return DEFAULT_ENDPOINT;
+  const withScheme = /^https?:\/\//i.test(s) ? s : `https://${s}`;
+  return withScheme.replace(/\/+$/, '');
+}
+
+/**
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {string}
+ */
+export function consoleUrlFrom(env = process.env) {
+  const v = env?.MUBIT_CONSOLE_URL;
+  const s = typeof v === 'string' ? v.trim() : '';
+  return s ? s.replace(/\/+$/, '') : CONSOLE_URL;
+}
+
+// ---------------------------------------------------------------------------
+// The browser step
+// ---------------------------------------------------------------------------
+
+/**
+ * Open the OS browser, detached, and never care whether it worked.
+ *
+ * Over SSH, in a container, or on a machine with no default browser there is nothing to
+ * open, and that is not an error — printing the URL is the whole fallback, and the user
+ * carries on by hand. Failing here would strand somebody who was one paste away.
+ *
+ * @param {{url: string, openImpl?: (url: string) => any, log?: (m: string) => void}} opts
+ * @returns {boolean} whether a browser was actually launched
+ */
+export function openConsole({ url, openImpl = defaultOpen, log = console.error }) {
+  let launched = false;
+  try {
+    openImpl(url);
+    launched = true;
+  } catch {
+    launched = false;
+  }
+  if (!launched) log(`Open this in your browser:\n  ${url}`);
+  return launched;
+}
+
+/** @param {string} url */
+function defaultOpen(url) {
+  const cmd = process.platform === 'darwin' ? 'open'
+    : process.platform === 'win32' ? 'start'
+      : 'xdg-open';
+  const child = spawn(cmd, [url], { detached: true, stdio: 'ignore', shell: process.platform === 'win32' });
+  child.on('error', () => { /* no browser here; the caller already printed the URL */ });
+  child.unref();
+}
+
+// ---------------------------------------------------------------------------
+// Verification
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {'ready'|'auth_failed'|'unreachable'|'server_error'|'invalid_key'} AuthState
+ * @typedef {{ok: boolean, state: AuthState, detail: string}} VerifyResult
+ */
+
+/**
+ * Two calls, cheapest first, so every outcome has exactly one cause.
+ *
+ *   1. `GET /v2/core/health` — is anything there? Separates "your network/endpoint is
+ *      wrong" from "your key is wrong". Without it, a user on a dropped VPN is told to
+ *      re-issue a perfectly good key.
+ *   2. `POST /v2/control/lessons` with the bearer token — is this key good? This is the
+ *      only question health cannot answer.
+ *
+ * @param {{endpoint: string, apiKey: string, fetchImpl?: typeof fetch, timeoutMs?: number}} opts
+ * @returns {Promise<VerifyResult>}
+ */
+export async function verifyCredentials(opts) {
+  const { apiKey, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = opts ?? {};
+  const endpoint = normalizeEndpoint(opts?.endpoint);
+
+  if (!looksLikeKey(apiKey)) {
+    return {
+      ok: false,
+      state: 'invalid_key',
+      detail: `That does not look like a Mubit API key. Keys begin with \`${KEY_PREFIX}\`.`,
+    };
+  }
+  const key = String(apiKey).trim();
+
+  // 1 — reachability.
+  const health = await dial(fetchImpl, `${endpoint}${HEALTH_ROUTE}`, { timeoutMs });
+  if (health.transportError) {
+    return {
+      ok: false,
+      state: 'unreachable',
+      detail: `Nothing answered at ${endpoint}. Check the endpoint, and that the instance is running.`,
+    };
+  }
+  if (health.status >= 500) {
+    return {
+      ok: false,
+      state: 'server_error',
+      detail: `${endpoint} is up but unhealthy (HTTP ${health.status}). This is the instance, not your key.`,
+    };
+  }
+
+  // 2 — the key itself.
+  const probe = await dial(fetchImpl, `${endpoint}${PROBE_ROUTE}`, {
+    method: 'POST',
+    timeoutMs,
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: '{}',
+  });
+  if (probe.transportError) {
+    return { ok: false, state: 'unreachable', detail: `Lost the connection to ${endpoint} while checking the key.` };
+  }
+  if (probe.status === 401 || probe.status === 403) {
+    return { ok: false, state: 'auth_failed', detail: 'The instance rejected that key. Issue a new one in the console.' };
+  }
+  if (probe.status >= 500) {
+    return { ok: false, state: 'server_error', detail: `The instance failed while checking the key (HTTP ${probe.status}).` };
+  }
+  if (probe.status >= 400) {
+    return { ok: false, state: 'server_error', detail: `Unexpected reply from ${endpoint} (HTTP ${probe.status}).` };
+  }
+  return { ok: true, state: 'ready', detail: `Connected to ${endpoint}.` };
+}
+
+/**
+ * One request, with a deadline, that never throws.
+ *
+ * A timeout is reported as a transport error rather than a status, because a request
+ * that never got an answer is a different thing from an answer that said no — the whole
+ * point of the state table above.
+ *
+ * @returns {Promise<{status: number, transportError: boolean}>}
+ */
+async function dial(fetchImpl, url, { method = 'GET', headers = {}, body, timeoutMs } = {}) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(url, { method, headers, body, signal: ac.signal });
+    return { status: res.status, transportError: false };
+  } catch {
+    return { status: 0, transportError: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verify, then store
+// ---------------------------------------------------------------------------
+
+/**
+ * Check a key and — only if the server accepts it — write it.
+ *
+ * Storing an unverified key does not save the user a step; it moves the failure to the
+ * next session, where it shows up as a broken plugin rather than a failed login.
+ *
+ * @param {{dataDir: string, endpoint: string, apiKey: string,
+ *          fetchImpl?: typeof fetch, timeoutMs?: number}} opts
+ * @returns {Promise<{ok: boolean, state: AuthState, detail: string, endpoint: string, stored: boolean}>}
+ */
+export async function authenticateWithKey(opts) {
+  const endpoint = normalizeEndpoint(opts?.endpoint);
+  const result = await verifyCredentials({ ...opts, endpoint });
+  if (!result.ok) return { ...result, endpoint, stored: false };
+
+  const stored = writeCredentials(opts.dataDir, {
+    endpoint,
+    apiKey: String(opts.apiKey).trim(),
+  });
+  if (!stored) {
+    return {
+      ok: false,
+      state: 'server_error',
+      detail: `The key is valid but could not be written to ${credentialsPath(opts.dataDir)}.`,
+      endpoint,
+      stored: false,
+    };
+  }
+  return { ...result, endpoint, stored: true };
+}
+
+/**
+ * What is configured right now, for the "you are already signed in" path.
+ * Returns the key's presence, never the key.
+ *
+ * @param {string} dataDir
+ * @returns {{endpoint: string, hasKey: boolean}}
+ */
+export function currentCredentials(dataDir) {
+  const c = readCredentials(dataDir);
+  return { endpoint: c.endpoint ?? '', hasKey: typeof c.apiKey === 'string' && c.apiKey !== '' };
+}
+
+// ---------------------------------------------------------------------------
+// The browser flow — loopback + PKCE
+// ---------------------------------------------------------------------------
+
+/**
+ * The workspace is still coming up. Not a failure: the same command, run again in a
+ * minute, finishes the job. Modelled as its own error type so callers cannot
+ * accidentally treat it as one.
+ */
+export class ProvisioningPending extends Error {
+  constructor(message = 'workspace is still provisioning') {
+    super(message);
+    this.name = 'ProvisioningPending';
+  }
+}
+
+/** base64url: the URL-safe alphabet, no padding. These travel in a query string. */
+function base64url(buf) {
+  return Buffer.from(buf).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * An RFC 7636 S256 pair.
+ *
+ * The browser only ever carries the **challenge**. The verifier stays in this process
+ * and goes straight to the console over the back channel, which is what makes the code
+ * in the address bar useless to anyone who reads it: without the verifier it cannot be
+ * exchanged, and the challenge is a one-way hash.
+ *
+ * @returns {{verifier: string, challenge: string}}
+ */
+export function makePkce() {
+  const verifier = base64url(randomBytes(32));
+  const challenge = base64url(createHash('sha256').update(verifier).digest());
+  return { verifier, challenge };
+}
+
+/**
+ * The loopback + PKCE flow, the same shape `gh auth login` uses.
+ *
+ *   1. Generate a PKCE pair and a `state` nonce.
+ *   2. Listen on `127.0.0.1:0` — a random free port, loopback only. Binding `0.0.0.0`
+ *      would put the callback on the network for the length of the flow.
+ *   3. Open the console, passing the port, the state and the challenge.
+ *   4. The user signs in there; the console redirects back to the loopback with a code.
+ *   5. Exchange `{code, verifier}` for the key over the back channel.
+ *
+ * `state` is checked on the way in. Without it, any page the user happens to have open
+ * could call the loopback with a code of its own and sign them into somebody else's
+ * account.
+ *
+ * @param {{consoleUrl?: string, repo?: string, host?: string, region?: string,
+ *          openImpl?: (url: string) => any, fetchImpl?: typeof fetch,
+ *          timeoutMs?: number, log?: (m: string) => void}} [opts]
+ * @returns {Promise<Record<string, any>>}
+ */
+export async function runBrowserAuth(opts = {}) {
+  const {
+    consoleUrl = CONSOLE_URL, repo = '', host = '', region = '',
+    openImpl, fetchImpl = fetch, timeoutMs = 120000, log = console.error,
+  } = opts;
+
+  const { verifier, challenge } = makePkce();
+  const state = base64url(randomBytes(16));
+
+  const server = createServer();
+  /** @type {(v: any) => void} */ let settle;
+  /** @type {(e: Error) => void} */ let fail;
+  const awaited = new Promise((res, rej) => { settle = res; fail = rej; });
+
+  server.on('request', (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    if (url.pathname !== '/callback') {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      return res.end('not found');
+    }
+    // A state mismatch is answered politely and then ignored: the real browser may still
+    // be on its way, so this must not end the flow. It simply never completes it.
+    if (url.searchParams.get('state') !== state) {
+      res.writeHead(400, { 'content-type': 'text/plain' });
+      return res.end('state mismatch');
+    }
+
+    const provisioning = url.searchParams.get('provisioning') === '1';
+    const code = url.searchParams.get('code');
+
+    // Hand the browser back to the console rather than leaving it on a blank loopback
+    // page — the user's attention is there, and that is where the confirmation belongs.
+    res.writeHead(302, {
+      location: `${consoleUrl}/app/cli-auth?status=${provisioning || !code ? 'provisioning' : 'authorized'}`,
+    });
+    res.end();
+
+    if (provisioning || !code) settle({ provisioning: true });
+    else settle({ code });
+  });
+
+  await new Promise((res, rej) => {
+    server.once('error', rej);
+    server.listen(0, '127.0.0.1', res);
+  });
+  server.unref();
+  const port = /** @type {any} */ (server.address()).port;
+
+  const timer = setTimeout(
+    () => fail(new Error('timed out waiting for browser authorization')),
+    timeoutMs,
+  );
+
+  try {
+    const authUrl = buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region });
+    openConsole({ url: authUrl, openImpl, log });
+
+    const hit = await awaited;
+    if (hit.provisioning) throw new ProvisioningPending();
+
+    const res = await fetchImpl(`${consoleUrl}/api/cli/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: hit.code, verifier }),
+    });
+    if (!res.ok) throw new Error(`token exchange failed (HTTP ${res.status})`);
+
+    const payload = await res.json();
+    if (!payload || typeof payload.mubitApiKey !== 'string' || !payload.mubitApiKey) {
+      throw new Error('token exchange failed: the console returned no API key');
+    }
+    return payload;
+  } finally {
+    clearTimeout(timer);
+    // Always release the port. A listener left behind outlives the command and the next
+    // run picks a different port, so the leak is silent until something else needs it.
+    await new Promise((r) => server.close(() => r(undefined)));
+  }
+}
+
+/** @returns {string} */
+function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }) {
+  const url = new URL(`${consoleUrl}/app/cli-auth`);
+  url.searchParams.set('port', String(port));
+  url.searchParams.set('state', state);
+  url.searchParams.set('challenge', challenge);
+  url.searchParams.set('repo', repo || '');
+  url.searchParams.set('host', host || '');
+  if (region) url.searchParams.set('region', region);
+  return url.toString();
+}
+
+/**
+ * Turn the console's answer into the `endpoint` the plugin stores.
+ *
+ * An explicit endpoint wins. Otherwise a known region maps to its host, and anything
+ * else falls back to the default — deriving `https://<whatever>.mubit.ai` from an
+ * unrecognised region would produce a DNS failure that reads like a network problem
+ * instead of a mapping this client has not been taught yet.
+ *
+ * @param {Record<string, any>} payload
+ * @returns {string}
+ */
+export function endpointFor(payload = {}) {
+  const explicit = typeof payload.mubitEndpoint === 'string' ? payload.mubitEndpoint.trim() : '';
+  if (explicit) return normalizeEndpoint(explicit);
+
+  const region = typeof payload.region === 'string' ? payload.region.trim().toLowerCase() : '';
+  const KNOWN = { eu: 'https://eu.mubit.ai', us: 'https://us.mubit.ai' };
+  return KNOWN[region] ?? DEFAULT_ENDPOINT;
+}
+
+/**
+ * The repository this session is in, in the console's `github.com/org/repo` form, so a
+ * workspace is provisioned per project rather than per machine. Best effort: outside a
+ * git repo the console simply gets a blank and decides for itself.
+ *
+ * @param {string} cwd
+ * @returns {string}
+ */
+export function repoIdentity(cwd = process.cwd()) {
+  try {
+    const r = spawnSync('git', ['config', '--get', 'remote.origin.url'],
+      { cwd, encoding: 'utf8', timeout: 2000 });
+    const origin = (r.stdout ?? '').trim();
+    if (origin) {
+      return origin
+        .replace(/^git@([^:]+):/, '$1/')
+        .replace(/^https?:\/\//, '')
+        .replace(/\.git$/, '');
+    }
+  } catch { /* not a repo, or no git */ }
+  return '';
+}
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+/**
+ * The key arrives in an environment variable, not `--key`.
+ *
+ * `argv` is world-readable: anyone on the machine can `ps` it while the process runs.
+ * A process's environment is readable only by its owner. Neither is as good as never
+ * handling the key at all, which is what the browser flow gets us — this path is the
+ * fallback for when there is no browser to open.
+ */
+export const KEY_ENV_VAR = 'MUBIT_AUTH_KEY';
+
+/**
+ * Parse argv into an intent. Kept separate from `main` so it is testable without
+ * running anything.
+ * @param {string[]} argv
+ */
+export function parseArgs(argv = []) {
+  const args = argv.slice();
+  const has = (f) => args.includes(f);
+  const valueOf = (flag) => {
+    const i = args.indexOf(flag);
+    return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
+  };
+  return {
+    mode: has('--status') ? 'status' : has('--logout') ? 'logout' : has('--paste') ? 'paste' : 'browser',
+    endpoint: valueOf('--endpoint'),
+    json: has('--json'),
+  };
+}
+
+/**
+ * @param {string[]} argv
+ * @param {Record<string, string|undefined>} env
+ * @param {{fetchImpl?: typeof fetch, log?: (m: string) => void, dataDir?: string}} [deps]
+ * @returns {Promise<number>} process exit code
+ */
+export async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
+  const log = deps.log ?? console.log;
+  const dataDir = deps.dataDir ?? resolveDataDirFrom(env);
+  const args = parseArgs(argv);
+  const emit = (payload) => log(args.json ? JSON.stringify(payload) : payload.detail);
+
+  if (args.mode === 'status') {
+    const cur = currentCredentials(dataDir);
+    emit({
+      ok: cur.hasKey,
+      state: cur.hasKey ? 'configured' : 'unconfigured',
+      endpoint: cur.endpoint,
+      detail: cur.hasKey
+        ? `Signed in to ${cur.endpoint || DEFAULT_ENDPOINT}.`
+        : 'No Mubit credentials stored. Run /mubit-memory:auth.',
+    });
+    return cur.hasKey ? 0 : 1;
+  }
+
+  if (args.mode === 'logout') {
+    clearCredentials(dataDir);
+    emit({ ok: true, state: 'unconfigured', detail: 'Removed the stored Mubit credentials.' });
+    return 0;
+  }
+
+  const fetchImpl = deps.fetchImpl ?? fetch;
+
+  // The good path: nothing to copy, nothing to paste, and the key never passes through
+  // the conversation. Only reached when the user did not ask for --paste.
+  if (args.mode === 'browser') {
+    try {
+      const payload = await runBrowserAuth({
+        consoleUrl: consoleUrlFrom(env),
+        repo: repoIdentity(env?.CLAUDE_PROJECT_DIR || process.cwd()),
+        host: hostname(),
+        fetchImpl,
+        // Injected by the tests. Without this seam the suite would open a real browser
+        // window per test and then sit out the full deadline.
+        openImpl: deps.openImpl,
+        timeoutMs: authTimeoutFrom(env, deps),
+        log: (m) => log(m),
+      });
+      const res = await authenticateWithKey({
+        dataDir,
+        endpoint: args.endpoint ?? endpointFor(payload),
+        apiKey: payload.mubitApiKey,
+        fetchImpl,
+      });
+      emit({ ok: res.ok, state: res.state, endpoint: res.endpoint, detail: res.detail });
+      return res.ok ? 0 : 1;
+    } catch (err) {
+      if (err instanceof ProvisioningPending) {
+        emit({
+          ok: false,
+          state: 'provisioning',
+          detail: 'Your Mubit workspace is still being created (usually a minute or two). '
+            + 'Run /mubit-memory:auth again shortly — it picks up where it left off.',
+        });
+        return 2; // distinct from a real failure, so the skill can say "wait", not "fix"
+      }
+      // No browser, no console, or the user closed the tab. The paste route still works,
+      // so the flow degrades to it rather than dead-ending.
+      emit({
+        ok: false,
+        state: 'browser_failed',
+        detail: `${err?.message ?? err}\n`
+          + `You can finish by hand instead: issue a key at ${consoleUrlFrom(env)}, then run\n`
+          + `  ${KEY_ENV_VAR}=mbt_… node "${'${CLAUDE_PLUGIN_ROOT}'}/bin/auth.mjs" --paste`,
+      });
+      return 1;
+    }
+  }
+
+  const apiKey = env?.[KEY_ENV_VAR] ?? '';
+  if (!apiKey) {
+    emit({
+      ok: false,
+      state: 'invalid_key',
+      detail: `No key supplied. Set ${KEY_ENV_VAR} for this one command, e.g.\n`
+        + `  ${KEY_ENV_VAR}=mbt_… node bin/auth.mjs --paste`,
+    });
+    return 1;
+  }
+
+  const endpoint = normalizeEndpoint(args.endpoint ?? env?.MUBIT_ENDPOINT ?? '');
+  const res = await authenticateWithKey({
+    dataDir, endpoint, apiKey, fetchImpl,
+  });
+  emit({ ok: res.ok, state: res.state, endpoint: res.endpoint, detail: res.detail });
+  return res.ok ? 0 : 1;
+}
+
+/**
+ * How long to wait for the browser round trip. Two minutes is right for a human who has
+ * to sign in, possibly create an account, and pick an instance — but no test suite can
+ * afford it, so `MUBIT_CC_AUTH_TIMEOUT_MS` shrinks it the way the other `MUBIT_CC_*`
+ * windows are shrunk.
+ */
+function authTimeoutFrom(env = {}, deps = {}) {
+  if (typeof deps.timeoutMs === 'number') return deps.timeoutMs;
+  const raw = Number(env?.MUBIT_CC_AUTH_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 120000;
+}
+
+/** Mirrors `lib/state.mjs` `dataDir()` without importing the hook surface. */
+function resolveDataDirFrom(env = process.env) {
+  const e = env ?? {};
+  if (e.MUBIT_CC_DATA_DIR) return e.MUBIT_CC_DATA_DIR;
+  if (e.CLAUDE_PLUGIN_DATA) return e.CLAUDE_PLUGIN_DATA;
+  const home = e.HOME || '.';
+  return `${home}/.claude/plugins/data/mubit-memory`;
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+// Guarded the same way as `bin/statusline.src.mjs`: the tests import this module and
+// drive `main()` with injected dependencies, so it must not run itself on import.
+const selfPath = fileURLToPath(import.meta.url);
+const entryPath = process.argv[1] ? resolve(process.argv[1]) : '';
+
+if (entryPath === selfPath) {
+  // Unlike a hook, this command is allowed to fail loudly — the user is watching, and a
+  // silent exit 0 after a failed login is worse than a message. But a stack trace is
+  // still never the right output, so the exit code carries the verdict.
+  process.exitCode = await main().catch((err) => {
+    console.log(`Authentication could not run: ${err?.message ?? err}`);
+    return 1;
+  });
+}

@@ -1,0 +1,520 @@
+// @ts-check
+/**
+ * `hooks/src/prompt-recall.mjs` — UserPromptSubmit, blocking (§5.2, §1.8, §12.4).
+ *
+ * The single most counter-intuitive fact in the whole plugin, and the one a future
+ * maintainer is most likely to "simplify" away:
+ *
+ *   | request                                       | LLM calls |
+ *   | query{mode:"direct_bypass", evidence_only}    |     0     |  ← rung 1, the primary path
+ *   | query{mode:"agent_routed",  evidence_only}    |     1     |  ← rung 2, only on a 403
+ *   | context{mode:"sections"}                      |     2     |  ← rung 3, opt-in only
+ *
+ * `/v2/control/context` is NOT an LLM-free assembly path: `GetContext` re-enters `query()`
+ * as `AgentRouted` with `evidence_only` left `false`, pays both calls,
+ * then throws the synthesized answer away. So the recall hook is query-first and treats
+ * `context` as the last rung — the inverse of what the endpoint names suggest.
+ *
+ * These tests are written before the implementation. Failing with
+ * "hooks/src/prompt-recall.mjs does not exist yet" is the expected red state.
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { writeFileSync } from 'node:fs';
+import {
+  fakeMubit, queryResponse, runHook, assertHookContract,
+  baseEnv, makeDataDir, readJsonFile, readJsonDir,
+} from './helpers/harness.mjs';
+import { userPromptSubmit } from './helpers/fixtures.mjs';
+
+const RUN_ID = 'cc-test-run-1';
+const PROMPT = 'why is the ingest job stuck in queued?';
+
+/** Direct search disabled by instance policy. A policy verdict, not a fault. */
+const DENIED = {
+  status: 403,
+  json: { error: 'direct data-plane bypass is disabled by policy', code: 'permission_denied' },
+};
+
+/** Deterministic env: a pinned static run id makes every request body exactly assertable. */
+function env(dataDir, server, extra = {}) {
+  return baseEnv({
+    dataDir,
+    endpoint: server.url,
+    extra: {
+      MUBIT_CC_RUN_STRATEGY: 'static',
+      MUBIT_CC_RUN_ID: RUN_ID,
+      MUBIT_CC_ENV_TAGS: 'ci:test',
+      ...extra,
+    },
+  });
+}
+
+const policyDir = (d) => join(d, 'policy');
+const marker = (d) => readJsonFile(join(d, 'status', `${RUN_ID}.json`));
+
+// ---------------------------------------------------------------------------
+// The regression test for the inverted ladder
+// ---------------------------------------------------------------------------
+
+// §1.8/§12.4 — THE test in this file. Under the default recallAssemble:"client" the hook
+// spends exactly one zero-LLM-call request and never touches the two-LLM-call endpoint.
+// If `context` ever shows up here, every user prompt just got two LLM calls more expensive.
+test('rung 1 only: one direct_bypass query, and NO /v2/control/context at all', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/query', 1);
+  server.assertNotCalled('POST', '/v2/control/context');
+
+  const body = server.lastCall('POST', '/v2/control/query').body;
+  assert.equal(body.mode, 'direct_bypass',
+    'only "direct_bypass" and "direct" reach the direct lane; ' +
+    'every other value silently falls through to AgentRouted and costs an LLM call');
+  assert.equal(body.evidence_only, true,
+    'evidence_only:true skips answer synthesis — the second LLM call');
+});
+
+// §5.2: the rung-1 body, field for field. `limit`, `budget:"low"` (<500 ms tier, §1.7) and
+// `entry_types` are all load-bearing; omitting `mode` defaults to "agent_routed",
+// which is the expensive case with no error.
+test('rung 1 request body matches §5.2 exactly', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  assertHookContract(r);
+
+  const body = server.lastCall('POST', '/v2/control/query').body;
+  assert.equal(body.run_id, RUN_ID);
+  assert.equal(typeof body.agent_id, 'string');
+  assert.ok(body.agent_id.startsWith('claude-code-'), `agent_id was "${body.agent_id}"`);
+  assert.equal(body.query, PROMPT);
+  assert.equal(body.mode, 'direct_bypass');
+  assert.equal(body.direct_lane, 'semantic_search');
+  assert.equal(body.evidence_only, true);
+  assert.equal(body.budget, 'low');
+  assert.equal(body.limit, 8);
+  assert.deepEqual(body.entry_types, ['mental_model', 'rule', 'lesson', 'fact', 'trace']);
+  assert.equal(body.include_working_memory, true);
+  assert.ok(Array.isArray(body.env_tags), 'env_tags exists on AgentQueryRequest but not on ContextRequest');
+  assert.ok(body.env_tags.includes('tool:claude-code'));
+  assert.ok(body.env_tags.includes('ci:test'), 'MUBIT_CC_ENV_TAGS extras are appended verbatim');
+  assert.ok(body.env_tags.length <= 8, 'env_tags is capped at 8 (§4.1)');
+});
+
+// §5.2: "query truncates to 2000 chars — recall quality does not improve past that and a
+// 40 KB pasted stack trace is a slow query." /v2/control/query also has a 256 KiB cap.
+test('the query is truncated to 2000 characters', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const long = 'why is the ingest job stuck in queued? '.repeat(200); // ~7600 chars
+
+  const r = await runHook('prompt-recall', userPromptSubmit({ prompt: long }), { env: env(dir, server) });
+  assertHookContract(r);
+
+  const q = server.lastCall('POST', '/v2/control/query').body.query;
+  assert.ok(q.length <= 2000, `query was ${q.length} chars`);
+  assert.ok(q.length >= 1900, `query was truncated far below the 2000-char cap (${q.length})`);
+  assert.equal(q.slice(0, 1900), long.slice(0, 1900), 'truncation keeps the head of the prompt');
+});
+
+// ---------------------------------------------------------------------------
+// The policy ladder: 403 → rung 2, cached
+// ---------------------------------------------------------------------------
+
+// §1.8/§5.2: a 403 on rung 1 is a policy verdict, not a failure. Descend one rung (1 LLM
+// call), and never to rung 3 (2 LLM calls).
+test('403 permission_denied on rung 1 falls to rung 2, byte-identical but for the mode', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': [DENIED, { json: queryResponse({ mode: 'agent_routed' }) }],
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/query', 2);
+  server.assertNotCalled('POST', '/v2/control/context');
+
+  const [first, second] = server.calls('POST', '/v2/control/query').map((c) => c.body);
+  assert.equal(first.mode, 'direct_bypass');
+  assert.equal(second.mode, 'agent_routed');
+  assert.equal(second.evidence_only, true, 'rung 2 still skips synthesis — 1 LLM call, not 2');
+  assert.deepEqual({ ...second, mode: 'direct_bypass' }, first,
+    'rung 2 is byte-identical to rung 1 except for the mode string');
+});
+
+// §5.2/§7: the denial is an instance-level policy fact with a 24 h TTL. Re-probing
+// direct_bypass on every prompt burns a round trip forever.
+test('a rung-1 denial is cached to policy/<endpoint_hash>.json with a 24h TTL', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': [DENIED, { json: queryResponse() }],
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const before = Date.now();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  assertHookContract(r);
+
+  const files = readJsonDir(policyDir(dir));
+  assert.equal(files.length, 1, `expected one policy verdict file, got ${files.map((f) => f.file)}`);
+  const v = files[0].json;
+  assert.equal(v.direct_bypass, 'denied');
+  assert.equal(v.ttl_ms, 86400000, 'MUBIT_CC_POLICY_TTL_MS default is 24 h');
+  assert.equal(typeof v.observed_at, 'number');
+  assert.ok(v.observed_at >= before && v.observed_at <= Date.now() + 1000);
+});
+
+// §5.2 / F23: on the NEXT prompt, rung 1 is not probed at all. This is the whole point of
+// caching the verdict — one wasted round trip per day, not one per prompt.
+test('a cached denial routes the next prompt straight to rung 2', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': [DENIED, { json: queryResponse() }],
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  server.assertCalled('POST', '/v2/control/query', 2);
+
+  server.reset();
+  server.route('POST /v2/control/query', { json: queryResponse({ mode: 'agent_routed' }) });
+  const r2 = await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_second' }), {
+    env: env(dir, server),
+  });
+
+  assertHookContract(r2);
+  server.assertCalled('POST', '/v2/control/query', 1);
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.mode, 'agent_routed',
+    'rung 1 must not be re-probed while the verdict is valid');
+});
+
+// §5.2 / F27: "A 'granted' verdict is not cached: rung 1 succeeding is self-evident and
+// caching it would only add a stale-state failure mode."
+test('a successful rung 1 writes nothing to policy/', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+
+  assertHookContract(r);
+  assert.deepEqual(readJsonDir(policyDir(dir)), [],
+    'grants are never cached — only denials are');
+});
+
+// §5.2 / F24: an operator who flips the instance's direct-search policy back on gets the free
+// path back within a day, with no reinstall.
+test('an expired denial re-probes rung 1 exactly once', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': [DENIED, { json: queryResponse() }],
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  const cached = readJsonDir(policyDir(dir));
+  assert.equal(cached.length, 1);
+  // Age the verdict past its own TTL. The filename is discovered, not guessed, so this
+  // test stays honest about the endpoint-hash scheme without duplicating it.
+  writeFileSync(cached[0].path, JSON.stringify({
+    ...cached[0].json,
+    observed_at: Date.now() - 2 * 86400000,
+  }));
+
+  server.reset();
+  server.route('POST /v2/control/query', { json: queryResponse() });
+  const r2 = await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_third' }), {
+    env: env(dir, server),
+  });
+
+  assertHookContract(r2);
+  server.assertCalled('POST', '/v2/control/query', 1);
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.mode, 'direct_bypass',
+    'the expired verdict must be re-probed, and the free rung reclaimed');
+});
+
+// §5.2/§7: "Keyed by endpoint hash so a local and a hosted instance hold independent
+// verdicts." One instance disabling direct_bypass must not tax the other.
+test('policy verdicts are per endpoint, not global', async (t) => {
+  const denying = await fakeMubit({ 'POST /v2/control/query': [DENIED, { json: queryResponse() }] });
+  const allowing = await fakeMubit();
+  t.after(() => Promise.all([denying.close(), allowing.close()]));
+  const dir = makeDataDir();
+
+  await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, denying) });
+  assert.equal(readJsonDir(policyDir(dir)).length, 1);
+
+  const r2 = await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_other_endpoint' }), {
+    env: env(dir, allowing),
+  });
+
+  assertHookContract(r2);
+  allowing.assertCalled('POST', '/v2/control/query', 1);
+  assert.equal(allowing.lastCall('POST', '/v2/control/query').body.mode, 'direct_bypass',
+    'the second endpoint must be probed on its own merits');
+  assert.equal(readJsonDir(policyDir(dir)).length, 1,
+    'the denial belongs to the first endpoint only');
+});
+
+// §5.2 / F25: "Only a 401/403 on a rung the plugin did not deliberately probe means auth is
+// broken." A 401 is auth_failed — not a policy denial, never cached, and no rung-2 retry.
+test('401 on rung 1 is auth_failed, never a cached policy verdict', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { status: 401, json: { error: 'unauthorized' } },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+
+  assertHookContract(r);
+  assert.deepEqual(readJsonDir(policyDir(dir)), [], 'a 401 must never be cached as a policy verdict');
+  server.assertCalled('POST', '/v2/control/query', 1);
+  assert.deepEqual(r.json, { suppressOutput: true },
+    'auth failure costs the memory, never the prompt');
+});
+
+// ---------------------------------------------------------------------------
+// Rung-independence of the rendered block
+// ---------------------------------------------------------------------------
+
+// §5.2/§4.10: "additionalContext renders identically whichever rung served it — that is the
+// point of lib/assemble.mjs mirroring the server's section order and vocabulary."
+test('rungs 1 and 2 render byte-identical additionalContext for the same evidence', async (t) => {
+  const a = await fakeMubit();
+  const b = await fakeMubit({
+    'POST /v2/control/query': [DENIED, { json: queryResponse({ mode: 'agent_routed' }) }],
+  });
+  t.after(() => Promise.all([a.close(), b.close()]));
+
+  const ra = await runHook('prompt-recall', userPromptSubmit(), { env: env(makeDataDir(), a) });
+  const rb = await runHook('prompt-recall', userPromptSubmit(), { env: env(makeDataDir(), b) });
+
+  assertHookContract(ra);
+  assertHookContract(rb);
+  a.assertCalled('POST', '/v2/control/query', 1);
+  b.assertCalled('POST', '/v2/control/query', 2);
+  assert.equal(
+    ra.json.hookSpecificOutput.additionalContext,
+    rb.json.hookSpecificOutput.additionalContext,
+    'the assembler owns the shape, not the rung');
+});
+
+// ---------------------------------------------------------------------------
+// Rung 3 — opt-in only
+// ---------------------------------------------------------------------------
+
+// §1.8/§5.2: rung 3 costs two LLM calls per prompt and exists only because an operator
+// explicitly accepted that cost for the server-assembled context_block.
+test('recallAssemble:"server" issues rung 3 with the documented sections body', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(dir, server, { MUBIT_CC_RECALL_ASSEMBLE: 'server' }),
+  });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/context', 1);
+
+  // The decision phase-2-recall.md leaves open, now recorded: server mode SUBSTITUTES rung 3
+  // for the ladder, it does not append itself to the end of it. §5.2's pseudocode reads as a
+  // sequential fallback, which would make rung 3 reachable only after rungs 1 and 2 had both
+  // failed — so the option would almost never take effect. plugin.json describes it as "how
+  // recalled memory is assembled", a straight substitution, and that is the reading taken:
+  // probing rung 1 first and then paying rung 3 anyway costs three LLM calls for one recall.
+  server.assertNotCalled('POST', '/v2/control/query');
+
+  const body = server.lastCall('POST', '/v2/control/context').body;
+  assert.equal(body.run_id, RUN_ID);
+  assert.equal(body.mode, 'sections');
+  assert.equal(body.max_token_budget, 1500);
+  assert.deepEqual(body.sections,
+    ['mental_models', 'active_rules', 'lessons', 'facts', 'working_memory', 'traces']);
+  assert.equal(body.include_working_memory, true);
+  assert.equal(body.query, PROMPT);
+});
+
+// §5.2 step 5: "Rung 3 → use the server's context_block and section_summaries as-is."
+// Re-assembling what you already paid two LLM calls for would be pure waste.
+test('rung 3 injects the server context_block verbatim', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(dir, server, { MUBIT_CC_RECALL_ASSEMBLE: 'server' }),
+  });
+
+  assertHookContract(r);
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.ok(ctx.includes('## Active rules'), `context_block not carried through: ${ctx}`);
+  assert.ok(ctx.includes('Poll the ingest job.'));
+  assert.equal(marker(dir).recall.rung, 3);
+});
+
+// ---------------------------------------------------------------------------
+// Skip conditions — zero HTTP, every time
+// ---------------------------------------------------------------------------
+
+// §5.2 step 0: recall disabled means no dialing at all, not "dial and discard".
+test('MUBIT_CC_RECALL=0 issues zero HTTP requests', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(makeDataDir(), server, { MUBIT_CC_RECALL: '0' }),
+  });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0, `saw: ${server.summary()}`);
+});
+
+// §5.2 step 0: a prompt under 8 chars ("ok", "yes", "go on") carries no retrievable intent.
+test('a prompt shorter than 8 characters issues zero HTTP requests', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const r = await runHook('prompt-recall', userPromptSubmit({ prompt: 'yes' }), {
+    env: env(makeDataDir(), server),
+  });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0, `saw: ${server.summary()}`);
+});
+
+// §5.2 step 0: a slash command is addressed to the harness, not the model — recalling
+// against "/mubit-memory:recall …" would inject memory into a memory command.
+test('a prompt starting with "/" issues zero HTTP requests', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const r = await runHook('prompt-recall', userPromptSubmit({ prompt: '/mubit-memory:doctor check the connection' }), {
+    env: env(makeDataDir(), server),
+  });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0, `saw: ${server.summary()}`);
+});
+
+// §5.2 step 0 / §4.7 / F7: an open breaker short-circuits before dialing. A blocking hook
+// in front of every prompt must not pay a connect timeout to a server known to be down.
+test('an open breaker issues zero HTTP requests', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { status: 500, json: { error: 'boom' } },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server, { MUBIT_CC_BREAKER_THRESHOLD: '2' });
+
+  // Two server errors inside the window open the breaker.
+  await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_a' }), { env: e });
+  await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_b' }), { env: e });
+
+  server.reset();
+  const r = await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_c' }), { env: e });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0,
+    `breaker open must short-circuit without dialing; saw: ${server.summary()}`);
+});
+
+// §5.2 step 3 / F28: rung 2 costs an LLM call and the whole path is bounded at 1500 ms.
+// Starting a 1-LLM-call request with 300 ms left buys nothing but a visible stall.
+test('rung 2 is skipped when less than 500 ms of budget remains', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': [{ ...DENIED, delayMs: 700 }, { json: queryResponse() }],
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(dir, server, { MUBIT_CC_RECALL_BUDGET_MS: '1000' }),
+  });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/query', 1);
+  server.assertNotCalled('POST', '/v2/control/context');
+  assert.deepEqual(r.json, { suppressOutput: true });
+});
+
+// ---------------------------------------------------------------------------
+// stdout contract
+// ---------------------------------------------------------------------------
+
+// §5.2: "Injecting 'I found nothing' wastes tokens and teaches the model to distrust the
+// channel." Exactly {"suppressOutput": true} — no additionalContext, no systemMessage.
+test('an empty result emits exactly {"suppressOutput": true}', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: [] }) },
+  });
+  t.after(() => server.close());
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(makeDataDir(), server) });
+
+  assertHookContract(r);
+  assert.deepEqual(r.json, { suppressOutput: true });
+  assert.equal(r.json.hookSpecificOutput, undefined);
+  assert.equal(r.json.systemMessage, undefined);
+});
+
+// §5.2 stdout: the injection channel is hookSpecificOutput.additionalContext on
+// UserPromptSubmit; the human-visible receipt is systemMessage.
+test('a non-empty result emits additionalContext plus a systemMessage receipt', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(makeDataDir(), server) });
+
+  assertHookContract(r);
+  const hso = r.json.hookSpecificOutput;
+  assert.equal(hso.hookEventName, 'UserPromptSubmit');
+  assert.equal(typeof hso.additionalContext, 'string');
+  assert.ok(hso.additionalContext.length > 0);
+  assert.ok(hso.additionalContext.includes('Ingest returns when queued'),
+    `recalled evidence must reach the prompt: ${hso.additionalContext}`);
+  assert.match(r.json.systemMessage, /^mubit: \d+ memor\w+ · [\d.]+k? tok · \d+ms$/,
+    `systemMessage was: ${r.json.systemMessage}`);
+});
+
+// ---------------------------------------------------------------------------
+// Marker
+// ---------------------------------------------------------------------------
+
+// §4.8/§5.2 step 7: the marker records which rung served, so a user paying for rung 2 or 3
+// can see it in the status line instead of discovering it on an invoice.
+test('the marker records which rung served', async (t) => {
+  const free = await fakeMubit();
+  const denied = await fakeMubit({
+    'POST /v2/control/query': [DENIED, { json: queryResponse({ mode: 'agent_routed' }) }],
+  });
+  t.after(() => Promise.all([free.close(), denied.close()]));
+
+  const dirA = makeDataDir();
+  const ra = await runHook('prompt-recall', userPromptSubmit(), { env: env(dirA, free) });
+  assertHookContract(ra);
+  const ma = marker(dirA);
+  assert.equal(ma.recall.rung, 1, '0 LLM calls');
+  assert.equal(ma.recall.sources, 3);
+  assert.equal(ma.recall.empty_reason, '');
+  assert.equal(typeof ma.recall.tokens, 'number');
+  assert.equal(typeof ma.recall.ms, 'number');
+
+  const dirB = makeDataDir();
+  const rb = await runHook('prompt-recall', userPromptSubmit(), { env: env(dirB, denied) });
+  assertHookContract(rb);
+  assert.equal(marker(dirB).recall.rung, 2, '1 LLM call');
+});

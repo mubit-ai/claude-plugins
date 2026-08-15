@@ -1,0 +1,79 @@
+{
+  "measuredAt": "2026-08-15T12:20:33.228Z",
+  "value": 5382,
+  "cached": 0,
+  "curatedValue": 2664,
+  "allowlistHonoured": false,
+  "method": "word/number/symbol segmentation; see the header of scripts/measure-context-cost.mjs",
+  "surface": {
+    "allowlist": [
+      "mubit_archive",
+      "mubit_dereference",
+      "mubit_diagnose",
+      "mubit_forget",
+      "mubit_learned",
+      "mubit_lessons",
+      "mubit_outcome",
+      "mubit_recall",
+      "mubit_reflect",
+      "mubit_status"
+    ],
+    "registered": [
+      "mubit_archive",
+      "mubit_checkpoint",
+      "mubit_context",
+      "mubit_dereference",
+      "mubit_diagnose",
+      "mubit_feedback",
+      "mubit_forget",
+      "mubit_handoff",
+      "mubit_ingest_status",
+      "mubit_learned",
+      "mubit_lessons",
+      "mubit_list_agents",
+      "mubit_memory_health",
+      "mubit_outcome",
+      "mubit_recall",
+      "mubit_reflect",
+      "mubit_register_agent",
+      "mubit_remember",
+      "mubit_status",
+      "mubit_step_outcome",
+      "mubit_strategies"
+    ],
+    "skills": [
+      "auth",
+      "doctor",
+      "forget",
+      "recall",
+      "reflect",
+      "remember",
+      "setup"
+    ],
+    "agents": [
+      "mubit-recall"
+    ]
+  },
+  "breakdown": {
+    "toolSchemas": {
+      "tokens": 4973,
+      "chars": 12688,
+      "count": 21
+    },
+    "curatedToolSchemas": {
+      "tokens": 2255,
+      "chars": 5817,
+      "count": 10
+    },
+    "skillFrontmatter": {
+      "tokens": 347,
+      "chars": 1165,
+      "count": 7
+    },
+    "agentFrontmatter": {
+      "tokens": 62,
+      "chars": 214,
+      "count": 1
+    }
+  }
+}

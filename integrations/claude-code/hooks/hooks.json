@@ -1,0 +1,49 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup|resume|clear|compact", "hooks": [
+        { "type": "command", "command": "node", "timeout": 5,
+          "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/session-start.mjs"] } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [
+        { "type": "command", "command": "node", "timeout": 3,
+          "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/prompt-recall.mjs"] },
+        { "type": "command", "command": "node", "timeout": 3,
+          "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/stage-prompt.mjs"] } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "^(Read|Grep|Glob|Edit|Write|MultiEdit|NotebookEdit|Bash|WebFetch|WebSearch|Task)$",
+        "hooks": [ { "type": "command", "command": "node", "timeout": 3,
+          "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/capture.mjs"] } ] },
+      { "matcher": "^mcp__.*",
+        "hooks": [ { "type": "command", "command": "node", "timeout": 3,
+          "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/capture.mjs"] } ] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "node", "timeout": 3,
+          "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/capture.mjs", "--failure"] } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "node", "timeout": 5,
+        "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/capture.mjs", "--stop"] } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "command", "command": "node", "timeout": 3,
+        "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/capture.mjs", "--subagent"] } ] }
+    ],
+    "PreCompact": [
+      { "hooks": [ { "type": "command", "command": "node", "timeout": 10,
+        "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/checkpoint.mjs", "--pre"] } ] }
+    ],
+    "PostCompact": [
+      { "hooks": [ { "type": "command", "command": "node", "timeout": 5,
+        "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/checkpoint.mjs", "--post"] } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "node", "timeout": 8,
+        "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/session-end.mjs"] } ] }
+    ]
+  }
+}

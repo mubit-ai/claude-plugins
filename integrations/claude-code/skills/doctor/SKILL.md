@@ -1,0 +1,61 @@
+---
+name: doctor
+description: Diagnose Mubit connectivity, memory health, and stuck ingest jobs. Use when memory looks empty, captures are not landing, or the status line shows a failure glyph.
+disable-model-invocation: false
+tools: ["mcp__plugin_mubit-memory_mubit__mubit_status", "mcp__plugin_mubit-memory_mubit__mubit_diagnose"]
+---
+
+Work in this order and stop at the first thing that is broken. Each step costs more than the
+one before it, and the cheap steps answer most questions.
+
+1. **Read the local status marker** at `status/<run_id>.json` under the plugin data dir
+   (`MUBIT_CC_DATA_DIR`, else `CLAUDE_PLUGIN_DATA`, else
+   `~/.claude/plugins/data/mubit-memory`). Free, no network. It carries the last known
+   `state`, `updated_at`, `recall` counts, `captured` counts including `pending`, the last
+   `reflect` result, and `last_error`. A marker whose `captured.pending` keeps growing is a
+   drain problem, not a recall problem.
+2. **Check connectivity** — `mubit_status`, or `GET /v2/core/health` directly. Health is the
+   one route that answers without a key, so a healthy response here alongside a failing
+   control-plane call points squarely at auth. It returns the plain string `OK`, not JSON —
+   parsing it as JSON is itself a way to invent a `server_error` that is not there.
+3. **Check memory health** — `POST /v2/control/memory_health {run_id}`. This is what
+   distinguishes "nothing was ever written" from "things were written and are not coming
+   back".
+4. **Poll the run's ingest jobs.** `runs/<run_id>/jobs.json` holds the last 20 accepted job
+   ids; poll each with `GET /v2/control/ingest/jobs/<job_id>?run_id=<run_id>`. Accepted means
+   queued, not stored. A job stuck in `queued` for minutes means the instance accepted the
+   write but has not finished indexing it — report it and point the user at the console.
+5. **If there is an error in context**, `POST /v2/control/diagnose {run_id, error_text}` (or
+   `mubit_diagnose`) to surface failure-path lessons that match it. This is a memory lookup,
+   not a health check: run it when you have a specific error to explain.
+
+## Report the typed state verbatim
+
+The connection state is a closed union of five values, and each one has a different fix. Say
+which one it is — never paraphrase them into "something went wrong", which sends the user
+looking in the wrong place.
+
+| `ConnState` | What it means | The fix |
+| --- | --- | --- |
+| `ready` | 2xx. The connection is fine. | If memory still looks wrong, the problem is content or scope, not connectivity — go to step 3. |
+| `unreachable` | `ECONNREFUSED` / `ENOTFOUND` / `EHOSTUNREACH` / `ECONNRESET`. Nothing is listening. | Check the endpoint is correct and the instance is running — see `/mubit-memory:setup`. |
+| `server_error` | 5xx, or an unparseable body on a JSON route. Mubit is up and failing. | Retry, then check the instance's status in the console; the client cannot fix this one. |
+| `auth_failed` | 401 or 403. The key is missing, wrong, or revoked. | Set a valid `mbt_...` key — `/mubit-memory:setup`. This state is sticky and deliberately does not open the breaker, because it is the one error the user can actually fix. |
+| `not_responding` | Three or more consecutive timeouts. | Usually load, not death: a cold cache, a laptop waking from sleep, a build hogging the CPU. Retry before concluding anything. |
+
+**A single timeout is not a verdict.** One `AbortError` changes no state; only a streak of
+three escalates, and only to `not_responding` — never to `unreachable` or `server_error`.
+
+Two more things that look like faults and are not:
+
+- **Warming.** Within the cold-start grace window (20 s by default) after a session starts,
+  failures are recorded but displayed as `◍ warming`. An instance that is still starting
+  is not broken, merely slow to answer.
+- **Paused.** After 5 failures in 300 s the breaker opens for a 120 s cooldown and the status
+  line shows `· paused Ns`. Requests are being skipped on purpose. One half-open probe dials
+  when the cooldown ends; a success closes it. Report the remaining cooldown rather than
+  advising a restart.
+
+Finish with a one-paragraph verdict: the state, the single most likely cause, and the exact
+command or setting that fixes it. Do not run installers or start services on the user's
+behalf.

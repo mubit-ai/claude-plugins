@@ -1,0 +1,10 @@
+{
+  "hook_event_name": "UserPromptSubmit",
+  "session_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "prompt_id": "p_lab_0001",
+  "prompt": "the ingest job stays queued after the batch was accepted — is that a bug in enqueue()?",
+  "transcript_path": "labs/payloads/transcript.jsonl",
+  "cwd": "labs/.work/demo-app",
+  "permission_mode": "default",
+  "is_continuation": false
+}

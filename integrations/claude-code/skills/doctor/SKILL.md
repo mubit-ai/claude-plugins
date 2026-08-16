@@ -31,26 +31,33 @@ one before it, and the cheap steps answer most questions.
 
 ## Report the typed state verbatim
 
-The connection state is a closed union of five values, and each one has a different fix. Say
+The connection state is a closed union of six values, and each one has a different fix. Say
 which one it is — never paraphrase them into "something went wrong", which sends the user
 looking in the wrong place.
 
 | `ConnState` | What it means | The fix |
 | --- | --- | --- |
-| `ready` | 2xx. The connection is fine. | If memory still looks wrong, the problem is content or scope, not connectivity — go to step 3. |
+| `ready` | 2xx, and the health route answered with its own `OK`. The connection is fine. | If memory still looks wrong, the problem is content or scope, not connectivity — go to step 3. |
+| `unconfigured` | No endpoint is set, so nothing was dialed. Not a fault, and not a server problem — there is no server yet. | `/mubit-memory:auth`. Say plainly that nothing is broken and nothing has been lost: capture is buffered and goes out once an endpoint exists. |
 | `unreachable` | `ECONNREFUSED` / `ENOTFOUND` / `EHOSTUNREACH` / `ECONNRESET`. Nothing is listening. | Check the endpoint is correct and the instance is running — see `/mubit-memory:setup`. |
-| `server_error` | 5xx, or an unparseable body on a JSON route. Mubit is up and failing. | Retry, then check the instance's status in the console; the client cannot fix this one. |
-| `auth_failed` | 401 or 403. The key is missing, wrong, or revoked. | Set a valid `mbt_...` key — `/mubit-memory:setup`. This state is sticky and deliberately does not open the breaker, because it is the one error the user can actually fix. |
+| `server_error` | 5xx, an unparseable body on a JSON route, or a 200 on the health route whose body was not `OK`. Something is up and answering wrongly. | Retry, then check the instance's status in the console. If it persists, check the endpoint reaches Mubit rather than a proxy or SSO portal — those answer 200 as well, and that is what this state catches. |
+| `auth_failed` | 401 or 403. The key is missing, wrong, or revoked. | Set a valid `mbt_...` key — `/mubit-memory:auth`. This state is sticky and deliberately does not open the breaker, because it is the one error the user can actually fix. |
 | `not_responding` | Three or more consecutive timeouts. | Usually load, not death: a cold cache, a laptop waking from sleep, a build hogging the CPU. Retry before concluding anything. |
 
 **A single timeout is not a verdict.** One `AbortError` changes no state; only a streak of
 three escalates, and only to `not_responding` — never to `unreachable` or `server_error`.
 
+**`unconfigured` is never a server fault.** If the marker or the breaker says an endpoint is
+unset, do not read the `server_error` row to the user and do not suggest checking instance
+status. Nothing was dialed.
+
 Two more things that look like faults and are not:
 
-- **Warming.** Within the cold-start grace window (20 s by default) after a session starts,
-  failures are recorded but displayed as `◍ warming`. An instance that is still starting
-  is not broken, merely slow to answer.
+- **Warming.** Within the cold-start grace window (20 s by default) after an endpoint is seen
+  for the first time, failures are recorded but displayed as `◍ warming`. An instance that is
+  still starting is not broken, merely slow to answer. The window is armed per endpoint, so a
+  marker still reading `warming` long after that endpoint was first used is a bug worth
+  reporting, not a warming instance.
 - **Paused.** After 5 failures in 300 s the breaker opens for a 120 s cooldown and the status
   line shows `· paused Ns`. Requests are being skipped on purpose. One half-open probe dials
   when the cooldown ends; a success closes it. Report the remaining cooldown rather than

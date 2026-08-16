@@ -222,9 +222,15 @@ test('renders the documented shape: glyph, run, mode, recall, saved, lessons', a
 
 /**
  * §10 precedence, worst first:
- *   ✖ auth failed > ✖ unreachable > ▲ server error > ◌ slow > ◍ warming > ● ready
+ *   ○ not configured > ✖ auth failed > ✖ unreachable > ▲ server error > ◌ slow > ◍ warming
+ *   > ● ready
+ *
+ * `unconfigured` outranks everything because it is the one state that makes the others
+ * meaningless: with no endpoint nothing was dialed, so any verdict sitting in a marker or a
+ * breaker file is about some previous endpoint and cannot be true of this one.
  */
 const PRECEDENCE = [
+  { state: 'unconfigured', glyph: '○', label: 'not configured' },
   { state: 'auth_failed', glyph: '✖', label: 'auth failed' },
   { state: 'unreachable', glyph: '✖', label: 'unreachable' },
   { state: 'server_error', glyph: '▲', label: 'server error' },
@@ -325,6 +331,42 @@ test('auth_failed outranks cold start — the one error the user can fix is neve
   assertNoStackTrace(r);
   assert.ok(r.line.startsWith('✖'), `expected ✖ auth failed to outrank ◍ warming, got: ${r.line}`);
   assert.ok(r.line.includes('auth failed'), `expected the "auth failed" label, got: ${r.line}`);
+});
+
+// §4.7 — the second state cold start must not cover. `◍ warming` says "wait, it is coming
+// up"; there is no instance coming up, and waiting never resolves it. The user has to run
+// one command, so the glyph has to keep saying so.
+test('unconfigured outranks cold start — waiting does not set an endpoint', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  seedMarker(dataDir, runId, { state: 'unconfigured', cold_start_until: Date.now() + 20_000 });
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.ok(r.line.startsWith('○'), `expected ○ not configured to outrank ◍ warming, got: ${r.line}`);
+  assert.ok(r.line.includes('not configured'), `expected the "not configured" label, got: ${r.line}`);
+});
+
+// A regression guard with an unusually sharp edge. `resolveDisplay` indexes DISPLAY[state]
+// without a guard, safe only because `isConnState` filters against CONN_STATES first — so
+// adding a state to the union and forgetting its glyph row throws, `main()` catches it, and
+// the status line degrades to *nothing at all*. Silent, and indistinguishable from the
+// documented "prints nothing on a fresh install" behaviour. Assert every state renders.
+test('every ConnState has a glyph row — a missing one blanks the status line silently', async () => {
+  const { CONN_STATES } = await lib('breaker.mjs');
+  for (const state of CONN_STATES) {
+    const dataDir = makeDataDir();
+    const e = env(dataDir);
+    const runId = await derivedRunId(e);
+    seedMarker(dataDir, runId, { state });
+
+    const r = await runStatusline({ env: e });
+    assertNoStackTrace(r);
+    assert.ok(r.line.trim().length > 0,
+      `state "${state}" rendered an empty status line — DISPLAY has no row for it, so `
+      + 'resolveDisplay threw and main() swallowed it');
+  }
 });
 
 // ---------------------------------------------------------------------------

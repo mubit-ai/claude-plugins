@@ -121,6 +121,33 @@ export function authHeaders(cfg) {
   return key ? { Authorization: `Bearer ${key}` } : {};
 }
 
+/**
+ * Is there an endpoint worth dialing? This is the predicate behind the `unconfigured`
+ * ConnState, and it is deliberately about the *endpoint* alone — a key that is missing or
+ * wrong produces a 401 from a real server, which is already `auth_failed` and already names
+ * the right fix.
+ *
+ * An absolute `http:`/`https:` URL or nothing. Both a blank endpoint and a plausible-looking
+ * one with no scheme (`eu.mubit.ai`) fail identically inside `fetch` — `urlFor` concatenates
+ * the route onto whatever this is, and a relative URL throws `ERR_INVALID_URL` before a
+ * socket exists. That is a local config gap in both cases, so both classify the same way.
+ * Without this the throw falls through `classifyError` to `server_error` and the plugin
+ * reports a fault in a server it never dialed.
+ *
+ * @param {Record<string, any>} cfg
+ * @returns {boolean}
+ */
+export function isConfigured(cfg) {
+  const ep = typeof cfg?.endpoint === 'string' ? cfg.endpoint.trim() : '';
+  if (!ep) return false;
+  try {
+    const u = new URL(ep);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // §4.1 — envTags, in Mubit's TYPE:NAME[:VERSION] form
 // ---------------------------------------------------------------------------

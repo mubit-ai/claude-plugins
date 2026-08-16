@@ -199,6 +199,71 @@ test('health: reads the body as TEXT and succeeds against the literal "OK"', asy
   server.assertCalled('GET', '/v2/core/health', 1);
 });
 
+// §4.7 — a 2xx is necessary and not sufficient. An SSO portal, a captive portal, a proxy
+// error page and an unrelated service all answer 200; taking the status alone as healthy
+// opened the session by telling the model memory was active when nothing behind the
+// endpoint was Mubit. The route returns `OK`, so one comparison settles it.
+test('health: a 200 whose body is not "OK" is server_error, never ready', async (t) => {
+  const { cfg, http } = await setup(t, {
+    routes: { 'GET /v2/core/health': { text: '<!DOCTYPE html><title>Sign in</title>' } },
+  });
+
+  const r = await noThrow(() => http.health(cfg), 'health(sso)');
+  assert.equal(r.ok, false, 'an HTML login page at the endpoint is not a healthy Mubit');
+  assert.equal(r.state, 'server_error');
+  assert.match(r.error, /body was not "OK"/);
+});
+
+// The check has to happen before the write, or the 30 s cache remembers a wrong host as
+// healthy and the next four sessions never re-dial to find out otherwise.
+test('health: a non-"OK" 200 is not cached as ready', async (t) => {
+  const { cfg, dataDir, http } = await setup(t, {
+    routes: { 'GET /v2/core/health': { text: 'Gateway Timeout' } },
+  });
+
+  await http.health(cfg);
+  const cached = JSON.parse(readFileSync(join(dataDir, 'status', 'health.json'), 'utf8'));
+  assert.equal(cached.ok, false, 'the failure is what gets cached');
+  assert.equal(cached.state, 'server_error');
+
+  const second = await http.health(cfg);
+  assert.equal(second.ok, false, 'the cached verdict is still a failure');
+});
+
+// Trimmed, not exact: a proxy that appends a newline has still relayed a healthy answer,
+// and failing that would report every instance behind such a proxy as broken.
+test('health: surrounding whitespace on "OK" is still healthy', async (t) => {
+  const { cfg, http } = await setup(t, { routes: { 'GET /v2/core/health': { text: 'OK\n' } } });
+
+  const r = await noThrow(() => http.health(cfg), 'health(OK\\n)');
+  assert.equal(r.ok, true);
+});
+
+// §4.1/C1b — the guard that makes `unconfigured` mean what it says. Before it, `urlFor`
+// handed `fetch` the bare route, `fetch` threw ERR_INVALID_URL before opening a socket, and
+// the throw was classified as a fault in a server that was never contacted.
+test('no endpoint: every call refuses without dialing and without touching the breaker', async (t) => {
+  const http = await lib('http.mjs');
+  const dataDir = makeDataDir();
+  const { loadConfig } = await lib('config.mjs');
+  const { breakerPath } = await lib('breaker.mjs');
+
+  for (const endpoint of ['', '   ', 'eu.mubit.ai', 'htp://nope']) {
+    const cfg = loadConfig(baseEnv({ dataDir, endpoint }));
+
+    const h = await noThrow(() => http.health(cfg), `health(${JSON.stringify(endpoint)})`);
+    assert.equal(h.ok, false);
+    assert.equal(h.state, 'unconfigured', `endpoint ${JSON.stringify(endpoint)}`);
+
+    const q = await noThrow(() => http.postQuery(cfg, { run_id: RUN, query: 'why', mode: 'direct_bypass', evidence_only: true }),
+      `postQuery(${JSON.stringify(endpoint)})`);
+    assert.equal(q.state, 'unconfigured');
+
+    assert.equal(existsSync(breakerPath(cfg)), false,
+      `a breaker file was written for endpoint ${JSON.stringify(endpoint)}, which was never dialed`);
+  }
+});
+
 // §1.1/§7: the health result is cached for 30 s, so a SessionStart plus a status refresh
 // do not each pay a round trip.
 test('health: the result is cached for 30s — a second call makes zero extra requests', async (t) => {

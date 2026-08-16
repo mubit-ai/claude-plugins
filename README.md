@@ -5,7 +5,7 @@ plugin today:
 
 | Plugin | Version | What it does |
 | --- | --- | --- |
-| [`mubit-memory`](integrations/claude-code/) | 0.9.0 | Persistent, typed, self-improving memory for Claude Code — involuntary capture, pre-prompt recall, and outcome attribution. |
+| [`mubit-memory`](integrations/claude-code/) | 0.8.0 | Persistent, typed, self-improving memory for Claude Code — involuntary capture, pre-prompt recall, and outcome attribution. |
 
 ## Install
 
@@ -19,36 +19,45 @@ Then **start a new Claude Code session**. `/reload-plugins` registers the hooks 
 fire `SessionStart`, so until a new session begins the plugin has never actually run: no run
 id, no registered agent, nothing on the status line. It looks broken and is fine.
 
-In that new session, sign in:
+Full setup, configuration and troubleshooting: [`integrations/claude-code/README.md`](integrations/claude-code/README.md).
+
+## Connect it to Mubit
 
 ```
 /mubit-memory:auth
 ```
 
-It opens the Mubit console in your browser — sign in, or sign up on the same page — and the key
-comes back over a loopback callback on `127.0.0.1`, so it never passes through the conversation
-and never lands in a transcript. That is the whole of the setup; there is nothing else to
-configure.
-
-Full setup, configuration and troubleshooting: [`integrations/claude-code/README.md`](integrations/claude-code/README.md).
-
-Claude Code fetches a GitHub marketplace with `git clone --depth 1
-https://github.com/mubit-ai/claude-plugins.git`. If your git is configured for SSH only, run
-`gh auth setup-git` first — the clone URL is always HTTPS, even for sources written as `git@`.
+Opens the [Mubit console](https://console.mubit.ai), signs you in, and stores a key for this
+machine after checking it against your instance. No browser — over SSH, say — is covered in the
+plugin README.
 
 ## This is a generated repository — do not edit it here
 
-Contents are published from Mubit's source repository on release. Any commit made directly
-here is overwritten by the next publish.
+Contents are published from Mubit's source repository on release. Any commit made directly here
+is overwritten by the next publish.
 
-The `integrations/claude-code` path is deliberate: the marketplace entry's `source` is the
-marketplace-relative path `./integrations/claude-code`, which resolves inside whichever
-repository served the catalog. Keeping the same path means `marketplace.json` needs no
-rewriting when it is published here, so there is nothing that can drift between the two copies.
+```
+source repository
+  ├── .claude-plugin/marketplace.json ──┐
+  └── integrations/claude-code/ ────────┤ published on release
+                                        ▼
+mubit-ai/claude-plugins (this repo)  →  git clone by Claude Code  →  a user's plugin dir
+```
 
-What runs on your machine is exactly what you see here — Claude Code executes this directory
-as fetched, with no build step, which is why `hooks/dist/`, `mcp/dist/` and
-`bin/statusline.mjs` are committed artifacts rather than build output.
+Claude Code fetches a GitHub marketplace with `git clone --depth 1`, using your own git
+credentials — there is no separate plugin token. If your git is configured for SSH only, run
+`gh auth setup-git` first; the clone URL is always HTTPS, even for sources written as `git@`.
+
+The `integrations/claude-code` path is preserved deliberately: the marketplace entry's `source`
+is the marketplace-relative path `./integrations/claude-code`, which resolves inside whichever
+repository served the catalog. Keeping the same path means `marketplace.json` needs no rewriting
+when it is published here, so there is nothing that can drift between the two copies.
+
+What is published is the plugin's tracked files, minus development-only scripts and QA
+transcripts written against a developer's own checkout. What
+runs on your machine is exactly what you see here — Claude Code executes this directory as
+fetched, with no build step, which is why `hooks/dist/`, `mcp/dist/` and `bin/statusline.mjs`
+are committed artifacts rather than build output.
 
 ## Verifying what you are about to run
 
@@ -59,7 +68,7 @@ events, and the MCP server runs as a long-lived subprocess. Two things make that
   `hooks/dist/`. Diff them rather than trusting the bundles — `npm run build` in
   `integrations/claude-code` regenerates the bundles in place, so a clean `git diff` afterwards
   is proof the committed artifacts match their source.
-- `integrations/claude-code/test/` carries the full suite (650 tests), including the redaction
+- `integrations/claude-code/test/` carries the full suite, including the redaction
   cases — pattern scrub, path denylist, and byte caps applied after the scrub. Run it with
   `npm test`.
 
@@ -69,4 +78,4 @@ claude plugin validate .
 
 ## License
 
-Apache-2.0. See the plugin directory for details.
+Apache-2.0 — see [`integrations/claude-code/LICENSE`](integrations/claude-code/LICENSE).

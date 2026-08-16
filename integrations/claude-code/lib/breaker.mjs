@@ -40,16 +40,38 @@ import { join } from 'node:path';
 
 import { readJson, resolveDataDir, writeJsonAtomic } from './state.mjs';
 
-/** @typedef {"ready"|"unreachable"|"server_error"|"auth_failed"|"not_responding"} ConnState */
+/**
+ * @typedef {"ready"|"unreachable"|"server_error"|"auth_failed"|"not_responding"
+ *   |"unconfigured"} ConnState
+ */
 /** @typedef {ConnState|"warming"} DisplayState */
 
-/** §4.7: the ConnState union is closed — `bin/statusline.mjs` has no glyph for anything else. */
+/**
+ * §4.7: the ConnState union is closed — `bin/statusline.mjs` has no glyph for anything else.
+ *
+ * `unconfigured` is the odd member and is worth reading as such: every other value is a
+ * verdict about a server that answered, or failed to. This one is a statement about *this
+ * machine* — no endpoint is set, so nothing was dialed and there is nothing to have an
+ * opinion about. It is in the union because the status line filters marker and breaker
+ * states through `isConnState`, and a value outside the union is discarded: the line would
+ * fall back to a green `●` for a plugin that is doing nothing at all. It is excluded from
+ * the breaker (`recordFailure` below) for the same reason it is here — there is no server
+ * to trip a breaker against.
+ */
 export const CONN_STATES = /** @type {const} */ ([
-  'ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding',
+  'ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding', 'unconfigured',
 ]);
 
 /** §4.7: "Only `timeoutStreak >= 3` escalates." Not tunable — it is the rule, not a knob. */
 const TIMEOUT_ESCALATION = 3;
+
+/**
+ * States the cold-start lens must never paint over. `ready` because `warming` is a failure
+ * display; `auth_failed` because a server still starting does not answer 401; `unconfigured`
+ * because nothing is starting up — there is no endpoint. Shared by `readBreaker` here and
+ * by `bin/statusline.src.mjs`, which applies the same lens to the merged view.
+ */
+const NEVER_WARMING = new Set(['ready', 'auth_failed', 'unconfigured']);
 
 /** §6.1 fallbacks, used only when a caller hands us a partial config. */
 const DEFAULT_THRESHOLD = 5;
@@ -169,9 +191,20 @@ function toStatus(v) {
  * @returns {string}
  */
 export function breakerPath(cfg = {}) {
+  return join(resolveDataDir(cfg), 'breaker', `${endpointHash(cfg)}.json`);
+}
+
+/**
+ * §7: `sha256(endpoint)[0:12]`, the name every per-endpoint file is keyed by — `breaker/`,
+ * `policy/`, `coldstart/`. Exported because it was open-coded in three places that must
+ * agree in order for those files to join up, and a fourth copy is how they stop agreeing.
+ *
+ * @param {Record<string, any>} [cfg]
+ * @returns {string}
+ */
+export function endpointHash(cfg = {}) {
   const endpoint = typeof cfg?.endpoint === 'string' ? cfg.endpoint : '';
-  const hash = createHash('sha256').update(endpoint).digest('hex').slice(0, 12);
-  return join(resolveDataDir(cfg), 'breaker', `${hash}.json`);
+  return createHash('sha256').update(endpoint).digest('hex').slice(0, 12);
 }
 
 /**
@@ -273,7 +306,9 @@ function save(cfg, s) {
  * `display` is `warming` only inside the cold-start grace and only over a *failure*:
  * `warming` replaces a failure glyph, never a healthy one, and never an `auth_failed` —
  * a server still warming up does not answer 401, so masking that verdict would hide
- * the single error the user can fix.
+ * the single error the user can fix. `unconfigured` is exempt on the same logic taken one
+ * step further: there is no instance to be warming up, and the grace window would otherwise
+ * hide the one state whose fix is a single command.
  *
  * @param {Record<string, any>} cfg
  * @param {{coldStartUntil?: number}} [opts] `coldStartUntil` is the absolute epoch-ms
@@ -288,7 +323,7 @@ export function readBreaker(cfg, opts = {}) {
     const s = load(cfg ?? {}, now, windowMs);
 
     const until = num(opts?.coldStartUntil);
-    const warming = until > 0 && now < until && s.state !== 'ready' && s.state !== 'auth_failed';
+    const warming = until > 0 && now < until && !NEVER_WARMING.has(s.state);
 
     return {
       state: s.state,
@@ -319,6 +354,15 @@ export function readBreaker(cfg, opts = {}) {
  */
 export function recordFailure(cfg, state) {
   try {
+    // A breaker exists to stop dialing a server that is failing. With no endpoint there is
+    // no server, nothing was dialed, and there is nothing to stop — so this returns before
+    // touching the file at all. Note the file would be keyed by `sha256("")` and shared by
+    // every unconfigured install, and five sessions of it would open a breaker that then
+    // suppresses recall for two minutes against an instance the user is about to configure.
+    // `lib/http.mjs` already refuses to dial before reaching `settle`; this is the backstop
+    // for any future caller that classifies a state without going through it.
+    if (state === 'unconfigured') return;
+
     const { threshold, windowMs } = params(cfg);
     const now = Date.now();
     const s = load(cfg ?? {}, now, windowMs);

@@ -36,76 +36,53 @@ it. Node >= 20 is the only runtime requirement, and the plugin has zero runtime 
 
 ## Connect it to Mubit
 
+Mubit Memory needs a Mubit instance and an API key for it. The short way:
+
 ```
 /mubit-memory:auth
 ```
 
-That is the whole setup. It opens the Mubit console in your browser; you sign in, or sign up on
-the same page, and the key comes back over a loopback callback on `127.0.0.1`. The key never
-passes through the conversation, so it never lands in a transcript you might export or attach to
-a bug report.
+That opens the [Mubit console](https://console.mubit.ai) in your browser, signs you in or signs
+you up, and brings a key back over a loopback callback on `127.0.0.1`. The key is checked against
+your instance before it is stored, so a successful run means it actually works — not that it
+looked right.
 
-It stores exactly two values — the whole of the plugin's configuration:
+It is stored at `${CLAUDE_PLUGIN_DATA}/credentials.json`, owner-only (mode `600`). That path
+survives plugin updates, so this is a once-per-machine step.
+
+**No browser?** Over SSH or in a container, issue a key in the console and hand it over in the
+environment for one command:
+
+```bash
+MUBIT_AUTH_KEY='mbt_…' node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --paste
+```
+
+The key goes in the environment, not in a `--key` flag: arguments are readable by every user on
+the machine via `ps`, and a process's environment is not.
+
+**The manual route**, which still takes precedence over anything `/mubit-memory:auth` writes:
+set two values in the plugin's settings (`/plugin` → Mubit Memory → configure).
 
 | Setting | Value |
 | --- | --- |
 | `endpoint` | your instance URL, e.g. `https://eu.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
-They go to `${CLAUDE_PLUGIN_DATA}/credentials.json`, owner-only (mode `600`). That directory sits
-outside the plugin root, which is replaced wholesale on every update — so signing in is a
-once-per-machine step, not a once-per-release one.
+There the key is marked sensitive, so it goes to your OS keychain rather than to a file. That is
+the better home for a long-lived install; `/mubit-memory:auth` is the faster one. Full precedence
+is in [Configuration](#configuration).
 
-Two things worth knowing before you read the result:
-
-- **Exit 2 is not a failure.** A brand-new workspace takes a minute or two to provision. Run
-  `/mubit-memory:auth` again shortly and it resumes where it left off.
-- **You still need a new session.** `/reload-plugins` registers the hooks but does not fire
-  `SessionStart`, so until you start a fresh session there is no run id and nothing on the status
-  line. This is the most common "it is still broken" report immediately after a *successful*
-  sign-in, and it is not a fault.
-
-The key is checked against your instance before it is written. A key that the server rejects is
-never stored — storing an unverified key does not save you a step, it just moves the failure to
-the next session, where it looks like a broken plugin rather than a failed login.
-
-### If there is no browser
-
-Over SSH, in a container, or on a machine with no default browser, the flow reports
-`browser_failed` and prints the URL rather than dead-ending. Issue a key at
-<https://console.mubit.ai>, then hand it over for that one command:
-
-```bash
-MUBIT_AUTH_KEY='mbt_…' node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --paste
-```
-
-The key travels in the environment rather than a `--key` flag because a process's arguments are
-readable by every user on the machine, and its environment is not.
-
-### Or set it by hand
-
-`/plugin` → Mubit Memory → configure still works, and still wins over what `auth` writes. `apiKey`
-is marked sensitive there, so it lands in your OS keychain — the best place for it. Prefer that
-for a long-lived install, and `/mubit-memory:auth` for getting working in the next minute. (A
-slash command cannot write the keychain; the `/plugin` UI is its only writer. That is precisely
-why `auth` needs a store of its own.)
-
-Two more commands, for when you want to know what is there:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --status   # reports presence, never the key; non-zero when unconfigured
-node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --logout   # removes the stored credentials
-```
-
-Confirm any of these routes with `/mubit-memory:setup`, which calls `mubit_status` and echoes the
+Either way, confirm with `/mubit-memory:setup`, which calls `mubit_status` and echoes the
 endpoint and the run id back. A rejected key reports as `auth_failed`, which is a key problem —
-missing, wrong, or revoked — not a network one; `/mubit-memory:auth` is the fix.
+missing, wrong, or revoked — not a network one.
 
 If the endpoint is unset the plugin has nothing to talk to: capture spools locally, recall
-returns nothing, and the status line says so. Nothing is lost and nothing is sent.
+returns nothing, and the status line says so — `○ not configured`, the `unconfigured` state,
+which names `/mubit-memory:auth` as the fix rather than blaming a server. Nothing is lost and
+nothing is sent.
 
-While an instance is still coming up, the status line shows `◍ warming` rather than a failure
-glyph — see [Connection states](#connection-states).
+The first time a given endpoint is seen, the status line shows `◍ warming` rather than a
+failure glyph while the instance comes up — see [Connection states](#connection-states).
 
 ---
 
@@ -136,7 +113,7 @@ an unwritable data dir, or a corrupt state file costs you a memory, never a turn
 
 | Command | Use it for |
 | --- | --- |
-| `/mubit-memory:auth` | Sign in and store a key for this machine. Also the fix for `auth_failed`, and for a rotated or revoked key. Never installs anything. |
+| `/mubit-memory:auth` | Sign in to Mubit and store a key for this machine. Never installs anything. |
 | `/mubit-memory:setup` | First run: confirm the endpoint and key are set and the instance answers. Never installs anything. |
 | `/mubit-memory:doctor` | Diagnose connectivity, memory health, and stuck ingest jobs, cheapest check first. |
 | `/mubit-memory:recall` | Search memory for detail beyond what was already injected this turn. |
@@ -215,8 +192,9 @@ Authorization: Bearer abc123def456...     ->  Authorization: [REDACTED:bearer]
 -----BEGIN RSA PRIVATE KEY----- ...       ->  [REDACTED:pem]
 ```
 
-The keyword list for `assignment` is `secret`, `token`, `password`, `credential`, `assertion`,
-`signature`, `apikey` and `api_key`. A final `high-entropy` rule catches
+The keyword list for `assignment` (`secret`, `token`, `password`, `credential`, `assertion`,
+`signature`, `apikey`, `api_key`) matches the terms Mubit itself treats as secret, so client
+and server agree on what counts as one. A final `high-entropy` rule catches
 anything else: a run of 32+ base64/hex characters with Shannon entropy >= 4.0 becomes
 `[REDACTED:high-entropy]`. Git SHAs cannot trip it — entropy over a 16-symbol alphabet is
 bounded by exactly 4.0 — and `idempotency-key` values are exempted by name so you can still
@@ -276,15 +254,15 @@ Precedence, highest first:
 4. `${CLAUDE_PROJECT_DIR}/.mubit-cc.json` — a JSON object keyed by the same option names
 5. The built-in default
 
-The credentials store sits below the environment so a CI job exporting `MUBIT_API_KEY` still wins
-over whatever a developer once signed in as on that machine, and above the project file so a
-fresh sign-in beats a stale committed `.mubit-cc.json`. If a setting you expected from
-`/mubit-memory:auth` appears to be ignored, something above it is set.
+Signing in ranks below the environment so a CI job exporting `MUBIT_API_KEY` still wins, and
+above the project file so a fresh login beats a stale committed one. The resolved config is
+cached for 300 s at `${CLAUDE_PLUGIN_DATA}/config.json`; the API key is deliberately not part of
+that cache, and writing credentials invalidates it immediately rather than after the TTL.
 
 | Option | Default | Environment variable | Effect |
 | --- | --- | --- | --- |
 | `endpoint` | `""` | `MUBIT_ENDPOINT` | Your Mubit instance URL. Required — without it there is nothing to talk to. |
-| `apiKey` | `""` | `MUBIT_API_KEY` | `mbt_...` key, sent as `Authorization: Bearer`. `/mubit-memory:auth` writes it to the owner-only credentials store; plugin settings keep it in the OS keychain and win over that. Never written to the resolved-config cache. |
+| `apiKey` | `""` | `MUBIT_API_KEY` | `mbt_...` key, sent as `Authorization: Bearer`. Set it with `/mubit-memory:auth`, or via plugin settings to keep it in the OS keychain. |
 | `userId` | `""` | `MUBIT_CC_USER_ID` | Optional user/entity id for multi-user memory scoping. |
 | `runStrategy` | `per-directory` | `MUBIT_CC_RUN_STRATEGY` | How a session maps to a Mubit run. See [Run strategies](#run-strategies). |
 | `capture` | `true` | `MUBIT_CC_CAPTURE` | Capture tool activity. Off means the `PostToolUse`/`Stop` hooks spool nothing. |
@@ -316,7 +294,7 @@ camelCase name in parentheses.
 | `MUBIT_CC_BATCH_MAX_ITEMS` (`batchMaxItems`) | `32` | Spool size that triggers a drain. |
 | `MUBIT_CC_BATCH_MAX_AGE_MS` (`batchMaxAgeMs`) | `30000` | Spool age that triggers a drain. |
 | `MUBIT_CC_TIMEOUT_MS` (`timeoutMs`) | `4000` | Per-request HTTP timeout. |
-| `MUBIT_CC_COLDSTART_GRACE_MS` (`coldStartGraceMs`) | `20000` | How long after a session start failures display as `◍ warming`. |
+| `MUBIT_CC_COLDSTART_GRACE_MS` (`coldStartGraceMs`) | `20000` | How long after an endpoint is first seen failures display as `◍ warming`. Armed once per endpoint, not per session. |
 | `MUBIT_CC_BREAKER_THRESHOLD` (`breakerThreshold`) | `5` | Failures within the window that open the circuit breaker. |
 | `MUBIT_CC_BREAKER_WINDOW_MS` (`breakerWindowMs`) | `300000` (5 min) | The rolling failure window. |
 | `MUBIT_CC_BREAKER_COOLDOWN_MS` (`breakerCooldownMs`) | `120000` (2 min) | Cooldown before a single half-open probe is allowed. |
@@ -325,16 +303,16 @@ camelCase name in parentheses.
 
 ### Turning off `reflectOnEnd`
 
-Mubit reflects on its own as a run accumulates activity, but a lesson extracted that way stays
-at the scope it was extracted at — typically `run` — and a `run`-scoped lesson is invisible to
-your next session.
+Mubit extracts lessons on its own as it ingests, but those keep the scope they were extracted
+at — typically `run` — and a `run`-scoped lesson is invisible to your next session.
 
 `POST /v2/control/reflect`, which `SessionEnd` issues and which `reflectOnEnd` controls, is the
-only thing that can widen a lesson's scope. Turn it off and your store still fills up — it just
-never produces anything a future session can see. It is not a latency knob.
+only thing in the system that can widen a lesson's scope. Turn it off and your store still
+fills up — it just never produces anything a future session can see. It is not a latency knob.
 
-(Reflecting is necessary, not sufficient: rules are never scope-promoted, and a lesson has to
-recur before it travels. Expect widening over several sessions, not on the first reflect.)
+(Reflecting is necessary, not sufficient. Rules are never scope-promoted, since they are
+enforced as written, and anything else has to establish itself before it travels. Expect
+widening over several sessions, not on the first reflect.)
 
 ### Run strategies
 
@@ -362,23 +340,27 @@ conversation isolated and can live with that split.
 
 ## Connection states
 
-The status line reports one of five typed states. They are typed separately because each one
+The status line reports one of six typed states. They are typed separately because each one
 has a different fix; `/mubit-memory:doctor` reports them by name for the same reason.
 
 | State | Glyph | What it means | The fix |
 | --- | --- | --- | --- |
-| `ready` | `●` | A 2xx with a parseable body. The connection is fine. | If memory still looks wrong, the problem is content or scope, not connectivity. Run `/mubit-memory:doctor` and look at memory health and ingest jobs. |
+| `ready` | `●` | A 2xx whose body is Mubit's own `OK`. The connection is fine. | If memory still looks wrong, the problem is content or scope, not connectivity. Run `/mubit-memory:doctor` and look at memory health and ingest jobs. |
+| `unconfigured` | `○` | No endpoint is set, so nothing was dialed. Not a fault — the plugin is installed and waiting. | Run `/mubit-memory:auth`. Capture keeps buffering meanwhile and is sent once an endpoint exists. |
 | `unreachable` | `✖` | `ECONNREFUSED` / `ENOTFOUND` / `EHOSTUNREACH` / `ECONNRESET`. Nothing is listening. | Check `endpoint` is correct and your instance is running. |
-| `server_error` | `▲` | 5xx, or a 2xx whose body will not parse, or a 4xx that is a payload problem (400/413/422) or backpressure (429). Mubit is up and failing. | Retry, then check your instance's status in the console. The client cannot fix this one. |
-| `auth_failed` | `✖` | 401 or 403. The key is missing, wrong, or revoked. | Set a valid `mbt_...` key via `/mubit-memory:setup`. This state is sticky and deliberately does not open the breaker, because it is the one error you can actually fix. |
+| `server_error` | `▲` | 5xx, a 2xx whose body is not what the route returns, or a 4xx that is a payload problem (400/413/422) or backpressure (429). Something is up and answering wrongly. | Retry, then check your instance's status in the console. If it persists, confirm `endpoint` points at Mubit and not at a proxy or SSO portal — those answer 200 too. |
+| `auth_failed` | `✖` | 401 or 403. The key is missing, wrong, or revoked. | Set a valid `mbt_...` key via `/mubit-memory:auth`. This state is sticky and deliberately does not open the breaker, because it is the one error you can actually fix. |
 | `not_responding` | `◌` | Three or more *consecutive* timeouts. | Usually load, not death — a cold cache, a laptop waking from sleep, a build hogging every core. Retry before concluding anything. |
 
 Two displays that look like faults and are not:
 
-- **`◍ warming`** — inside the cold-start grace window (20 s by default) after a session starts,
-  failures are recorded but shown as warming. An instance that is still starting is not
-  broken, merely slow to answer. `auth_failed` is never masked this way, because a server
-  still warming up does not answer 401.
+- **`◍ warming`** — inside the cold-start grace window (20 s by default) the *first* time a
+  given endpoint is seen, failures are recorded but shown as warming. An instance that is
+  still starting is not broken, merely slow to answer. The window is armed once per endpoint,
+  not once per session, so it cannot mask a fault that outlives it; point the plugin at a
+  different instance and it arms again for that one. `auth_failed` is never masked this way,
+  because a server still warming up does not answer 401 — and neither is `unconfigured`,
+  because nothing is starting up when no endpoint is set.
 - **`· paused 94s`** — after 5 failures in 300 s the breaker opened for a 120 s cooldown and
   requests are being skipped on purpose. Exactly one half-open probe dials when the cooldown
   ends; a success closes it. Nothing needs restarting.
@@ -394,9 +376,6 @@ of three escalates, and only ever to `not_responding` — never to `unreachable`
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | Nothing at all after install: no status line, no injected memory | `/reload-plugins` does not fire `SessionStart`, so the plugin has never run | Start a new session |
-| `auth_failed`, or nothing works on a fresh machine | No key, or a rotated/revoked one | `/mubit-memory:auth`, then **start a new session** — the sign-in itself does not fire `SessionStart` |
-| `/mubit-memory:auth` exits 2 | The workspace is still provisioning. Not a failure | Wait a minute and run it again; it resumes where it left off |
-| Signed in successfully, but the plugin still uses an old key | Plugin settings and `MUBIT_API_KEY` both outrank the credentials store | Clear the higher rung, or set the new key there instead. `bin/auth.mjs --status` shows what the store holds |
 | No skills, no hooks, no MCP server, and no error anywhere in the UI | `plugin.json` failed schema validation. A plugin that fails validation does not half-load — it does not load | `claude --plugin-dir <path> --debug-file /tmp/cc.log`, then `grep "invalid manifest" /tmp/cc.log` |
 | `mcp-config-invalid: Missing environment variables` | `.mcp.json` references a `${VAR}` that is unset | Not something an install can hit; if you forked the plugin, declare no `env` block at all |
 | Status line shows a glyph but no counters | No hook has written the marker for this run yet | Normal for the first few seconds of a session |

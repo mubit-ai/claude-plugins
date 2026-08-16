@@ -62,12 +62,13 @@ const STDIN_TIMEOUT_MS = 300;
  * @type {Record<string, {rank: number, glyph: string, label: string}>}
  */
 const DISPLAY = {
-  auth_failed:    { rank: 0, glyph: '✖', label: 'auth failed' },
-  unreachable:    { rank: 1, glyph: '✖', label: 'unreachable' },
-  server_error:   { rank: 2, glyph: '▲', label: 'server error' },
-  not_responding: { rank: 3, glyph: '◌', label: 'slow' },
-  warming:        { rank: 4, glyph: '◍', label: 'warming' },
-  ready:          { rank: 5, glyph: '●', label: '' },
+  unconfigured:   { rank: 0, glyph: '○', label: 'not configured' },
+  auth_failed:    { rank: 1, glyph: '✖', label: 'auth failed' },
+  unreachable:    { rank: 2, glyph: '✖', label: 'unreachable' },
+  server_error:   { rank: 3, glyph: '▲', label: 'server error' },
+  not_responding: { rank: 4, glyph: '◌', label: 'slow' },
+  warming:        { rank: 5, glyph: '◍', label: 'warming' },
+  ready:          { rank: 6, glyph: '●', label: '' },
 };
 
 /**
@@ -126,9 +127,20 @@ function resolveDisplay(markerState, breakerState, coldStart) {
     if (!isConnState(s)) continue;                  // `unknown`, '', or junk: not a verdict
     if (DISPLAY[s].rank < DISPLAY[worst].rank) worst = s;
   }
-  if (coldStart && worst !== 'auth_failed') worst = 'warming';
+  // The lens, and the two states it must not cover. `auth_failed` because a server still
+  // warming up does not answer 401. `unconfigured` because nothing is warming up — there is
+  // no endpoint, and `◍ warming` would promise that waiting fixes it when only the user can.
+  if (coldStart && !NEVER_WARMING.has(worst)) worst = 'warming';
   return DISPLAY[worst] ?? DISPLAY.ready;
 }
+
+/**
+ * The two states the cold-start lens never paints over. Mirrors the set `lib/breaker.mjs`
+ * applies inside `readBreaker`; kept as its own copy because this file is bundled standalone
+ * and the two lenses are applied to different views (the breaker's own state there, the
+ * merged marker-and-breaker view here — see the DECISION note above).
+ */
+const NEVER_WARMING = new Set(['auth_failed', 'unconfigured']);
 
 /** §4.7: the ConnState union is closed — anything else has no glyph and is not a verdict. */
 function isConnState(v) {

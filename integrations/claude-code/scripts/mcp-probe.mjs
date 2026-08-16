@@ -18,11 +18,12 @@
  *
  * `--server` is the one that matters before a release: the committed `mcp/dist/server.js` is
  * bundled from the *published* `@mubit-ai/mcp`, so it does not carry the §8.1 allowlist patch
- * until that package ships. Point `--server` at a locally built
- * `mcp/dist/index.js` to see what the plugin will do once it does.
+ * until that package ships. Point `--server` at a locally built copy of that package to see
+ * what the plugin will do once it does.
  *
- * Reads `MUBIT_ENDPOINT` / `MUBIT_API_KEY` from the environment like every other entry point;
- * `. ./.local/env` first. Never prints the key.
+ * Reads `MUBIT_ENDPOINT` / `MUBIT_API_KEY` from the environment, so a stored credential from
+ * `/mubit-memory:auth` is not enough on its own — export them for this one command. Never
+ * prints the key.
  */
 
 import { spawn } from 'node:child_process';

@@ -23,6 +23,13 @@ const REPO_ROOT = resolve(PLUGIN_ROOT, '../..');
 /** `.mcp.json` names the server `mubit`, so this is the prefix skills must use (§3.2). */
 const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
+/** §4.7 — `CONN_STATES` in `lib/breaker.mjs`, restated rather than imported for the same
+ *  reason as the allowlist below: this script must run without the plugin runtime. Adding a
+ *  state there and not here means the README can stop documenting it and nothing notices. */
+const CONN_STATES = [
+  'ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding', 'unconfigured',
+];
+
 /** §8.2 — ten of the twenty-one tools. */
 const DEFAULT_ALLOWLIST = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
@@ -40,7 +47,7 @@ const P = {
   readme: join(PLUGIN_ROOT, 'README.md'),
   contextCost: join(PLUGIN_ROOT, 'scripts', 'context-cost.json'),
   config: join(PLUGIN_ROOT, 'lib', 'config.mjs'),
-  mcpBundle: join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js'),
+  serverBundle: join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js'),
   skills: join(PLUGIN_ROOT, 'skills'),
   agents: join(PLUGIN_ROOT, 'agents'),
 };
@@ -93,9 +100,11 @@ if (plugin && entry) {
 if (entry) {
   /*
    * The plugin ships in the same repo as this catalog, so a marketplace-relative path resolves
-   * inside the copy the host already fetched. An explicit {source:"github"} entry makes it clone
-   * a second time — from `mubit-ai/claude-plugins`, which does not exist — and the install fails outright.
-   * See the matching note in test/manifests.test.mjs.
+   * inside the copy the host already fetched, in both this repo and the published mirror — which
+   * is why `marketplace.json` is byte-identical in the two and the mirror job rewrites nothing.
+   * An explicit {source:"github"} entry would make the host clone a second time and re-resolve
+   * the path against that clone, which is a slower way to reach the same files and one more
+   * thing to keep in step. See the matching note in test/manifests.test.mjs.
    */
   ok(entry.source === './integrations/claude-code',
     `marketplace.json source must be the marketplace-relative string "./integrations/claude-code" — the plugin `
@@ -262,22 +271,24 @@ function frontmatterTools(text) {
   return [];
 }
 
+/*
+ * The tool table comes from the server bundle the plugin ships, not from the upstream
+ * TypeScript it was built from. That source sits outside `PLUGIN_ROOT`, so an installed copy
+ * does not contain it and this check used to fail downstream on a missing file. The bundle is
+ * also the stricter target: an allowlist entry has to name a tool the running server
+ * registers.
+ */
 /** @type {string[]} */
 let realTools = [];
-if (existsSync(P.mcpBundle)) {
-  // Drop the trailing inline sourcemap first: it is several times the size of the code, and
-  // matching across it turns a millisecond scan into a multi-second one.
-  const whole = readFileSync(P.mcpBundle, 'utf8');
-  const cut = whole.indexOf('//# sourceMappingURL=');
-  const code = cut > 0 ? whole.slice(0, cut) : whole;
-  realTools = [...new Set([...code.matchAll(/name:\s?"(mubit_[a-z_0-9]+)"/g)].map((m) => m[1]))];
+if (existsSync(P.serverBundle)) {
+  realTools = [...readFileSync(P.serverBundle, 'utf8').matchAll(/name:\s*"(mubit_[a-z_0-9]+)"/g)].map((m) => m[1]);
   ok(realTools.length > 0, 'could not parse any tool names out of mcp/dist/server.js');
   for (const name of DEFAULT_ALLOWLIST) {
     ok(realTools.includes(name),
-      `default allowlist names "${name}", which the shipped MCP server never registers (§8.2)`);
+      `default allowlist names "${name}", which the bundled MCP server does not register (§8.2)`);
   }
 } else {
-  fail(`mcp/dist/server.js does not exist: ${P.mcpBundle}`);
+  fail(`mcp/dist/server.js does not exist: ${P.serverBundle} — run \`npm run build\``);
 }
 
 /** @type {Array<{file:string, rel:string}>} */
@@ -326,7 +337,7 @@ for (const { file, rel } of markdown) {
       `${rel}: tools entry "${t}" is not fully qualified — a plugin-provided server needs the ${QUALIFIED_PREFIX} prefix; bare mcp__<server>__<tool> matches nothing (§3.2)`)) continue;
     const bare = t.slice(QUALIFIED_PREFIX.length);
     if (realTools.length) {
-      ok(realTools.includes(bare), `${rel}: names MCP tool "${bare}", which the shipped MCP server never registers`);
+      ok(realTools.includes(bare), `${rel}: names MCP tool "${bare}", which the bundled MCP server does not register`);
     }
   }
 }
@@ -358,12 +369,23 @@ if (existsSync(P.readme)) {
     'README.md mentions /reload-plugins but never names SessionStart — the reason the reload is not enough');
 
   /*
-   * The README documents a hosted instance and nothing else: the whole setup is an `endpoint`
-   * and an `apiKey`. Asserting that positively keeps this check from having to spell out the
-   * server-side components it would otherwise be forbidding by name.
+   * The published README documents a hosted instance and nothing else. Self-hosting is not a
+   * documented path.
+   *
+   * This asserts what the README must contain rather than listing components it must not name.
+   * A denylist has to spell out the internals in order to forbid them, so the guard becomes
+   * the disclosure the moment it ships — and it only catches terms someone thought to
+   * enumerate. Pinning setup to the two hosted settings leaves no room for a local-stack
+   * walkthrough to be correct, without naming one. The denylist still exists, in
+   * `scripts/check-mirror-clean.mjs`, which runs against the built mirror and is not published.
    */
-  ok(has('endpoint') && has('apiKey'),
-    'README.md must document the hosted setup — the `endpoint` and `apiKey` pair is the whole of it');
+  ok(/\bendpoint\b/i.test(readme) && /\bapiKey\b|\bAPI key\b/i.test(readme),
+    'README.md must document the two settings a hosted instance takes — `endpoint` and `apiKey`. '
+    + 'Those are the whole configuration surface; anything else implies a stack the user runs.');
+  ok(/\/plugin\b/.test(readme) && /\/mubit-memory:auth/.test(readme),
+    'README.md must show how those settings get set: `/mubit-memory:auth`, or the `/plugin` config '
+    + 'UI that writes them to the OS keychain. A README that documents neither is documenting '
+    + 'some other install path.');
 
   ok(has('reflectOnEnd') && /reflectOnEnd[\s\S]{0,600}?(cross-session|beyond its own run)/.test(readme),
     'README.md must state what turning off `reflectOnEnd` costs: it is the only path that promotes a lesson '
@@ -387,10 +409,10 @@ if (existsSync(P.readme)) {
   // §4.7 — the states are typed precisely because each has a different fix. A README that
   // says "connection problems" instead of naming them sends every one of them to the same
   // wrong remedy.
-  for (const state of ['ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding']) {
+  for (const state of CONN_STATES) {
     ok(new RegExp(`\\b${state}\\b`).test(readme),
-      `README.md never names the connection state "${state}" (§4.7) — the five states have five distinct `
-      + 'fixes, and the status line shows them by name');
+      `README.md never names the connection state "${state}" (§4.7) — each state has its own `
+      + 'distinct fix, and the status line shows them by name');
   }
 
   // §4.4 — the differentiator. "State it plainly rather than burying it in a table."

@@ -20,9 +20,9 @@
  * Hooks, `lib/`, and the bundles cost nothing — they run out of process and their output
  * enters context only when a hook actually injects something.
  *
- * The tool schemas are read from a live `tools/list` rather than parsed out of
- * `mcp/dist/server.js`, because zod-to-JSON-Schema is where most of the bytes
- * come from and no static reading of the TypeScript reproduces it.
+ * The tool schemas are read from a live `tools/list` rather than parsed out of the server
+ * source, because zod-to-JSON-Schema is where most of the bytes come from and no static
+ * reading reproduces it.
  *
  *   node scripts/measure-context-cost.mjs                 # report
  *   node scripts/measure-context-cost.mjs --json          # machine-readable

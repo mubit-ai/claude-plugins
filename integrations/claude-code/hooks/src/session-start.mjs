@@ -34,7 +34,8 @@
 
 import { join } from 'node:path';
 
-import { loadConfig } from '../../lib/config.mjs';
+import { endpointHash } from '../../lib/breaker.mjs';
+import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { health, heartbeat, postLessons, registerAgent } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
@@ -99,14 +100,35 @@ await runHook('session-start', {
       return {};
     }
 
-    // §4.7 — start the grace window before the first dial, so a failure in the next 400 ms
-    // is already covered by it. Written first so even a crash below leaves the window open.
-    const coldStartUntil = Date.now() + Math.max(0, intOr(cfg.coldStartGraceMs, 0));
-    updateMarker(cfg, runId, { mode: cfg.mode, cold_start_until: coldStartUntil });
-
-    // §16.2 steps 2-3. Read once, here, so both return paths below can carry it: whether the
+    // §16.2 steps 2-3. Read once, here, so every return path below can carry it: whether the
     // shipped `settings.json` actually took effect is independent of whether Mubit is up.
     const statusLineHint = probeStatusLine(cfg);
+
+    // §4.1 — no endpoint, nothing to dial, and nothing to diagnose about a server. Ahead of
+    // the grace window and the health probe: arming a cold-start window would mask this
+    // behind `◍ warming`, and probing would spend the budget on a `fetch` that throws
+    // `ERR_INVALID_URL` before it opens a socket.
+    if (!isConfigured(cfg)) {
+      updateMarker(cfg, runId, { mode: cfg.mode, state: 'unconfigured', cold_start_until: 0, last_error: '' });
+      log(cfg, 'debug', 'session-start: no endpoint configured', { run_id: runId });
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'SessionStart',
+          additionalContext: unconfiguredBlock(cfg, runId),
+        },
+        systemMessage: statusLineHint || `mubit: not configured${DOT}run /mubit-memory:auth`,
+      };
+    }
+
+    // §4.7 — the grace window, armed once per endpoint rather than once per session. It
+    // exists to cover an instance that is genuinely still starting, which is a property of
+    // the instance and not of this session; re-arming it on entry meant the window was open
+    // at the instant every probe failed, forever, and `◍ warming` became the only failure
+    // state this hook could report. Persisted so the deadline survives the session that set
+    // it, and keyed by endpoint so pointing at a new instance re-arms while pointing back at
+    // an old one finds its expired record.
+    const coldStartUntil = armColdStart(cfg);
+    updateMarker(cfg, runId, { mode: cfg.mode, cold_start_until: coldStartUntil });
 
     // §5.1 step 4 — health is the gate. It returns the bare string `OK`, not JSON; reading
     // it as JSON would report every healthy server as down (lib/http.mjs owns that).
@@ -114,9 +136,13 @@ await runHook('session-start', {
     if (!hres.ok) {
       const state = connState(hres.state);
       const warming = coldStartUntil > Date.now();
+      // The marker records what happened; `bin/statusline.mjs` decides how to show it, from
+      // the `cold_start_until` written above. Persisting the lens here instead was the other
+      // half of the stuck-`warming` bug: the string outlived the window that justified it,
+      // and nothing that ran later ever corrected it.
       updateMarker(cfg, runId, {
         mode: cfg.mode,
-        state: warming ? 'warming' : state,
+        state,
         last_error: String(hres.error ?? '').slice(0, 300),
       });
       log(cfg, 'warn', `session-start: mubit is not reachable (${state})`, { run_id: runId });
@@ -231,6 +257,32 @@ function steerBlock(cfg, runId, lessons) {
  * @param {string} state
  * @returns {string}
  */
+/**
+ * §5.1, the "there is no instance" case — distinct from `offlineBlock` because the two are
+ * different claims and the model acts on the difference. Offline means work is buffered and
+ * will be sent when Mubit answers; here nothing is going to answer until a person runs one
+ * command, and saying "unreachable" would blame a server that does not exist.
+ *
+ * Carries no endpoint, because there is none to name — the version this replaced interpolated
+ * a blank one and rendered `Mubit at  is unreachable (server_error)`.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @returns {string}
+ */
+function unconfiguredBlock(cfg, runId) {
+  return [
+    '# Mubit memory is not configured',
+    '',
+    `Run: ${runId} (${cfg.mode})`,
+    'No Mubit endpoint is set on this machine, so no memory will be injected this session and '
+      + 'recall is unavailable — do not search for it, and do not assume anything was recalled.',
+    'Work is still captured and buffered locally. Run /mubit-memory:auth to sign in and set an '
+      + 'endpoint; what has been buffered is sent once one is configured.',
+    '',
+  ].join('\n');
+}
+
 function offlineBlock(cfg, runId, state) {
   return [
     '# Mubit memory is offline',
@@ -242,6 +294,46 @@ function offlineBlock(cfg, runId, state) {
     'Work is still captured and buffered locally; it is sent when Mubit answers again.',
     '',
   ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// §4.7 — the cold-start grace, armed per endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * The deadline until which a failure displays as `◍ warming`, armed the first time this
+ * endpoint is seen and reused unchanged after that.
+ *
+ * The record is keyed by `sha256(endpoint)[0:12]`, the same scheme as `breaker/` and
+ * `policy/`, so the three join up for anyone reading the data directory. Keying it that way
+ * is what gives the intended behaviour on a change of instance for free: a new endpoint has
+ * no record and arms a fresh window, and switching back to a previous one finds a record
+ * whose deadline is long past, so a familiar instance does not get a warm-up it has not
+ * earned.
+ *
+ * Failing soft is deliberate. If the record cannot be read or written — a read-only data
+ * dir, a truncated file — the answer is `0`, meaning "not warming". An unwritable disk must
+ * not be able to pin the status line to `warming` forever, which is the failure this whole
+ * function exists to end.
+ *
+ * @param {Record<string, any>} cfg
+ * @returns {number} absolute epoch-ms deadline, or 0 when the grace is off or unavailable
+ */
+function armColdStart(cfg) {
+  const grace = Math.max(0, intOr(cfg.coldStartGraceMs, 0));
+  if (grace <= 0) return 0;
+  try {
+    const path = join(dataDir(cfg), 'coldstart', `${endpointHash(cfg)}.json`);
+    const stored = readJson(path, null);
+    const until = stored && typeof stored === 'object' ? intOr(stored.until, 0) : 0;
+    if (until > 0) return until;
+
+    const armed = Date.now() + grace;
+    writeJsonAtomic(path, { endpoint: cfg.endpoint, armed_at: Date.now(), until: armed });
+    return armed;
+  } catch {
+    return 0;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -57,8 +57,8 @@ import { unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { assembleContext, estimateTokens } from '../../lib/assemble.mjs';
-import { readBreaker } from '../../lib/breaker.mjs';
-import { envTags, loadConfig } from '../../lib/config.mjs';
+import { CONN_STATES, readBreaker } from '../../lib/breaker.mjs';
+import { envTags, isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { postContext, postQuery } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
@@ -118,6 +118,11 @@ await runHook('prompt-recall', {
 
     // --- §5.2 step 0. Every skip here is "dial nothing", not "dial and discard".
     if (!cfg.recall) return SUPPRESS;
+    // §4.1: with no endpoint there is nothing to recall from. Ahead of run-id derivation,
+    // which can shell out to `git rev-parse` — this hook blocks every prompt, and an install
+    // nobody has signed in to yet should not pay a subprocess per prompt to learn that.
+    // `session-start` has already written `unconfigured` to the marker for this run.
+    if (!isConfigured(cfg)) return SUPPRESS;
 
     const prompt = typeof payload?.prompt === 'string' ? payload.prompt.trim() : '';
     if (prompt.length < MIN_PROMPT_CHARS) return SUPPRESS;
@@ -140,13 +145,19 @@ await runHook('prompt-recall', {
     // server already known to be down. Read-only — `allowRequest` would spend the single
     // half-open probe that `lib/http.mjs` is about to ask for itself.
     if (breakerOpen(cfg)) {
+      // Carry the breaker's verdict onto the marker on the way out. Returning without it is
+      // how a state goes stale and stays stale: once the breaker is open this hook stops
+      // dialing, so nothing else writes `state` for the rest of the run, and whatever the
+      // last hook happened to record — often a `warming` from a window that has long since
+      // expired — is what the status line keeps showing.
+      const b = readBreaker(cfg);
       log(cfg, 'debug', 'prompt-recall: breaker open; skipping recall', { run_id: runId });
+      if (isConnState(b.state)) updateMarker(cfg, runId, { mode: cfg.mode, state: b.state });
       return SUPPRESS;
     }
 
     const query = prompt.slice(0, MAX_QUERY_CHARS);
     const promptId = safeId(payload?.prompt_id);
-    const coldUntil = numOr(readMarker(cfg, runId).cold_start_until, 0);
 
     const outcome = cfg.recallAssemble === 'server'
       ? await rungThree(cfg, { runId, agentId, query, deadline })
@@ -155,7 +166,7 @@ await runHook('prompt-recall', {
     const ms = Date.now() - started;
 
     if (outcome.failed) {
-      noteFailure(cfg, runId, outcome, coldUntil, ms);
+      noteFailure(cfg, runId, outcome, ms);
       return SUPPRESS;
     }
 
@@ -475,27 +486,32 @@ function clearPolicy(cfg) {
 
 /**
  * §4.7/§4.8: the status line reads nothing but the marker, so a failed recall has to leave
- * a true state behind. `warming` masks a failure only inside the cold-start grace and never
- * masks `auth_failed` — a server still warming up does not answer 401, and hiding the
- * one error the user can fix is the worst thing this hook could do.
+ * a true state behind — the state as observed, with no display lens applied. The cold-start
+ * grace still exists and still shows `◍ warming` over a failure, but it is resolved by
+ * `bin/statusline.mjs` from the window the marker carries, which means it expires on its own
+ * instead of being frozen into the record by whichever hook wrote last.
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {Outcome} outcome
- * @param {number} coldUntil
  * @param {number} ms
  */
-function noteFailure(cfg, runId, outcome, coldUntil, ms) {
+function noteFailure(cfg, runId, outcome, ms) {
   const state = str(outcome.state);
-  const known = ['unreachable', 'server_error', 'auth_failed', 'not_responding'].includes(state);
-  const warming = coldUntil > Date.now() && state !== 'auth_failed';
+  // Against `CONN_STATES` rather than a list written out here. The copy that used to live on
+  // this line was one state short of the union the moment a state was added, and the effect
+  // of falling off it is silent: the marker simply keeps whatever it said before.
+  const known = isConnState(state);
 
   log(cfg, 'warn', `prompt-recall: recall failed on rung ${outcome.rung} (${state || 'unknown'})`, {
     run_id: runId, error: str(outcome.error).slice(0, 300),
   });
 
   updateMarker(cfg, runId, {
-    ...(known ? { state: warming ? 'warming' : state } : {}),
+    // The state as observed. `bin/statusline.mjs` owns the cold-start lens and reads the
+    // window from the marker, so writing `warming` here would persist a display decision
+    // past the window that justified it.
+    ...(known ? { state } : {}),
     last_error: str(outcome.error).slice(0, 200),
     recall: { sources: 0, tokens: 0, ms, empty_reason: '', rung: outcome.rung, dropped: 0 },
   });
@@ -574,6 +590,13 @@ function isObject(v) {
 /** @param {any} v @returns {string} */
 function str(v) {
   return typeof v === 'string' ? v.trim() : '';
+}
+
+/** Is this one of the §4.7 states? Asked against the exported union so this file cannot
+ *  drift from it. `invalid_request` is deliberately not one — it is a caller bug, not a
+ *  verdict about the connection, and must never reach the status line. */
+function isConnState(v) {
+  return typeof v === 'string' && /** @type {readonly string[]} */ (CONN_STATES).includes(v);
 }
 
 /** @param {any} v @param {number} d @returns {number} */

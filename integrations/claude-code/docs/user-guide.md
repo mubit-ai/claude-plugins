@@ -26,12 +26,27 @@ Read these now and you will skip the three most common support questions.
 
 ## Part 1 — Install
 
-### Option A — from your local checkout (works today)
+### Option A — from GitHub (what everyone should use)
 
-A marketplace source can be a local directory. This is already set up on this machine — the
-marketplace `mubit` is registered and points at your repo:
+```
+/plugin marketplace add mubit-ai/claude-plugins
+/plugin install mubit-memory@mubit
+/reload-plugins
+```
+
+Then `/reload-plugins`, and **quit and start a new session.**
+
+Claude Code fetches a marketplace with `git clone --depth 1`, using your own git credentials —
+there is no separate plugin token. If your git is SSH-only, run `gh auth setup-git` first: the
+clone URL is always HTTPS, even for sources written as `git@`.
+
+### Option B — from a local checkout
+
+A marketplace source can also be a local directory. This is the loop you want when you are
+changing the plugin itself; substitute your own checkout path throughout.
 
 ```bash
+claude plugin marketplace add ~/src/claude-plugins
 claude plugin marketplace list
 ```
 
@@ -44,13 +59,7 @@ Configured marketplaces:
     Source: GitHub (anthropics/claude-plugins-official)
 
   ❯ mubit
-    Source: Directory (/path/to/mubit)
-```
-
-If it is missing, add it:
-
-```bash
-claude plugin marketplace add /path/to/mubit
+    Source: Directory (~/src/claude-plugins)
 ```
 
 Then install — either from `/plugin` → **Browse plugins** → **Mubit Memory** → Install, or from
@@ -85,26 +94,12 @@ To undo the marketplace registration at any time:
 claude plugin marketplace remove mubit
 ```
 
-### Option B — from GitHub
-
-```
-/plugin marketplace add mubit-ai/claude-plugins
-/plugin install mubit-memory@mubit
-/reload-plugins
-```
-
-> **`mubit-ai/claude-plugins` is private during the security review.** Claude Code fetches it
-> with `git clone --depth 1 https://github.com/mubit-ai/claude-plugins.git` — your own git
-> credentials, no separate token. So this works today for anyone with repo access and fails
-> with an authentication error for everyone else. If your git is SSH-only, run
-> `gh auth setup-git` first: the clone URL is always HTTPS.
-
 ### Option C — try it without installing anything
 
-Zero side effects, session-only. Good for a first look:
+Zero side effects, session-only. Good for a first look, and the fastest loop while developing:
 
 ```bash
-claude --plugin-dir /path/to/mubit/integrations/claude-code
+claude --plugin-dir ~/src/claude-plugins/integrations/claude-code
 ```
 
 > Session-only plugins get their own data directory —
@@ -114,7 +109,7 @@ claude --plugin-dir /path/to/mubit/integrations/claude-code
 ### Confirm the install is sound
 
 ```bash
-claude plugin validate /path/to/mubit/integrations/claude-code
+claude plugin validate ~/src/claude-plugins/integrations/claude-code
 ```
 
 **Expect** `✔ Validation passed`. This is the host's own schema check, and it is the only thing
@@ -138,12 +133,12 @@ Component inventory
   MCP servers (1)  mubit  (tool schemas resolved at runtime; not counted)
 
 Projected token cost
-  Always-on:   ~515 tok   added to every session
+  Always-on:   ~452 tok   added to every session
 ```
 
-Seven skills, one agent, nine hook events. `~515 tok` is what the seven skill descriptions and
-the agent cost you in every session; hooks cost nothing in context because they run in the
-harness, not the model.
+Seven skills, one agent, nine hook events. That number is what the skill descriptions and the
+agent cost you in every session; hooks cost nothing in context because they run in the harness,
+not the model.
 
 > The plugin's own `contextCost` (5382) is larger because it counts the MCP tool schemas, which
 > the host lists as "resolved at runtime; not counted". Both numbers are honest — they measure
@@ -160,76 +155,55 @@ zero runtime dependencies and ships its bundles pre-built.
 /mubit-memory:auth
 ```
 
-A browser tab opens on the Mubit console. Sign in — or sign up, it is the same page — and the key
-comes back to the plugin by itself, over a loopback callback on `127.0.0.1`. You never copy or
-paste it, which is the point: a key pasted into the conversation is in the transcript, and
-transcripts get shared, exported, and attached to bug reports.
+That is the whole setup. It opens the [Mubit console](https://console.mubit.ai) in your browser,
+signs you in or signs you up, and brings a key back over a loopback callback on `127.0.0.1`. The
+key is checked against your instance *before* it is stored, so a run that reports success means
+it works — not that it looked plausible.
 
-### Two values
+It lands in `${CLAUDE_PLUGIN_DATA}/credentials.json`, owner-only (mode `600`), on a path that
+survives plugin updates. Once per machine, not once per release.
+
+### The two values it sets
 
 | Setting | Value |
 | --- | --- |
 | `endpoint` | your instance URL, e.g. `https://eu.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
-That is the whole configuration, and signing in is how both arrive. They are written to
-`${CLAUDE_PLUGIN_DATA}/credentials.json`, readable only by you (mode `600`). That directory
-survives plugin updates, so you do this once per machine — not once per release.
+Both are needed: an endpoint with no key gets `auth_failed` on every call, and no endpoint at
+all means there is nothing to talk to.
 
-The key is checked against your instance *before* it is stored, so a key the server rejects is
-never written. Read the outcome like this:
+### No browser
 
-| What you see | What it means |
-| --- | --- |
-| It reports the endpoint | Done. Now start a new session — see below. |
-| It says the workspace is still being created | Not a failure. A new workspace takes a minute or two. Run `/mubit-memory:auth` again shortly; it resumes where it left off. |
-| `auth_failed` | The instance rejected the key — wrong, revoked, or issued for a different instance. |
-| `unreachable` | Nothing answered at the endpoint. This is not a key problem; do not reissue one. |
-| `browser_failed` | No browser opened, or you closed the tab. See the fallback below. |
-
-**Then start a new session.** This is the one step people miss. `/reload-plugins` registers the
-hooks but does not fire `SessionStart`, so until you open a fresh session there is no run id and
-nothing on the status line — even though the sign-in worked perfectly.
-
-Confirm with:
-
-```
-/mubit-memory:setup
-```
-
-While an instance is still starting, the status line shows `◍ warming`, not a failure glyph.
-
-### No browser? (SSH, containers)
-
-The flow prints the URL instead of dead-ending. Issue a key at <https://console.mubit.ai>, then
-run it with the key in the environment for that one command:
+Over SSH or in a container there is nothing to open. Issue a key at
+<https://console.mubit.ai> and hand it over for one command:
 
 ```bash
 MUBIT_AUTH_KEY='mbt_…' node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --paste
 ```
 
-Put it in the environment, not in a `--key` flag — a process's arguments are readable by every
-user on the machine; its environment is not.
+The key goes in the environment rather than a `--key` flag because arguments are readable by
+every user on the machine via `ps`, and a process's environment is not.
 
-### Checking and undoing it
+Useful neighbours: `--status` prints what is stored (presence, never the key) and exits non-zero
+when nothing is; `--logout` removes it.
 
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --status   # is a key stored? never prints the key itself
-node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --logout   # remove the stored credentials
+### Or set it by hand
+
+`/plugin` → **Mubit Memory** → configure. There the key is marked sensitive, so it goes to your
+OS keychain rather than to a file — the better home for a long-lived install, and it takes
+precedence over anything `/mubit-memory:auth` writes.
+
+Confirm either route with:
+
+```
+/mubit-memory:setup
 ```
 
-### Or configure it by hand
-
-The manual route still exists, and it still beats what `auth` writes:
-
-```
-/plugin
-```
-
-→ **Mubit Memory** → configure. The key is marked sensitive there, so it goes to your OS keychain
-— genuinely the best place for it. Prefer this for a long-lived install and `/mubit-memory:auth`
-for getting working in the next minute. A slash command has no way to write the keychain, which
-is exactly why signing in needs a file of its own.
+A rejected key reports as `auth_failed`, not as a network problem: the key is missing, wrong, or
+revoked. Before you have set an endpoint at all the status line reads `○ not configured`, which
+is not a failure either — it is the plugin waiting. The first time an endpoint is used, while
+the instance is still starting, the status line shows `◍ warming` rather than a failure glyph.
 
 ### Or configure by environment variable
 
@@ -251,13 +225,8 @@ cat > .mubit-cc.json <<'JSON'
 JSON
 ```
 
-Precedence, highest first: plugin settings → `MUBIT_*` env vars → the credentials store that
-`/mubit-memory:auth` writes → `.mubit-cc.json` → defaults.
-
-Signing in sits below the environment on purpose, so a CI job exporting `MUBIT_API_KEY` is not
-quietly overridden by whoever last logged in on that machine — and above the project file, so a
-fresh sign-in beats a stale committed one. If a sign-in looks like it did nothing, check whether
-a plugin setting or a `MUBIT_*` variable is set above it.
+Precedence, highest first: plugin settings → `MUBIT_*` env vars → `credentials.json` (what
+`/mubit-memory:auth` writes) → `.mubit-cc.json` → defaults.
 
 ---
 
@@ -311,14 +280,14 @@ cat "$(ls -t ~/.claude/plugins/data/mubit-memory*/status/*.json | grep -v health
   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(JSON.stringify({run_id:j.run_id,mode:j.mode,state:j.state,captured:j.captured,recall:{sources:j.recall.sources,tokens:j.recall.tokens},last_error:j.last_error},null,2))})'
 ```
 
-**Expect** something like this — here with no Mubit running, which is why `state` is `warming`
-and `last_error` is set:
+**Expect** something like this — here with the endpoint set but nothing listening on it, which
+is why `state` is `unreachable` and `last_error` is set:
 
 ```json
 {
   "run_id": "cc-my-project-9f2a11c4",
-  "mode": "local",
-  "state": "warming",
+  "mode": "hosted",
+  "state": "unreachable",
   "captured": { "tools": 0, "turns": 0, "pending": 1 },
   "recall": { "sources": 0, "tokens": 0 },
   "last_error": "GET /v2/core/health: TypeError: fetch failed: (ECONNREFUSED)"
@@ -350,14 +319,13 @@ health and stuck ingest jobs — and reports the connection state by name.
 
 ---
 
-## Part 5 — The seven commands
+## Part 5 — The six commands
 
 You will not need most of these day to day. Capture is automatic; these are for the moments it
 is not enough.
 
 | Command | Type this when |
 | --- | --- |
-| `/mubit-memory:auth` | Fresh machine, or your key was rotated or revoked. Signs you in and stores the key. **Never installs anything.** |
 | `/mubit-memory:setup` | First run, or after `auth_failed` / `unreachable`. Detects your deployment and tells you what is missing. **Never installs anything.** |
 | `/mubit-memory:doctor` | Memory looks empty, captures are not landing, or the status line shows a failure glyph |
 | `/mubit-memory:recall` | You want detail beyond what was already injected this turn |
@@ -513,15 +481,17 @@ no network I/O, ever.
 | Glyph | State | What it means | Fix |
 | --- | --- | --- | --- |
 | `●` | `ready` | Connection is fine | If memory still looks wrong, it is content or scope, not connectivity — run `/mubit-memory:doctor` |
+| `○` | `unconfigured` | No endpoint is set, so nothing was dialed | Run `/mubit-memory:auth`. Nothing is broken and nothing is lost — capture buffers until an endpoint exists |
 | `✖` | `unreachable` | Nothing is listening | Check `endpoint` is correct and your instance is running |
-| `▲` | `server_error` | Mubit is up and failing | Retry, then check the instance in the console; the client cannot fix this |
+| `▲` | `server_error` | Something is up and answering wrongly | Retry, then check the instance in the console. If it persists, check `endpoint` reaches Mubit and not a proxy or SSO page — those answer 200 too |
 | `✖` | `auth_failed` | Key missing, wrong, or revoked | Set a valid `mbt_...` key. Sticky on purpose — it is the one error you can fix |
 | `◌` | `not_responding` | Three consecutive timeouts | Usually load, not death. Retry before concluding anything |
 
 Two displays that look like faults and are not:
 
-- **`◍ warming`** — the 20-second cold-start window. An instance that is still starting is not
-  broken, merely slow to answer.
+- **`◍ warming`** — the 20-second cold-start window, opened the first time a given endpoint is
+  used. An instance that is still starting is not broken, merely slow to answer. It is armed
+  once per endpoint rather than once per session, so it cannot hide a fault that outlasts it.
 - **`· paused 94s`** — the circuit breaker opened after 5 failures in 5 minutes. One probe dials
   when the cooldown ends and a success closes it. Nothing needs restarting.
 
@@ -530,8 +500,6 @@ Two displays that look like faults and are not:
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | No status line, no skills, nothing at all | You have not started a new session since installing | Quit and reopen. `/reload-plugins` does not fire `SessionStart` |
-| `auth_failed`, or nothing works on a new machine | No key stored, or it was rotated or revoked | `/mubit-memory:auth`, then start a new session — signing in does not fire `SessionStart` either |
-| Signed in, but it still behaves as though you had not | A plugin setting or `MUBIT_API_KEY` outranks the credentials store | `bin/auth.mjs --status` shows what is stored; clear the higher rung or set the new key there |
 | Everything connects, recall is always empty | Writes are accepted and indexed a moment later, so a recall right after a capture can miss | Run `/mubit-memory:doctor` and check the ingest job states |
 | Nothing loads and there is no error anywhere | A manifest failed validation. A plugin that fails does not half-load | `claude plugin validate <plugin-dir>` |
 | Memory from `/mubit-memory:remember` never shows up in recall | `runStrategy: per-conversation` splits hook writes from MCP writes | Use `per-directory` |
@@ -584,13 +552,8 @@ marketplace and listing it; a real `claude plugin install` from it, `claude plug
 `claude plugin uninstall`; the plugin loading with 6 skills / 1 agent / MCP connected; and the
 shape of the on-disk status marker. Every expected-output block above is a transcript.
 
-Re-verified for the `/mubit-memory:auth` release: `claude plugin validate`, `claude plugin
-details` (7 skills / 1 agent, and the projected token cost quoted above), and the plugin loading
-under `claude --plugin-dir` with `/mubit-memory:auth` registered alongside the other six. The
-credentials store was exercised offline — written, re-written over a wider-mode file, and
-confirmed at mode `600` — as part of the test suite.
-
-Not verified here: any behaviour that needs a running Mubit or a live console — the browser
-sign-in end to end, recall content, reflection output, and lesson promotion. The sign-in flow is
-covered offline against a stand-in console that enforces the PKCE exchange, which checks the
-client's half of it; the round trip against the real console is covered separately.
+Not verified: installing from a pushed GitHub repo. The distribution repo's contents are built
+and `claude plugin validate` passes against them, but `mubit-ai/claude-plugins` has not been
+created on GitHub yet, so the clone-and-install path is untested end to end. Also unverified is
+any behaviour that needs a running Mubit: recall content, reflection output, and lesson
+promotion — those need a live instance and are covered separately.

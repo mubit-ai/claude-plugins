@@ -16,10 +16,16 @@
  *   failure  -> `{ok: false, state, status?, error, ms}`
  *
  * `state` is a `ConnState` from §4.7 (`unreachable | server_error | auth_failed |
- * not_responding`) for anything that reached the socket, plus one extra value that never
- * does: `invalid_request`, for the five pre-flight guards below. A guard failure is a bug in
+ * not_responding`) for anything that reached the socket, plus two values that never do.
+ *
+ * `invalid_request`, for the five pre-flight guards below. A guard failure is a bug in
  * the *caller*, not a verdict about the server, so it is deliberately outside the ConnState
  * union — it must never reach `recordFailure` and must never colour the status line.
+ *
+ * `unconfigured`, for a config with no usable endpoint. Unlike `invalid_request` this one
+ * *is* a ConnState, because it is the honest answer to "what is the connection doing?" and
+ * the user needs to see it on the status line. It shares the important half: nothing is
+ * dialed and nothing is recorded.
  *
  * Five pre-flight guards, each preventing a specific silent failure. All five return
  * `ok:false` having dialed nothing:
@@ -64,11 +70,14 @@
 import { join } from 'node:path';
 
 import { allowRequest, classifyError, readBreaker, recordFailure, recordSuccess } from './breaker.mjs';
-import { authHeaders } from './config.mjs';
+import { authHeaders, isConfigured } from './config.mjs';
 import { log } from './log.mjs';
 import { readJson, resolveDataDir, writeJsonAtomic } from './state.mjs';
 
-/** @typedef {"unreachable"|"server_error"|"auth_failed"|"not_responding"|"invalid_request"} FailState */
+/**
+ * @typedef {"unreachable"|"server_error"|"auth_failed"|"not_responding"|"invalid_request"
+ *   |"unconfigured"} FailState
+ */
 /** @typedef {{ok: true, status: number, body: any, ms: number}} OkResult */
 /** @typedef {{ok: false, state: FailState, status?: number, error: string, ms: number}} ErrResult */
 /** @typedef {OkResult|ErrResult} Result */
@@ -165,6 +174,12 @@ export async function request(cfg, method, path, body, opts = {}) {
       }
     }
 
+    // --- §4.1: no endpoint, no dial. `urlFor` would hand `fetch` the bare route, which is a
+    // relative URL and throws `ERR_INVALID_URL` before a socket exists — a throw that reads
+    // downstream as a fault in a server we never contacted. Ahead of `allowRequest` because
+    // that call writes when it spends the half-open probe.
+    if (!isConfigured(cfg)) return refuseUnconfigured(cfg, started, `${verb} ${route}`);
+
     // --- §4.2/§4.7: consult the breaker before dialing. Called exactly once per request:
     // while the breaker is open this consumes the single half-open probe, so asking twice
     // would spend a probe the retry below is entitled to.
@@ -223,6 +238,10 @@ export async function request(cfg, method, path, body, opts = {}) {
 export async function health(cfg, opts = {}) {
   const started = Date.now();
   try {
+    // §4.1, and before the cache read as well as before `allowRequest`: a cached `ready`
+    // from a previous endpoint must not answer for a config that no longer has one.
+    if (!isConfigured(cfg)) return refuseUnconfigured(cfg, started, `GET ${ROUTES.health}`);
+
     if (!opts || opts.force !== true) {
       const hit = readHealthCache(cfg);
       if (hit) return { ...hit, ms: Date.now() - started, cached: true };
@@ -234,7 +253,7 @@ export async function health(cfg, opts = {}) {
       return { ok: false, state, error: `circuit breaker open (${state}); health was not dialed`, ms: Date.now() - started };
     }
 
-    const res = await dial(cfg, {
+    const dialed = await dial(cfg, {
       verb: 'GET',
       url: urlFor(cfg, ROUTES.health),
       route: ROUTES.health,
@@ -243,6 +262,28 @@ export async function health(cfg, opts = {}) {
       parse: 'text',
     });
 
+    // §4.7: a 2xx is necessary and not sufficient. The status alone says only that *some*
+    // host answered — an SSO redirect, a captive portal, a proxy error page and a completely
+    // different service all answer 200 — and taking that as healthy opens the session by
+    // telling the model memory is active when nothing behind it is Mubit. The route returns
+    // the bare string `OK`, so one comparison settles it.
+    //
+    // This lands as `server_error` rather than a state of its own: §4.7 already classes "a
+    // 2xx whose body will not parse" that way for the JSON routes, and "up and answering
+    // wrongly" is the same verdict here.
+    // Only a 2xx is reinterpreted here. A `dial` that already failed carries a verdict about
+    // the transport — `unreachable`, `not_responding`, `auth_failed` — and that verdict is
+    // better than anything this line could say.
+    const res = (dialed.ok && !isOkBody(dialed.body)) ? {
+      ok: /** @type {const} */ (false),
+      status: dialed.status,
+      state: /** @type {FailState} */ ('server_error'),
+      error: `GET ${ROUTES.health}: HTTP ${dialed.status} but the body was not "OK" `
+        + `(${preview(dialed.body)})`,
+      ms: dialed.ms,
+    } : dialed;
+
+    // Validated before it is cached, or a wrong host is remembered as healthy for 30 s.
     settle(cfg, res, opts);
     writeHealthCache(cfg, res);
     return withMs(res, started);
@@ -615,6 +656,46 @@ function writeHealthCache(cfg, res) {
 function refuse(cfg, started, error, fields = {}) {
   log(cfg, 'error', error, fields);
   return { ok: false, state: 'invalid_request', error, ms: Date.now() - started };
+}
+
+/**
+ * The same shape for "no endpoint is set", at `debug` rather than `error`: an install nobody
+ * has signed in to yet is an ordinary state, not a fault, and one log line per dial per
+ * prompt would be noise on a machine whose only problem is that it has not been configured.
+ *
+ * Every caller of this must run *before* `allowRequest`, which writes the breaker file when
+ * it spends a half-open probe. Refusing after that point would still leave a breaker record
+ * for a server that was never dialed.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {number} started
+ * @param {string} what the verb and route, for the message
+ * @returns {ErrResult}
+ */
+function refuseUnconfigured(cfg, started, what) {
+  const error = `${what}: no Mubit endpoint is configured; nothing was dialed`;
+  log(cfg, 'debug', error);
+  return { ok: false, state: 'unconfigured', error, ms: Date.now() - started };
+}
+
+/**
+ * Was that body Mubit answering, rather than merely something answering? The health handler
+ * returns the bare string `OK`, so this is an equality test and not a heuristic. Trimmed,
+ * because a proxy that appends a newline has still relayed a healthy answer.
+ *
+ * @param {any} body the text body of a 2xx
+ * @returns {boolean}
+ */
+function isOkBody(body) {
+  return String(body ?? '').trim() === 'OK';
+}
+
+/** A short, single-line, quoted glimpse of an unexpected body — enough to recognise a login
+ *  page or a proxy error in a log without pasting a kilobyte of HTML into it. */
+function preview(body) {
+  const s = String(body ?? '').replace(/\s+/g, ' ').trim();
+  if (!s) return 'empty body';
+  return s.length > 60 ? `${JSON.stringify(s.slice(0, 60))}…` : JSON.stringify(s);
 }
 
 /**

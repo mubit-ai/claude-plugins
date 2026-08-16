@@ -39,6 +39,8 @@ No framework, no dependencies, no network, no Docker, no real Mubit. `node:test`
 | `manifests.test.mjs` | manifests as data, version lockstep, allowlist ↔ the shipped MCP tool table |
 | `state.test.mjs` | paths, atomic JSON, TTL pruning, markers, redacted logging |
 | `config.test.mjs` | precedence, loopback detection, env tags, frozen defaults |
+| `credentials.test.mjs` | the 0600 store, merge-not-replace, never throws |
+| `auth.test.mjs` | the key ladder, PKCE + loopback, the four outcomes |
 | `runid.test.mjs` | four strategies, the `source` table, never `"default"` |
 | `redact.test.mjs` | patterns, denylist, caps, scrub-before-cap, self-reference |
 | `breaker.test.mjs` | five states, "a timeout is not a verdict", half-open |
@@ -58,6 +60,7 @@ No framework, no dependencies, no network, no Docker, no real Mubit. `node:test`
 | `statusline.test.mjs` | network-free, glyph precedence, empty-state survival |
 | `launch.test.mjs` | run-id derivation, env-before-import, allowlist default |
 | `skills.test.mjs` | frontmatter, tool prefixes, load-bearing prose |
+| `release.test.mjs` | release wiring, committed `dist`, the shipped licence |
 | `failure.test.mjs` | F1–F29, the cross-cutting failure surface |
 
 ## `failure.test.mjs` is the important one

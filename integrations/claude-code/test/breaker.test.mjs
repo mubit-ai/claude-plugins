@@ -26,7 +26,17 @@ import { join } from 'node:path';
 import { lib, baseEnv, makeDataDir } from './helpers/harness.mjs';
 
 /** The complete `ConnState` union (§4.7). Nothing outside this set may ever be produced. */
-const CONN_STATES = ['ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding'];
+const CONN_STATES = [
+  'ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding', 'unconfigured',
+];
+
+/**
+ * The subset `classifyError` is allowed to return. `unconfigured` is a ConnState but never a
+ * classification: it is decided in `lib/http.mjs` *before* a dial, and no error object or
+ * status code should be able to produce it. If it ever shows up here, some caller has reached
+ * the socket on a config with no endpoint — which is the bug this state was added to end.
+ */
+const CLASSIFIABLE = CONN_STATES.filter((s) => s !== 'unconfigured');
 
 /** Tiny breaker parameters so the whole file runs in well under a second. */
 const TIGHT = {
@@ -125,7 +135,7 @@ test('classifyError: undici-wrapped AbortError still classifies as not_respondin
 
 // §4.7: the ConnState union is closed. Anything else leaks into the status line and the
 // marker, where `bin/statusline.mjs` has no glyph for it.
-test('classifyError: never produces a state outside the five-value ConnState union', async () => {
+test('classifyError: never produces a state outside the classifiable ConnState values', async () => {
   const { classifyError } = await lib('breaker.mjs');
   /** @type {Array<[any, any]>} */
   const grid = [];
@@ -144,9 +154,27 @@ test('classifyError: never produces a state outside the five-value ConnState uni
 
   for (const [e, s] of grid) {
     const got = classifyError(e, s);
-    assert.ok(CONN_STATES.includes(got),
+    assert.ok(CLASSIFIABLE.includes(got),
       `classifyError(${e && (e.code || e.name)}, ${s}) produced "${got}", outside ConnState`);
   }
+});
+
+// §4.7/C1b — a breaker exists to stop dialing a server that is failing. An unconfigured
+// install never dialed one, so there is nothing to trip and nothing to cool down. Recording
+// it opened the breaker on a local config gap and then suppressed recall for the cooldown,
+// against an instance the user was one command away from having.
+test('recordFailure: `unconfigured` is never recorded — no file, no failures, no open', async () => {
+  const { recordFailure, readBreaker, breakerPath } = await lib('breaker.mjs');
+  const dataDir = makeDataDir();
+  const cfg = { dataDir, endpoint: '', breaker: { threshold: 3, windowMs: 5000, cooldownMs: 1000 } };
+
+  for (let i = 0; i < 10; i++) recordFailure(cfg, 'unconfigured');
+
+  assert.equal(existsSync(breakerPath(cfg)), false,
+    'ten unconfigured "failures" wrote a breaker file for an endpoint that was never dialed');
+  const b = readBreaker(cfg);
+  assert.equal(b.openedAt, 0);
+  assert.equal(b.failures.length, 0);
 });
 
 // §1.3/§5.5: a 422 is a bad payload, a 413 is an oversized body, a 429 is backpressure.

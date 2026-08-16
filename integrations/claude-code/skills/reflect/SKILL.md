@@ -13,15 +13,17 @@ error. Use `mubit_lessons` afterwards when the user wants to see what is now vis
 
 ## Why the explicit call exists at all
 
-Mubit also reflects on its own as a run accumulates activity, and it extracts lessons
-perfectly well — but those lessons stay at the scope they were extracted at, typically
-`run`, and a `run`-scoped lesson is invisible to the next session. So the store can look
-busy while nothing ever crosses the boundary into a future session.
-**Only this explicit path can widen a lesson's scope.**
+Mubit already extracts lessons on its own, in the background, as it ingests. It does that
+perfectly well — and then stops there. Lessons extracted that way keep the scope they were
+extracted at, typically `run`, and **a `run`-scoped lesson is invisible to the next session**.
 
-Widening is gradual even here: rules are never scope-promoted (they are enforced as
-written), and a lesson has to recur before it travels. Expect lessons to widen over several
-sessions, not on the first reflect.
+The consequence is concrete: the store can look busy, lessons accumulating steadily, while
+nothing ever crosses the boundary into a future session. Widening a lesson's scope is
+reserved for the explicit reflect path — this skill, and the one `SessionEnd` issues.
+
+Widening is still gradual once a lesson is on that path. Rules are never scope-promoted, since
+they are enforced as written; anything else has to establish itself before it travels. Expect
+lessons to widen over several sessions, not on the first reflect.
 
 ## When to invoke it
 

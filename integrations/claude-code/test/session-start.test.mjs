@@ -189,6 +189,75 @@ test('marker.cold_start_until = now + coldStartGraceMs', async (t) => {
     `cold_start_until ${marker.cold_start_until} > ${after + 20000}`);
 });
 
+// §4.7 — the window is a property of the *endpoint*, not of the session. Re-arming it on
+// entry meant it was open at the instant every probe failed, on every session, forever: the
+// grace could never expire, so `◍ warming` masked every real fault permanently and no other
+// failure state was reachable through the hook that runs first.
+test('cold_start_until is armed once per endpoint, not once per session', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const e = env(dataDir, server.url, { MUBIT_CC_COLDSTART_GRACE_MS: '20000' });
+
+  const first = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: e });
+  assertHookContract(first);
+  const armed = readMarker(dataDir).cold_start_until;
+  assert.ok(armed > 0, 'the first session for an endpoint arms the window');
+
+  // A later session against the same endpoint inherits the same deadline, so the window
+  // runs down in wall-clock time instead of restarting.
+  const second = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: e });
+  assertHookContract(second);
+  assert.equal(readMarker(dataDir).cold_start_until, armed,
+    'a second session re-armed the grace window instead of inheriting it');
+});
+
+// The other half of the same rule: a genuinely new instance really is starting up, so
+// pointing at one arms a fresh window — and pointing back at a familiar one does not.
+test('a new endpoint arms its own window; returning to the old one does not re-arm', async (t) => {
+  const a = await fakeMubit();
+  const b = await fakeMubit();
+  t.after(() => { a.close(); b.close(); });
+  const dataDir = makeDataDir();
+  const grace = { MUBIT_CC_COLDSTART_GRACE_MS: '20000' };
+
+  await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: env(dataDir, a.url, grace) });
+  const armedA = readMarker(dataDir).cold_start_until;
+
+  await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: env(dataDir, b.url, grace) });
+  const armedB = readMarker(dataDir).cold_start_until;
+  assert.notEqual(armedB, armedA, 'a different endpoint should arm its own grace window');
+
+  await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: env(dataDir, a.url, grace) });
+  assert.equal(readMarker(dataDir).cold_start_until, armedA,
+    'returning to an endpoint already seen re-armed its window instead of reusing the record');
+});
+
+// §4.1 — the state that used to be reported as `server_error`: `urlFor` handed `fetch` a
+// bare route, `fetch` threw ERR_INVALID_URL before opening a socket, and `classifyError`
+// had no branch for it. The user was then sent to the README row that says the client
+// cannot fix it, for the one problem only the client can fix.
+test('no endpoint reports unconfigured, dials nothing, and names the fix', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, '') });
+  assertHookContract(r);
+
+  const marker = readMarker(dataDir);
+  assert.equal(marker.state, 'unconfigured');
+  assert.equal(marker.cold_start_until, 0, 'an unset endpoint has nothing to warm up');
+  server.assertCalled('GET', '/v2/core/health', 0);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /not configured/i);
+  assert.match(ctx, /\/mubit-memory:auth/, 'the injected block must name the one command that fixes it');
+  assert.doesNotMatch(ctx, /is unreachable|server_error/,
+    'an unset endpoint is not a verdict about a server');
+});
+
 // ---------------------------------------------------------------------------
 // §4.3 — the `source` table
 // ---------------------------------------------------------------------------

@@ -9,8 +9,17 @@ the plugin knows how to call and prints every request, so "what actually leaves 
 is something you read, not something you take on faith.
 
 > This repository is a **generated mirror**; the source lives in `ricedb-cc-plugin` and a
-> publish wipes anything hand-committed here. `labs/` is on a throwaway branch for exactly that
-> reason — poke at anything, keep nothing.
+> publish wipes anything hand-committed here. `labs/` is on a throwaway branch, checked out as
+> its own worktree so the primary checkout stays on `main` — poke at anything, keep nothing.
+>
+> ```
+> /Users/eldaru/Mubit/claude-plugins        main                   ← untouched
+> /Users/eldaru/Mubit/claude-plugins-labs   lab/mubit-walkthrough  ← you are here
+> ```
+>
+> A worktree shares the object store but has its own working files, so `npm test` and the MCP
+> probe run here without a second `npm install` (both need only committed bundles and Node
+> built-ins — verified: 720/720 in ~6 s).
 
 ---
 
@@ -111,7 +120,9 @@ agent_id    claude-code-2f183a4e
 ```
 
 `cc-<slug>-<hash8>` — the slug is the directory name, the hash covers the **git toplevel**. Two
-terminals in one repo share a run; two repos that happen to share a directory name do not.
+terminals in one repo share a run; two repos that happen to share a directory name do not. Your
+hash will not match the one printed above, and that is exactly the point: it is a function of
+the absolute path, so this checkout and a copy of it elsewhere are different runs.
 
 Now try the other three strategies:
 

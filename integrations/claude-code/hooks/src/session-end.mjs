@@ -40,14 +40,14 @@
  * after a `reason=clear`, a wrapper re-running the hook), and a double flush is a double
  * reflect. It returns **true when it fails to write** — proceeding on marker failure is
  * deliberate (§4.6): losing a session's captures is worse than sending them twice, and the
- * per-batch `idempotency_key` makes the double send a server-side no-op anyway.
+ * batch carries the same `idempotency_key` whichever drainer sends it, so the double send is
+ * one the server can collapse.
  *
  * Best-effort throughout, and exit 0 always (§4.9). Anything still spooled is picked up by
  * the next session's first drain — the spool is keyed by `run_id`, not by session, so a
  * crashed session's captures survive.
  */
 
-import { createHash } from 'node:crypto';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -59,7 +59,8 @@ import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import {
-  acquireDrainLock, claimOnce, commitBatch, readBatch, releaseDrainLock, spoolStats,
+  acquireDrainLock, batchIdempotencyKey, claimOnce, commitBatch, readBatch, releaseDrainLock,
+  spoolStats,
 } from '../../lib/spool.mjs';
 import {
   pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
@@ -237,7 +238,7 @@ async function drainInline(cfg, o) {
       const res = await postIngest(cfg, {
         run_id: o.runId,
         agent_id: o.agentId,
-        idempotency_key: idempotencyKey(o.runId, o.sessionId, seq, items),
+        idempotency_key: batchIdempotencyKey(o.runId, items),
         parallel: true,
         items,
         ...(str(cfg.userId) ? { user_id: str(cfg.userId) } : {}),
@@ -277,24 +278,6 @@ async function drainInline(cfg, o) {
     });
   }
   return { sent, batches };
-}
-
-/**
- * §5.5: the key is per batch and derived from `(run_id, session, sequence, item ids)`, so a
- * re-send of the *same* batch dedupes server-side while a different batch that lands on the
- * same sequence number gets its own key — otherwise a re-drain's batch 0 would be silently
- * deduped against an earlier batch 0 it has nothing in common with.
- *
- * @param {string} runId @param {string} sessionId @param {number} seq @param {any[]} items
- * @returns {string}
- */
-function idempotencyKey(runId, sessionId, seq, items) {
-  const ids = items.map((it) => str(it?.item_id)).join('|');
-  const digest = createHash('sha256')
-    .update(`${runId}|end:${sessionId}|${seq}|${ids}`, 'utf8')
-    .digest('hex')
-    .slice(0, 12);
-  return `cc-end-${slug(sessionId, 26)}-${seq}-${digest}`;
 }
 
 /**
@@ -484,12 +467,6 @@ function breakerOpen(cfg) {
     // Fail open: a breaker that cannot be read must not stop the last flush of a session.
     return false;
   }
-}
-
-/** A readable, log-safe fragment for an idempotency key. */
-function slug(v, max) {
-  const s = String(v ?? '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
-  return s.slice(0, max) || 'session';
 }
 
 /** @param {any} v @returns {boolean} */

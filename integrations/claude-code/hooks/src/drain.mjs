@@ -31,14 +31,14 @@
  * **The lock is released on every exit path** — the breaker short-circuit, a throw after the
  * send, the hard stop — because a stuck `drain.lock` silently stops all capture for the
  * length of its 60 s TTL, which is far worse than the rare double drain that the per-batch
- * `idempotency_key` already absorbs. The one exception: a drainer that *lost* the race never
- * deletes the winner's lock.
+ * `idempotency_key` covers — it is content-addressed on `(run_id, item ids)`, so the same
+ * items carry the same key whichever drainer sends them (`lib/spool.mjs`). The one
+ * exception: a drainer that *lost* the race never deletes the winner's lock.
  *
  * Constraints, shared with the rest of the plugin: zero dependencies, Node >= 20 built-ins,
  * and **exit code 0, always** (§4.9). A memory layer has no business breaking a prompt.
  */
 
-import { createHash } from 'node:crypto';
 import { renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
@@ -49,7 +49,7 @@ import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import {
-  acquireDrainLock, commitBatch, readBatch, releaseDrainLock, spoolStats,
+  acquireDrainLock, batchIdempotencyKey, commitBatch, readBatch, releaseDrainLock, spoolStats,
 } from '../../lib/spool.mjs';
 import {
   ensureDir, pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
@@ -269,7 +269,7 @@ async function drainSpool(cfg, runId, agentId, promptId, started) {
     const res = await postIngest(cfg, {
       run_id: runId,
       agent_id: agentId,
-      idempotency_key: idempotencyKey(runId, promptId, seq, items),
+      idempotency_key: batchIdempotencyKey(runId, items),
       parallel: true,               // batch items are independent of each other
       items,
       ...(str(cfg.userId) ? { user_id: str(cfg.userId) } : {}),
@@ -364,29 +364,6 @@ async function stillOurs(lock) {
 /** @param {number} ms @returns {Promise<void>} */
 function sleep(ms) {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
-}
-
-/**
- * §5.5: "the `idempotency_key` is per batch, derived from `(run_id, prompt_id, batch
- * sequence)`, so a retry after a transport timeout is a server-side no-op."
- *
- * The item ids ride in the digest as well as the triple. Two drains of the *same* batch
- * still agree — nothing was committed, so the same files come back in the same order — while
- * a later batch that happens to land on the same sequence number with *different* items gets
- * its own key. Without that, a re-drain's batch 0 would be silently deduped away against an
- * earlier batch 0 it has nothing in common with, and those captures would be lost with no
- * error anywhere.
- *
- * @param {string} runId @param {string} promptId @param {number} seq @param {any[]} items
- * @returns {string}
- */
-function idempotencyKey(runId, promptId, seq, items) {
-  const ids = items.map((it) => str(it?.item_id)).join('|');
-  const digest = createHash('sha256')
-    .update(`${runId}|${promptId}|${seq}|${ids}`, 'utf8')
-    .digest('hex')
-    .slice(0, 12);
-  return `cc-${slug(promptId || 'noturn', 26)}-${seq}-${digest}`;
 }
 
 /**
@@ -727,12 +704,6 @@ function str(v) {
 function numOr(v, d) {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : d;
-}
-
-/** A readable, log-safe fragment for an idempotency key. */
-function slug(v, max) {
-  const s = String(v ?? '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
-  return s.slice(0, max) || 'noturn';
 }
 
 /** @param {any} err @returns {string} */

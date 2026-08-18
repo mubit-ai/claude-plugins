@@ -32,7 +32,7 @@ import {
   closeSync, existsSync, linkSync, openSync, readdirSync, readFileSync,
   renameSync, statSync, unlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 import { ensureDir, resolveDataDir, runDir, safeSegment } from './state.mjs';
@@ -44,6 +44,36 @@ const DRAIN_LOCK_TTL_MS = 60_000;
 const DEFAULT_MAX = 32;
 
 const ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+/**
+ * The `idempotency_key` for one ingest batch.
+ *
+ * Content-addressed on purpose: `(run_id, the item ids in this batch)` and nothing else.
+ * `drain` and `session-end` drain the same spool — `session-end` steals a lock `drain` left
+ * behind after 60 s, and `drain` has a hard stop that can leave a batch uncommitted — so the
+ * same files are genuinely sent by both. They used to build this key differently (one keyed
+ * on the prompt id under a `cc-` prefix, the other on the session id under `cc-end-`), which
+ * meant the one case the key exists for was the one case it did not cover, while four
+ * comments in this codebase claimed it did.
+ *
+ * The item ids stay in the digest for the reason the older versions gave: a *different*
+ * batch landing on the same sequence number must not be deduped against an earlier one it
+ * has nothing in common with. Content-addressing keeps that and drops the sender.
+ *
+ * @param {string} runId
+ * @param {any[]} items
+ * @returns {string}
+ */
+export function batchIdempotencyKey(runId, items) {
+  const ids = (Array.isArray(items) ? items : [])
+    .map((it) => (it && typeof it === 'object' ? String(it.item_id ?? '') : ''))
+    .join('|');
+  const digest = createHash('sha256')
+    .update(`${String(runId ?? '')}|${ids}`, 'utf8')
+    .digest('hex')
+    .slice(0, 16);
+  return `cc-batch-${digest}`;
+}
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -221,9 +251,9 @@ export function readBatch(cfg, runId, max = DEFAULT_MAX) {
  * §5.5 step 6: unlink, and only after a 2xx. A 5xx or a network failure must leave the
  * files exactly where they are so the next drain retries them.
  *
- * A double drain is absorbed server-side by the per-batch `idempotency_key`, so committing
- * an already-unlinked entry is a no-op here rather than a throw that would strand the rest
- * of the batch on disk.
+ * A double drain carries one `idempotency_key` for the server to collapse (see
+ * `batchIdempotencyKey`), so committing an already-unlinked entry is a no-op here rather
+ * than a throw that would strand the rest of the batch on disk.
  *
  * @param {SpoolEntry[]} entries
  * @returns {void}
@@ -304,7 +334,8 @@ function pidAlive(pid) {
  *     TTL for it would stall capture for a minute for no reason.
  *   - It is older than 60 s, *unconditionally* — even when its owner is demonstrably
  *     alive. A stuck lock silently stops ALL capture for a run, which is strictly worse
- *     than the rare double drain the per-batch `idempotency_key` already absorbs. (§7)
+ *     than the rare double drain the per-batch `idempotency_key` covers — including the
+ *     cross-drainer case this lock exists to make rare. (§7)
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
@@ -411,8 +442,8 @@ export function releaseDrainLock(lock) {
  * **Returns `true` on a non-`EEXIST` error — proceed on marker failure.** The marker exists
  * to prevent a *double* flush; a read-only or full `${CLAUDE_PLUGIN_DATA}` must not be able
  * to prevent the flush *entirely*. Losing a session's captures is worse than sending them
- * twice, and the per-batch `idempotency_key` makes a double send a server-side no-op
- * anyway (§4.6, §12.1-F14).
+ * twice, and the same items carry the same per-batch `idempotency_key` either way, so the
+ * double send is one the server can collapse (§4.6, §12.1-F14).
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId

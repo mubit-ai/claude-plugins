@@ -56,8 +56,18 @@ const PLACEHOLDER_SESSION_IDS = new Set(['default', 'none', 'null', 'undefined',
 /** Run ids that are never an answer, whatever produced them. */
 const FORBIDDEN_RUN_IDS = new Set(['default', 'cc-', 'cc']);
 
-/** `claude-code-<sessionShort>`; 8 hex chars keeps collisions theoretical. */
-const SESSION_SHORT = 8;
+/**
+ * The agent identity, and deliberately not a per-session one.
+ *
+ * This used to be `claude-code-<8 chars of the host session id>`, which minted a fresh
+ * principal every session. Anything upstream that counts *distinct actors* — to decide
+ * whether a lesson has been confirmed by more than one of them — then counted one person's
+ * consecutive sessions as a crowd, and the count stopped meaning anything.
+ *
+ * A role is what this value is for. The session is not lost: it is the run id, the session
+ * map under `sessions/`, and the `session_id` the tool surface carries.
+ */
+const AGENT_ROLE = 'claude-code';
 /** `-sub-<agentShort>` for a subagent identity. */
 const AGENT_SHORT = 12;
 
@@ -194,6 +204,15 @@ function staticRunId(cfg) {
       `MUBIT_CC_RUN_ID is ${JSON.stringify(pinned)}, which collapses every user and project `
       + 'into one shared Mubit run. Pin a real run id.');
   }
+  // The run id names a directory as well as a run. A pin carrying a path separator or a dot
+  // segment would mean two different things at once — one value on the wire, another after
+  // the write flattened it — so it is a config error here rather than a surprise later.
+  if (/[\\/]/.test(pinned) || /^\.+$/.test(pinned)) {
+    throw new Error(
+      `MUBIT_CC_RUN_ID is ${JSON.stringify(pinned)}, which is a path rather than a name. A `
+      + 'run id names a directory under the plugin data dir as well as a run, so it may not '
+      + 'contain "/" or "\\" or be a bare dot segment.');
+  }
   return pinned;
 }
 
@@ -258,32 +277,17 @@ function assertUsableRunId(id) {
 // ---------------------------------------------------------------------------
 
 /**
- * §4.3/§5.1: `claude-code-<sessionShort>`, plus `-sub-<agentShort>` when the
- * payload belongs to a subagent — two subagents of one session must never share
- * an identity, or the control plane cannot attribute their work.
+ * §4.3/§5.1: the stable role `claude-code`, plus `-sub-<agentShort>` when the payload
+ * belongs to a subagent — two subagents working at the same time must never share an
+ * identity, or their work cannot be told apart. That distinctness is the only thing this
+ * value has to provide; see `AGENT_ROLE` for why the parent half is not per-session.
  * @param {Record<string, any>} [payload]
  * @returns {string}
  */
 export function deriveAgentId(payload = {}) {
   const p = isObject(payload) ? payload : {};
-  const parent = `claude-code-${sessionShort(p)}`;
   const sub = subagentShort(p);
-  return sub ? `${parent}-sub-${sub}` : parent;
-}
-
-/**
- * The session half of the identity: a prefix of the host session id with its
- * dashes removed, so an agent id is greppable back to the transcript.
- * @param {Record<string, any>} payload
- * @returns {string}
- */
-function sessionShort(payload) {
-  const compact = hostSessionId(payload).replace(/-/g, '').toLowerCase().replace(/[^0-9a-z]/g, '');
-  if (compact) return compact.slice(0, SESSION_SHORT);
-  // No session id at all: a stable hash beats an empty suffix, which would make
-  // every anonymous agent the same agent.
-  const seed = firstString(payload.transcript_path, payload.cwd) || 'anonymous';
-  return shortHash(seed, SESSION_SHORT);
+  return sub ? `${AGENT_ROLE}-sub-${sub}` : AGENT_ROLE;
 }
 
 /**
@@ -292,8 +296,9 @@ function sessionShort(payload) {
  */
 function subagentShort(payload) {
   const raw = typeof payload.agent_id === 'string' ? payload.agent_id.trim() : '';
-  // A payload echoing an already-derived agent id is not a subagent.
-  if (!raw || raw.startsWith('claude-code-')) return '';
+  // A payload echoing an already-derived agent id is not a subagent. The parent is now the
+  // bare role, so the equality case matters as much as the prefix one.
+  if (!raw || raw === AGENT_ROLE || raw.startsWith(`${AGENT_ROLE}-`)) return '';
   const short = raw
     .replace(/^(sub_?agent|subagent|sub|agent)[-_]/i, '')
     .toLowerCase()
@@ -386,7 +391,7 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
     run_id: next.run_id,
     // The session's agent is the parent, even when a SubagentStop is what
     // happened to trigger this derivation.
-    agent_id: `claude-code-${sessionShort(payload)}`,
+    agent_id: AGENT_ROLE,
     strategy: next.strategy,
     project_dir: projectDirOf(cfg),
     created_at: numberOr(inherited.created_at, now),

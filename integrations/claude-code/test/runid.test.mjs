@@ -148,6 +148,41 @@ test('static: an unset MUBIT_CC_RUN_ID is a config error', async () => {
     'static without MUBIT_CC_RUN_ID must raise a config error, not fall back to another strategy');
 });
 
+/**
+ * A run id names a directory under the plugin data dir as well as a run. A pin carrying a
+ * separator meant two different things at once — one value on the wire, another after the
+ * write flattened it — and `stage-prompt` used to join it raw, so the turn file landed
+ * somewhere no sibling hook would read.
+ */
+test('static: a MUBIT_CC_RUN_ID that is a path is a config error', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+
+  for (const pinned of ['../../escaped', 'cc-a/b', 'cc-a\\b', '..']) {
+    const env = envFor(makeDataDir(), makeProjectDir({ git: true }), 'static',
+      { MUBIT_CC_RUN_ID: pinned });
+    let threw = false;
+    try {
+      withEnv(env, () => runid.deriveRunId(config.loadConfig(env), fx.sessionStart()));
+    } catch {
+      threw = true;
+    }
+    assert.equal(threw, true, `"${pinned}" must be refused, not turned into a directory`);
+  }
+});
+
+// The pins that merely need flattening are still legal — refusing those would break a run
+// id a user has been using for months.
+test('static: a run id with unusual but harmless characters is still accepted', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const env = envFor(makeDataDir(), makeProjectDir({ git: true }), 'static',
+    { MUBIT_CC_RUN_ID: 'cc-a:b*c' });
+
+  assert.equal(derive(config, runid, env, fx.sessionStart()), 'cc-a:b*c',
+    'the wire value is the pin verbatim; only the path segment is flattened');
+});
+
 // ===========================================================================
 // §4.3/§12.3 — stability
 // ===========================================================================
@@ -361,23 +396,24 @@ for (const strategy of ['per-directory', 'git-branch', 'per-conversation', 'stat
 // §4.3 — deriveAgentId
 // ===========================================================================
 
-// §4.3/§5.1: claude-code-<sessionShort>.
-test('deriveAgentId(): claude-code-<sessionShort>, derived from the session id', async () => {
+// §4.3/§5.1: a role, not a session. The session id must not leak into the identity — a new
+// principal per session makes any upstream "how many distinct actors confirmed this?" count
+// meaningless, because one person working two days running satisfies it alone.
+test('deriveAgentId(): the stable role claude-code, with no session in it', async () => {
   const runid = await lib('runid.mjs');
 
   const id = runid.deriveAgentId(fx.stop());
-  assert.match(id, /^claude-code-[0-9a-z]+$/, `"${id}" is not claude-code-<sessionShort>`);
+  assert.equal(id, 'claude-code', `"${id}" is not the bare role`);
 
-  const short = id.slice('claude-code-'.length);
-  assert.ok(short.length >= 6, `session short "${short}" is too short to be distinctive`);
-  assert.ok(fx.SESSION_ID.replace(/-/g, '').startsWith(short),
-    `"${short}" is not a prefix of the host session id`);
-
-  assert.equal(runid.deriveAgentId(fx.userPromptSubmit()), id, 'agent id must be stable per session');
-  assert.notEqual(runid.deriveAgentId(fx.stop({ session_id: '9999abcd-1111-2222-3333-444455556666' })), id);
+  assert.equal(runid.deriveAgentId(fx.userPromptSubmit()), id, 'agent id must not vary by hook');
+  assert.equal(runid.deriveAgentId(fx.stop({ session_id: '9999abcd-1111-2222-3333-444455556666' })), id,
+    'a different session is the same actor');
+  assert.ok(!id.includes(fx.SESSION_ID.replace(/-/g, '').slice(0, 8)),
+    'the host session id must not appear in the agent id');
 });
 
-// §4.3: subagents get their own identity — claude-code-<sessionShort>-sub-<agentShort>.
+// §4.3: subagents still get their own identity — claude-code-sub-<agentShort>. This is the
+// one distinctness the value has to provide, and making the parent stable must not cost it.
 test('deriveAgentId(): appends -sub-<agentShort> for a subagent payload', async () => {
   const runid = await lib('runid.mjs');
 
@@ -387,7 +423,16 @@ test('deriveAgentId(): appends -sub-<agentShort> for a subagent payload', async 
   assert.ok(sub.startsWith(`${parent}-sub-`), `"${sub}" is not "${parent}-sub-<agentShort>"`);
   assert.ok(sub.slice(`${parent}-sub-`.length).length > 0, 'the subagent short id is empty');
   assert.notEqual(runid.deriveAgentId(fx.subagentStop({ agent_id: 'sub_ZZZZZZZZZZZZ' })), sub,
-    'two subagents of one session must not share an agent id');
+    'two subagents working at once must not share an agent id');
+});
+
+// A payload echoing the derived parent back at us is not a subagent. With the parent now the
+// bare role, the equality case is as reachable as the prefix one.
+test('deriveAgentId(): a payload echoing the parent id is not a subagent', async () => {
+  const runid = await lib('runid.mjs');
+
+  assert.equal(runid.deriveAgentId(fx.stop({ agent_id: 'claude-code' })), 'claude-code');
+  assert.equal(runid.deriveAgentId(fx.stop({ agent_id: 'claude-code-sub-abc123' })), 'claude-code');
 });
 
 // ===========================================================================

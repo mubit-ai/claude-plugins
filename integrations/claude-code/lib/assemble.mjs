@@ -255,7 +255,9 @@ export function assembleContext(evidence, opts = {}) {
     for (const item of bucket) {
       if (perSection > 0 && count >= perSection) { continue; }
 
-      const line = `- ${item.text}\n`;
+      // §4.10: the server marks an entry stale; a mark the client renders nowhere is a mark
+      // that does nothing. It rides on the line it qualifies, where the model reads it.
+      const line = `- ${item.stale ? '(stale) ' : ''}${item.text}\n`;
       const cost = estimateTokens(line) + (open ? 0 : headingCost);
       if (used + cost > budget) continue;   // skipped, counted below; a later item may fit
 

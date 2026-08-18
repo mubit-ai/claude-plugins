@@ -72,7 +72,7 @@ import { postContext, postQuery } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
-import { readJson, resolveDataDir, writeJsonAtomic } from '../../lib/state.mjs';
+import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
 /** §5.2 step 0: "ok", "yes", "go on" carry no retrievable intent. */
 const MIN_PROMPT_CHARS = 8;
@@ -190,7 +190,10 @@ await runHook('prompt-recall', {
 
     // §5.2 step 6: what was rendered is what `Stop` attributes against (§5.5). Written even
     // when it is empty — an absent key is a different value from an empty one downstream.
-    persistRecalled(cfg, runId, promptId, payload, outcome.refIds);
+    // The standing lessons injected at session start ride along on the first turn that
+    // stages ids, so that they too can be reinforced or corrected.
+    persistRecalled(cfg, runId, promptId, payload,
+      [...claimStandingLessons(cfg, runId), ...outcome.refIds]);
 
     updateMarker(cfg, runId, {
       state: 'ready',
@@ -386,7 +389,10 @@ async function rungThree(cfg, o) {
 function fromEvidence(cfg, responseBody, rung) {
   const b = isObject(responseBody) ? responseBody : {};
   const evidence = Array.isArray(b.evidence) ? b.evidence : [];
-  const a = assembleContext(evidence, { tokenBudget: intOr(cfg.recallTokenBudget, 1500) });
+  const a = assembleContext(evidence, {
+    tokenBudget: intOr(cfg.recallTokenBudget, 1500),
+    perSection: intOr(cfg.recallMaxPerSection, 0),
+  });
   return {
     failed: false,
     rung,
@@ -446,7 +452,7 @@ function persistRecalled(cfg, runId, promptId, payload, refIds) {
     const base = isObject(prev) ? prev : {};
 
     /** @type {Record<string, any>} */
-    const next = { ...base, prompt_id: promptId, recalled: [...refIds] };
+    const next = { ...base, prompt_id: promptId, recalled: [...new Set(refIds)] };
     if (typeof next.session_id !== 'string') next.session_id = str(payload?.session_id);
     if (!Number.isFinite(next.started_at)) next.started_at = Date.now();
 
@@ -454,6 +460,39 @@ function persistRecalled(cfg, runId, promptId, payload, refIds) {
   } catch (err) {
     // §4.9: the cost of an unwritable data dir is this turn's attribution, never the prompt.
     log(cfg, 'warn', `prompt-recall: could not stage recalled ids (${messageOf(err)})`, { run_id: runId });
+  }
+}
+
+/**
+ * The ids of the standing lessons `session-start` injected, taken once per session.
+ *
+ * They are handed to the model in the same breath as recalled memory and act on the same
+ * turn, but they never passed through recall, so nothing ever put them in front of the
+ * attribution machinery: they could not be reinforced when a session went well, and — the
+ * part that matters — could not be corrected when a wrong one steered a session into the
+ * ground. Crediting them on the first turn that stages ids puts them under exactly the rule
+ * every recalled item already lives by.
+ *
+ * `credited_at` is stamped before the ids are returned, so a second prompt in the same
+ * session does not reinforce them again.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @returns {string[]}
+ */
+function claimStandingLessons(cfg, runId) {
+  try {
+    const lessons = readMarker(cfg, runId).lessons;
+    if (!isObject(lessons) || numOr(lessons.credited_at, 0) > 0) return [];
+    const ids = Array.isArray(lessons.injected_ids)
+      ? lessons.injected_ids.filter((v) => typeof v === 'string' && v.trim())
+      : [];
+    if (!ids.length) return [];
+    updateMarker(cfg, runId, { lessons: { credited_at: Date.now() } });
+    return ids;
+  } catch {
+    // Attribution is worth a turn's ids, never a turn.
+    return [];
   }
 }
 
@@ -613,11 +652,20 @@ function breakerOpen(cfg) {
  * §5.2 stdout. The wrapper names the run and states what was spent, so a user reading the
  * transcript can see where the injected block came from — and so the model can tell injected
  * memory apart from its own reasoning.
+ *
+ * It also says, once, what this block is not. Retrieval is a ranked guess over a token
+ * budget: items get dropped, an entry can be stale, and nothing here was re-checked against
+ * the repository as it stands right now. Rendered without that line, a bullet under
+ * "Active rules" reads with the authority of a project invariant, and the model will act on
+ * a year-old one rather than look. One sentence is the whole fix.
+ *
  * @param {string} runId @param {number} sources @param {number} tokens @param {string} block
  * @returns {string}
  */
 function wrap(runId, sources, tokens, block) {
   return `<mubit-memory run="${runId}" sources="${sources}" tokens="${tokens}">\n`
+    + 'Recalled from memory of earlier work — it may be incomplete or out of date, so verify '
+    + 'against the code before relying on it.\n\n'
     + `${block.replace(/\s+$/, '')}\n</mubit-memory>`;
 }
 
@@ -646,7 +694,7 @@ function remaining(cfg, deadline) {
 
 /** @param {any} v @returns {string} */
 function safeId(v) {
-  return String(v ?? '').trim().replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, MAX_ID);
+  return safeSegment(v, MAX_ID);
 }
 
 /** @param {any} v @returns {boolean} */

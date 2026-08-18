@@ -284,6 +284,26 @@ test('a stale entry loses to a fresh entry of equal score', async () => {
   assert.equal(r.dropped, 1);
 });
 
+/**
+ * The mark has to reach the model. The server sends `is_stale` "for transparency", and this
+ * module used it only as a sort key — so an entry it knew was stale was rendered
+ * indistinguishably from a fresh one, under a heading like "Active rules". A qualifier the
+ * client never renders qualifies nothing.
+ */
+test('a stale entry is rendered marked, and a fresh one is not', async () => {
+  const { assembleContext } = await load();
+  const ev = [
+    item(1, { reference_id: 'ref_stale', score: 0.70, is_stale: true, content: 'old truth' }),
+    item(2, { reference_id: 'ref_fresh', score: 0.90, is_stale: false, content: 'current truth' }),
+  ];
+
+  const r = assembleContext(ev, { tokenBudget: 4000 });
+
+  assert.match(r.block, /- \(stale\) old truth/);
+  assert.match(r.block, /- current truth/);
+  assert.ok(!/\(stale\) current truth/.test(r.block), 'a fresh entry must not be marked');
+});
+
 // Same rule with room for both: the fresh entry still sorts first.
 test('a fresh entry outranks a stale entry of equal score even when both fit', async () => {
   const { assembleContext } = await load();

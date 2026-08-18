@@ -265,3 +265,41 @@ function jsonFiles(dir) {
 export function ensureDir(dir) {
   try { mkdirSync(dir, { recursive: true }); return true; } catch { return false; }
 }
+
+// ---------------------------------------------------------------------------
+// Path segments
+// ---------------------------------------------------------------------------
+
+/**
+ * The one definition of a path segment this plugin will write.
+ *
+ * A run id normally arrives from `lib/runid.mjs` as `cc-<slug>-<hash>`, but it can also be
+ * pinned by hand in a settings file or an environment variable, and a prompt id arrives
+ * from the host. Both are untrusted input to a path: anything that could climb out of the
+ * directory it is joined under is flattened rather than trusted.
+ *
+ * This lived as four near-identical private copies (`safeSegment`, `safeId`, `idPart`) plus
+ * one join that had none, which is how `stage-prompt` came to write turn state to a path no
+ * sibling would look in. One copy, imported everywhere, is the fix.
+ *
+ * @param {unknown} value
+ * @param {number} [max]  truncate to this many characters; 0 leaves it uncapped
+ * @returns {string}  the flattened segment, or `''` when nothing usable is left
+ */
+export function safeSegment(value, max = 0) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  let safe = raw.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
+  if (max > 0) safe = safe.slice(0, max);
+  return safe && safe !== '.' && safe !== '..' ? safe : '';
+}
+
+/**
+ * `${dataDir}/runs/<run_id>` — the per-run root every hook writes under.
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @returns {string}
+ */
+export function runDir(cfg, runId) {
+  return join(resolveDataDir(cfg), 'runs', safeSegment(runId));
+}

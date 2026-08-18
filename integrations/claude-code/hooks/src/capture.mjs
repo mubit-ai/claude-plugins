@@ -35,7 +35,7 @@ import { classifyTool, classifyTurn } from '../../lib/classify.mjs';
 import { isDeniedPath, isSelfReference, redactParams, redactText } from '../../lib/redact.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import { appendItem, spoolStats } from '../../lib/spool.mjs';
-import { readJson, resolveDataDir, writeJsonAtomic } from '../../lib/state.mjs';
+import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
 /**
  * Nothing here is allowed to be slow, so the budget exists only to bound a pathological
@@ -566,7 +566,7 @@ function clamp(s, max) {
 
 /** An id fragment safe as both a path segment and a wire value. @param {any} v */
 function idPart(v) {
-  return String(v ?? '').trim().replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, MAX_ID_CHARS);
+  return safeSegment(v, MAX_ID_CHARS);
 }
 
 /**

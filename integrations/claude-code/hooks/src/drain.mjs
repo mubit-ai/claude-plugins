@@ -31,14 +31,14 @@
  * **The lock is released on every exit path** — the breaker short-circuit, a throw after the
  * send, the hard stop — because a stuck `drain.lock` silently stops all capture for the
  * length of its 60 s TTL, which is far worse than the rare double drain that the per-batch
- * `idempotency_key` already absorbs. The one exception: a drainer that *lost* the race never
- * deletes the winner's lock.
+ * `idempotency_key` covers — it is content-addressed on `(run_id, item ids)`, so the same
+ * items carry the same key whichever drainer sends them (`lib/spool.mjs`). The one
+ * exception: a drainer that *lost* the race never deletes the winner's lock.
  *
  * Constraints, shared with the rest of the plugin: zero dependencies, Node >= 20 built-ins,
  * and **exit code 0, always** (§4.9). A memory layer has no business breaking a prompt.
  */
 
-import { createHash } from 'node:crypto';
 import { renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
@@ -49,10 +49,10 @@ import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import {
-  acquireDrainLock, commitBatch, readBatch, releaseDrainLock, spoolStats,
+  acquireDrainLock, batchIdempotencyKey, commitBatch, readBatch, releaseDrainLock, spoolStats,
 } from '../../lib/spool.mjs';
 import {
-  ensureDir, pruneStale, readJson, resolveDataDir, writeJsonAtomic,
+  ensureDir, pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
 } from '../../lib/state.mjs';
 
 /** §5.5: "Budget 10 s soft" — nothing waits on it, but it still bounds itself. */
@@ -102,6 +102,17 @@ const DEFAULT_BATCH = 32;
  */
 const SIGNAL_SUCCESS = 0.2;
 const SIGNAL_FAILURE = -0.3;
+
+/**
+ * How many times one turn's outcome may be posted before the client gives up on it.
+ *
+ * The post is claim-then-send: the turn is marked pending by `capture --stop` and cleared
+ * only by a response, so a landed-but-timed-out post is indistinguishable from a lost one
+ * and gets re-posted for as long as anything keeps looking. Three is enough to ride out a
+ * restart and a slow server; past that the signal is worth less than the risk of counting
+ * one turn several times.
+ */
+const MAX_OUTCOME_ATTEMPTS = 3;
 
 /**
  * §1.3: `RecordOutcomeRequest.reference_id` must be non-empty, so run-level attribution
@@ -269,7 +280,7 @@ async function drainSpool(cfg, runId, agentId, promptId, started) {
     const res = await postIngest(cfg, {
       run_id: runId,
       agent_id: agentId,
-      idempotency_key: idempotencyKey(runId, promptId, seq, items),
+      idempotency_key: batchIdempotencyKey(runId, items),
       parallel: true,               // batch items are independent of each other
       items,
       ...(str(cfg.userId) ? { user_id: str(cfg.userId) } : {}),
@@ -364,29 +375,6 @@ async function stillOurs(lock) {
 /** @param {number} ms @returns {Promise<void>} */
 function sleep(ms) {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
-}
-
-/**
- * §5.5: "the `idempotency_key` is per batch, derived from `(run_id, prompt_id, batch
- * sequence)`, so a retry after a transport timeout is a server-side no-op."
- *
- * The item ids ride in the digest as well as the triple. Two drains of the *same* batch
- * still agree — nothing was committed, so the same files come back in the same order — while
- * a later batch that happens to land on the same sequence number with *different* items gets
- * its own key. Without that, a re-drain's batch 0 would be silently deduped away against an
- * earlier batch 0 it has nothing in common with, and those captures would be lost with no
- * error anywhere.
- *
- * @param {string} runId @param {string} promptId @param {number} seq @param {any[]} items
- * @returns {string}
- */
-function idempotencyKey(runId, promptId, seq, items) {
-  const ids = items.map((it) => str(it?.item_id)).join('|');
-  const digest = createHash('sha256')
-    .update(`${runId}|${promptId}|${seq}|${ids}`, 'utf8')
-    .digest('hex')
-    .slice(0, 12);
-  return `cc-${slug(promptId || 'noturn', 26)}-${seq}-${digest}`;
 }
 
 /**
@@ -569,6 +557,23 @@ async function sendOutcome(cfg, runId, agentId, promptId) {
       : [];
     if (entryIds.length === 0) return;
 
+    // A post that the server accepted but answered too late to be heard leaves the turn
+    // pending, and the turn stays pending until *something* gets a response — so the next
+    // drain posts it again, and `session-end` again after that. The stable key means the
+    // server can collapse those, but "can" is a property of the other end that this process
+    // never observes, and reinforcement is not something to spend on faith. Count the
+    // attempts locally, in the file, before dialling, and stop.
+    const attempts = numOr(turn.outcome_attempts, 0);
+    if (attempts >= MAX_OUTCOME_ATTEMPTS) {
+      // Stop trying, and stop claiming it is pending: nobody is going to send this.
+      writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
+      log(cfg, 'warn', `drain: outcome abandoned after ${attempts} attempts`, {
+        run_id: runId, prompt_id: promptId,
+      });
+      return;
+    }
+    writeJsonAtomic(p, { ...turn, outcome_attempts: attempts + 1 });
+
     // The turn file records how the turn ended, so the drain never has to re-derive it.
     const failed = str(turn.outcome).toLowerCase() === 'failure';
 
@@ -582,15 +587,21 @@ async function sendOutcome(cfg, runId, agentId, promptId) {
         : 'Claude Code turn completed after these memories were injected.',
       agent_id: agentId,
       entry_ids: entryIds,
-      // Derived from (run_id, prompt_id), never random: the server keeps an outcome
-      // idempotency ledger across restarts, which only helps if the key is stable.
+      // Derived from (run_id, prompt_id), never random, so every re-post of this outcome
+      // carries one key for the server to collapse.
       idempotency_key: `cc-outcome-${runId}-${promptId}`,
-    }, { timeoutMs: numOr(cfg.timeoutMs, 4000), retry: true });
+      // Deliberately no `retry`. The transport's one silent re-dial on timeout doubles a
+      // post that may already have landed, inside the same second — the widest part of the
+      // window, and the least useful, since the next drain retries anyway.
+    }, { timeoutMs: numOr(cfg.timeoutMs, 4000) });
 
     if (res.ok) {
-      writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_sent_at: Date.now() });
+      writeJsonAtomic(p, {
+        ...turn, outcome_attempts: attempts + 1, outcome_pending: false, outcome_sent_at: Date.now(),
+      });
     } else {
-      // Left pending on purpose: the next drain re-posts it under the same key.
+      // Left pending on purpose: the next drain re-posts it under the same key, up to the
+      // attempt bound above.
       log(cfg, 'warn', `drain: outcome post failed (${res.state})`, {
         run_id: runId, prompt_id: promptId, error: str(res.error).slice(0, 300),
       });
@@ -712,23 +723,6 @@ function flagValue(argv, name) {
 // Paths and coercion
 // ---------------------------------------------------------------------------
 
-/**
- * The same flattening `lib/spool.mjs` applies, so `runs/<run_id>/` means one directory to
- * every module. A run id can come from a hand-written `.mubit-cc.json`, so it is treated as
- * untrusted input to a path.
- * @param {any} v @returns {string}
- */
-function safeSegment(v) {
-  const s = String(v ?? '').trim();
-  if (!s) return '';
-  return s.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
-}
-
-/** @param {Record<string, any>} cfg @param {string} runId @returns {string} */
-function runDir(cfg, runId) {
-  return join(resolveDataDir(cfg), 'runs', safeSegment(runId));
-}
-
 /** §6.1 `MUBIT_CC_BATCH_MAX_ITEMS`. @param {Record<string, any>} cfg @returns {number} */
 function batchMax(cfg) {
   const n = Math.trunc(numOr(cfg?.batchMaxItems, DEFAULT_BATCH));
@@ -744,12 +738,6 @@ function str(v) {
 function numOr(v, d) {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : d;
-}
-
-/** A readable, log-safe fragment for an idempotency key. */
-function slug(v, max) {
-  const s = String(v ?? '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
-  return s.slice(0, max) || 'noturn';
 }
 
 /** @param {any} err @returns {string} */

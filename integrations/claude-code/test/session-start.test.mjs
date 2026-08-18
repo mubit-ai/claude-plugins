@@ -113,7 +113,7 @@ test('register body carries run_id, agent_id, role, status and capabilities', as
   assert.deepEqual(body.capabilities, ['code', 'shell', 'edit', 'search']);
   // §1.3 — run_id and agent_id are mandatory on StateAgentRegisterRequestPayload.
   assert.match(body.run_id, /^cc-/);
-  assert.match(body.agent_id, /^claude-code-/);
+  assert.equal(body.agent_id, 'claude-code');
   // §4.3 — the MCP server's `MUBIT_DEFAULT_SESSION_ID` default collapses every
   // project into one run. No strategy may ever emit it.
   assert.notEqual(body.run_id, 'default');
@@ -168,6 +168,48 @@ test('stdout is a SessionStart steer block plus a one-line systemMessage', async
   assert.ok(r.json.systemMessage.includes(runId));
   assert.ok(!r.json.systemMessage.includes('\n'), 'systemMessage is one line');
 });
+
+/** The same qualifier on the other injection surface — these were learned elsewhere too. */
+test('the standing lessons section says they may be out of date', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /standing lessons/i);
+  assert.match(ctx, /may be out of date/i);
+  assert.match(ctx, /verify/i);
+});
+
+/**
+ * A standing lesson steers the whole session, so it has to be able to earn that place — and
+ * to lose it. Attribution runs on ids, and this hook used to parse `lesson_id` off the wire
+ * and throw it away, which left every global lesson permanently uncreditable: never
+ * reinforced when it helped, never corrected when it was wrong.
+ */
+test('the lesson ids are kept on the marker for the first turn to credit', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const marker = readMarker(dataDir);
+  assert.deepEqual(marker.lessons.injected_ids, ['les_g1'],
+    'the lesson id must survive the parse');
+  assert.equal(marker.lessons.credited_at, 0, 'nothing has credited them yet');
+
+  // The id is bookkeeping, not prose: the model sees the lesson, not its id.
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.ok(!ctx.includes('les_g1'), 'the id must not be rendered into the steer block');
+});
+
 
 // §4.7 — the grace window starts here, so failures in the first seconds after
 // still starting up do not tell the user their memory is broken.
@@ -353,6 +395,56 @@ test('source=fork reuses the parent session record run', async (t) => {
 
 // §5.1 step 4: health not ok -> skip register and lessons, but STILL steer, so the
 // model knows memory is offline instead of inventing recall it never received.
+/**
+ * The gap health cannot close. `GET /v2/core/health` is allowlisted before authentication —
+ * it answers `OK` for a wrong key, an expired key, and no key at all — so a session whose
+ * credential is rejected used to open with "Mubit memory is active" and then silently recall
+ * nothing all session. The first authenticated call of the session is the one that knows,
+ * and now it is the one that decides.
+ */
+test('a rejected key produces the unauthenticated block, not "memory is active"', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/agents/register': { status: 401, json: { error: 'invalid api key' } },
+    'POST /v2/control/lessons': { status: 401, json: { error: 'invalid api key' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  // Health said OK — the point of the test is that this is no longer enough.
+  server.assertCalled('GET', '/v2/core/health', 1);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /not authenticated/i);
+  assert.ok(!/memory is active/i.test(ctx), 'the steer must not claim memory is working');
+  assert.match(ctx, /do not assume anything was recalled/i);
+  assert.match(ctx, /mubit-memory:auth/, 'the user needs the one command that fixes it');
+  // Capture keeps running: the work is buffered, not dropped.
+  assert.match(ctx, /captured and buffered/i);
+
+  assert.equal(readMarker(dataDir).state, 'auth_failed');
+});
+
+/** A transport hiccup on register is not an authentication verdict, and must not read as one. */
+test('a register failure that is not about the key leaves the steer block alone', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/agents/register': { status: 500, json: { error: 'boom' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /memory is active/i);
+  assert.ok(!/not authenticated/i.test(ctx));
+});
+
 test('health down skips register and lessons but still emits a steer block', async (t) => {
   const server = await fakeMubit({ 'GET /v2/core/health': { status: 503, text: 'unavailable' } });
   t.after(() => server.close());

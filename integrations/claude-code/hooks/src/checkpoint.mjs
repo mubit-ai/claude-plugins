@@ -59,7 +59,7 @@ import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import { appendItem } from '../../lib/spool.mjs';
-import { readJson, resolveDataDir, writeJsonAtomic } from '../../lib/state.mjs';
+import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
 /** §5.6: `--pre` runs before a compaction, `--post` after it. */
 const MODE = process.argv.slice(2).includes('--post') ? 'post' : 'pre';
@@ -634,21 +634,9 @@ function onLineBoundary(s) {
   return nl === -1 ? s : s.slice(nl + 1);
 }
 
-/**
- * The same flattening `lib/spool.mjs` applies, so `runs/<run_id>/` means one directory to
- * every module. A run id can come from a hand-written `.mubit-cc.json`, so it is treated as
- * untrusted input to a path.
- * @param {any} v @returns {string}
- */
-function safeSegment(v) {
-  const s = String(v ?? '').trim();
-  if (!s) return '';
-  return s.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
-}
-
 /** An id fragment safe as both a path segment and a wire value. @param {any} v */
 function idPart(v) {
-  return String(v ?? '').trim().replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, MAX_ID_CHARS);
+  return safeSegment(v, MAX_ID_CHARS);
 }
 
 /**

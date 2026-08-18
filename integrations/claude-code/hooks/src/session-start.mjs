@@ -171,6 +171,13 @@ await runHook('session-start', {
     }
 
     // §5.1 step 5 — register, or heartbeat on a resume.
+    //
+    // This is also the first call of the session that proves anything about the key. Health
+    // is allowlisted before authentication — it answers `OK` for a wrong key, an expired key
+    // and no key at all — so on its own it cannot support the claim the steer block makes.
+    // A failure here that names the credential is therefore not just logged: it decides
+    // which block the model gets.
+    let authError = '';
     const resuming = sourceOf(payload) === 'resume';
     const identity = { run_id: runId, agent_id: agentId };
     const regBudget = budgetFor(REGISTER_MS);
@@ -186,6 +193,7 @@ await runHook('session-start', {
       if (!ires.ok) {
         log(cfg, 'warn', `session-start: ${resuming ? 'heartbeat' : 'register'} failed (${ires.error})`,
           { run_id: runId });
+        if (connState(ires.state) === 'auth_failed') authError = String(ires.error ?? '');
       }
     }
 
@@ -198,7 +206,31 @@ await runHook('session-start', {
       const lres = await postLessons(cfg, { scope: 'global', limit: LESSON_LIMIT },
         { timeoutMs: lessonBudget });
       if (lres.ok) lessons = readLessons(lres.body);
-      else log(cfg, 'info', `session-start: global lessons unavailable (${lres.error})`, { run_id: runId });
+      else {
+        log(cfg, 'info', `session-start: global lessons unavailable (${lres.error})`, { run_id: runId });
+        if (!authError && connState(lres.state) === 'auth_failed') authError = String(lres.error ?? '');
+      }
+    }
+
+    // An authenticated call came back saying the credential is not good. Nothing this session
+    // sends will land and nothing will be recalled, so saying "memory is active" would be a
+    // straight falsehood — and the kind the model cannot check.
+    if (authError) {
+      updateMarker(cfg, runId, {
+        mode: cfg.mode,
+        state: 'auth_failed',
+        last_error: authError.slice(0, 300),
+      });
+      log(cfg, 'warn', 'session-start: the API key was rejected', { run_id: runId });
+      /** @type {Record<string, any>} */
+      const out = {
+        hookSpecificOutput: {
+          hookEventName: 'SessionStart',
+          additionalContext: unauthenticatedBlock(cfg, runId),
+        },
+      };
+      out.systemMessage = statusLineHint || `mubit: auth failed${DOT}capture buffered`;
+      return out;
     }
 
     // §5.1 step 7.
@@ -206,7 +238,16 @@ await runHook('session-start', {
       mode: cfg.mode,
       state: 'ready',
       last_error: '',
-      lessons: { global: lessons.length, checked_at: Date.now() },
+      lessons: {
+        global: lessons.length,
+        checked_at: Date.now(),
+        // The ids the first turn of this session credits. A standing lesson steered the
+        // session as surely as a recalled one did, so it earns the same reinforcement — and
+        // the same correction when the session fails. `prompt-recall` consumes this once and
+        // stamps `credited_at`.
+        injected_ids: lessons.map((l) => l.id).filter(Boolean),
+        credited_at: 0,
+      },
     });
 
     const summary = `mubit: ${cfg.mode}${DOT}run ${runId}${DOT}`
@@ -235,7 +276,7 @@ await runHook('session-start', {
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
- * @param {{type: string, content: string}[]} lessons
+ * @param {{id: string, type: string, content: string}[]} lessons
  * @returns {string}
  */
 function steerBlock(cfg, runId, lessons) {
@@ -250,23 +291,15 @@ function steerBlock(cfg, runId, lessons) {
   ];
   if (lessons.length) {
     lines.push('', '## Standing lessons (global)');
+    // Same qualifier the per-turn injection carries. These were learned in other sessions,
+    // possibly in another part of the codebase, and nothing re-checked them against this one.
+    lines.push('Learned from earlier work — they may be out of date, so verify before relying '
+      + 'on one.');
     for (const l of lessons) lines.push(`- [${l.type}] ${l.content}`);
   }
   return `${lines.join('\n')}\n`;
 }
 
-/**
- * §5.1 "Failure": the model is told, in the same channel it would have received memory in,
- * that there is none this session — and that its work is still being kept.
- *
- * Deliberately carries no lesson section: nothing was fetched, and an empty "Standing
- * lessons" heading reads as "this project has learned nothing", which is a different claim.
- *
- * @param {Record<string, any>} cfg
- * @param {string} runId
- * @param {string} state
- * @returns {string}
- */
 /**
  * §5.1, the "there is no instance" case — distinct from `offlineBlock` because the two are
  * different claims and the model acts on the difference. Offline means work is buffered and
@@ -293,6 +326,41 @@ function unconfiguredBlock(cfg, runId) {
   ].join('\n');
 }
 
+/**
+ * §5.1 "Failure", the case health cannot see. The endpoint answers, so it is not offline and
+ * it is not unconfigured — the key is simply not accepted. Naming that precisely is the
+ * difference between a user who runs one command and a user who files a bug about memory
+ * being empty.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @returns {string}
+ */
+function unauthenticatedBlock(cfg, runId) {
+  return [
+    '# Mubit memory is not authenticated',
+    '',
+    `Run: ${runId} (${cfg.mode})`,
+    'Mubit rejected this machine\'s API key, so no memory will be injected this session and '
+      + 'recall is unavailable — do not search for it, and do not assume anything was recalled.',
+    'Work is still captured and buffered locally. Run /mubit-memory:auth to sign in again; '
+      + 'what has been buffered is sent once the key is accepted.',
+    '',
+  ].join('\n');
+}
+
+/**
+ * §5.1 "Failure": the model is told, in the same channel it would have received memory in,
+ * that there is none this session — and that its work is still being kept.
+ *
+ * Deliberately carries no lesson section: nothing was fetched, and an empty "Standing
+ * lessons" heading reads as "this project has learned nothing", which is a different claim.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {string} state
+ * @returns {string}
+ */
 function offlineBlock(cfg, runId, state) {
   return [
     '# Mubit memory is offline',
@@ -354,12 +422,19 @@ function armColdStart(cfg) {
  * `ListLessonsResponse.lessons[]` — `{lesson_id, content, lesson_type, scope, importance}`.
  * A lesson with no content is not a lesson; rendering it would spend a line of the model's
  * context on a bullet with nothing after it.
+ *
+ * `lesson_id` is kept. It used to be dropped here, and dropping it is what made a standing
+ * lesson permanently uncreditable: attribution runs on the ids in
+ * `runs/<run_id>/turns/<prompt_id>.json:recalled[]`, so a lesson injected without one could
+ * be reinforced by nothing and corrected by nothing. A wrong global lesson then steered
+ * every session for good.
+ *
  * @param {any} body
- * @returns {{type: string, content: string}[]}
+ * @returns {{id: string, type: string, content: string}[]}
  */
 function readLessons(body) {
   const raw = body && typeof body === 'object' && Array.isArray(body.lessons) ? body.lessons : [];
-  /** @type {{type: string, content: string}[]} */
+  /** @type {{id: string, type: string, content: string}[]} */
   const out = [];
   for (const l of raw) {
     if (!l || typeof l !== 'object') continue;
@@ -368,7 +443,8 @@ function readLessons(body) {
     const type = typeof l.lesson_type === 'string' && l.lesson_type.trim()
       ? l.lesson_type.trim()
       : 'lesson';
-    out.push({ type, content });
+    const id = typeof l.lesson_id === 'string' ? l.lesson_id.trim() : '';
+    out.push({ id, type, content });
     if (out.length >= LESSON_LIMIT) break;
   }
   return out;

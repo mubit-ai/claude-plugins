@@ -24,7 +24,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import {
-  fakeMubit, queryResponse, runHook, assertHookContract,
+  fakeMubit, queryResponse, evidence, runHook, assertHookContract,
   baseEnv, makeDataDir, readJsonFile, readJsonDir,
 } from './helpers/harness.mjs';
 import { userPromptSubmit } from './helpers/fixtures.mjs';
@@ -90,6 +90,60 @@ test('rung 1 only: one direct_bypass query, and NO /v2/control/context at all', 
 // §5.2: the rung-1 body, field for field. `limit`, `budget:"low"` (<500 ms tier, §1.7) and
 // `entry_types` are all load-bearing; omitting `mode` defaults to "agent_routed",
 // which is the expensive case with no error.
+/**
+ * The block's size was bounded by two things, neither of them a count the user could set:
+ * the server's own request limit, and a 1500-token budget that a handful of one-line lessons
+ * never came close to. `assembleContext` has had a per-section cap since it was written and
+ * no caller ever passed it. Now it is a setting, and `0` keeps exactly the behaviour every
+ * release so far has had.
+ */
+test('recallMaxPerSection caps items per section; 0 leaves it uncapped', async (t) => {
+  const many = [
+    evidence({ id: 'e1', reference_id: 'ref_1', entry_type: 'lesson', content: 'lesson one', score: 0.9 }),
+    evidence({ id: 'e2', reference_id: 'ref_2', entry_type: 'lesson', content: 'lesson two', score: 0.8 }),
+    evidence({ id: 'e3', reference_id: 'ref_3', entry_type: 'lesson', content: 'lesson three', score: 0.7 }),
+  ];
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: many }) },
+  });
+  t.after(() => server.close());
+
+  const uncapped = await runHook('prompt-recall', userPromptSubmit(),
+    { env: env(makeDataDir(), server) });
+  assertHookContract(uncapped);
+  const all = uncapped.json.hookSpecificOutput.additionalContext;
+  assert.ok(all.includes('lesson three'), 'the default must not have started dropping items');
+
+  const capped = await runHook('prompt-recall', userPromptSubmit(),
+    { env: env(makeDataDir(), server, { MUBIT_CC_RECALL_MAX_PER_SECTION: '2' }) });
+  assertHookContract(capped);
+  const ctx = capped.json.hookSpecificOutput.additionalContext;
+  assert.ok(ctx.includes('lesson one') && ctx.includes('lesson two'));
+  assert.ok(!ctx.includes('lesson three'), 'the third item is over the cap');
+});
+
+/**
+ * Retrieval is a ranked guess over a token budget: items are dropped, entries go stale, and
+ * nothing in the block was re-checked against the working tree. Rendered bare, a bullet under
+ * a heading like "Active rules" reads as a project invariant and gets acted on instead of
+ * checked. The envelope says so once, where the model cannot miss it.
+ */
+test('the injected block says memory may be incomplete and should be verified', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /may be incomplete or out of date/i);
+  assert.match(ctx, /verify/i);
+  // Still inside the envelope that separates injected memory from the model's own reasoning.
+  assert.match(ctx, /^<mubit-memory /);
+  assert.match(ctx, /<\/mubit-memory>$/);
+});
+
 test('rung 1 request body matches §5.2 exactly', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
@@ -100,8 +154,7 @@ test('rung 1 request body matches §5.2 exactly', async (t) => {
 
   const body = server.lastCall('POST', '/v2/control/query').body;
   assert.equal(body.run_id, RUN_ID);
-  assert.equal(typeof body.agent_id, 'string');
-  assert.ok(body.agent_id.startsWith('claude-code-'), `agent_id was "${body.agent_id}"`);
+  assert.equal(body.agent_id, 'claude-code', `agent_id was "${body.agent_id}"`);
   assert.equal(body.query, PROMPT);
   assert.equal(body.mode, 'direct_bypass');
   assert.equal(body.direct_lane, 'semantic_search');

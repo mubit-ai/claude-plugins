@@ -40,14 +40,14 @@
  * after a `reason=clear`, a wrapper re-running the hook), and a double flush is a double
  * reflect. It returns **true when it fails to write** — proceeding on marker failure is
  * deliberate (§4.6): losing a session's captures is worse than sending them twice, and the
- * per-batch `idempotency_key` makes the double send a server-side no-op anyway.
+ * batch carries the same `idempotency_key` whichever drainer sends it, so the double send is
+ * one the server can collapse.
  *
  * Best-effort throughout, and exit 0 always (§4.9). Anything still spooled is picked up by
  * the next session's first drain — the spool is keyed by `run_id`, not by session, so a
  * crashed session's captures survive.
  */
 
-import { createHash } from 'node:crypto';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -59,10 +59,11 @@ import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import {
-  acquireDrainLock, claimOnce, commitBatch, readBatch, releaseDrainLock, spoolStats,
+  acquireDrainLock, batchIdempotencyKey, claimOnce, commitBatch, readBatch, releaseDrainLock,
+  spoolStats,
 } from '../../lib/spool.mjs';
 import {
-  pruneStale, readJson, resolveDataDir, writeJsonAtomic,
+  pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
 } from '../../lib/state.mjs';
 
 /**
@@ -88,6 +89,9 @@ const JOBS_KEEP = 20;
 /** §5.5: the implicit signal is deliberately weak — a turn ending is not proof it helped. */
 const SIGNAL_SUCCESS = 0.2;
 const SIGNAL_FAILURE = -0.3;
+
+/** The drain's bound, applied here too — this flush is the third sender of the same post. */
+const MAX_OUTCOME_ATTEMPTS = 3;
 
 /** §1.3: `reference_id` must be non-empty; the real attribution rides in `entry_ids[]`. */
 const RUN_LEVEL_REFERENCE = 'global';
@@ -142,8 +146,9 @@ await runHook('session-end', {
       runId, agentId, budget: () => budgetFor(OUTCOME_MS, REFLECT_MS / 2),
     });
 
-    // §5.7 step 4 — REQUIRED (§1.4), and skipped only on the two documented conditions.
+    // §5.7 step 4 — REQUIRED (§1.4), and skipped only on the documented conditions.
     const priorIngested = numOr(readMarker(cfg, runId).captured?.ingested, 0);
+    const pending = spoolStats(cfg, runId).count;
     const reflect = await maybeReflect(cfg, {
       runId,
       budget: budgetFor(REFLECT_MS, HEARTBEAT_MS),
@@ -151,7 +156,12 @@ await runHook('session-end', {
       // it and reaches here before that drainer commits, so the marker's ingest count is stale
       // by design. The spool is the only term that sees the work that is about to land.
       anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0
-        || spoolStats(cfg, runId).count > 0,
+        || (drained.deferred && pending > 0),
+      // ...but a non-empty spool means the opposite when *our* drain is the one that stopped:
+      // budget spent, breaker open, or an ingest that failed. Then nobody is about to land
+      // it, and reflecting would draw conclusions from a session the server only half has.
+      undelivered: drained.failed && pending > 0,
+      pending,
     });
 
     // §5.7 step 5 — the agent is not gone, it is idle; re-registering it next session is
@@ -196,9 +206,13 @@ await runHook('session-end', {
  * error split (§5.5), and the next session's first drain applies it. A second copy of that
  * logic in a hook nobody is waiting on is how the two drift apart.
  *
+ * It reports *how* it ended, not just how much it sent. "The spool is not empty" has two
+ * opposite meanings — another drainer is about to land this work, or nobody is — and step 4
+ * has to tell them apart before deciding whether there is anything worth reflecting on.
+ *
  * @param {Record<string, any>} cfg
  * @param {{runId: string, agentId: string, sessionId: string, deadline: number}} o
- * @returns {Promise<{sent: number, batches: number}>}
+ * @returns {Promise<{sent: number, batches: number, deferred: boolean, failed: boolean}>}
  */
 async function drainInline(cfg, o) {
   let sent = 0;
@@ -210,8 +224,10 @@ async function drainInline(cfg, o) {
     // it would double-send the same batch and race the unlink.
     log(cfg, 'debug', 'session-end: another drainer holds the lock; leaving the spool to it',
       { run_id: o.runId });
-    return { sent, batches };
+    return { sent, batches, deferred: true, failed: false };
   }
+
+  let failed = false;
 
   try {
     const max = intOr(cfg.batchMaxItems, 32);
@@ -219,12 +235,14 @@ async function drainInline(cfg, o) {
       if (Date.now() >= o.deadline) {
         log(cfg, 'info', 'session-end: drain budget spent; the rest waits for the next session',
           { run_id: o.runId, pending: spoolStats(cfg, o.runId).count });
+        failed = true;
         break;
       }
       // A pure read: `request()` consults `allowRequest` itself, and consulting it twice
       // would spend the single half-open probe the dial is entitled to.
       if (breakerOpen(cfg)) {
         log(cfg, 'debug', 'session-end: breaker open; items stay spooled', { run_id: o.runId });
+        failed = true;
         break;
       }
 
@@ -237,7 +255,7 @@ async function drainInline(cfg, o) {
       const res = await postIngest(cfg, {
         run_id: o.runId,
         agent_id: o.agentId,
-        idempotency_key: idempotencyKey(o.runId, o.sessionId, seq, items),
+        idempotency_key: batchIdempotencyKey(o.runId, items),
         parallel: true,
         items,
         ...(str(cfg.userId) ? { user_id: str(cfg.userId) } : {}),
@@ -248,6 +266,7 @@ async function drainInline(cfg, o) {
         log(cfg, 'warn', `session-end: ingest failed (${res.state}); items stay spooled`, {
           run_id: o.runId, status: res.status ?? 0, error: str(res.error).slice(0, 300),
         });
+        failed = true;
         break;
       }
 
@@ -276,25 +295,7 @@ async function drainInline(cfg, o) {
       },
     });
   }
-  return { sent, batches };
-}
-
-/**
- * §5.5: the key is per batch and derived from `(run_id, session, sequence, item ids)`, so a
- * re-send of the *same* batch dedupes server-side while a different batch that lands on the
- * same sequence number gets its own key — otherwise a re-drain's batch 0 would be silently
- * deduped against an earlier batch 0 it has nothing in common with.
- *
- * @param {string} runId @param {string} sessionId @param {number} seq @param {any[]} items
- * @returns {string}
- */
-function idempotencyKey(runId, sessionId, seq, items) {
-  const ids = items.map((it) => str(it?.item_id)).join('|');
-  const digest = createHash('sha256')
-    .update(`${runId}|end:${sessionId}|${seq}|${ids}`, 'utf8')
-    .digest('hex')
-    .slice(0, 12);
-  return `cc-end-${slug(sessionId, 26)}-${seq}-${digest}`;
+  return { sent, batches, deferred: false, failed };
 }
 
 /**
@@ -367,6 +368,19 @@ async function flushOutcomes(cfg, o) {
       if (entryIds.length === 0) continue;
 
       const promptId = str(turn.prompt_id) || name.replace(/\.json$/, '');
+
+      // Same bound the drain applies, for the same reason: a post the server accepted but
+      // answered too late leaves the turn pending, and this flush is the third place that
+      // would send it again. Counted in the file, before dialling.
+      const attempts = numOr(turn.outcome_attempts, 0);
+      if (attempts >= MAX_OUTCOME_ATTEMPTS) {
+        writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
+        log(cfg, 'info', `session-end: outcome abandoned after ${attempts} attempts`,
+          { run_id: o.runId, prompt_id: promptId });
+        continue;
+      }
+      writeJsonAtomic(p, { ...turn, outcome_attempts: attempts + 1 });
+
       const failed = str(turn.outcome).toLowerCase() === 'failure';
 
       const res = await postOutcome(cfg, {
@@ -386,9 +400,12 @@ async function flushOutcomes(cfg, o) {
 
       if (res.ok) {
         flushed++;
-        writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_sent_at: Date.now() });
+        writeJsonAtomic(p, {
+          ...turn, outcome_attempts: attempts + 1, outcome_pending: false, outcome_sent_at: Date.now(),
+        });
       } else {
-        // Left pending on purpose: the next session's drain re-posts it under the same key.
+        // Left pending on purpose: the next session's drain re-posts it under the same key,
+        // up to the attempt bound above.
         log(cfg, 'info', `session-end: outcome flush failed (${res.state})`,
           { run_id: o.runId, prompt_id: promptId });
       }
@@ -411,11 +428,13 @@ async function flushOutcomes(cfg, o) {
  * A failure is logged and recorded as `reflect: failed`, never surfaced as a blocking error.
  *
  * Every exit stamps a `status`, so the marker can tell the skip reasons apart:
- * `skipped:disabled`, `skipped:not-ingested`, `failed`, `ok`. A blank status in a written
- * marker is therefore impossible — it means the hook died before the marker write.
+ * `skipped:disabled`, `skipped:not-ingested`, `skipped:undrained`, `failed`, `ok`. A blank
+ * status in a written marker is therefore impossible — it means the hook died before the
+ * marker write.
  *
  * @param {Record<string, any>} cfg
- * @param {{runId: string, budget: number, anythingIngested: boolean}} o
+ * @param {{runId: string, budget: number, anythingIngested: boolean, undelivered?: boolean,
+ *          pending?: number}} o
  * @returns {Promise<{attempted: boolean, status: string, lessons: number, at: number, error: string}>}
  */
 async function maybeReflect(cfg, o) {
@@ -425,6 +444,15 @@ async function maybeReflect(cfg, o) {
     log(cfg, 'info', 'session-end: reflect disabled by MUBIT_CC_REFLECT_ON_END=0 — this session\'s '
       + 'lessons stay at run scope', { run_id: o.runId });
     return { ...idle, at: Date.now(), status: 'skipped:disabled' };
+  }
+  if (o.undelivered) {
+    // Reflection reads the server's tail. Ours did not get there — this drain stopped with
+    // items still spooled and no other drainer holding the lock — so a reflection now would
+    // be drawn from a partial session and stored as if it were the whole one. The next
+    // session drains the rest and can reflect over a run the server actually has.
+    log(cfg, 'info', 'session-end: the spool did not drain; leaving reflect to the next session',
+      { run_id: o.runId, pending: o.pending ?? 0 });
+    return { ...idle, at: Date.now(), status: 'skipped:undrained' };
   }
   if (!o.anythingIngested) {
     log(cfg, 'debug', 'session-end: nothing ingested this session; nothing to reflect on',
@@ -484,29 +512,6 @@ function breakerOpen(cfg) {
     // Fail open: a breaker that cannot be read must not stop the last flush of a session.
     return false;
   }
-}
-
-/**
- * The same flattening `lib/spool.mjs` applies, so `runs/<run_id>/` means one directory to
- * every module. A run id can come from a hand-written `.mubit-cc.json`, so it is treated as
- * untrusted input to a path.
- * @param {any} v @returns {string}
- */
-function safeSegment(v) {
-  const s = String(v ?? '').trim();
-  if (!s) return '';
-  return s.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
-}
-
-/** @param {Record<string, any>} cfg @param {string} runId @returns {string} */
-function runDir(cfg, runId) {
-  return join(resolveDataDir(cfg), 'runs', safeSegment(runId));
-}
-
-/** A readable, log-safe fragment for an idempotency key. */
-function slug(v, max) {
-  const s = String(v ?? '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
-  return s.slice(0, max) || 'session';
 }
 
 /** @param {any} v @returns {boolean} */

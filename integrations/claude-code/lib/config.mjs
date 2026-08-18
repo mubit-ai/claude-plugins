@@ -335,6 +335,11 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const recall = bool(pick('recall', 'MUBIT_CC_RECALL'), true);
   const redact = bool(pick('redact', 'MUBIT_CC_REDACT'), true);
   const recallTokenBudget = int(pick('recallTokenBudget', 'MUBIT_CC_RECALL_TOKENS'), 1500);
+  // How many items one section of the injected block may carry. `0` is uncapped, which is
+  // the behaviour every release so far has had: the real ceiling is the request limit, and
+  // the token budget almost never binds because a handful of one-line lessons fit inside it
+  // easily. Anyone who wants a shorter block has had no dial for it until now.
+  const recallMaxPerSection = int(pick('recallMaxPerSection', 'MUBIT_CC_RECALL_MAX_PER_SECTION'), 0);
   const recallAssemble = enumOf(pick('recallAssemble', 'MUBIT_CC_RECALL_ASSEMBLE'),
     ['client', 'server'], 'client');
   // What recall does when rung 1 (`direct_bypass`, zero LLM calls) is refused by instance
@@ -396,6 +401,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     recall,
     redact,
     recallTokenBudget,
+    recallMaxPerSection,
     recallBudgetMs,
     recallAssemble,
     recallFallback,

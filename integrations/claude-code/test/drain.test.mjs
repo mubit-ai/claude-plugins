@@ -206,6 +206,46 @@ test('drain: two drains of the same batch send the same idempotency_key', async 
   );
 });
 
+/**
+ * The case the key exists for, and the one it used not to cover.
+ *
+ * `drain` and `session-end` drain the same spool. `session-end` steals a lock `drain` left
+ * behind after 60 s, and `drain` has a hard stop that can leave a batch uncommitted, so the
+ * same files really are sent by both. They each built the key their own way — one from the
+ * prompt id under a `cc-` prefix, the other from the session id under `cc-end-` — so the
+ * cross-drainer resend, the one thing four comments in this codebase claimed was covered,
+ * produced two different keys and re-posted the batch.
+ */
+test('drain and session-end send one batch under one idempotency_key', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/ingest': [
+      { status: 500, json: { error: 'transport' } },
+      { json: { accepted: true, job_id: 'job_test_1', deduplicated: true, status: 'queued' } },
+    ],
+  });
+  seedSpool(dataDir, 4);
+  const env = envFor(dataDir, server.url, { MUBIT_CC_BREAKER_THRESHOLD: '10' });
+
+  // The drain tries and fails; the batch stays on disk.
+  assertHookContract(await runHook('drain', stop(), { env }));
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 4, 'a 5xx leaves the batch in place');
+
+  // The session ends, and the other drainer picks up exactly those files.
+  assertHookContract(await runHook('session-end',
+    { hook_event_name: 'SessionEnd', reason: 'exit' }, { env }));
+
+  const calls = server.calls('POST', '/v2/control/ingest');
+  assert.equal(calls.length, 2, 'both drainers sent the batch');
+  assert.deepEqual(
+    calls[0].body.items.map((i) => i.item_id),
+    calls[1].body.items.map((i) => i.item_id),
+    'precondition: it is the same batch',
+  );
+  assert.equal(calls[0].body.idempotency_key, calls[1].body.idempotency_key,
+    'the same items must carry the same key whichever drainer sends them');
+});
+
 // §5.5 step 6 — 2xx commits: spool unlinked, marker advanced, job_id kept for the doctor skill.
 test('drain: a 2xx unlinks the batch, advances the marker, and records the job_id', async (t) => {
   const dataDir = makeDataDir();

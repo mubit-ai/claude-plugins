@@ -104,6 +104,17 @@ const SIGNAL_SUCCESS = 0.2;
 const SIGNAL_FAILURE = -0.3;
 
 /**
+ * How many times one turn's outcome may be posted before the client gives up on it.
+ *
+ * The post is claim-then-send: the turn is marked pending by `capture --stop` and cleared
+ * only by a response, so a landed-but-timed-out post is indistinguishable from a lost one
+ * and gets re-posted for as long as anything keeps looking. Three is enough to ride out a
+ * restart and a slow server; past that the signal is worth less than the risk of counting
+ * one turn several times.
+ */
+const MAX_OUTCOME_ATTEMPTS = 3;
+
+/**
  * §1.3: `RecordOutcomeRequest.reference_id` must be non-empty, so run-level attribution
  * uses this sentinel and puts the real ids in `entry_ids[]` — where each one is reinforced
  * individually (`control.proto`).
@@ -546,6 +557,23 @@ async function sendOutcome(cfg, runId, agentId, promptId) {
       : [];
     if (entryIds.length === 0) return;
 
+    // A post that the server accepted but answered too late to be heard leaves the turn
+    // pending, and the turn stays pending until *something* gets a response — so the next
+    // drain posts it again, and `session-end` again after that. The stable key means the
+    // server can collapse those, but "can" is a property of the other end that this process
+    // never observes, and reinforcement is not something to spend on faith. Count the
+    // attempts locally, in the file, before dialling, and stop.
+    const attempts = numOr(turn.outcome_attempts, 0);
+    if (attempts >= MAX_OUTCOME_ATTEMPTS) {
+      // Stop trying, and stop claiming it is pending: nobody is going to send this.
+      writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
+      log(cfg, 'warn', `drain: outcome abandoned after ${attempts} attempts`, {
+        run_id: runId, prompt_id: promptId,
+      });
+      return;
+    }
+    writeJsonAtomic(p, { ...turn, outcome_attempts: attempts + 1 });
+
     // The turn file records how the turn ended, so the drain never has to re-derive it.
     const failed = str(turn.outcome).toLowerCase() === 'failure';
 
@@ -559,15 +587,21 @@ async function sendOutcome(cfg, runId, agentId, promptId) {
         : 'Claude Code turn completed after these memories were injected.',
       agent_id: agentId,
       entry_ids: entryIds,
-      // Derived from (run_id, prompt_id), never random: the server keeps an outcome
-      // idempotency ledger across restarts, which only helps if the key is stable.
+      // Derived from (run_id, prompt_id), never random, so every re-post of this outcome
+      // carries one key for the server to collapse.
       idempotency_key: `cc-outcome-${runId}-${promptId}`,
-    }, { timeoutMs: numOr(cfg.timeoutMs, 4000), retry: true });
+      // Deliberately no `retry`. The transport's one silent re-dial on timeout doubles a
+      // post that may already have landed, inside the same second — the widest part of the
+      // window, and the least useful, since the next drain retries anyway.
+    }, { timeoutMs: numOr(cfg.timeoutMs, 4000) });
 
     if (res.ok) {
-      writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_sent_at: Date.now() });
+      writeJsonAtomic(p, {
+        ...turn, outcome_attempts: attempts + 1, outcome_pending: false, outcome_sent_at: Date.now(),
+      });
     } else {
-      // Left pending on purpose: the next drain re-posts it under the same key.
+      // Left pending on purpose: the next drain re-posts it under the same key, up to the
+      // attempt bound above.
       log(cfg, 'warn', `drain: outcome post failed (${res.state})`, {
         run_id: runId, prompt_id: promptId, error: str(res.error).slice(0, 300),
       });

@@ -301,3 +301,60 @@ test('a standing lesson injected at session start reaches entry_ids, once', asyn
   const body = server.lastCall('POST', '/v2/control/outcome').body;
   assert.deepEqual(body.entry_ids, ['les_g1', ...RECALLED]);
 });
+
+// ---------------------------------------------------------------------------
+// The replay window
+// ---------------------------------------------------------------------------
+
+/**
+ * A post the server accepted but answered too late to be heard is indistinguishable, from
+ * here, from one that never arrived: the turn stays `outcome_pending`, and the next drain
+ * sends it again — and `session-end` after that, for as long as anything keeps looking. The
+ * stable `idempotency_key` is what is supposed to collapse those, but that is a property of
+ * the other end which this process never observes, and reinforcement is not something to
+ * spend on faith.
+ *
+ * So the attempts are counted locally, in the turn file, before dialling.
+ */
+test('a turn whose outcome never gets a response is not posted forever', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/outcome': { status: 500, json: { error: 'never answered in time' } },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server, { MUBIT_CC_BREAKER_THRESHOLD: '99' });
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: e }));
+  assertHookContract(await runHook('capture', stop(), { env: e, args: ['--stop'] }));
+
+  for (let i = 0; i < 5; i++) {
+    assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', PROMPT_ID] }));
+  }
+
+  assert.equal(server.countOf('POST', '/v2/control/outcome'), 3,
+    'the client bounds its own replays rather than trusting the far end to collapse them');
+
+  const turn = readJsonFile(turnPath(dir));
+  assert.equal(turn.outcome_attempts, 3);
+  assert.equal(turn.outcome_pending, false, 'nothing is going to send this; stop saying it is pending');
+  assert.equal(turn.outcome_abandoned, true);
+});
+
+/** The bound must not cost a turn its attribution when the post simply works. */
+test('a successful outcome post still records one attempt and is never re-sent', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: e }));
+  assertHookContract(await runHook('capture', stop(), { env: e, args: ['--stop'] }));
+  assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', PROMPT_ID] }));
+  assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', PROMPT_ID] }));
+
+  assert.equal(server.countOf('POST', '/v2/control/outcome'), 1);
+  const turn = readJsonFile(turnPath(dir));
+  assert.equal(turn.outcome_attempts, 1);
+  assert.ok(turn.outcome_sent_at > 0);
+  assert.notEqual(turn.outcome_abandoned, true);
+});

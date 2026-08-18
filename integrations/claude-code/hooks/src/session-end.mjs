@@ -90,6 +90,9 @@ const JOBS_KEEP = 20;
 const SIGNAL_SUCCESS = 0.2;
 const SIGNAL_FAILURE = -0.3;
 
+/** The drain's bound, applied here too — this flush is the third sender of the same post. */
+const MAX_OUTCOME_ATTEMPTS = 3;
+
 /** §1.3: `reference_id` must be non-empty; the real attribution rides in `entry_ids[]`. */
 const RUN_LEVEL_REFERENCE = 'global';
 
@@ -350,6 +353,19 @@ async function flushOutcomes(cfg, o) {
       if (entryIds.length === 0) continue;
 
       const promptId = str(turn.prompt_id) || name.replace(/\.json$/, '');
+
+      // Same bound the drain applies, for the same reason: a post the server accepted but
+      // answered too late leaves the turn pending, and this flush is the third place that
+      // would send it again. Counted in the file, before dialling.
+      const attempts = numOr(turn.outcome_attempts, 0);
+      if (attempts >= MAX_OUTCOME_ATTEMPTS) {
+        writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
+        log(cfg, 'info', `session-end: outcome abandoned after ${attempts} attempts`,
+          { run_id: o.runId, prompt_id: promptId });
+        continue;
+      }
+      writeJsonAtomic(p, { ...turn, outcome_attempts: attempts + 1 });
+
       const failed = str(turn.outcome).toLowerCase() === 'failure';
 
       const res = await postOutcome(cfg, {
@@ -369,9 +385,12 @@ async function flushOutcomes(cfg, o) {
 
       if (res.ok) {
         flushed++;
-        writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_sent_at: Date.now() });
+        writeJsonAtomic(p, {
+          ...turn, outcome_attempts: attempts + 1, outcome_pending: false, outcome_sent_at: Date.now(),
+        });
       } else {
-        // Left pending on purpose: the next session's drain re-posts it under the same key.
+        // Left pending on purpose: the next session's drain re-posts it under the same key,
+        // up to the attempt bound above.
         log(cfg, 'info', `session-end: outcome flush failed (${res.state})`,
           { run_id: o.runId, prompt_id: promptId });
       }

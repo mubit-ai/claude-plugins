@@ -259,3 +259,45 @@ test('two drains for the same turn send the same idempotency_key', async (t) => 
     assert.equal(call.body.reference_id, 'global');
   }
 });
+
+// ---------------------------------------------------------------------------
+// Standing lessons enter the same loop
+// ---------------------------------------------------------------------------
+
+/**
+ * A global lesson injected by `session-start` acts on the turn exactly as a recalled item
+ * does, but it never passed through recall, so it used to reach the attribution machinery
+ * with no id at all — never reinforced when it helped, and never corrected when it was
+ * wrong. One bad global lesson then steered every session, forever, with no path back.
+ *
+ * It is credited once, on the first turn of the session that stages ids.
+ */
+test('a standing lesson injected at session start reaches entry_ids, once', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/ingest': SLOW_INGEST });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const e = env(dataDir, server);
+
+  assertHookContract(await runHook('session-start', { hook_event_name: 'SessionStart', source: 'startup' }, { env: e }));
+
+  // Turn one: the lesson id rides along with what recall found.
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: e }));
+  const first = readJsonFile(turnPath(dataDir));
+  assert.deepEqual(first.recalled, ['les_g1', ...RECALLED],
+    'the standing lesson must be attributable alongside the recalled evidence');
+
+  // Turn two: already credited, so it is not reinforced a second time.
+  const SECOND = 'p_second_prompt';
+  assertHookContract(await runHook('prompt-recall',
+    userPromptSubmit({ prompt_id: SECOND }), { env: e }));
+  assert.deepEqual(readJsonFile(turnPath(dataDir, SECOND)).recalled, RECALLED,
+    'one injection is one credit, not one per prompt');
+
+  // And it travels the rest of the loop as any other id does.
+  assertHookContract(await runHook('capture', stop(), { env: e, args: ['--stop'] }));
+  assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', PROMPT_ID] }));
+  await waitFor(() => server.countOf('POST', '/v2/control/outcome') >= 1, 5000);
+
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.deepEqual(body.entry_ids, ['les_g1', ...RECALLED]);
+});

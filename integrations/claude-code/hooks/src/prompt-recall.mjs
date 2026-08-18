@@ -190,7 +190,10 @@ await runHook('prompt-recall', {
 
     // §5.2 step 6: what was rendered is what `Stop` attributes against (§5.5). Written even
     // when it is empty — an absent key is a different value from an empty one downstream.
-    persistRecalled(cfg, runId, promptId, payload, outcome.refIds);
+    // The standing lessons injected at session start ride along on the first turn that
+    // stages ids, so that they too can be reinforced or corrected.
+    persistRecalled(cfg, runId, promptId, payload,
+      [...claimStandingLessons(cfg, runId), ...outcome.refIds]);
 
     updateMarker(cfg, runId, {
       state: 'ready',
@@ -446,7 +449,7 @@ function persistRecalled(cfg, runId, promptId, payload, refIds) {
     const base = isObject(prev) ? prev : {};
 
     /** @type {Record<string, any>} */
-    const next = { ...base, prompt_id: promptId, recalled: [...refIds] };
+    const next = { ...base, prompt_id: promptId, recalled: [...new Set(refIds)] };
     if (typeof next.session_id !== 'string') next.session_id = str(payload?.session_id);
     if (!Number.isFinite(next.started_at)) next.started_at = Date.now();
 
@@ -454,6 +457,39 @@ function persistRecalled(cfg, runId, promptId, payload, refIds) {
   } catch (err) {
     // §4.9: the cost of an unwritable data dir is this turn's attribution, never the prompt.
     log(cfg, 'warn', `prompt-recall: could not stage recalled ids (${messageOf(err)})`, { run_id: runId });
+  }
+}
+
+/**
+ * The ids of the standing lessons `session-start` injected, taken once per session.
+ *
+ * They are handed to the model in the same breath as recalled memory and act on the same
+ * turn, but they never passed through recall, so nothing ever put them in front of the
+ * attribution machinery: they could not be reinforced when a session went well, and — the
+ * part that matters — could not be corrected when a wrong one steered a session into the
+ * ground. Crediting them on the first turn that stages ids puts them under exactly the rule
+ * every recalled item already lives by.
+ *
+ * `credited_at` is stamped before the ids are returned, so a second prompt in the same
+ * session does not reinforce them again.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @returns {string[]}
+ */
+function claimStandingLessons(cfg, runId) {
+  try {
+    const lessons = readMarker(cfg, runId).lessons;
+    if (!isObject(lessons) || numOr(lessons.credited_at, 0) > 0) return [];
+    const ids = Array.isArray(lessons.injected_ids)
+      ? lessons.injected_ids.filter((v) => typeof v === 'string' && v.trim())
+      : [];
+    if (!ids.length) return [];
+    updateMarker(cfg, runId, { lessons: { credited_at: Date.now() } });
+    return ids;
+  } catch {
+    // Attribution is worth a turn's ids, never a turn.
+    return [];
   }
 }
 

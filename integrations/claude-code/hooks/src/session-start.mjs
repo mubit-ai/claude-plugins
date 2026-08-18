@@ -206,7 +206,16 @@ await runHook('session-start', {
       mode: cfg.mode,
       state: 'ready',
       last_error: '',
-      lessons: { global: lessons.length, checked_at: Date.now() },
+      lessons: {
+        global: lessons.length,
+        checked_at: Date.now(),
+        // The ids the first turn of this session credits. A standing lesson steered the
+        // session as surely as a recalled one did, so it earns the same reinforcement — and
+        // the same correction when the session fails. `prompt-recall` consumes this once and
+        // stamps `credited_at`.
+        injected_ids: lessons.map((l) => l.id).filter(Boolean),
+        credited_at: 0,
+      },
     });
 
     const summary = `mubit: ${cfg.mode}${DOT}run ${runId}${DOT}`
@@ -235,7 +244,7 @@ await runHook('session-start', {
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
- * @param {{type: string, content: string}[]} lessons
+ * @param {{id: string, type: string, content: string}[]} lessons
  * @returns {string}
  */
 function steerBlock(cfg, runId, lessons) {
@@ -354,12 +363,19 @@ function armColdStart(cfg) {
  * `ListLessonsResponse.lessons[]` — `{lesson_id, content, lesson_type, scope, importance}`.
  * A lesson with no content is not a lesson; rendering it would spend a line of the model's
  * context on a bullet with nothing after it.
+ *
+ * `lesson_id` is kept. It used to be dropped here, and dropping it is what made a standing
+ * lesson permanently uncreditable: attribution runs on the ids in
+ * `runs/<run_id>/turns/<prompt_id>.json:recalled[]`, so a lesson injected without one could
+ * be reinforced by nothing and corrected by nothing. A wrong global lesson then steered
+ * every session for good.
+ *
  * @param {any} body
- * @returns {{type: string, content: string}[]}
+ * @returns {{id: string, type: string, content: string}[]}
  */
 function readLessons(body) {
   const raw = body && typeof body === 'object' && Array.isArray(body.lessons) ? body.lessons : [];
-  /** @type {{type: string, content: string}[]} */
+  /** @type {{id: string, type: string, content: string}[]} */
   const out = [];
   for (const l of raw) {
     if (!l || typeof l !== 'object') continue;
@@ -368,7 +384,8 @@ function readLessons(body) {
     const type = typeof l.lesson_type === 'string' && l.lesson_type.trim()
       ? l.lesson_type.trim()
       : 'lesson';
-    out.push({ type, content });
+    const id = typeof l.lesson_id === 'string' ? l.lesson_id.trim() : '';
+    out.push({ id, type, content });
     if (out.length >= LESSON_LIMIT) break;
   }
   return out;

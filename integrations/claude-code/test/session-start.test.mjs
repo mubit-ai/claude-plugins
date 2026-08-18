@@ -169,6 +169,32 @@ test('stdout is a SessionStart steer block plus a one-line systemMessage', async
   assert.ok(!r.json.systemMessage.includes('\n'), 'systemMessage is one line');
 });
 
+/**
+ * A standing lesson steers the whole session, so it has to be able to earn that place — and
+ * to lose it. Attribution runs on ids, and this hook used to parse `lesson_id` off the wire
+ * and throw it away, which left every global lesson permanently uncreditable: never
+ * reinforced when it helped, never corrected when it was wrong.
+ */
+test('the lesson ids are kept on the marker for the first turn to credit', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const marker = readMarker(dataDir);
+  assert.deepEqual(marker.lessons.injected_ids, ['les_g1'],
+    'the lesson id must survive the parse');
+  assert.equal(marker.lessons.credited_at, 0, 'nothing has credited them yet');
+
+  // The id is bookkeeping, not prose: the model sees the lesson, not its id.
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.ok(!ctx.includes('les_g1'), 'the id must not be rendered into the steer block');
+});
+
+
 // §4.7 — the grace window starts here, so failures in the first seconds after
 // still starting up do not tell the user their memory is broken.
 test('marker.cold_start_until = now + coldStartGraceMs', async (t) => {

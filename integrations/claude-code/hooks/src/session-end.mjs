@@ -57,6 +57,7 @@ import { ROUTES, heartbeat, postIngest, postOutcome, request } from '../../lib/h
 import { runHook } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
+import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import {
   acquireDrainLock, batchIdempotencyKey, claimOnce, commitBatch, readBatch, releaseDrainLock,
@@ -85,16 +86,6 @@ const REFLECT_LAST_N = 200;
 
 /** §7: `runs/<run_id>/jobs.json` keeps the last 20, for the doctor skill. */
 const JOBS_KEEP = 20;
-
-/** §5.5: the implicit signal is deliberately weak — a turn ending is not proof it helped. */
-const SIGNAL_SUCCESS = 0.2;
-const SIGNAL_FAILURE = -0.3;
-
-/** The drain's bound, applied here too — this flush is the third sender of the same post. */
-const MAX_OUTCOME_ATTEMPTS = 3;
-
-/** §1.3: `reference_id` must be non-empty; the real attribution rides in `entry_ids[]`. */
-const RUN_LEVEL_REFERENCE = 'global';
 
 /** A dead session is not worth an unbounded scan of a six-hour turn directory. */
 const MAX_TURN_FLUSH = 10;
@@ -331,19 +322,28 @@ function recordJob(cfg, runId, body, n) {
  * A turn that `capture --stop` marked `outcome_pending` but whose drain never got to
  * attribute it — the drainer stood down, the endpoint was down, the session ended first.
  *
- * Never sent with an empty `entry_ids[]`: an outcome attributed to nothing is a wasted round
- * trip that also pollutes the run-level signal history the reflect path is about to read.
- * `outcomeMode: "off"` disables implicit attribution entirely, and `"explicit"` hands the
- * call to the model through `mubit_outcome` — firing one here as well would dilute the
- * model's deliberate judgement with an automatic 0.2.
+ * **The rule is `lib/outcome.mjs`'s, not this hook's.** `drain.mjs` (§5.5 step 7) is its other
+ * caller, and because the two hooks never fire for the same turn, a disagreement between them
+ * is invisible: it shows up only as a run whose outcome series mixes two definitions of the
+ * same measurement. That is exactly what happened while this function kept its own copy — it
+ * posted `success`/+0.2 with `entry_ids` for every pending turn, including the ones the drain
+ * had learned to record as `neutral` with none.
+ *
+ * So `decideOutcome` answers what to post (including "nothing", for a turn that recalled
+ * nothing — an outcome attributed to nothing is a wasted round trip that also pollutes the
+ * run-level signal history the reflect path is about to read), `outcomeRequest` addresses it,
+ * and what stays here is what a SessionEnd flush owns: which files to consider, the budget,
+ * and leaving a failure pending.
  *
  * @param {Record<string, any>} cfg
  * @param {{runId: string, agentId: string, budget: () => number}} o
  * @returns {Promise<number>} how many outcomes were accepted
  */
 async function flushOutcomes(cfg, o) {
-  const mode = str(cfg.outcomeMode) || 'implicit';
-  if (mode !== 'implicit') return 0;
+  // §6.1: "off" disables implicit attribution entirely, and "explicit" hands the call to the
+  // model through `mubit_outcome` — firing one here as well would dilute the model's
+  // deliberate judgement with an automatic 0.2.
+  if (!implicitOutcomesEnabled(cfg)) return 0;
 
   let flushed = 0;
   try {
@@ -358,45 +358,30 @@ async function flushOutcomes(cfg, o) {
 
       const p = join(dir, name);
       const turn = readJson(p, null);
-      if (!isObject(turn)) continue;
-      if (turn.outcome_pending !== true) continue;
-      if (numOr(turn.outcome_sent_at, 0) > 0) continue;
+      // This hook sweeps a directory rather than being handed one turn, so `outcome_pending`
+      // is the filter that says which files are even candidates: a turn `capture --stop` has
+      // not closed yet is still being written.
+      if (!isObject(turn) || turn.outcome_pending !== true) continue;
 
-      const entryIds = Array.isArray(turn.recalled)
-        ? turn.recalled.filter((v) => typeof v === 'string' && v.trim())
-        : [];
-      if (entryIds.length === 0) continue;
+      const decision = decideOutcome(turn);
+      if (!decision.post) {
+        // Nothing is going to send this one; stop claiming it is pending.
+        if (decision.reason === 'attempts_exhausted') {
+          writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
+        }
+        continue;
+      }
 
       const promptId = str(turn.prompt_id) || name.replace(/\.json$/, '');
 
-      // Same bound the drain applies, for the same reason: a post the server accepted but
-      // answered too late leaves the turn pending, and this flush is the third place that
-      // would send it again. Counted in the file, before dialling.
+      // The same bound the drain applies, for the same reason: this flush is the third place
+      // that would send the same post. Counted before dialling, in the file.
       const attempts = numOr(turn.outcome_attempts, 0);
-      if (attempts >= MAX_OUTCOME_ATTEMPTS) {
-        writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
-        log(cfg, 'info', `session-end: outcome abandoned after ${attempts} attempts`,
-          { run_id: o.runId, prompt_id: promptId });
-        continue;
-      }
       writeJsonAtomic(p, { ...turn, outcome_attempts: attempts + 1 });
 
-      const failed = str(turn.outcome).toLowerCase() === 'failure';
-
-      const res = await postOutcome(cfg, {
-        run_id: o.runId,
-        reference_id: RUN_LEVEL_REFERENCE,
-        outcome: failed ? 'failure' : 'success',
-        signal: failed ? SIGNAL_FAILURE : SIGNAL_SUCCESS,
-        rationale: failed
-          ? 'Claude Code turn ended in failure after these memories were injected.'
-          : 'Claude Code turn completed after these memories were injected.',
-        agent_id: o.agentId,
-        entry_ids: entryIds,
-        // Derived from (run_id, prompt_id) and never random, so this and a concurrent drain
-        // post the same key: the server's outcome ledger then makes the second one a no-op.
-        idempotency_key: `cc-outcome-${o.runId}-${promptId}`,
-      }, { timeoutMs: budget });
+      const res = await postOutcome(cfg,
+        outcomeRequest({ runId: o.runId, agentId: o.agentId, promptId, decision }),
+        { timeoutMs: budget });
 
       if (res.ok) {
         flushed++;

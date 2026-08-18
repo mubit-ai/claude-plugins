@@ -41,7 +41,22 @@ export const userPromptSubmit = (over = {}) => base({
   ...over,
 });
 
-/** @param {Record<string,any>} [over] */
+/**
+ * PostToolUse.
+ *
+ * The tool's result rides in **`tool_response`**, and the duration in **`duration_ms`**.
+ * Those are the names the host emits, verbatim; they are not a guess. This fixture used to
+ * say `tool_output` / `execution_time_ms`, `capture.mjs` read the same two invented names,
+ * and the pair agreed with each other through 752 green tests while every memory the plugin
+ * had ever shipped read `Read(file_path=X) -> ` with nothing after the arrow. A fixture
+ * written beside the implementation cannot falsify it — so treat these names as recorded
+ * evidence and do not "tidy" them.
+ *
+ * `postToolUseLegacyOutput` below covers the older `tool_output` shape, which capture still
+ * accepts as a fallback.
+ *
+ * @param {Record<string,any>} [over]
+ */
 export const postToolUse = (over = {}) => base({
   hook_event_name: 'PostToolUse',
   prompt_id: PROMPT_ID,
@@ -51,11 +66,26 @@ export const postToolUse = (over = {}) => base({
     old_string: 'let a = 1;',
     new_string: 'let a = 2;',
   },
-  tool_output: { type: 'text', text: 'Applied 1 edit to src/lib.rs' },
+  tool_response: { type: 'text', text: 'Applied 1 edit to src/lib.rs' },
   tool_use_id: TOOL_USE_ID,
-  execution_time_ms: 42,
+  duration_ms: 42,
   ...over,
 });
+
+/**
+ * The same call as it arrived from an older host: the result under `tool_output`, with no
+ * `tool_response` at all. Nothing is gained by making an old payload shape fail, so capture
+ * reads `tool_response ?? tool_output` and this fixture is what holds the second half of
+ * that `??` honest.
+ *
+ * @param {Record<string,any>} [over]
+ */
+export const postToolUseLegacyOutput = (over = {}) => {
+  const p = postToolUse(over);
+  const legacy = p.tool_response;
+  delete p.tool_response;
+  return { ...p, tool_output: legacy };
+};
 
 /** @param {Record<string,any>} [over] */
 export const postToolUseFailure = (over = {}) => base({
@@ -65,9 +95,82 @@ export const postToolUseFailure = (over = {}) => base({
   tool_input: { command: 'cargo check -p my-crate' },
   error: "error[E0433]: failed to resolve: use of undeclared crate or module `tonic`",
   tool_use_id: TOOL_USE_ID,
-  execution_time_ms: 1893,
+  duration_ms: 1893,
   ...over,
 });
+
+/**
+ * `tool_response` bodies, copied off real transcripts rather than imagined — one per shape
+ * the renderer has to survive. The point of the table is that no two of these look alike:
+ * `Read` buries its payload under `file.content`, `Bash` splits it across `stdout`/`stderr`,
+ * and the rest are flat result objects with no text field at all. Any of them rendering to
+ * an empty string is defect F1 coming back.
+ *
+ * @type {Record<string, {tool_input: Record<string, any>, tool_response: any, expect: string}>}
+ */
+export const RECORDED_RESPONSES = {
+  Read: {
+    tool_input: { file_path: '/Users/x/repo/src/lib.rs' },
+    tool_response: {
+      type: 'text',
+      file: {
+        filePath: '/Users/x/repo/src/lib.rs',
+        content: 'pub fn main() { println!("hello"); }\n',
+        numLines: 1,
+        startLine: 1,
+        totalLines: 1,
+      },
+    },
+    expect: 'pub fn main()',
+  },
+  Bash: {
+    tool_input: { command: 'ls -la' },
+    tool_response: {
+      stdout: 'total 8\ndrwxr-xr-x  3 x  staff  96 Aug 17 09:00 .',
+      stderr: '',
+      interrupted: false,
+      isImage: false,
+      noOutputExpected: false,
+    },
+    expect: 'drwxr-xr-x',
+  },
+  Edit: {
+    tool_input: { file_path: '/Users/x/repo/src/lib.rs', old_string: 'a', new_string: 'b' },
+    tool_response: {
+      filePath: '/Users/x/repo/src/lib.rs',
+      oldString: 'let a = 1;',
+      newString: 'let a = 2;',
+      userModified: false,
+      replaceAll: false,
+    },
+    expect: 'newString',
+  },
+  Agent: {
+    tool_input: { description: 'Explore the matcher', subagent_type: 'Explore', prompt: 'where is it' },
+    tool_response: {
+      isAsync: true,
+      status: 'async_launched',
+      agentId: 'aa1ef5c824d2b9874',
+      description: 'Explore the matcher',
+    },
+    expect: 'async_launched',
+  },
+  TaskUpdate: {
+    tool_input: { task_id: '1', status: 'in_progress' },
+    tool_response: {
+      success: true,
+      taskId: '1',
+      updatedFields: ['status'],
+      statusChange: { from: 'pending', to: 'in_progress' },
+    },
+    expect: 'in_progress',
+  },
+  Skill: {
+    tool_input: { skill: 'artifact-design' },
+    tool_response: { success: true, commandName: 'artifact-design' },
+    expect: 'artifact-design',
+  },
+};
 
 /** @param {Record<string,any>} [over] */
 export const stop = (over = {}) => base({

@@ -66,6 +66,24 @@ const BRIDGED = [
 /** A `.mcp.json` value the host never expanded, e.g. the literal `${MUBIT_ENDPOINT}`. */
 const UNEXPANDED = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 
+/**
+ * The bundled server's own version, inlined from the `@mubit-ai/mcp` manifest at build time
+ * (`esbuild.config.mjs` defines `__MUBIT_MCP_VERSION__`).
+ *
+ * The server reads its version with `require("../package.json")`, which resolves inside its
+ * own package and not inside ours: bundled to `mcp/dist/server.js`, `../package.json` is a
+ * file that does not exist, and the require throws at module scope before any tool
+ * registers. Reading the file here at runtime would only move the same guess; the build
+ * knows the answer exactly, because it is the package it just bundled.
+ *
+ * Empty when this file is run unbundled — the launch tests import the source directly, and
+ * the server's own in-package read is correct there anyway.
+ */
+// @ts-ignore — the name is not declared anywhere: esbuild substitutes a string literal for
+// it at build time, and `typeof` is the one operator that is safe on a name that genuinely
+// is not there when this file runs as source.
+const SERVER_VERSION = typeof __MUBIT_MCP_VERSION__ === 'string' ? __MUBIT_MCP_VERSION__ : '';
+
 if (prepare(process.env)) {
   // §8.3 step 4. Every module-scope read the server makes now sees a resolved value.
   await import('./server.js');
@@ -117,6 +135,7 @@ function prepare(env) {
   env.MUBIT_DEFAULT_SESSION_ID = runId;
   env.MUBIT_DEFAULT_USER_ID = String(cfg.userId ?? '');
   env.MUBIT_MCP_TOOLS = tools.join(',');
+  if (SERVER_VERSION) env.MUBIT_MCP_VERSION = SERVER_VERSION;
 
   log(cfg, 'info', 'mcp: starting server', {
     run_id: runId, endpoint: cfg.endpoint, mode: cfg.mode, tools: tools.length,

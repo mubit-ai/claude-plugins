@@ -92,19 +92,18 @@ failure glyph while the instance comes up — see [Connection states](#connectio
 
 | Event | Runs | Timeout | What it does |
 | --- | --- | --- | --- |
-| `SessionStart` (`startup\|resume\|clear\|compact`) | `session-start.mjs` | 5 s | Derives the run id, checks health, registers the agent (heartbeats on `resume`), pulls up to 5 global lessons, injects a short steer block telling the model memory is active and not to search for it preemptively. |
+| `SessionStart` (`startup\|resume\|clear\|compact`) | `session-start.mjs` | 5 s | Derives the run id, checks health, registers the agent (heartbeats on `resume`), pulls up to 5 global lessons, injects a short steer block telling the model memory is active, that it need not open a turn by searching, and which tool to reach for when the injected memory falls short. On a `compact` source it also re-anchors the session to the checkpoint saved by `PreCompact`. |
 | `UserPromptSubmit` | `prompt-recall.mjs` | 3 s | Queries Mubit and injects recalled memory as `additionalContext`. Blocking, with a 1500 ms internal budget. Injects nothing at all when the result is empty. |
 | `UserPromptSubmit` | `stage-prompt.mjs` | 3 s | Zero network. Stages the prompt so the `Stop` capture has both halves of the turn, and triggers the detached drain when the spool is full or stale. |
-| `PostToolUse` (built-in tools) | `capture.mjs` | 3 s | Redacts and spools the tool call. Zero network. |
-| `PostToolUse` (`^mcp__.*`) | `capture.mjs` | 3 s | Same, for other MCP servers' tools. Mubit's own tool calls are suppressed. |
+| `PostToolUse` (every tool) | `capture.mjs` | 3 s | Redacts and spools the tool call, whatever the tool was — built-in or any MCP server's. Zero network. A short skip list drops the handful that carry no memory (mode switches, list-only queries), and Mubit's own tool calls are suppressed. |
 | `PostToolUseFailure` | `capture.mjs --failure` | 3 s | Captures the failure — these produce the most useful lessons. |
 | `Stop` | `capture.mjs --stop` | 5 s | Writes the `Q: … / A: …` turn, spawns the drain, and attributes the turn's outcome to the memories that were recalled for it. |
 | `SubagentStop` | `capture.mjs --subagent` | 3 s | Same, under a distinct subagent identity. |
 | `PreCompact` | `checkpoint.mjs --pre` | 10 s | The one blocking network call in the plugin: snapshots the last 200 KB of transcript before the host throws it away. |
-| `PostCompact` | `checkpoint.mjs --post` | 5 s | Zero network. Tells the model what the checkpoint anchor is. |
+| `PostCompact` | `checkpoint.mjs --post` | 5 s | Zero network. Records that the compaction happened; injects nothing, because Claude Code accepts no injected context on this event. The re-anchor arrives instead from `SessionStart`, which also fires on a `compact` source. |
 | `SessionEnd` | `session-end.mjs` | 8 s | Drains inline, flushes pending outcomes, then reflects. |
 
-(Nine events; `UserPromptSubmit` and `PostToolUse` each register two commands.)
+(Nine events; `UserPromptSubmit` registers two commands.)
 
 Every hook exits 0, always. A memory layer has no business breaking a prompt — a dead server,
 an unwritable data dir, or a corrupt state file costs you a memory, never a turn.
@@ -124,7 +123,8 @@ an unwritable data dir, or a corrupt state file costs you a memory, never a turn
 
 ### Ten MCP tools
 
-The bundled MCP server exposes 21 tools; the plugin allowlists ten of them by default:
+The bundled MCP server carries 21 tools and registers ten of them by default — the other
+eleven cost you nothing until you ask for them:
 
 ```
 mubit_learned   mubit_recall   mubit_outcome   mubit_reflect   mubit_lessons
@@ -273,7 +273,7 @@ that cache, and writing credentials invalidates it immediately rather than after
 | `recallAssemble` | `client` | `MUBIT_CC_RECALL_ASSEMBLE` | `client` assembles the context block locally for **0 LLM calls**. `server` uses `/v2/control/context`, which costs **2 LLM calls per prompt** and replaces the free path rather than adding to it. |
 | `recallFallback` | `none` | `MUBIT_CC_RECALL_FALLBACK` | What recall does when the instance has direct-access recall disabled. `none` returns nothing, for **0 LLM calls**. `agent_routed` pays **1 LLM call per prompt** to get recall anyway — typically several seconds, against a recall budget of 1500 ms, so most prompts spend the call and still inject nothing. See [When recall returns nothing](#when-recall-returns-nothing). |
 | `reflectOnEnd` | `true` | `MUBIT_CC_REFLECT_ON_END` | Reflect at `SessionEnd`. This is the only path that promotes a lesson beyond its own run, so turning it off to save a few seconds trades away cross-session memory entirely. See below. |
-| `outcomeMode` | `implicit` | `MUBIT_CC_OUTCOME_MODE` | `implicit`: each turn's success or failure is attributed automatically to the memories recalled for it. `explicit`: only the model's own `mubit_outcome` calls count. `off`: no attribution. |
+| `outcomeMode` | `implicit` | `MUBIT_CC_OUTCOME_MODE` | `implicit`: a turn whose reply carried the recalled memory's own vocabulary is attributed to those memories; a turn that carried none of it is recorded as `neutral` against the run and attributed to no entry, so an injection nobody used is counted rather than being invisible. `explicit`: only the model's own `mubit_outcome` calls count. `off`: no attribution, and no measurement of it either. |
 | `statusLine` | `true` | `MUBIT_CC_STATUSLINE` | Render the status line. When false it prints an empty line and exits 0 rather than erroring per frame. |
 | `mcpTools` | `""` (the curated ten) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
 
@@ -405,7 +405,7 @@ of three escalates, and only ever to `not_responding` — never to `unreachable`
 | `mcp-config-invalid: Missing environment variables` | `.mcp.json` references a `${VAR}` that is unset | Not something an install can hit; if you forked the plugin, declare no `env` block at all |
 | Status line shows a glyph but no counters | No hook has written the marker for this run yet | Normal for the first few seconds of a session |
 | Status line never appears at all | A plugin cannot register `statusLine`; the shipped entry is inert | Add it to your own `~/.claude/settings.json` — see [A status line](#a-status-line) |
-| `/mcp` lists 21 tools instead of ten | The bundled MCP server predates the allowlist patch | Cosmetic; the ten in the default set are the ones the skills use. Fixed by the next `@mubit-ai/mcp` release |
+| `/mcp` lists 21 tools instead of ten | You are on 0.9.1 or older, whose bundled MCP server predates the allowlist patch and registers everything | Upgrade. On an older version it is not cosmetic: every session pays for all 21 tool schemas |
 | A saved lesson never becomes visible in a later session | `mubit_learned` writes every entry as `success` / `session`; only the explicit reflect path widens scope, over several sessions | Keep `reflectOnEnd` on, and run `/mubit-memory:reflect` at meaningful checkpoints |
 | A just-saved memory is not findable a second later | `mubit_learned` returns when the write is **queued**, not stored. Embedding and indexing happen after the call returns | Wait. Reflecting or searching immediately honestly returns nothing, and that is not a fault |
 | Hook captures and `/mubit-memory:remember` writes land in different runs | `runStrategy: per-conversation` | Use `per-directory` |

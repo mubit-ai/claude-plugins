@@ -13,10 +13,7 @@
           "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/stage-prompt.mjs"] } ] }
     ],
     "PostToolUse": [
-      { "matcher": "^(Read|Grep|Glob|Edit|Write|MultiEdit|NotebookEdit|Bash|WebFetch|WebSearch|Task)$",
-        "hooks": [ { "type": "command", "command": "node", "timeout": 3,
-          "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/capture.mjs"] } ] },
-      { "matcher": "^mcp__.*",
+      { "matcher": "*",
         "hooks": [ { "type": "command", "command": "node", "timeout": 3,
           "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/capture.mjs"] } ] }
     ],

@@ -254,9 +254,15 @@ test('--pre failure emits the exact checkpoint-failed systemMessage and exits 0'
 // --post
 // ---------------------------------------------------------------------------
 
-// §5.6 — PostCompact re-anchors the freshly compacted context to the stored id.
-// It reads `checkpoints.json` and dials nothing; 800 ms is not a network budget.
-test('--post references the stored checkpoint_id with no network call', async (t) => {
+// §5.6 — `--post` reads `checkpoints.json` and dials nothing; 800 ms is not a network budget.
+//
+// It also injects NOTHING, and that is the fix rather than a regression: `PostCompact` is not
+// a `hookSpecificOutput.hookEventName` Claude Code accepts, so the re-anchor this hook used to
+// emit failed validation and was discarded whole — silently, on every compaction, since the
+// first release. `test/hook-output.test.mjs` holds the accepted set and the evidence. The
+// re-anchor now ships from `session-start.mjs` on `source === "compact"`, which is the only
+// hook that runs after a compaction AND has an event name the host will take.
+test('--post reads the stored checkpoint, dials nothing, and injects nothing', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -269,15 +275,16 @@ test('--post references the stored checkpoint_id with no network call', async (t
   assert.equal(server.requests.length, 0,
     `--post must not dial: ${server.requests.map((q) => `${q.method} ${q.path}`).join(', ')}`);
 
-  const out = r.json.hookSpecificOutput;
-  assert.equal(out.hookEventName, 'PostCompact');
-  assert.ok(out.additionalContext.includes('ckpt_seeded_9'),
-    `additionalContext must name the stored checkpoint, got:\n${out.additionalContext}`);
-  assert.ok(out.additionalContext.includes(RUN_ID), 'and the run it belongs to');
+  assert.equal(r.json?.hookSpecificOutput, undefined,
+    'a PostCompact hookSpecificOutput is rejected by the host and takes the whole output with '
+    + `it; got:\n${JSON.stringify(r.json)}`);
+  assert.equal(r.json?.suppressOutput, true,
+    `--post has nothing the host will accept, so it says nothing; got:\n${JSON.stringify(r.json)}`);
 });
 
-// §5.6 — with nothing stored there is nothing to anchor to. Degrade quietly rather than
-// injecting "checkpoint undefined holds your context", which is worse than silence.
+// §5.6 — with nothing stored there is nothing to anchor to, and the answer is the same
+// suppression rather than a second shape. "checkpoint undefined holds your context" is worse
+// than silence, and so is a payload the host throws away.
 test('--post with no stored checkpoint degrades quietly', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
@@ -288,10 +295,8 @@ test('--post with no stored checkpoint degrades quietly', async (t) => {
 
   assertHookContract(r);
   assert.equal(server.requests.length, 0);
-  const ctx = r.json?.hookSpecificOutput?.additionalContext;
-  if (ctx !== undefined) {
-    assert.ok(!/undefined|null/.test(ctx), `emitted a placeholder id: ${ctx}`);
-  }
+  assert.equal(r.json?.hookSpecificOutput, undefined);
+  assert.equal(r.json?.suppressOutput, true);
 });
 
 // ---------------------------------------------------------------------------

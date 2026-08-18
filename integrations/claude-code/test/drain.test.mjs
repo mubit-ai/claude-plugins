@@ -357,8 +357,11 @@ test('drain --with-outcome: posts one outcome carrying the turn\'s recalled entr
   assert.equal(body.signal, 0.2);
   assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
   assert.ok(typeof body.agent_id === 'string' && body.agent_id.length > 0);
-  assert.ok(typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0);
   assert.ok(typeof body.rationale === 'string' && body.rationale.length > 0);
+  // Derived from (run_id, prompt_id) and never random — and spelled the same way in
+  // `session-end`, since that is what makes a concurrent flush a server-side no-op rather
+  // than double reinforcement. `session-end.test.mjs` asserts the two agree end to end.
+  assert.equal(body.idempotency_key, `cc-outcome-${RUN_ID}-${PROMPT_ID}`);
 });
 
 // §5.5 — no recalled ids means there is nothing to reinforce; the call is skipped entirely
@@ -413,6 +416,129 @@ test('drain --with-outcome: a StopFailure turn posts outcome "failure" at signal
   assert.equal(body.signal, -0.3);
   assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
 });
+
+// ---------------------------------------------------------------------------
+// §5.5 step 7, conditioned on evidence — "ignored" is not the same as "not injected"
+// ---------------------------------------------------------------------------
+
+/** A turn as `capture --stop` leaves it once it could compute the used-signal. */
+function seedMeasuredTurn(dataDir, used, over = {}) {
+  return seedTurn(dataDir, {
+    used_evidence: {
+      method: 'memory-term-echo/v1',
+      at: Date.now(),
+      candidates: 12,
+      matched: used ? 3 : 0,
+      terms: used ? ['indexing', 'queued', 'poll'] : [],
+      answer_chars: 180,
+      used,
+    },
+    ...over,
+  });
+}
+
+// THE test for this finding. Before it, a turn whose injected memory was plainly ignored
+// and a turn where nothing was injected at all were the same thing on the wire: silence.
+// Precision cannot be computed from a denominator that never leaves the machine.
+test('drain --with-outcome: an ignored injection is distinguishable from no injection', async (t) => {
+  const ignoredDir = makeDataDir();
+  const ignored = await mubit(t);
+  seedSpool(ignoredDir, 1);
+  seedMeasuredTurn(ignoredDir, false);
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(ignoredDir, ignored.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+
+  ignored.assertCalled('POST', '/v2/control/outcome', 1);
+  const body = ignored.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'neutral',
+    'the four accepted outcomes are success/failure/partial/neutral; anything else is a 400');
+  assert.equal(body.signal, 0,
+    'no evidence of use is not evidence of harm — a penalty here would punish memory for '
+    + 'a signal that is mostly false negatives');
+  assert.deepEqual(body.entry_ids, [],
+    'a neutral record must not name the entries: attributed reinforcement counts any signal '
+    + '>= 0 as one reinforcement, so naming them would credit exactly what was ignored');
+  assert.equal(body.reference_id, 'global');
+  assert.ok(typeof body.rationale === 'string' && body.rationale.length > 0,
+    'the rationale is the only field that can carry what was measured');
+
+  // The other half of the distinction: nothing injected is still silence.
+  const emptyDir = makeDataDir();
+  const empty = await mubit(t);
+  seedSpool(emptyDir, 1);
+  seedTurn(emptyDir, { recalled: [] });
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(emptyDir, empty.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+  empty.assertNotCalled('POST', '/v2/control/outcome');
+});
+
+// §5.5: the weak +0.2 was always defended as "a turn completing is weak positive evidence".
+// It now stands on something narrower and checkable — the reply carried the memory's own
+// vocabulary — and the record says which method decided that.
+test('drain --with-outcome: evidence of use keeps the +0.2 and the entry attribution', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+  seedMeasuredTurn(dataDir, true);
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'success');
+  assert.equal(body.signal, 0.2);
+  assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
+  assert.ok(body.rationale.includes('memory-term-echo/v1'),
+    `the rationale must name the method that decided this: ${body.rationale}`);
+});
+
+// A turn that failed is not proof the memory was wrong when nothing shows the memory was
+// used at all. -0.3 against an entry the model never touched is the same mistake as +0.2,
+// pointed the other way.
+test('drain --with-outcome: a failed turn with no evidence of use is not punished for it', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+  seedMeasuredTurn(dataDir, false, { outcome: 'failure' });
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'neutral');
+  assert.equal(body.signal, 0);
+  assert.deepEqual(body.entry_ids, []);
+});
+
+// §5.5/§6.1: the new record is still implicit attribution. "off" means the hook posts
+// nothing, and "explicit" means the model owns the call — a measurement that ignores either
+// is a measurement the user did not consent to.
+for (const mode of ['off', 'explicit']) {
+  test(`drain --with-outcome: outcomeMode "${mode}" silences the neutral record too`, async (t) => {
+    const dataDir = makeDataDir();
+    const server = await mubit(t);
+    seedSpool(dataDir, 1);
+    seedMeasuredTurn(dataDir, false);
+
+    assertHookContract(await runHook('drain', stop(), {
+      env: envFor(dataDir, server.url, { MUBIT_CC_OUTCOME_MODE: mode }),
+      args: ['--with-outcome', PROMPT_ID],
+    }));
+
+    server.assertCalled('POST', '/v2/control/ingest', 1);
+    server.assertNotCalled('POST', '/v2/control/outcome');
+  });
+}
 
 // §5.5 step 9 + §7 — the lock is released on every exit path, including after a throw.
 // A stuck lock silently stops all capture, which is worse than a rare double drain.

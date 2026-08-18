@@ -47,6 +47,7 @@ import { loadConfig } from '../../lib/config.mjs';
 import { postIngest, postOutcome } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
+import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import {
   acquireDrainLock, batchIdempotencyKey, commitBatch, readBatch, releaseDrainLock, spoolStats,
@@ -94,32 +95,6 @@ const LOCK_POLL_MS = 25;
 
 /** §6.1 `MUBIT_CC_BATCH_MAX_ITEMS`, used when a config could not be resolved. */
 const DEFAULT_BATCH = 32;
-
-/**
- * §5.5: "the implicit signal is deliberately weak (0.2, not 1.0) — a turn completing is not
- * proof the recalled memory helped, only weak positive evidence." A `StopFailure` turn is
- * stronger evidence in the other direction, but still an inference, not a user verdict.
- */
-const SIGNAL_SUCCESS = 0.2;
-const SIGNAL_FAILURE = -0.3;
-
-/**
- * How many times one turn's outcome may be posted before the client gives up on it.
- *
- * The post is claim-then-send: the turn is marked pending by `capture --stop` and cleared
- * only by a response, so a landed-but-timed-out post is indistinguishable from a lost one
- * and gets re-posted for as long as anything keeps looking. Three is enough to ride out a
- * restart and a slow server; past that the signal is worth less than the risk of counting
- * one turn several times.
- */
-const MAX_OUTCOME_ATTEMPTS = 3;
-
-/**
- * §1.3: `RecordOutcomeRequest.reference_id` must be non-empty, so run-level attribution
- * uses this sentinel and puts the real ids in `entry_ids[]` — where each one is reinforced
- * individually (`control.proto`).
- */
-const RUN_LEVEL_REFERENCE = 'global';
 
 /**
  * The 4xx that are NOT a verdict on the payload.
@@ -527,73 +502,50 @@ async function flushOutcome(cfg, runId, agentId, promptId, wanted) {
  * `--with-outcome <prompt_id>`: read `runs/<run_id>/turns/<prompt_id>.json` and post exactly
  * one `/v2/control/outcome`.
  *
- * Skipped entirely — never sent with an empty `entry_ids[]` — when the turn recalled nothing,
- * because an outcome attributed to nothing is a wasted round trip that also pollutes the
- * run-level signal history the reflect path reads.
+ * **The rule itself lives in `lib/outcome.mjs`, and this hook is one of its two callers.**
+ * `session-end.mjs` is the other, for turns this drain never reached (§5.7 step 3), and the
+ * two are separate esbuild entry points that cannot import one another — so the rule sat in
+ * both files, and the copies disagreed for a while. `decideOutcome` answers the four-case
+ * table (including "post nothing", which is a real answer here) and `outcomeRequest` addresses
+ * the record; everything left in this function is the parts a drain owns: the file, the
+ * clock, and what a failure means.
  *
- * Two `outcomeMode` values silence it. `"off"` disables implicit attribution altogether.
- * `"explicit"` hands the call to the model through `mubit_outcome` — so the hook must stay
- * quiet there too, or the model's deliberate judgement is diluted by an automatic 0.2.
+ * `outcomeMode` "off" and "explicit" silence all of it — including the neutral record, which
+ * is implicit attribution as much as the +0.2 is.
  *
  * @param {Record<string, any>} cfg @param {string} runId @param {string} agentId
  * @param {string} promptId
  */
 async function sendOutcome(cfg, runId, agentId, promptId) {
   try {
-    const mode = str(cfg.outcomeMode);
-    if (mode === 'off' || mode === 'explicit') return;
+    if (!implicitOutcomesEnabled(cfg)) return;
     if (!promptId) return;
 
     const p = join(runDir(cfg, runId), 'turns', `${safeSegment(promptId)}.json`);
     const turn = readJson(p, null);
-    if (!turn || typeof turn !== 'object' || Array.isArray(turn)) return;
 
-    // Already attributed by an earlier drain. The key below makes a re-post a server-side
-    // no-op anyway, but there is no reason to spend the round trip.
-    if (numOr(turn.outcome_sent_at, 0) > 0) return;
-
-    const entryIds = Array.isArray(turn.recalled)
-      ? turn.recalled.filter((v) => typeof v === 'string' && v.trim())
-      : [];
-    if (entryIds.length === 0) return;
-
-    // A post that the server accepted but answered too late to be heard leaves the turn
-    // pending, and the turn stays pending until *something* gets a response — so the next
-    // drain posts it again, and `session-end` again after that. The stable key means the
-    // server can collapse those, but "can" is a property of the other end that this process
-    // never observes, and reinforcement is not something to spend on faith. Count the
-    // attempts locally, in the file, before dialling, and stop.
-    const attempts = numOr(turn.outcome_attempts, 0);
-    if (attempts >= MAX_OUTCOME_ATTEMPTS) {
-      // Stop trying, and stop claiming it is pending: nobody is going to send this.
-      writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
-      log(cfg, 'warn', `drain: outcome abandoned after ${attempts} attempts`, {
+    const decision = decideOutcome(turn);
+    if (!decision.post) {
+      // One reason needs the file changed: nothing is going to send this turn's outcome, so
+      // it must stop claiming to be pending.
+      if (decision.reason === 'attempts_exhausted') {
+        writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
+      }
+      log(cfg, 'debug', `drain: no outcome to post (${decision.reason})`, {
         run_id: runId, prompt_id: promptId,
       });
       return;
     }
+
+    // Counted before dialling, in the file. See MAX_OUTCOME_ATTEMPTS.
+    const attempts = numOr(turn.outcome_attempts, 0);
     writeJsonAtomic(p, { ...turn, outcome_attempts: attempts + 1 });
 
-    // The turn file records how the turn ended, so the drain never has to re-derive it.
-    const failed = str(turn.outcome).toLowerCase() === 'failure';
-
-    const res = await postOutcome(cfg, {
-      run_id: runId,
-      reference_id: RUN_LEVEL_REFERENCE,
-      outcome: failed ? 'failure' : 'success',
-      signal: failed ? SIGNAL_FAILURE : SIGNAL_SUCCESS,
-      rationale: failed
-        ? 'Claude Code turn ended in failure after these memories were injected.'
-        : 'Claude Code turn completed after these memories were injected.',
-      agent_id: agentId,
-      entry_ids: entryIds,
-      // Derived from (run_id, prompt_id), never random, so every re-post of this outcome
-      // carries one key for the server to collapse.
-      idempotency_key: `cc-outcome-${runId}-${promptId}`,
-      // Deliberately no `retry`. The transport's one silent re-dial on timeout doubles a
-      // post that may already have landed, inside the same second — the widest part of the
-      // window, and the least useful, since the next drain retries anyway.
-    }, { timeoutMs: numOr(cfg.timeoutMs, 4000) });
+    const res = await postOutcome(cfg, outcomeRequest({ runId, agentId, promptId, decision }),
+      // Deliberately no `retry`. The transport's one silent re-dial on timeout doubles a post
+      // that may already have landed, inside the same second — the widest part of the window,
+      // and the least useful, since the next drain retries anyway.
+      { timeoutMs: numOr(cfg.timeoutMs, 4000) });
 
     if (res.ok) {
       writeJsonAtomic(p, {

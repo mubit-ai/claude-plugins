@@ -16,10 +16,12 @@
  *   node scripts/mcp-probe.mjs --call mubit_status --args '{}'
  *   node scripts/mcp-probe.mjs --json                   # machine-readable
  *
- * `--server` is the one that matters before a release: the committed `mcp/dist/server.js` is
- * bundled from the *published* `@mubit-ai/mcp`, so it does not carry the §8.1 allowlist patch
- * until that package ships. Point `--server` at a locally built copy of that package to see
- * what the plugin will do once it does.
+ * `--server` swaps in a different server bundle without touching the committed one. It used
+ * to be the flag that mattered most: `mcp/dist/server.js` was bundled from the *published*
+ * `@mubit-ai/mcp`, which predated the §8.1 allowlist patch, so the committed server ignored
+ * `MUBIT_MCP_TOOLS` and this probe printed all 21 tools. It is now built from the in-repo
+ * package (`esbuild.config.mjs`) and prints ten. Use `--server` to compare against another
+ * build — a published tarball, or a branch you are patching.
  *
  * Reads `MUBIT_ENDPOINT` / `MUBIT_API_KEY` from the environment, so a stored credential from
  * `/mubit-memory:auth` is not enough on its own — export them for this one command. Never
@@ -174,6 +176,10 @@ function report(r, opt) {
   if (version === '0.1.0') {
     process.stdout.write('\nnote: version "0.1.0" is the pre-§8.1 hardcode — this server predates the '
       + 'allowlist patch, so MUBIT_MCP_TOOLS is inert and every tool registers.\n');
+  } else if (version === '0.0.0-unpackaged') {
+    process.stdout.write('\nnote: "0.0.0-unpackaged" means the server could not read its own version. It '
+      + 'reads `../package.json`, which does not resolve once bundled to mcp/dist/server.js, so the '
+      + 'launcher passes MUBIT_MCP_VERSION in — and did not. Rebuild with `npm run build`.\n');
   }
   if (r.called) {
     process.stdout.write(`\n${opt.call} →\n`);

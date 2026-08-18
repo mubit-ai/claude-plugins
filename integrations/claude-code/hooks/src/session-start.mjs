@@ -48,8 +48,18 @@ import { dataDir, readJson, writeJsonAtomic } from '../../lib/state.mjs';
 const BUDGET_MS = 2500;
 const HARNESS_BUDGET_MS = 3200;
 
-/** §5.1 sub-budgets. Each is clamped to whatever is left of BUDGET_MS. */
-const HEALTH_MS = 400;
+/**
+ * §5.1 sub-budgets. Each is clamped to whatever is left of BUDGET_MS.
+ *
+ * `HEALTH_MS` is derived from the envelope rather than pinned at a number, because the number
+ * was wrong and silently so. At 400 ms inside a 2500 ms budget, a healthy instance answering
+ * in 700 ms read as `not_responding`: the session opened by telling the model memory was
+ * offline and recall was unavailable, and then skipped the global-lessons fetch — whose own
+ * budget is 900 ms and which answers in ~140 ms. Every fresh container pays a cold TLS
+ * handshake, so the overrun was routine rather than exceptional. Half the envelope is the
+ * honest share for the one probe whose failure suppresses everything after it.
+ */
+const HEALTH_MS = Math.round(BUDGET_MS * 0.5);
 const REGISTER_MS = 600;
 const LESSONS_MS = 900;
 

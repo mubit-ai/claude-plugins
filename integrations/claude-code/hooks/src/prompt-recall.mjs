@@ -389,7 +389,10 @@ async function rungThree(cfg, o) {
 function fromEvidence(cfg, responseBody, rung) {
   const b = isObject(responseBody) ? responseBody : {};
   const evidence = Array.isArray(b.evidence) ? b.evidence : [];
-  const a = assembleContext(evidence, { tokenBudget: intOr(cfg.recallTokenBudget, 1500) });
+  const a = assembleContext(evidence, {
+    tokenBudget: intOr(cfg.recallTokenBudget, 1500),
+    perSection: intOr(cfg.recallMaxPerSection, 0),
+  });
   return {
     failed: false,
     rung,

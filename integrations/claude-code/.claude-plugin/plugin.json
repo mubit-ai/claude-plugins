@@ -25,6 +25,8 @@
       "description": "Scrub secrets and denylisted paths before anything leaves the machine. Turning this off is not recommended." },
     "recallTokenBudget": { "type": "number", "title": "Recall token budget", "default": 1500,
       "description": "Maximum tokens of recalled context injected per prompt." },
+    "recallMaxPerSection": { "type": "number", "title": "Recall items per section", "default": 0,
+      "description": "Maximum items rendered per section of the injected block. 0 means no cap, and the token budget is the only limit." },
     "recallAssemble": { "type": "string", "title": "Recall assembly", "default": "client",
       "description": "How recalled memory is assembled: 'client' is free; 'server' uses /v2/control/context, which costs two LLM calls per prompt." },
     "reflectOnEnd": { "type": "boolean", "title": "Reflect on session end", "default": true,

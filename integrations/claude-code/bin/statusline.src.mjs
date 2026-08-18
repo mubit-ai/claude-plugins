@@ -44,6 +44,13 @@ import { dataDir, readJson, writeJsonAtomic } from '../lib/state.mjs';
 const LIVENESS_FILE = 'statusline-installed.json';
 
 /**
+ * Consecutive dry recalls before the line says so, mirroring §4.7's `TIMEOUT_ESCALATION`.
+ * The reasoning is the same one: a single empty recall is not a verdict — a fresh run has
+ * nothing to recall, and a narrow prompt legitimately matches nothing. A run of them is.
+ */
+const RECALL_DRY_ESCALATION = 3;
+
+/**
  * Claude Code writes the session blob and closes stdin immediately, so this only ever
  * fires when the host wedges — and even then we can still render, because the run id is
  * derivable without the payload. Short, because a per-frame widget may not stall a frame.
@@ -266,7 +273,18 @@ export function render(payload = {}) {
 
   const sources = num(recall.sources);
   const tokens = num(recall.tokens);
-  if (sources > 0 || tokens > 0 || num(recall.ms) > 0) {
+  // §16.2 — a recall path that is permanently dead must say so somewhere the user looks.
+  // Until this, the worst case rendered as a green `●` beside `recall 0/0 tok`: every hook
+  // firing, every call timing out, nothing injected, and no fault reported anywhere. That is
+  // the failure that makes a memory plugin look useless rather than broken.
+  //
+  // Not a ConnState. `resolveDisplay` merges verdicts *about the connection*, and this is a
+  // verdict about content — the connection may be perfectly healthy and the store simply
+  // unreachable by policy. So it renders as its own segment and leaves the glyph alone.
+  const dry = int(num(recall.dry_streak));
+  if (dry >= RECALL_DRY_ESCALATION) {
+    parts.push(`recall dry ${dry}`);
+  } else if (sources > 0 || tokens > 0 || num(recall.ms) > 0) {
     parts.push(`recall ${int(sources)}/${compact(tokens)} tok`);
   }
 

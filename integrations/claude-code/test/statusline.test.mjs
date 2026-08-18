@@ -217,6 +217,57 @@ test('renders the documented shape: glyph, run, mode, recall, saved, lessons', a
 });
 
 // ---------------------------------------------------------------------------
+// MUB-2 — the line has to be able to say "recall is dead"
+// ---------------------------------------------------------------------------
+
+// A run of dry recalls used to render as `recall 0/0 tok` beside a green ●: a healthy-looking
+// line describing a plugin that has injected nothing for the whole session.
+test('a run of dry recalls renders "recall dry N" instead of a healthy count', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  seedMarker(dataDir, runId, {
+    recall: { sources: 0, tokens: 0, ms: 812, empty_reason: 'policy_denied', rung: 0, dropped: 0, dry_streak: 7 },
+  });
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.match(r.line, /recall dry 7/);
+  assert.doesNotMatch(r.line, /recall 0\/0 tok/);
+});
+
+// Below the threshold it stays quiet, for the same reason one AbortError is not a verdict:
+// a fresh run has nothing to recall, and a narrow prompt legitimately matches nothing.
+test('a dry streak under the threshold does not cry wolf', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  seedMarker(dataDir, runId, {
+    recall: { sources: 6, tokens: 1200, ms: 300, empty_reason: '', rung: 1, dropped: 0, dry_streak: 2 },
+  });
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.doesNotMatch(r.line, /recall dry/);
+  assert.match(r.line, /recall 6\/1\.2k tok/);
+});
+
+// A marker written before this field existed has no `dry_streak`. It must render exactly as
+// it always did rather than printing `recall dry NaN`.
+test('a marker predating dry_streak renders unchanged', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  const m = seedMarker(dataDir, runId);
+  delete m.recall.dry_streak;
+  writeFileSync(join(dataDir, 'status', `${runId}.json`), JSON.stringify(m));
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.equal(r.line, `● mubit: ${runId} · local · recall 6/1.2k tok · saved 12t/1q · lessons 3g`);
+});
+
+// ---------------------------------------------------------------------------
 // §10 — glyph precedence: worst state wins, top to bottom
 // ---------------------------------------------------------------------------
 

@@ -701,3 +701,48 @@ test('timeout: a response inside the budget still succeeds', async (t) => {
   assert.equal(r.status, 200);
   assert.ok(r.ms >= 50, `elapsed ms should be measured, got ${r.ms}`);
 });
+
+// ---------------------------------------------------------------------------
+// MUB-9 — a deadline the client chose is not a verdict about the server
+// ---------------------------------------------------------------------------
+
+// §4.7/§5.2: `session-start`'s health slice and `prompt-recall`'s budget both dial on a
+// fraction of the configured timeout. Recording those aborts escalated the marker to
+// `not_responding` and, past the threshold, opened the breaker — which also suppresses the
+// capture drain. A dead recall path must not throttle capture as a side effect.
+test('breaker: an abort on a caller-squeezed budget is not recorded', async (t) => {
+  const { cfg, http } = await setup(t, {
+    routes: { 'POST /v2/control/query': { delayMs: 900, json: { ok: true } } },
+    extra: { MUBIT_CC_TIMEOUT_MS: '4000', MUBIT_CC_BREAKER_THRESHOLD: '3', MUBIT_CC_BREAKER_WINDOW_MS: '5000' },
+  });
+  const { readBreaker } = await lib('breaker.mjs');
+
+  for (let i = 0; i < 3; i += 1) {
+    const r = await http.request(cfg, 'POST', '/v2/control/query', { run_id: RUN }, { timeoutMs: 120 });
+    assert.equal(r.ok, false);
+    assert.equal(r.state, 'not_responding');
+  }
+
+  const b = readBreaker(cfg);
+  assert.equal(b.state, 'ready', 'three squeezed aborts must not escalate the reported state');
+  assert.equal(b.timeoutStreak, 0, 'a client-side budget must not move the timeout streak');
+  assert.equal(b.failures.length, 0, 'a client-side budget must not count toward opening the breaker');
+});
+
+// The other half of the same rule: an abort on the *full* configured budget is evidence, and
+// `drain.mjs` — the only caller that dials on it — must still be able to open the breaker.
+test('breaker: an abort on the full configured budget is still recorded', async (t) => {
+  const { cfg, http } = await setup(t, {
+    routes: { 'POST /v2/control/ingest': { delayMs: 900, json: { ok: true } } },
+    extra: { MUBIT_CC_TIMEOUT_MS: '120', MUBIT_CC_BREAKER_THRESHOLD: '3', MUBIT_CC_BREAKER_WINDOW_MS: '5000' },
+  });
+  const { readBreaker } = await lib('breaker.mjs');
+
+  for (let i = 0; i < 3; i += 1) {
+    await http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN }, { timeoutMs: 120 });
+  }
+
+  const b = readBreaker(cfg);
+  assert.equal(b.timeoutStreak, 3, 'a timeout on the whole budget is a verdict and must count');
+  assert.equal(b.state, 'not_responding', '§4.7: three in a row escalate');
+});

@@ -147,7 +147,11 @@ await runHook('session-end', {
     const reflect = await maybeReflect(cfg, {
       runId,
       budget: budgetFor(REFLECT_MS, HEARTBEAT_MS),
-      anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0,
+      // Evidence *in flight* counts. When another drainer holds the lock this hook defers to
+      // it and reaches here before that drainer commits, so the marker's ingest count is stale
+      // by design. The spool is the only term that sees the work that is about to land.
+      anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0
+        || spoolStats(cfg, runId).count > 0,
     });
 
     // §5.7 step 5 — the agent is not gone, it is idle; re-registering it next session is
@@ -163,7 +167,10 @@ await runHook('session-end', {
     updateMarker(cfg, runId, {
       mode: cfg.mode,
       captured: { pending: spoolStats(cfg, runId).count },
-      ...(reflect.attempted ? { reflect: { at: reflect.at, lessons_stored: reflect.lessons, status: reflect.status } } : {}),
+      // Written unconditionally: a conditional block makes `status: ""` ambiguous between
+      // "reflect was skipped" and "this hook never reached the marker write". After this, a
+      // blank status means exactly the second — the hook was killed with its own work.
+      reflect: { at: reflect.at, lessons_stored: reflect.lessons, status: reflect.status },
       ...(reflect.error ? { last_error: reflect.error.slice(0, 200) } : {}),
     });
 
@@ -403,22 +410,26 @@ async function flushOutcomes(cfg, o) {
  *
  * A failure is logged and recorded as `reflect: failed`, never surfaced as a blocking error.
  *
+ * Every exit stamps a `status`, so the marker can tell the skip reasons apart:
+ * `skipped:disabled`, `skipped:not-ingested`, `failed`, `ok`. A blank status in a written
+ * marker is therefore impossible — it means the hook died before the marker write.
+ *
  * @param {Record<string, any>} cfg
  * @param {{runId: string, budget: number, anythingIngested: boolean}} o
  * @returns {Promise<{attempted: boolean, status: string, lessons: number, at: number, error: string}>}
  */
 async function maybeReflect(cfg, o) {
-  const idle = { attempted: false, status: '', lessons: 0, at: 0, error: '' };
+  const idle = { attempted: false, status: 'skipped', lessons: 0, at: 0, error: '' };
 
   if (cfg.reflectOnEnd === false) {
     log(cfg, 'info', 'session-end: reflect disabled by MUBIT_CC_REFLECT_ON_END=0 — this session\'s '
       + 'lessons stay at run scope', { run_id: o.runId });
-    return idle;
+    return { ...idle, at: Date.now(), status: 'skipped:disabled' };
   }
   if (!o.anythingIngested) {
     log(cfg, 'debug', 'session-end: nothing ingested this session; nothing to reflect on',
       { run_id: o.runId });
-    return idle;
+    return { ...idle, at: Date.now(), status: 'skipped:not-ingested' };
   }
   if (o.budget <= 0) {
     log(cfg, 'warn', 'session-end: no budget left for reflect; this session\'s lessons stay at run scope',

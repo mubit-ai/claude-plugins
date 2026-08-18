@@ -100,8 +100,7 @@ test('rung 1 request body matches §5.2 exactly', async (t) => {
 
   const body = server.lastCall('POST', '/v2/control/query').body;
   assert.equal(body.run_id, RUN_ID);
-  assert.equal(typeof body.agent_id, 'string');
-  assert.ok(body.agent_id.startsWith('claude-code-'), `agent_id was "${body.agent_id}"`);
+  assert.equal(body.agent_id, 'claude-code', `agent_id was "${body.agent_id}"`);
   assert.equal(body.query, PROMPT);
   assert.equal(body.mode, 'direct_bypass');
   assert.equal(body.direct_lane, 'semantic_search');

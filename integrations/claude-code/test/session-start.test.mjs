@@ -113,7 +113,7 @@ test('register body carries run_id, agent_id, role, status and capabilities', as
   assert.deepEqual(body.capabilities, ['code', 'shell', 'edit', 'search']);
   // §1.3 — run_id and agent_id are mandatory on StateAgentRegisterRequestPayload.
   assert.match(body.run_id, /^cc-/);
-  assert.match(body.agent_id, /^claude-code-/);
+  assert.equal(body.agent_id, 'claude-code');
   // §4.3 — the MCP server's `MUBIT_DEFAULT_SESSION_ID` default collapses every
   // project into one run. No strategy may ever emit it.
   assert.notEqual(body.run_id, 'default');

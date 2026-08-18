@@ -102,7 +102,7 @@ test('--pre posts /v2/control/checkpoint with run_id, agent_id, label, snapshot 
 
   const body = server.lastCall('POST', '/v2/control/checkpoint').body;
   assert.equal(body.run_id, RUN_ID);
-  assert.match(body.agent_id, /^claude-code-/);
+  assert.equal(body.agent_id, 'claude-code');
   assert.match(body.label, /^claude-code-precompact-\d+$/);
   assert.equal(typeof body.context_snapshot, 'string');
   assert.ok(body.context_snapshot.length > 0, 'the snapshot is the whole point');

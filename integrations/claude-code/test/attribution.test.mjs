@@ -105,7 +105,7 @@ test('recall → stop → drain attributes the outcome to the recalled reference
   assert.equal(body.outcome, 'success');
   assert.equal(body.signal, 0.2,
     'the implicit signal is deliberately weak — a turn completing is not proof the memory helped');
-  assert.ok(body.agent_id.startsWith('claude-code-'));
+  assert.equal(body.agent_id, 'claude-code', 'the outcome is attributed to the role, not the session');
   assert.ok(typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0);
 
   // THE assertion. reference_id, not id.

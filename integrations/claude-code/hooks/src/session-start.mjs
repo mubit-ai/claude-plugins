@@ -171,6 +171,13 @@ await runHook('session-start', {
     }
 
     // §5.1 step 5 — register, or heartbeat on a resume.
+    //
+    // This is also the first call of the session that proves anything about the key. Health
+    // is allowlisted before authentication — it answers `OK` for a wrong key, an expired key
+    // and no key at all — so on its own it cannot support the claim the steer block makes.
+    // A failure here that names the credential is therefore not just logged: it decides
+    // which block the model gets.
+    let authError = '';
     const resuming = sourceOf(payload) === 'resume';
     const identity = { run_id: runId, agent_id: agentId };
     const regBudget = budgetFor(REGISTER_MS);
@@ -186,6 +193,7 @@ await runHook('session-start', {
       if (!ires.ok) {
         log(cfg, 'warn', `session-start: ${resuming ? 'heartbeat' : 'register'} failed (${ires.error})`,
           { run_id: runId });
+        if (connState(ires.state) === 'auth_failed') authError = String(ires.error ?? '');
       }
     }
 
@@ -198,7 +206,31 @@ await runHook('session-start', {
       const lres = await postLessons(cfg, { scope: 'global', limit: LESSON_LIMIT },
         { timeoutMs: lessonBudget });
       if (lres.ok) lessons = readLessons(lres.body);
-      else log(cfg, 'info', `session-start: global lessons unavailable (${lres.error})`, { run_id: runId });
+      else {
+        log(cfg, 'info', `session-start: global lessons unavailable (${lres.error})`, { run_id: runId });
+        if (!authError && connState(lres.state) === 'auth_failed') authError = String(lres.error ?? '');
+      }
+    }
+
+    // An authenticated call came back saying the credential is not good. Nothing this session
+    // sends will land and nothing will be recalled, so saying "memory is active" would be a
+    // straight falsehood — and the kind the model cannot check.
+    if (authError) {
+      updateMarker(cfg, runId, {
+        mode: cfg.mode,
+        state: 'auth_failed',
+        last_error: authError.slice(0, 300),
+      });
+      log(cfg, 'warn', 'session-start: the API key was rejected', { run_id: runId });
+      /** @type {Record<string, any>} */
+      const out = {
+        hookSpecificOutput: {
+          hookEventName: 'SessionStart',
+          additionalContext: unauthenticatedBlock(cfg, runId),
+        },
+      };
+      out.systemMessage = statusLineHint || `mubit: auth failed${DOT}capture buffered`;
+      return out;
     }
 
     // §5.1 step 7.
@@ -265,18 +297,6 @@ function steerBlock(cfg, runId, lessons) {
 }
 
 /**
- * §5.1 "Failure": the model is told, in the same channel it would have received memory in,
- * that there is none this session — and that its work is still being kept.
- *
- * Deliberately carries no lesson section: nothing was fetched, and an empty "Standing
- * lessons" heading reads as "this project has learned nothing", which is a different claim.
- *
- * @param {Record<string, any>} cfg
- * @param {string} runId
- * @param {string} state
- * @returns {string}
- */
-/**
  * §5.1, the "there is no instance" case — distinct from `offlineBlock` because the two are
  * different claims and the model acts on the difference. Offline means work is buffered and
  * will be sent when Mubit answers; here nothing is going to answer until a person runs one
@@ -302,6 +322,41 @@ function unconfiguredBlock(cfg, runId) {
   ].join('\n');
 }
 
+/**
+ * §5.1 "Failure", the case health cannot see. The endpoint answers, so it is not offline and
+ * it is not unconfigured — the key is simply not accepted. Naming that precisely is the
+ * difference between a user who runs one command and a user who files a bug about memory
+ * being empty.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @returns {string}
+ */
+function unauthenticatedBlock(cfg, runId) {
+  return [
+    '# Mubit memory is not authenticated',
+    '',
+    `Run: ${runId} (${cfg.mode})`,
+    'Mubit rejected this machine\'s API key, so no memory will be injected this session and '
+      + 'recall is unavailable — do not search for it, and do not assume anything was recalled.',
+    'Work is still captured and buffered locally. Run /mubit-memory:auth to sign in again; '
+      + 'what has been buffered is sent once the key is accepted.',
+    '',
+  ].join('\n');
+}
+
+/**
+ * §5.1 "Failure": the model is told, in the same channel it would have received memory in,
+ * that there is none this session — and that its work is still being kept.
+ *
+ * Deliberately carries no lesson section: nothing was fetched, and an empty "Standing
+ * lessons" heading reads as "this project has learned nothing", which is a different claim.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {string} state
+ * @returns {string}
+ */
 function offlineBlock(cfg, runId, state) {
   return [
     '# Mubit memory is offline',

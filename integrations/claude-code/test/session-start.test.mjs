@@ -379,6 +379,56 @@ test('source=fork reuses the parent session record run', async (t) => {
 
 // §5.1 step 4: health not ok -> skip register and lessons, but STILL steer, so the
 // model knows memory is offline instead of inventing recall it never received.
+/**
+ * The gap health cannot close. `GET /v2/core/health` is allowlisted before authentication —
+ * it answers `OK` for a wrong key, an expired key, and no key at all — so a session whose
+ * credential is rejected used to open with "Mubit memory is active" and then silently recall
+ * nothing all session. The first authenticated call of the session is the one that knows,
+ * and now it is the one that decides.
+ */
+test('a rejected key produces the unauthenticated block, not "memory is active"', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/agents/register': { status: 401, json: { error: 'invalid api key' } },
+    'POST /v2/control/lessons': { status: 401, json: { error: 'invalid api key' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  // Health said OK — the point of the test is that this is no longer enough.
+  server.assertCalled('GET', '/v2/core/health', 1);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /not authenticated/i);
+  assert.ok(!/memory is active/i.test(ctx), 'the steer must not claim memory is working');
+  assert.match(ctx, /do not assume anything was recalled/i);
+  assert.match(ctx, /mubit-memory:auth/, 'the user needs the one command that fixes it');
+  // Capture keeps running: the work is buffered, not dropped.
+  assert.match(ctx, /captured and buffered/i);
+
+  assert.equal(readMarker(dataDir).state, 'auth_failed');
+});
+
+/** A transport hiccup on register is not an authentication verdict, and must not read as one. */
+test('a register failure that is not about the key leaves the steer block alone', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/agents/register': { status: 500, json: { error: 'boom' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /memory is active/i);
+  assert.ok(!/not authenticated/i.test(ctx));
+});
+
 test('health down skips register and lessons but still emits a steer block', async (t) => {
   const server = await fakeMubit({ 'GET /v2/core/health': { status: 503, text: 'unavailable' } });
   t.after(() => server.close());

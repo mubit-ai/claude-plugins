@@ -20,7 +20,7 @@ import { readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  runHook, assertHookContract, fakeMubit, makeDataDir, makeProjectDir,
+  runHook, assertHookContract, assertWithinBudget, fakeMubit, makeDataDir, makeProjectDir,
   baseEnv, readJsonFile,
 } from './helpers/harness.mjs';
 import * as fx from './helpers/fixtures.mjs';
@@ -524,5 +524,8 @@ test('a lessons call past its 900ms sub-budget degrades only that section', asyn
     'the lesson section is dropped, not waited for');
 
   // The 2500 ms whole-hook budget still holds; the 900 ms sub-budget is what expired.
-  assert.ok(r.ms < 3200, `session-start took ${r.ms}ms, past its 2500ms internal budget`);
+  await assertWithinBudget('session-start', 3200, r.ms, async () => (await runHook(
+    'session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(makeDataDir(), server.url) },
+  )).ms);
 });

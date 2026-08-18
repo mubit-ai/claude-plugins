@@ -443,16 +443,62 @@ export async function runHook(name, payload, opts = {}) {
 }
 
 /**
- * Assert the universal hook contract: exit 0, and stdout is either empty or
- * parseable JSON. Every hook in this plugin satisfies this in every mode,
- * including every failure mode (§4.9).
+ * Top-level keys Claude Code accepts in hook stdout, and the events for which it accepts a
+ * `hookSpecificOutput` block at all.
+ *
+ * This mirrors an external contract — https://code.claude.com/docs/en/hooks — rather than
+ * anything this repo controls, so it can drift when the host changes. It is written down here
+ * because the alternative was worse: nothing in the suite knew what the host would accept, and
+ * `hooks/src/checkpoint.mjs` shipped a `hookSpecificOutput` for `PostCompact`, an event that
+ * takes universal fields only. The host answered every compaction with
+ * `Hook JSON output validation failed — (root): Invalid input`, and 765 green tests said
+ * nothing, because the test asserted the shape the hook emitted instead of the shape the host
+ * takes.
+ *
+ * Deliberately shallow: this checks that a block is *admissible for its event*, not each
+ * event's inner fields. The bug class worth catching is "this event has no such channel".
+ */
+const HOOK_STDOUT_KEYS = new Set([
+  'continue', 'suppressOutput', 'stopReason', 'decision', 'reason',
+  'systemMessage', 'terminalSequence', 'permissionDecision', 'hookSpecificOutput',
+]);
+
+/** Events that accept a `hookSpecificOutput` block. `PostCompact` is not one of them. */
+const HOOK_SPECIFIC_EVENTS = new Set([
+  'PreToolUse', 'UserPromptSubmit', 'PostToolUse', 'PostToolBatch',
+  'Stop', 'SubagentStop', 'SessionStart',
+]);
+
+/**
+ * Assert the universal hook contract: exit 0, stdout is either empty or parseable JSON, and
+ * what it parses to is a shape the host will actually accept. Every hook in this plugin
+ * satisfies this in every mode, including every failure mode (§4.9).
  * @param {HookResult} r
  */
 export function assertHookContract(r) {
   assert.equal(r.code, 0, `hook must exit 0, got ${r.code}. stderr:\n${r.stderr}`);
-  if (r.stdout.trim()) {
-    assert.notEqual(typeof r.json, 'string',
-      `stdout must be JSON, got:\n${r.stdout}`);
+  if (!r.stdout.trim()) return;
+  assert.notEqual(typeof r.json, 'string',
+    `stdout must be JSON, got:\n${r.stdout}`);
+  if (!r.json || typeof r.json !== 'object') return;
+
+  for (const key of Object.keys(r.json)) {
+    assert.ok(HOOK_STDOUT_KEYS.has(key),
+      `stdout carries \`${key}\`, which is not a key the host accepts; it rejects the whole `
+      + `object and reports the hook as failed. Got:\n${r.stdout}`);
+  }
+
+  const hso = r.json.hookSpecificOutput;
+  if (hso === undefined) return;
+  assert.ok(hso && typeof hso === 'object', '`hookSpecificOutput` must be an object');
+  assert.ok(HOOK_SPECIFIC_EVENTS.has(hso.hookEventName),
+    `\`hookSpecificOutput\` is not accepted for \`${hso.hookEventName}\` — that event takes the `
+    + 'universal fields only (`systemMessage` and friends). Emitting it fails the host\'s schema '
+    + 'validation, so the hook is reported broken and everything it wanted to say is dropped. '
+    + 'See https://code.claude.com/docs/en/hooks.');
+  if (hso.hookEventName === 'UserPromptSubmit') {
+    assert.equal(typeof hso.additionalContext, 'string',
+      'UserPromptSubmit requires `additionalContext` when it emits a `hookSpecificOutput`');
   }
 }
 

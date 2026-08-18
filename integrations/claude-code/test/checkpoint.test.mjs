@@ -254,9 +254,14 @@ test('--pre failure emits the exact checkpoint-failed systemMessage and exits 0'
 // --post
 // ---------------------------------------------------------------------------
 
-// §5.6 — PostCompact re-anchors the freshly compacted context to the stored id.
-// It reads `checkpoints.json` and dials nothing; 800 ms is not a network budget.
-test('--post references the stored checkpoint_id with no network call', async (t) => {
+// §5.6 — PostCompact names the stored id once the session has been compacted. It reads
+// `checkpoints.json` and dials nothing; 800 ms is not a network budget.
+//
+// The channel is `systemMessage`, and that is not a stylistic choice: the host accepts
+// `hookSpecificOutput` for `SessionStart` and `UserPromptSubmit` (among others) but not for
+// `PostCompact`, and rejects the entire object when one appears — so the version of this test
+// that asserted `additionalContext` was pinning a shape that failed in every real session.
+test('--post names the stored checkpoint_id in a systemMessage, with no network call', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -269,15 +274,16 @@ test('--post references the stored checkpoint_id with no network call', async (t
   assert.equal(server.requests.length, 0,
     `--post must not dial: ${server.requests.map((q) => `${q.method} ${q.path}`).join(', ')}`);
 
-  const out = r.json.hookSpecificOutput;
-  assert.equal(out.hookEventName, 'PostCompact');
-  assert.ok(out.additionalContext.includes('ckpt_seeded_9'),
-    `additionalContext must name the stored checkpoint, got:\n${out.additionalContext}`);
-  assert.ok(out.additionalContext.includes(RUN_ID), 'and the run it belongs to');
+  assert.equal(r.json.hookSpecificOutput, undefined,
+    'PostCompact takes universal fields only; a `hookSpecificOutput` here is rejected wholesale');
+  const msg = r.json.systemMessage;
+  assert.equal(typeof msg, 'string', `--post must speak through systemMessage, got:\n${r.stdout}`);
+  assert.ok(msg.includes('ckpt_seeded_9'), `it must name the stored checkpoint, got:\n${msg}`);
+  assert.ok(msg.includes(RUN_ID), 'and the run it belongs to');
 });
 
 // §5.6 — with nothing stored there is nothing to anchor to. Degrade quietly rather than
-// injecting "checkpoint undefined holds your context", which is worse than silence.
+// saying "checkpoint undefined holds your context", which is worse than silence.
 test('--post with no stored checkpoint degrades quietly', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
@@ -288,9 +294,9 @@ test('--post with no stored checkpoint degrades quietly', async (t) => {
 
   assertHookContract(r);
   assert.equal(server.requests.length, 0);
-  const ctx = r.json?.hookSpecificOutput?.additionalContext;
-  if (ctx !== undefined) {
-    assert.ok(!/undefined|null/.test(ctx), `emitted a placeholder id: ${ctx}`);
+  const msg = r.json?.systemMessage;
+  if (msg !== undefined) {
+    assert.ok(!/undefined|null/.test(msg), `emitted a placeholder id: ${msg}`);
   }
 });
 

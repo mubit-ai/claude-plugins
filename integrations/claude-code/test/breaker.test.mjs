@@ -13,8 +13,9 @@
  *   2. `auth_failed` is sticky and never feeds the failure-count breaker. Opening a breaker
  *      on a 401 hides the single error the user can actually fix.
  *
- * Every window/cooldown is shrunk through `MUBIT_CC_BREAKER_*` (§6.1) — this file must
- * never sleep for real seconds.
+ * Every window/cooldown is set through `MUBIT_CC_BREAKER_*` (§6.1). Shrinking them is how this
+ * file avoids sleeping for real seconds — but not the cooldown, which is long by default and
+ * short only in the three tests that sleep through it deliberately. See `TIGHT` for why.
  */
 
 import test from 'node:test';
@@ -38,12 +39,34 @@ const CONN_STATES = [
  */
 const CLASSIFIABLE = CONN_STATES.filter((s) => s !== 'unconfigured');
 
-/** Tiny breaker parameters so the whole file runs in well under a second. */
+/**
+ * Small breaker parameters so the file stays quick — except the cooldown, which is long on
+ * purpose.
+ *
+ * Almost every test here opens the breaker and then asserts it is open. That assertion is a
+ * race against the cooldown: the breaker half-opens on its own once the cooldown elapses, so a
+ * short one turns "is it open?" into "did the assertion run fast enough?". At 40 ms it did not,
+ * under a runner that executes 28 files concurrently — `recordFailure` writes a file, the next
+ * line reads it back, and 40 ms of scheduling delay in between is ordinary. The breaker had
+ * quietly earned a probe and `allowRequest` correctly returned `true`.
+ *
+ * A cooldown no test can outrun costs nothing, because a test that is not sleeping through it
+ * does not care how long it is. The three that *do* exercise the half-open probe opt into a
+ * short one by name, and pay for it in sleeps.
+ */
 const TIGHT = {
   MUBIT_CC_BREAKER_THRESHOLD: '3',
   MUBIT_CC_BREAKER_WINDOW_MS: '5000',
-  MUBIT_CC_BREAKER_COOLDOWN_MS: '40',
+  MUBIT_CC_BREAKER_COOLDOWN_MS: '60000',
 };
+
+/**
+ * For the half-open tests only. Wide enough that two consecutive calls cannot straddle it under
+ * a loaded runner, short enough to sleep through three times without noticing.
+ */
+const PROBE_COOLDOWN = { MUBIT_CC_BREAKER_COOLDOWN_MS: '400' };
+const PROBE_WINDOW_MS = 400;
+const PAST_COOLDOWN_MS = 450;
 
 const LOCAL = 'https://unreachable.example.com';
 const HOSTED = 'https://mubit.example.com';
@@ -438,12 +461,16 @@ test('breaker: allowRequest is idempotent while closed', async () => {
 
 // §4.7 / §12.6: the window is rolling — failures older than it drop out and stop counting.
 // Without expiry, five failures spread over a week would open the breaker on a healthy box.
+//
+// The window is wide for the same reason the cooldown is (see `TIGHT`): the two "fresh"
+// failures below must land inside one window as well as after the sleep, and at 40 ms a
+// scheduling stall between two file writes was enough to expire the first of them.
 test('breaker: failures older than the window expire and no longer count', async () => {
-  const { cfg, B } = await setup({ MUBIT_CC_BREAKER_WINDOW_MS: '40' });
+  const { cfg, B } = await setup({ MUBIT_CC_BREAKER_WINDOW_MS: String(PROBE_WINDOW_MS) });
 
   B.recordFailure(cfg, 'unreachable');
   B.recordFailure(cfg, 'unreachable');
-  await sleep(70);                        // both fall out of the 40 ms window
+  await sleep(PAST_COOLDOWN_MS);          // both fall out of the window
 
   B.recordFailure(cfg, 'unreachable');
   B.recordFailure(cfg, 'unreachable');
@@ -454,24 +481,28 @@ test('breaker: failures older than the window expire and no longer count', async
 });
 
 // §4.7 / F8: after the cooldown exactly one half-open probe dials; a second short-circuits.
+//
+// One of the three tests that sleeps through a cooldown, so one of the three that takes the
+// short one. It is also the sharpest case for why the default is long: it needs two
+// *consecutive* calls to land inside a single cooldown window.
 test('breaker: after the cooldown exactly one half-open probe is allowed', async () => {
-  const { cfg, B } = await setup();       // cooldown 40 ms
+  const { cfg, B } = await setup(PROBE_COOLDOWN);
   for (let i = 0; i < 3; i++) B.recordFailure(cfg, 'unreachable');
   assert.equal(B.allowRequest(cfg), false, 'open inside the cooldown');
 
-  await sleep(60);
+  await sleep(PAST_COOLDOWN_MS);
   assert.equal(B.allowRequest(cfg), true, 'first call after the cooldown is the probe');
   assert.equal(B.allowRequest(cfg), false, 'the probe is consumed — no second dial');
 
-  await sleep(60);
+  await sleep(PAST_COOLDOWN_MS);
   assert.equal(B.allowRequest(cfg), true, 'a further cooldown earns another single probe');
 });
 
 // §4.7 / F9: a successful probe closes the breaker and clears the failure window.
 test('breaker: a successful half-open probe closes it and clears failures', async () => {
-  const { cfg, B } = await setup();
+  const { cfg, B } = await setup(PROBE_COOLDOWN);
   for (let i = 0; i < 3; i++) B.recordFailure(cfg, 'unreachable');
-  await sleep(60);
+  await sleep(PAST_COOLDOWN_MS);
   assert.equal(B.allowRequest(cfg), true);
 
   B.recordSuccess(cfg);
@@ -487,11 +518,11 @@ test('breaker: a successful half-open probe closes it and clears failures', asyn
 // §4.7: a failed probe re-opens with a FRESH openedAt, so the next probe is a full cooldown
 // away rather than immediately available.
 test('breaker: a failed half-open probe re-opens with a fresh openedAt', async () => {
-  const { cfg, B } = await setup();
+  const { cfg, B } = await setup(PROBE_COOLDOWN);
   for (let i = 0; i < 3; i++) B.recordFailure(cfg, 'unreachable');
   const firstOpenedAt = B.readBreaker(cfg).openedAt;
 
-  await sleep(60);
+  await sleep(PAST_COOLDOWN_MS);
   assert.equal(B.allowRequest(cfg), true, 'probe allowed');
   B.recordFailure(cfg, 'unreachable');
 

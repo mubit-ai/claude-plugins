@@ -496,6 +496,30 @@ const OWN_MCP_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 const PATH_KEYS = ['file_path', 'filePath', 'path', 'notebook_path', 'notebookPath', 'target_file'];
 
 /**
+ * Shell-shaped tools, and the `tool_input` keys each one actually carries.
+ *
+ * Only `Bash` holds the command. The tools that read or stop a background task identify it
+ * by handle — `{task_id, block, timeout}`, or `{bash_id, filter}` on an older host — so a
+ * check that reads `input.command` for them is dead code, which is what this used to be:
+ * the branch named `BashOutput` and then tested a field a `BashOutput` has never had.
+ *
+ * A handle is opaque, so what can carry a self-reference is what the model typed: the output
+ * `filter`, or the name it gave the task (`task_id` also accepts an agent's *name*). The
+ * command that started the shell was already judged at its own `Bash` PostToolUse.
+ *
+ * Both the current and legacy names are listed because the plugin sees whichever the running
+ * host sends, and it does not get to choose.
+ */
+const SHELL_INPUT_KEYS = {
+  Bash: ['command'],
+  BashOutput: ['task_id', 'bash_id', 'shell_id', 'filter'],
+  TaskOutput: ['task_id', 'bash_id', 'shell_id', 'filter'],
+  KillShell: ['task_id', 'shell_id'],
+  KillBash: ['task_id', 'shell_id'],
+  TaskStop: ['task_id', 'shell_id'],
+};
+
+/**
  * §4.4. Without this the plugin records its own traffic, recalls it, then
  * records the recall — and the store fills with
  * `curl https://eu.mubit.ai/v2/control/context`.
@@ -515,16 +539,20 @@ export function isSelfReference(toolName, toolInput, cfg = {}) {
 
     const roots = selfRoots(cfg);
 
-    // 2. Bash whose command mentions our endpoint or our own state.
-    if (name === 'Bash' || name === 'BashOutput') {
-      const command = typeof input.command === 'string' ? input.command : '';
-      if (command) {
-        if (command.includes('/v2/control/') || command.includes('/v2/core/')) return true;
-        if (command.includes('MUBIT_')) return true;
-        if (/mubit/i.test(command)) return true;
+    // 2. A shell-shaped tool whose input mentions our endpoint or our own state.
+    const shellKeys = Object.prototype.hasOwnProperty.call(SHELL_INPUT_KEYS, name)
+      ? SHELL_INPUT_KEYS[name]
+      : null;
+    if (shellKeys) {
+      for (const key of shellKeys) {
+        const v = input[key];
+        if (typeof v !== 'string' || !v) continue;
+        if (v.includes('/v2/control/') || v.includes('/v2/core/')) return true;
+        if (v.includes('MUBIT_')) return true;
+        if (/mubit/i.test(v)) return true;
         const hp = endpointHostPort(cfg);
-        if (hp && command.includes(hp)) return true;
-        for (const root of roots) if (command.includes(root)) return true;
+        if (hp && v.includes(hp)) return true;
+        for (const root of roots) if (v.includes(root)) return true;
       }
     }
 

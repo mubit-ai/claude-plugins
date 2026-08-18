@@ -443,6 +443,78 @@ export async function runHook(name, payload, opts = {}) {
 }
 
 /**
+ * The cost of starting `node` and doing nothing, measured now. Best of three, because the
+ * quantity wanted is the floor, not the average.
+ *
+ * Every hook budget in this suite is asserted against a *spawned child*, so every measurement
+ * carries this term whether or not anyone accounts for it. Measuring it beats the constant
+ * `failure.test.mjs:53` uses (`NODE_STARTUP_ALLOWANCE_MS = 900`) for the same reason a measured
+ * anything beats a guessed one: it is right on a fast machine and on a loaded one.
+ *
+ * @returns {number} ms
+ */
+function bareSpawnMs() {
+  const samples = [];
+  for (let i = 0; i < 3; i++) {
+    const started = Date.now();
+    spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    samples.push(Date.now() - started);
+  }
+  return Math.min(...samples);
+}
+
+/**
+ * Assert a hook's own cost stayed inside its budget, without letting the test runner's load
+ * cast the deciding vote.
+ *
+ * Two things corrupt a naive `assert.ok(r.ms < BUDGET)` here, and they compound:
+ *
+ *   1. **`npm test` is its own load.** `node --test` takes a glob and runs the suite's files
+ *      concurrently, each spawning hooks of its own. Measured during three concurrent suites,
+ *      one `capture` run ranged 180-957 ms — on identical code that costs 100 ms idle. A single
+ *      sample reports the machine, not the hook.
+ *   2. **Most of the number is not the hook.** Starting `node` costs ~47 ms idle here before
+ *      the hook's first statement. `capture` costs ~100 ms, so its own share is ~53 ms —
+ *      which is the ~40 ms §5.4 actually budgets, plus change.
+ *
+ * So the measurement is the best of a few samples *minus the spawn floor measured under the
+ * same conditions*, and `budgetMs` means "what this hook may add on top of starting node".
+ * Under the 3× load above that difference stayed within 93-310 ms while the raw wall clock
+ * passed 950 ms — noisy, because parsing a bundle contends for CPU differently than spawning
+ * does, but no longer a lottery.
+ *
+ * The fast path costs nothing: a first sample already under budget returns immediately, which
+ * is every run on an idle machine. Only a miss pays for resampling and for measuring the floor.
+ *
+ * This is a guard-rail against a gross regression — a sleep, a retry loop, a directory walk —
+ * and not a stopwatch. It is *not* what stops a hook dialing the network: the tests that care
+ * assert `server.requests.length === 0`, which is exact and cannot be talked out of by a fast
+ * local socket.
+ *
+ * `resample` must run the hook in a *fresh* data dir; the correctness assertions have already
+ * been made against the first run and must not see a second one's writes.
+ *
+ * @param {string} label            e.g. 'capture --stop'
+ * @param {number} budgetMs         allowed cost above a bare `node` spawn
+ * @param {number} firstMs          the run the test already made
+ * @param {() => Promise<number>} resample
+ * @param {number} [extraSamples]
+ */
+export async function assertWithinBudget(label, budgetMs, firstMs, resample, extraSamples = 2) {
+  if (firstMs < budgetMs) return;
+  const samples = [firstMs];
+  for (let i = 0; i < extraSamples; i++) samples.push(await resample());
+
+  const best = Math.min(...samples);
+  const floor = bareSpawnMs();
+  const own = best - floor;
+  assert.ok(own < budgetMs,
+    `${label} cost ${own}ms above a bare node spawn; budget is ${budgetMs}ms. `
+    + `Best of ${samples.length} samples was ${best}ms (${samples.map((m) => `${m}ms`).join(', ')}) `
+    + `against a ${floor}ms spawn floor measured just now. Contention inflates both terms, so a `
+    + 'difference this large is the hook, not the runner.');
+}
+/**
  * Assert the universal hook contract: exit 0, and stdout is either empty or
  * parseable JSON. Every hook in this plugin satisfies this in every mode,
  * including every failure mode (§4.9).
@@ -454,6 +526,117 @@ export function assertHookContract(r) {
     assert.notEqual(typeof r.json, 'string',
       `stdout must be JSON, got:\n${r.stdout}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// The MCP server, over real stdio
+// ---------------------------------------------------------------------------
+
+/**
+ * Speak real newline-delimited JSON-RPC to the plugin's MCP server and return what it
+ * advertises — build-guide §8.
+ *
+ * Everything else in this file stubs the server out: `test/launch.test.mjs` swaps
+ * `./server.js` for a module that snapshots `process.env`, which is the right tool for the
+ * launcher's ordering guarantee and says nothing about what the *server* then does with
+ * those values. The allowlist is only observable here, at `tools/list`, because filtering
+ * happens inside the bundle at registration time. That gap is how a server which ignores
+ * `MUBIT_MCP_TOOLS` shipped past 650 green tests.
+ *
+ * Runs `mcp/dist/index.js` — the committed bundle `.mcp.json` actually points at, not
+ * `mcp/src/launch.mjs`. The bundle is the product; there is no build step at install time.
+ *
+ * No network: the endpoint is port 1, where nothing listens. `tools/list` is answered from
+ * the server's local tool table, so no request is ever made. The API key is a fixture the
+ * launcher only has to find non-empty, and the data dir is a fresh temp tree — a test that
+ * resolved the real one would write its fixture config into the developer's own install.
+ *
+ * @param {{extra?: Record<string,string>, timeoutMs?: number}} [opts]
+ *   `extra` overrides env (e.g. `MUBIT_MCP_TOOLS`) for this launch only.
+ * @returns {Promise<{server: any, tools: any[], names: string[], stderr: string}>}
+ */
+export async function mcpListTools(opts = {}) {
+  const entry = join(PLUGIN_ROOT, 'mcp', 'dist', 'index.js');
+  if (!existsSync(entry)) {
+    throw new Error(`mcp/dist/index.js does not exist yet: ${entry}\n  Run \`npm run build\`.`);
+  }
+
+  const env = baseEnv({
+    dataDir: makeDataDir(),
+    endpoint: 'http://127.0.0.1:1',
+    apiKey: 'mbt_test_0123456789abcdef_deadbeefcafebabe0123456789abcdef',
+    extra: {
+      // The launcher refuses to import the server at all if deriveRunId throws, and a
+      // per-directory derivation over a temp dir is a git call this test does not need.
+      MUBIT_CC_RUN_STRATEGY: 'static',
+      MUBIT_CC_RUN_ID: 'mcp-surface-test-run',
+      ...(opts.extra ?? {}),
+    },
+  });
+
+  const child = spawn(process.execPath, [entry], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const timeoutMs = opts.timeoutMs ?? 15_000;
+
+  let buf = '', stderr = '', settled = false;
+  child.stderr.on('data', (d) => { stderr += d; });
+
+  return new Promise((res, rej) => {
+    const finish = (fn, v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      fn(v);
+    };
+    const fail = (why) => finish(rej, new Error(`${why}\n  server stderr:\n${stderr || '(silent)'}`));
+    const timer = setTimeout(() => fail(`MCP server did not answer tools/list within ${timeoutMs}ms`), timeoutMs);
+    const send = (msg) => child.stdin.write(`${JSON.stringify(msg)}\n`);
+
+    // A bundle Node cannot parse dies here rather than answering — the failure a test that
+    // imports the source can never see.
+    child.on('error', (e) => fail(`could not spawn the MCP server: ${e.message}`));
+    child.on('close', (code) => fail(`the MCP server exited (code ${code}) before answering`));
+
+    let init = null;
+    child.stdout.on('data', (d) => {
+      buf += d;
+      for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let msg;
+        // Anything on stdout that is not a JSON-RPC frame is itself the bug: on a stdio
+        // transport that channel carries the protocol and one stray byte breaks the host.
+        try { msg = JSON.parse(line); } catch { return fail(`the server wrote non-protocol bytes to stdout: ${line}`); }
+
+        if (msg.id === 1) {
+          init = msg.result ?? null;
+          send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+          send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+        } else if (msg.id === 2) {
+          if (!msg.result) return fail(`tools/list failed: ${JSON.stringify(msg.error ?? msg)}`);
+          const tools = msg.result.tools ?? [];
+          finish(res, {
+            server: init?.serverInfo ?? null,
+            tools,
+            names: tools.map((t) => t.name).sort(),
+            stderr,
+          });
+        }
+      }
+    });
+
+    send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'mubit-plugin-test', version: '1' },
+      },
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

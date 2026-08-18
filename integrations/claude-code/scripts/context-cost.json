@@ -1,9 +1,9 @@
 {
-  "measuredAt": "2026-08-14T16:07:40.217Z",
-  "value": 5382,
+  "measuredAt": "2026-08-17T11:41:33.218Z",
+  "value": 3316,
   "cached": 0,
-  "curatedValue": 2664,
-  "allowlistHonoured": false,
+  "curatedValue": 3316,
+  "allowlistHonoured": true,
   "method": "word/number/symbol segmentation; see the header of scripts/measure-context-cost.mjs",
   "surface": {
     "allowlist": [
@@ -20,26 +20,15 @@
     ],
     "registered": [
       "mubit_archive",
-      "mubit_checkpoint",
-      "mubit_context",
       "mubit_dereference",
       "mubit_diagnose",
-      "mubit_feedback",
       "mubit_forget",
-      "mubit_handoff",
-      "mubit_ingest_status",
       "mubit_learned",
       "mubit_lessons",
-      "mubit_list_agents",
-      "mubit_memory_health",
       "mubit_outcome",
       "mubit_recall",
       "mubit_reflect",
-      "mubit_register_agent",
-      "mubit_remember",
-      "mubit_status",
-      "mubit_step_outcome",
-      "mubit_strategies"
+      "mubit_status"
     ],
     "skills": [
       "auth",
@@ -56,13 +45,13 @@
   },
   "breakdown": {
     "toolSchemas": {
-      "tokens": 4973,
-      "chars": 12688,
-      "count": 21
+      "tokens": 2907,
+      "chars": 7981,
+      "count": 10
     },
     "curatedToolSchemas": {
-      "tokens": 2255,
-      "chars": 5817,
+      "tokens": 2907,
+      "chars": 7981,
       "count": 10
     },
     "skillFrontmatter": {

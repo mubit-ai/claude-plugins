@@ -143,7 +143,13 @@ test('only the entries that survived the token budget are attributed', async (t)
   assert.deepEqual(turn.recalled, ['ref_rule_1'],
     'a 150-token budget holds one ~100-token item; active_rules fills first');
 
-  assertHookContract(await runHook('capture', stop(), { env: e, args: ['--stop'] }));
+  // The reply has to show the model actually used what survived the budget, or the turn is
+  // an *ignored* injection and `drain` records it as neutral with no entry_ids — correctly,
+  // and this test would then be asserting the budget property through a scenario that never
+  // reaches it. The default `stop()` message answers a different question entirely.
+  assertHookContract(await runHook('capture', stop({
+    last_assistant_message: 'Following the RULE that was recalled: nothing else fit the budget.',
+  }), { env: e, args: ['--stop'] }));
   assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', PROMPT_ID] }));
   await waitFor(() => server.countOf('POST', '/v2/control/outcome') >= 1, 5000);
 

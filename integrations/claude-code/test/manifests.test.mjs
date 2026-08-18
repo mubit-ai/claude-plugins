@@ -293,10 +293,9 @@ test('hooks.json declares all nine registrations with the right events, args and
       { script: 'prompt-recall.mjs', extraArgs: [], timeout: 3 },
       { script: 'stage-prompt.mjs', extraArgs: [], timeout: 3 },
     ],
-    PostToolUse: [
-      { script: 'capture.mjs', extraArgs: [], timeout: 3 },
-      { script: 'capture.mjs', extraArgs: [], timeout: 3 },
-    ],
+    // Exactly one, and match-all. Two groups both matching a tool would fire capture twice
+    // for that one call — see the PostToolUse matcher test below.
+    PostToolUse: [{ script: 'capture.mjs', extraArgs: [], timeout: 3 }],
     PostToolUseFailure: [{ script: 'capture.mjs', extraArgs: ['--failure'], timeout: 3 }],
     Stop: [{ script: 'capture.mjs', extraArgs: ['--stop'], timeout: 5 }],
     SubagentStop: [{ script: 'capture.mjs', extraArgs: ['--subagent'], timeout: 3 }],
@@ -321,27 +320,57 @@ test('hooks.json SessionStart matches startup|resume|clear|compact', () => {
     'SessionStart matcher must be "startup|resume|clear|compact" (§3.2)');
 });
 
-// §3.2 — two PostToolUse matcher groups: the built-in tool regex and `^mcp__.*`.
-// The mcp group deliberately also matches this plugin's own tools; capture.mjs drops
-// those in code (§4.4), because a negative lookahead in a manifest is untestable.
-test('hooks.json PostToolUse has two matcher groups: built-in tools and ^mcp__.*', () => {
+/**
+ * §3.2 — PostToolUse is ONE group, and it matches every tool.
+ *
+ * It used to be two: an anchored allowlist of eleven built-in names, and `^mcp__.*`. Both
+ * halves of that were wrong.
+ *
+ * 1. The allowlist enumerated a tool set the plugin does not own and cannot see change. The
+ *    host's names drift under it — `Task` became `Agent`, `KillShell` became `TaskStop`,
+ *    `BashOutput` became `TaskOutput` — and the only reason the renamed ones kept matching
+ *    is that the host tests a matcher against a tool's former names as well as its current
+ *    one. That is a compatibility table the plugin does not control and cannot read, and
+ *    every entry in it is one host release from going away. Meanwhile a dozen names that
+ *    never existed when the list was written (`TaskCreate`, `TaskUpdate`, `Skill`,
+ *    `SendMessage`, `Artifact`, …) had no alias to ride and were simply never captured:
+ *    459 of 7,545 calls (6.1%) over a real transcript corpus, silently dropped, with nothing
+ *    anywhere to report the loss. A rule the plugin cannot keep correct does not belong in a
+ *    manifest; the decision moves into `capture.mjs`, where it is a tested skip list (see
+ *    `test/capture.test.mjs`).
+ * 2. Two groups cannot survive one of them becoming match-all: every `mcp__*` call would
+ *    match both and fire capture twice for a single tool call. So it is exactly one.
+ *
+ * The group deliberately also matches this plugin's own MCP tools; capture drops those in
+ * code (§4.4), because a negative lookahead in a manifest is untestable.
+ */
+test('hooks.json PostToolUse declares exactly one match-all group', () => {
   const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
   const groups = hooks.hooks?.PostToolUse ?? [];
-  assert.equal(groups.length, 2,
-    'PostToolUse must declare exactly two matcher groups (built-in tool regex, then ^mcp__.*)');
+  assert.equal(groups.length, 1,
+    'PostToolUse must declare exactly ONE matcher group — a second group matching the same '
+    + 'tool fires capture twice for one call');
 
-  const builtin = String(groups[0].matcher ?? '');
-  assert.ok(builtin.startsWith('^(') && builtin.endsWith(')$'),
-    `PostToolUse builtin matcher must be a fully anchored alternation, got ${JSON.stringify(builtin)}`);
-  for (const tool of ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit',
-    'Bash', 'WebFetch', 'WebSearch', 'Task']) {
-    assert.ok(new RegExp(`\\b${tool}\\b`).test(builtin),
-      `PostToolUse builtin matcher is missing ${tool} (§3.2): ${builtin}`);
+  // The host treats an absent matcher, `""`, `"*"` and `".*"` as match-all. Anything else
+  // is an allowlist, whatever it is spelled like.
+  const matcher = groups[0].matcher;
+  assert.ok(matcher === undefined || matcher === '' || matcher === '*' || matcher === '.*',
+    `PostToolUse matcher must match every tool, got ${JSON.stringify(matcher)} — the plugin `
+    + 'cannot enumerate the host\'s tool set, so it must not try');
+
+  // The names the old allowlist could never deliver, and the ones the host has since
+  // renamed. Each one must reach capture now.
+  for (const tool of ['Read', 'Bash', 'Edit', 'Agent', 'TaskCreate', 'TaskUpdate', 'TaskStop',
+    'Skill', 'SendMessage', 'Artifact', 'TaskOutput', 'mcp__github__create_issue']) {
+    assert.ok(matchesAll(matcher, tool), `PostToolUse must match ${tool}`);
   }
-
-  assert.ok(String(groups[1].matcher ?? '').startsWith('^mcp__'),
-    `second PostToolUse group must match ^mcp__.* (§3.2), got ${JSON.stringify(groups[1].matcher)}`);
 });
+
+/** The host's rule: absent, `""`, `"*"` and `".*"` match every tool; anything else filters. */
+function matchesAll(matcher, toolName) {
+  if (matcher === undefined || matcher === '' || matcher === '*' || matcher === '.*') return true;
+  try { return new RegExp(String(matcher)).test(toolName); } catch { return false; }
+}
 
 // §11.4 — `npx` costs ~500ms of module resolution per invocation, paid on every
 // PostToolUse. A fifty-tool session would burn 25 seconds of process overhead for zero

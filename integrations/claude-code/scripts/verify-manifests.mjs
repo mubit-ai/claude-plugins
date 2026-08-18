@@ -161,8 +161,17 @@ if (hooks) {
 
   ok(hooks.hooks?.SessionStart?.[0]?.matcher === 'startup|resume|clear|compact',
     'SessionStart matcher must be "startup|resume|clear|compact" (§3.2)');
-  ok((hooks.hooks?.PostToolUse ?? []).length === 2,
-    'PostToolUse must declare exactly two matcher groups: the built-in tool regex, then ^mcp__.* (§3.2)');
+  // Exactly ONE group, matching everything. Two groups was the old shape — a built-in tool
+  // alternation plus `^mcp__.*` — and it dropped every tool the alternation had not been
+  // updated for. It is one group now rather than two match-all ones because a second group
+  // would fire capture.mjs twice for every tool call. What to capture is decided in
+  // capture.mjs, where the tool table already lives (§3.2, audit F2).
+  const postToolUse = hooks.hooks?.PostToolUse ?? [];
+  ok(postToolUse.length === 1,
+    `PostToolUse must declare exactly one match-all group (§3.2); found ${postToolUse.length}`);
+  ok(['*', '', '.*'].includes(String(postToolUse[0]?.matcher ?? '')),
+    'the PostToolUse matcher must match every tool — the host reads "", "*" and ".*" as '
+    + `match-all; found ${JSON.stringify(postToolUse[0]?.matcher)} (§3.2)`);
 }
 
 // --- .mcp.json and settings.json (§3.3, §3.4) ------------------------------

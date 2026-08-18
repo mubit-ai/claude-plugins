@@ -29,11 +29,13 @@
  *   node scripts/measure-context-cost.mjs --write         # stamp it and update marketplace.json
  *   node scripts/measure-context-cost.mjs --server <path> # measure a different server bundle
  *
- * `--server` matters before a release for the same reason it does in `mcp-probe.mjs`: the
- * committed `mcp/dist/server.js` is bundled from the *published* `@mubit-ai/mcp`, which
- * predates the §8.1 allowlist patch and therefore registers every tool it has. What that
- * server registers is what a user installing today actually pays, so that is what gets
- * declared — with the post-patch figure reported beside it.
+ * `--server` measures a different server bundle, for the same reason it exists in
+ * `mcp-probe.mjs`. What the committed server registers is what a user installing today
+ * actually pays, so that is what gets declared; `curatedValue` reports the allowlisted
+ * figure beside it. Until 0.9.1 the two differed — `mcp/dist/server.js` was bundled from the
+ * *published* `@mubit-ai/mcp`, which predates the §8.1 allowlist patch and registered all 21
+ * tools, so the declared cost was 5,382 against a curated 2,664. It is now built from the
+ * in-repo package and the two agree.
  *
  * ## The token estimate
  *
@@ -325,10 +327,12 @@ function report(r) {
 
   if (!r.allowlistHonoured) {
     process.stdout.write(
-      `\nThis server registers all ${b.toolSchemas.count} tools — it predates the §8.1 allowlist patch,\n`
-      + `so \`mcpTools\` is inert and every user pays for every tool. With the curated ten\n`
-      + `honoured the same surface costs ${r.curatedValue} tokens, ${r.value - r.curatedValue} fewer.\n`
-      + 'Re-measure and re-declare when a patched @mubit-ai/mcp publishes.\n');
+      `\nThis server registers all ${b.toolSchemas.count} tools, so \`mcpTools\` is inert and every\n`
+      + `user pays for every tool. With the curated ten honoured the same surface costs\n`
+      + `${r.curatedValue} tokens, ${r.value - r.curatedValue} fewer.\n`
+      + 'The server is bundled from the in-repo @mubit-ai/mcp, which reads MUBIT_MCP_TOOLS (§8.1).\n'
+      + 'A server that ignores it is a stale bundle — rebuild:\n'
+      + '  npm --prefix ../mcp ci && npm --prefix ../mcp run build && npm run build\n');
   }
   const chars = b.toolSchemas.chars + b.skillFrontmatter.chars + b.agentFrontmatter.chars;
   process.stdout.write(`\nDeliberate over-estimate, not a tokenizer count: ${(chars / r.value).toFixed(2)} chars/token `

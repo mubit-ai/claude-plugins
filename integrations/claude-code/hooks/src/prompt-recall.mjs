@@ -71,6 +71,7 @@ import { runHook } from '../../lib/hook.mjs';
 import { postContext, postQuery } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
+import { redactText } from '../../lib/redact.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -96,6 +97,43 @@ const ENDPOINT_HASH_LEN = 12;
 
 /** U+00B7, the separator the status line and every systemMessage share. */
 const DOT = ' · ';
+
+/**
+ * §5.5: how many of the injected block's own words the turn carries for the Stop-side
+ * used-signal. The block is capped at ~1500 tokens, so 48 distinct terms covers the head of
+ * every section that rendered; the cap exists so a pathological block cannot grow the turn
+ * file without bound.
+ */
+const MAX_RECALL_TERMS = 48;
+
+/**
+ * A term: 4-24 characters, starting with a letter. The lower bound drops the function words
+ * that carry no topic ("the", "job"); the upper bound is the first line of defence against a
+ * credential becoming a term — most are longer, and `redactText` has already had the ones
+ * that are not.
+ */
+const TERM_RE = /[A-Za-z][A-Za-z0-9_]{3,23}/g;
+
+/** How much of the prompt is tokenised for subtraction. A 10 MB paste is a prompt too. */
+const MAX_PROMPT_SCAN = 16 * 1024;
+
+/**
+ * Words that pass the shape test and mean nothing. Without them a reply that says "there
+ * are three of these" would score as an echo of the memory. Deliberately short: the prompt
+ * subtraction below removes far more, and every extra row here is a term the signal can no
+ * longer see.
+ */
+const TERM_STOPWORDS = new Set([
+  'about', 'after', 'again', 'against', 'also', 'always', 'another', 'because', 'been',
+  'before', 'being', 'between', 'both', 'called', 'does', 'doing', 'done', 'each', 'else',
+  'even', 'ever', 'every', 'from', 'have', 'here', 'html', 'http', 'https', 'into',
+  'just', 'like', 'made', 'make', 'many', 'more', 'most', 'much', 'must', 'need', 'never',
+  'next', 'once', 'only', 'other', 'over', 'part', 'same', 'says', 'send', 'sent', 'should',
+  'since', 'some', 'such', 'take', 'than', 'that', 'their', 'them', 'then', 'there', 'these',
+  'they', 'this', 'those', 'through', 'thing', 'time', 'under', 'until', 'very', 'want',
+  'well', 'were', 'what', 'when', 'where', 'which', 'while', 'will', 'with', 'without',
+  'would', 'your',
+]);
 
 /** `prompt_id` names a file, so it is untrusted input to a path. */
 const MAX_ID = 128;
@@ -190,10 +228,7 @@ await runHook('prompt-recall', {
 
     // §5.2 step 6: what was rendered is what `Stop` attributes against (§5.5). Written even
     // when it is empty — an absent key is a different value from an empty one downstream.
-    // The standing lessons injected at session start ride along on the first turn that
-    // stages ids, so that they too can be reinforced or corrected.
-    persistRecalled(cfg, runId, promptId, payload,
-      [...claimStandingLessons(cfg, runId), ...outcome.refIds]);
+    persistRecalled(cfg, runId, promptId, payload, outcome);
 
     updateMarker(cfg, runId, {
       state: 'ready',
@@ -437,14 +472,29 @@ function failure(state, error, rung) {
  * event (§5.3). The two hooks are separate processes with no ordering guarantee, so this is
  * read-modify-write, renamed into place — the mirror image of the merge on that side.
  *
+ * ---------------------------------------------------------------------------
+ * `recall`: the cost half of precision, and why it belongs on the TURN
+ * ---------------------------------------------------------------------------
+ * Everything in it was already computed a few lines above and then thrown away. The marker
+ * keeps the same numbers, but the marker is last-write-wins per RUN: a forty-prompt session
+ * leaves exactly one record, so "what did an injection cost" is answerable only for whichever
+ * prompt happened to be last. Recall fires on every prompt over 8 characters with no
+ * relevance gate; the cost of that is measured (191 tokens a turn) and the return on it is
+ * not. This is the denominator — `Stop` writes the numerator into the same file (§5.5).
+ *
+ * `terms` is the injected block's own vocabulary MINUS the prompt's, because that subtraction
+ * is what makes the Stop-side signal mean anything: a word the user typed would have come
+ * back in the reply with no memory involved at all. It is done here, where the prompt is in
+ * hand, rather than re-derived at Stop from a file that may have been truncated.
+ *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {string} promptId
  * @param {Record<string, any>} payload
- * @param {string[]} refIds
+ * @param {Outcome} outcome
  * @returns {void}
  */
-function persistRecalled(cfg, runId, promptId, payload, refIds) {
+function persistRecalled(cfg, runId, promptId, payload, outcome) {
   try {
     if (!promptId) return;
     const file = join(resolveDataDir(cfg), 'runs', safeId(runId), 'turns', `${promptId}.json`);
@@ -452,7 +502,27 @@ function persistRecalled(cfg, runId, promptId, payload, refIds) {
     const base = isObject(prev) ? prev : {};
 
     /** @type {Record<string, any>} */
-    const next = { ...base, prompt_id: promptId, recalled: [...new Set(refIds)] };
+    const next = {
+      ...base,
+      prompt_id: promptId,
+      // The standing lessons injected at session start ride along on the first turn that
+      // stages ids, so that they too can be reinforced or corrected. Deduped: the same
+      // entry reached through two lanes must not be reinforced twice for one turn.
+      recalled: [...new Set([...claimStandingLessons(cfg, runId), ...outcome.refIds])],
+      recall: {
+        at: Date.now(),
+        rung: outcome.rung,
+        sources: outcome.refIds.length || outcome.sources,
+        tokens: outcome.tokens,
+        // The token figure is a four-chars-per-token estimate (§4.10). Characters are what
+        // was actually injected, so a later reader can re-derive the estimate rather than
+        // inherit it.
+        chars: outcome.block.length,
+        dropped: outcome.dropped,
+        empty_reason: outcome.emptyReason,
+        terms: memoryTerms(cfg, outcome.block, str(payload?.prompt)),
+      },
+    };
     if (typeof next.session_id !== 'string') next.session_id = str(payload?.session_id);
     if (!Number.isFinite(next.started_at)) next.started_at = Date.now();
 
@@ -460,6 +530,51 @@ function persistRecalled(cfg, runId, promptId, payload, refIds) {
   } catch (err) {
     // §4.9: the cost of an unwritable data dir is this turn's attribution, never the prompt.
     log(cfg, 'warn', `prompt-recall: could not stage recalled ids (${messageOf(err)})`, { run_id: runId });
+  }
+}
+
+/**
+ * The words the memory contributed and the prompt did not, in render order (so the sections
+ * that fill first — mental models, then rules — are the ones that survive the cap).
+ *
+ * §4.4: the block is scrubbed before any of it is written down. Evidence content is not
+ * necessarily this plugin's own redacted capture — another client, or `mubit_remember`, can
+ * put anything in the store — and the turn file is a new place for a secret to land. The
+ * `[REDACTED:…]` placeholders are then dropped rather than tokenised: "redacted" is not
+ * memory vocabulary, and a reply that happened to contain the word would score as an echo.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} block
+ * @param {string} prompt
+ * @returns {string[]}
+ */
+function memoryTerms(cfg, block, prompt) {
+  try {
+    if (!block) return [];
+    let text = block;
+    try {
+      text = str(redactText(block, cfg, 'output')?.text) || '';
+    } catch {
+      // A scrub that threw is not a licence to write the raw block's words down.
+      return [];
+    }
+    text = text.replace(/\[REDACTED:[^\]]*\]/gi, ' ');
+
+    const fromPrompt = termSet(prompt.slice(0, MAX_PROMPT_SCAN));
+    /** @type {string[]} */
+    const out = [];
+    const seen = new Set();
+    for (const m of text.matchAll(TERM_RE)) {
+      const t = m[0].toLowerCase();
+      if (seen.has(t) || fromPrompt.has(t) || TERM_STOPWORDS.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+      if (out.length >= MAX_RECALL_TERMS) break;
+    }
+    return out;
+  } catch {
+    // A turn with no terms is measured as "unmeasurable" downstream, never as "unused".
+    return [];
   }
 }
 
@@ -494,6 +609,13 @@ function claimStandingLessons(cfg, runId) {
     // Attribution is worth a turn's ids, never a turn.
     return [];
   }
+}
+
+/** @param {string} s @returns {Set<string>} */
+function termSet(s) {
+  const set = new Set();
+  for (const m of String(s ?? '').matchAll(TERM_RE)) set.add(m[0].toLowerCase());
+  return set;
 }
 
 // ---------------------------------------------------------------------------

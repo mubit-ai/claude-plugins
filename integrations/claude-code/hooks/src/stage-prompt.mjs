@@ -35,7 +35,9 @@ import { runHook, spawnDetached } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
 import { deriveRunId } from '../../lib/runid.mjs';
 import { spoolStats } from '../../lib/spool.mjs';
-import { ensureDir, readJson, resolveDataDir, writeJsonAtomic } from '../../lib/state.mjs';
+import {
+  ensureDir, readJson, resolveDataDir, runDir, safeSegment, writeJsonAtomic,
+} from '../../lib/state.mjs';
 
 /**
  * §5.3 targets < 25 ms of work; this is the harness's hard stop, not the target. Everything
@@ -91,10 +93,13 @@ await runHook('stage-prompt', {
  */
 function stageTurn(cfg, runId, payload) {
   try {
-    const promptId = safeId(payload?.prompt_id);
+    const promptId = safeSegment(payload?.prompt_id, MAX_ID);
     if (!promptId) return false;
 
-    const dir = join(resolveDataDir(cfg), 'runs', runId, 'turns');
+    // Both halves of this path are untrusted: the prompt id comes from the host, the run id
+    // can be pinned by hand. This join used to sanitise only the first, which put the turn
+    // file somewhere no sibling hook would ever read it.
+    const dir = join(runDir(cfg, runId), 'turns');
     // §12.1-F14: a read-only ${CLAUDE_PLUGIN_DATA} costs this Q&A pair and nothing else.
     if (!ensureDir(dir)) return false;
 
@@ -176,14 +181,6 @@ function writePayload(cfg, payload) {
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
-
-/** @param {any} v @returns {string} */
-function safeId(v) {
-  const raw = typeof v === 'string' ? v.trim() : '';
-  if (!raw) return '';
-  const safe = raw.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^\.+/, '').slice(0, MAX_ID);
-  return safe && safe !== '.' && safe !== '..' ? safe : '';
-}
 
 /** @param {any} v @returns {{text: string, truncated: boolean}} */
 function clampPrompt(v) {

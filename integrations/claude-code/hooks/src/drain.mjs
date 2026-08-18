@@ -52,7 +52,7 @@ import {
   acquireDrainLock, commitBatch, readBatch, releaseDrainLock, spoolStats,
 } from '../../lib/spool.mjs';
 import {
-  ensureDir, pruneStale, readJson, resolveDataDir, writeJsonAtomic,
+  ensureDir, pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
 } from '../../lib/state.mjs';
 
 /** §5.5: "Budget 10 s soft" — nothing waits on it, but it still bounds itself. */
@@ -711,23 +711,6 @@ function flagValue(argv, name) {
 // ---------------------------------------------------------------------------
 // Paths and coercion
 // ---------------------------------------------------------------------------
-
-/**
- * The same flattening `lib/spool.mjs` applies, so `runs/<run_id>/` means one directory to
- * every module. A run id can come from a hand-written `.mubit-cc.json`, so it is treated as
- * untrusted input to a path.
- * @param {any} v @returns {string}
- */
-function safeSegment(v) {
-  const s = String(v ?? '').trim();
-  if (!s) return '';
-  return s.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
-}
-
-/** @param {Record<string, any>} cfg @param {string} runId @returns {string} */
-function runDir(cfg, runId) {
-  return join(resolveDataDir(cfg), 'runs', safeSegment(runId));
-}
 
 /** §6.1 `MUBIT_CC_BATCH_MAX_ITEMS`. @param {Record<string, any>} cfg @returns {number} */
 function batchMax(cfg) {

@@ -35,7 +35,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
-import { ensureDir, resolveDataDir } from './state.mjs';
+import { ensureDir, resolveDataDir, runDir, safeSegment } from './state.mjs';
 
 /** §7: `runs/<run_id>/drain.lock` is assumed orphaned past this age and stolen. */
 const DRAIN_LOCK_TTL_MS = 60_000;
@@ -48,24 +48,6 @@ const ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
-
-/**
- * A run id reaches us from `lib/runid.mjs` as `cc-<slug>-<hash>`, but it can also come
- * from a `.mubit-cc.json` a user typed by hand. Anything that could climb out of
- * `runs/` is flattened rather than trusted.
- * @param {string} runId
- * @returns {string}
- */
-function safeSegment(runId) {
-  const s = String(runId ?? '').trim();
-  if (!s) return '';
-  return s.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
-}
-
-/** @param {Record<string, any>} cfg @param {string} runId @returns {string} */
-function runDir(cfg, runId) {
-  return join(resolveDataDir(cfg), 'runs', safeSegment(runId));
-}
 
 /** §7: `runs/<run_id>/spool/`. @param {Record<string, any>} cfg @param {string} runId */
 function spoolDir(cfg, runId) {

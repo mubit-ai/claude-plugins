@@ -17,13 +17,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import {
-  runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir, readJsonFile, tempDir,
+  runHook, assertHookContract, fakeMubit, baseEnv, lib, makeDataDir, readJsonFile, tempDir,
 } from './helpers/harness.mjs';
 import { userPromptSubmit, spoolItem, PROMPT_ID, SESSION_ID } from './helpers/fixtures.mjs';
 
@@ -257,4 +257,67 @@ test('stage-prompt: exits 0 with valid JSON when the data dir is unwritable', as
   } finally {
     chmodSync(dir, before);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The run id is a path segment too
+// ---------------------------------------------------------------------------
+
+/**
+ * `prompt_id` was sanitised here from the start; `run_id` was not, and it is the half a user
+ * can pin by hand. A pin carrying a separator used to write the turn file *outside*
+ * `runs/<run_id>/`, where no sibling hook looks — so the prompt vanished and the turn was
+ * captured as half a conversation, silently.
+ *
+ * `lib/runid.mjs` now refuses such a pin outright, so this drives the hook the way the
+ * failure actually reached it: a run id resolved from a project config file.
+ */
+test('a run id carrying a path separator cannot escape runs/', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const projectDir = tempDir('mubit-cc-hostile-');
+  writeFileSync(join(projectDir, '.mubit-cc.json'),
+    JSON.stringify({ runStrategy: 'static', runId: '../../escaped' }));
+
+  const env = baseEnv({ dataDir, endpoint: server.url, projectDir });
+  const r = await runHook('stage-prompt', userPromptSubmit({ prompt: PROMPT }), { env });
+  assertHookContract(r);
+
+  // Whatever it did, it did not write above the data dir.
+  assert.ok(!existsSync(join(dataDir, '..', '..', 'escaped')), 'the turn escaped the data dir');
+  assert.ok(!existsSync(join(dataDir, '..', 'escaped')), 'the turn escaped the run root');
+
+  const runsRoot = join(dataDir, 'runs');
+  if (existsSync(runsRoot)) {
+    for (const name of readdirSync(runsRoot)) {
+      assert.ok(!name.includes('/') && name !== '..' && name !== '.',
+        `"${name}" is not a single flattened segment`);
+    }
+  }
+});
+
+/**
+ * A run id that needs flattening but is not a path — the shape `lib/runid.mjs` lets through.
+ * The turn file must land on the segment every *other* module computes, or `prompt-recall`
+ * fills `recalled` in one file while this hook writes the prompt to another.
+ */
+test('a run id needing flattening lands on the segment every module uses', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const projectDir = tempDir('mubit-cc-hostile2-');
+  const hostile = 'cc-a:b*c';
+  writeFileSync(join(projectDir, '.mubit-cc.json'),
+    JSON.stringify({ runStrategy: 'static', runId: hostile }));
+
+  const env = baseEnv({ dataDir, endpoint: server.url, projectDir });
+  assertHookContract(await runHook('stage-prompt', userPromptSubmit({ prompt: PROMPT }), { env }));
+
+  const state = await lib('state.mjs');
+  const segment = state.safeSegment(hostile);
+  assert.equal(segment, 'cc-a_b_c');
+  const staged = join(dataDir, 'runs', segment, 'turns', `${PROMPT_ID}.json`);
+  assert.ok(existsSync(staged), `the turn is not at ${staged}`);
+  assert.equal(readJsonFile(staged).prompt, PROMPT);
 });

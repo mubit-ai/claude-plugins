@@ -62,7 +62,7 @@ import {
   acquireDrainLock, claimOnce, commitBatch, readBatch, releaseDrainLock, spoolStats,
 } from '../../lib/spool.mjs';
 import {
-  pruneStale, readJson, resolveDataDir, writeJsonAtomic,
+  pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
 } from '../../lib/state.mjs';
 
 /**
@@ -484,23 +484,6 @@ function breakerOpen(cfg) {
     // Fail open: a breaker that cannot be read must not stop the last flush of a session.
     return false;
   }
-}
-
-/**
- * The same flattening `lib/spool.mjs` applies, so `runs/<run_id>/` means one directory to
- * every module. A run id can come from a hand-written `.mubit-cc.json`, so it is treated as
- * untrusted input to a path.
- * @param {any} v @returns {string}
- */
-function safeSegment(v) {
-  const s = String(v ?? '').trim();
-  if (!s) return '';
-  return s.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
-}
-
-/** @param {Record<string, any>} cfg @param {string} runId @returns {string} */
-function runDir(cfg, runId) {
-  return join(resolveDataDir(cfg), 'runs', safeSegment(runId));
 }
 
 /** A readable, log-safe fragment for an idempotency key. */

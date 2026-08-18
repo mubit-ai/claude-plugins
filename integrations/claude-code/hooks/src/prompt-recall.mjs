@@ -72,7 +72,7 @@ import { postContext, postQuery } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
-import { readJson, resolveDataDir, writeJsonAtomic } from '../../lib/state.mjs';
+import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
 /** §5.2 step 0: "ok", "yes", "go on" carry no retrievable intent. */
 const MIN_PROMPT_CHARS = 8;
@@ -646,7 +646,7 @@ function remaining(cfg, deadline) {
 
 /** @param {any} v @returns {string} */
 function safeId(v) {
-  return String(v ?? '').trim().replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, MAX_ID);
+  return safeSegment(v, MAX_ID);
 }
 
 /** @param {any} v @returns {boolean} */

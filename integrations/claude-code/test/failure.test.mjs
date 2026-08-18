@@ -943,6 +943,13 @@ describe('cold start', () => {
 // The three-rung policy ladder
 // ===========================================================================
 
+/**
+ * Rung 2 is opt-in as of the rung-1-only default (§5.2). F22-F24 are about the *ladder* — that
+ * a 403 is a verdict rather than a fault, is cached, and re-probes on expiry — so they ask for
+ * the fallback explicitly and keep testing exactly what they always tested.
+ */
+const FALLBACK_ON = { MUBIT_CC_RECALL_FALLBACK: 'agent_routed' };
+
 describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () => {
   // §5.2: "a 403 on rung 1 is not a failure — it is a policy verdict that gets cached and
   // descends the ladder, and it must not touch the breaker or the auth_failed state."
@@ -951,7 +958,7 @@ describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () =
   test('F22: 403 permission_denied on rung 1 falls to rung 2 without touching the breaker or auth state', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, { 'POST /v2/control/query': policyGatedQuery() });
-    const env = hookEnv({ dataDir, endpoint: srv.url });
+    const env = hookEnv({ dataDir, endpoint: srv.url, extra: FALLBACK_ON });
 
     const res = await runHook('prompt-recall', fx.userPromptSubmit(), { env });
     assertHookContract(res);
@@ -976,7 +983,7 @@ describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () =
   test('F23: after a cached denial the next prompt goes straight to rung 2 without re-probing rung 1', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, { 'POST /v2/control/query': policyGatedQuery() });
-    const env = hookEnv({ dataDir, endpoint: srv.url });
+    const env = hookEnv({ dataDir, endpoint: srv.url, extra: FALLBACK_ON });
 
     assertHookContract(await runHook('prompt-recall', fx.userPromptSubmit({ prompt_id: 'p_first' }), { env }));
     assert.deepEqual(queryModes(srv), ['direct_bypass', 'agent_routed']);
@@ -993,7 +1000,7 @@ describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () =
   test('F24: a cached denial older than MUBIT_CC_POLICY_TTL_MS re-probes rung 1 exactly once', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, { 'POST /v2/control/query': policyGatedQuery() });
-    const env = hookEnv({ dataDir, endpoint: srv.url, extra: { MUBIT_CC_POLICY_TTL_MS: '86400000' } });
+    const env = hookEnv({ dataDir, endpoint: srv.url, extra: { ...FALLBACK_ON, MUBIT_CC_POLICY_TTL_MS: '86400000' } });
 
     // Let the plugin write its own cache entry, so the test never has to guess the
     // endpoint-hash filename.
@@ -1020,7 +1027,7 @@ describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () =
     const srv = await server(t, {
       'POST /v2/control/query': { status: 401, json: { error: 'unauthorized' } },
     });
-    const env = hookEnv({ dataDir, endpoint: srv.url });
+    const env = hookEnv({ dataDir, endpoint: srv.url, extra: FALLBACK_ON });
 
     const res = await runHook('prompt-recall', fx.userPromptSubmit(), { env });
     assertHookContract(res);
@@ -1038,7 +1045,7 @@ describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () =
   test('F27: a successful rung 1 writes nothing to policy/ — grants are never cached', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t); // default routes: query succeeds
-    const env = hookEnv({ dataDir, endpoint: srv.url });
+    const env = hookEnv({ dataDir, endpoint: srv.url, extra: FALLBACK_ON });
 
     const res = await runHook('prompt-recall', fx.userPromptSubmit(), { env });
     assertHookContract(res);

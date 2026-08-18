@@ -270,6 +270,7 @@ that cache, and writing credentials invalidates it immediately rather than after
 | `redact` | `true` | `MUBIT_CC_REDACT` | Stage-1 pattern scrub. Turning it off is not recommended; stages 2 and 3 run regardless. |
 | `recallTokenBudget` | `1500` | `MUBIT_CC_RECALL_TOKENS` | Maximum tokens of recalled context injected per prompt. Sections are trimmed to fit, preferring non-stale entries. |
 | `recallAssemble` | `client` | `MUBIT_CC_RECALL_ASSEMBLE` | `client` assembles the context block locally for **0 LLM calls**. `server` uses `/v2/control/context`, which costs **2 LLM calls per prompt** and replaces the free path rather than adding to it. |
+| `recallFallback` | `none` | `MUBIT_CC_RECALL_FALLBACK` | What recall does when the instance has direct-access recall disabled. `none` returns nothing, for **0 LLM calls**. `agent_routed` pays **1 LLM call per prompt** to get recall anyway — typically several seconds, against a recall budget of 1500 ms, so most prompts spend the call and still inject nothing. See [When recall returns nothing](#when-recall-returns-nothing). |
 | `reflectOnEnd` | `true` | `MUBIT_CC_REFLECT_ON_END` | Reflect at `SessionEnd`. This is the only path that promotes a lesson beyond its own run, so turning it off to save a few seconds trades away cross-session memory entirely. See below. |
 | `outcomeMode` | `implicit` | `MUBIT_CC_OUTCOME_MODE` | `implicit`: each turn's success or failure is attributed automatically to the memories recalled for it. `explicit`: only the model's own `mubit_outcome` calls count. `off`: no attribution. |
 | `statusLine` | `true` | `MUBIT_CC_STATUSLINE` | Render the status line. When false it prints an empty line and exits 0 rather than erroring per frame. |
@@ -286,7 +287,7 @@ camelCase name in parentheses.
 | `MUBIT_CC_RUN_ID` (`runId`) | `""` | The pinned run id for `runStrategy: static`. Required there; unset is a config error, never a silent fallback. |
 | `MUBIT_CC_RECALL_BUDGET_MS` (`recallBudgetMs`) | `1500` | Wall-clock budget for pre-prompt recall. |
 | `MUBIT_CC_RECALL_SECTIONS` (`recallSections`) | `mental_models,active_rules,lessons,facts,working_memory,traces` | Which context sections to request. |
-| `MUBIT_CC_POLICY_TTL_MS` (`policyTtlMs`) | `86400000` (24 h) | How long a cached `direct_bypass` policy denial is honoured before retrying. |
+| `MUBIT_CC_POLICY_TTL_MS` (`policyTtlMs`) | `86400000` (24 h) | How long a cached `direct_bypass` policy denial is honoured before retrying. Set it to `1` to re-probe on the next prompt, after an operator has enabled direct search. |
 | `MUBIT_CC_CAPTURE_DENY` (`denyGlobs`) | `""` | Extra denylist globs, appended to the built-in floor. |
 | `MUBIT_CC_RESPECT_GITIGNORE` (`respectGitignore`) | `1` | Drop captures for git-ignored paths. |
 | `MUBIT_CC_MAX_PARAM_BYTES` (`maxParamBytes`) | `4096` | Byte cap per tool-input field. |
@@ -300,6 +301,29 @@ camelCase name in parentheses.
 | `MUBIT_CC_BREAKER_COOLDOWN_MS` (`breakerCooldownMs`) | `120000` (2 min) | Cooldown before a single half-open probe is allowed. |
 | `MUBIT_CC_LOG_LEVEL` (`logLevel`) | `warn` | `error`, `warn`, `info`, or `debug`. |
 | `MUBIT_CC_ENV_TAGS` (`envTags`) | `""` | Extra `TYPE:NAME` tags on every ingested item, appended to the derived `tool:claude-code`, `repo:`, `branch:`, `lang:` set (8 total). |
+
+### When recall returns nothing
+
+Recall's default path is the **direct bypass**: one request, no LLM calls, tens to a couple of
+hundred milliseconds server-side. That path is gated by your instance's direct-access policy.
+When an operator has it switched off, the request comes back `403`, and the plugin has a
+choice: return nothing, or pay a router LLM call to get an answer another way.
+
+It returns nothing, and says so. The alternative costs a language-model call in front of every
+prompt you type — measured at a ~5 s median with a tail past 11 s, against a recall budget of
+1500 ms inside a 3 s hook timeout. Most of those prompts spend the call and inject nothing
+anyway, so the default trades away recall you were mostly not receiving for latency you were
+always paying. `MUBIT_CC_RECALL_FALLBACK=agent_routed` opts back in.
+
+**The real fix is on the instance, not here.** Ask whoever operates it to enable direct-access
+recall; the plugin needs no change, and rung 1 starts answering. The refusal is cached for 24 h
+so the plugin does not re-probe on every prompt, so after the dial is flipped either wait it
+out or set `MUBIT_CC_POLICY_TTL_MS=1` once to pick it up on the next prompt.
+
+You can tell this is what is happening from the status line — `recall dry N` after three
+consecutive empty recalls — or from `/mubit-memory:doctor`, which reads `recall.empty_reason`
+and names `policy_denied` specifically. Note that the connection state stays `ready`
+throughout, because nothing is wrong with the connection.
 
 ### Turning off `reflectOnEnd`
 

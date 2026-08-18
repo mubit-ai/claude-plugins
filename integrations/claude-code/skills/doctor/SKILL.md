@@ -13,7 +13,21 @@ one before it, and the cheap steps answer most questions.
    `~/.claude/plugins/data/mubit-memory`). Free, no network. It carries the last known
    `state`, `updated_at`, `recall` counts, `captured` counts including `pending`, the last
    `reflect` result, and `last_error`. A marker whose `captured.pending` keeps growing is a
-   drain problem, not a recall problem.
+   drain problem, not a recall problem. A marker whose `recall.dry_streak` keeps growing is
+   the reverse: recall is running and returning nothing. **Check this before step 2** — it is
+   the one fault that leaves `state: ready` and a healthy-looking line, so every other check
+   below will come back clean while the model receives no memory at all. Read
+   `recall.empty_reason` for which kind:
+   - `policy_denied` — the instance has direct-access recall (rung 1) disabled, and the
+     `agent_routed` fallback is off by default because it costs an LLM call per prompt. Ask
+     the operator to enable direct search. `MUBIT_CC_RECALL_FALLBACK=agent_routed` restores
+     recall at that cost; `MUBIT_CC_POLICY_TTL_MS=1` re-probes immediately once it is on.
+   - `budget_exhausted` — recall ran out of time before the call returned. Raise
+     `MUBIT_CC_RECALL_BUDGET_MS`, and note it cannot usefully exceed the hook timeout.
+   - `breaker_open` — recall is not being attempted at all; the connection is the problem, so
+     continue to step 2.
+   - `no_evidence` with a long streak — the connection and policy are fine and the store
+     genuinely has nothing for these prompts. Go to step 3.
 2. **Check connectivity** — `mubit_status`, or `GET /v2/core/health` directly. Health is the
    one route that answers without a key, so a healthy response here alongside a failing
    control-plane call points squarely at auth. It returns the plain string `OK`, not JSON —
@@ -37,7 +51,7 @@ looking in the wrong place.
 
 | `ConnState` | What it means | The fix |
 | --- | --- | --- |
-| `ready` | 2xx, and the health route answered with its own `OK`. The connection is fine. | If memory still looks wrong, the problem is content or scope, not connectivity — go to step 3. |
+| `ready` | 2xx, and the health route answered with its own `OK`. The connection is fine. | If memory still looks wrong, check `recall.dry_streak` first (step 1) — a dead recall path reports `ready`. If that is zero, the problem is content or scope — go to step 3. |
 | `unconfigured` | No endpoint is set, so nothing was dialed. Not a fault, and not a server problem — there is no server yet. | `/mubit-memory:auth`. Say plainly that nothing is broken and nothing has been lost: capture is buffered and goes out once an endpoint exists. |
 | `unreachable` | `ECONNREFUSED` / `ENOTFOUND` / `EHOSTUNREACH` / `ECONNRESET`. Nothing is listening. | Check the endpoint is correct and the instance is running — see `/mubit-memory:setup`. |
 | `server_error` | 5xx, an unparseable body on a JSON route, or a 200 on the health route whose body was not `OK`. Something is up and answering wrongly. | Retry, then check the instance's status in the console. If it persists, check the endpoint reaches Mubit rather than a proxy or SSO portal — those answer 200 as well, and that is what this state catches. |

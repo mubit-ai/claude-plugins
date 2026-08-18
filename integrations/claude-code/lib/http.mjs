@@ -550,6 +550,14 @@ async function dial(cfg, o) {
     return {
       ok: false,
       state,
+      // A deadline the *caller* squeezed below the configured default is the caller's own
+      // budget, not evidence about the server: `session-start`'s health slice and
+      // `prompt-recall`'s budget both dial on a fraction of it. An abort at the full default
+      // is evidence and still records — which is what keeps `drain.mjs`, the only caller that
+      // dials on the whole budget and retries, able to open the breaker on a dead instance.
+      ...(timedOut && o.timeoutMs < deadline(cfg, null)
+        ? { abortedEarly: /** @type {const} */ (true) }
+        : {}),
       error: timedOut
         ? `${o.verb} ${o.route}: aborted after ${o.timeoutMs}ms`
         : `${o.verb} ${o.route}: ${messageOf(err)}`,
@@ -565,7 +573,7 @@ async function dial(cfg, o) {
  * and double-counting it would escalate `timeoutStreak` twice as fast as §4.7 allows.
  *
  * @param {Record<string, any>} cfg
- * @param {{ok: boolean, state?: string, status?: number}} res
+ * @param {{ok: boolean, state?: string, status?: number, abortedEarly?: boolean}} res
  * @param {{record?: boolean}|undefined} opts
  */
 function settle(cfg, res, opts) {
@@ -575,6 +583,13 @@ function settle(cfg, res, opts) {
   // not a transport fault. Recording it would pin the status line to "✖ auth" on an instance
   // that is merely running with the instance's direct-search policy disabled.
   if (res.status === 403) return;
+  // Same reasoning: a deadline this client chose is not evidence about the server. A caller
+  // on a 400 ms slice and one on 30 s learn different things from the same healthy instance,
+  // so recording it escalates the marker to `not_responding` — and past five, opens the
+  // breaker, which also suppresses the capture drain — over a budget nobody else agreed to.
+  // `dial()` sets this only for a deadline tighter than the configured default, so an abort
+  // on the full budget is still a verdict.
+  if (res.abortedEarly) return;
   recordFailure(cfg, /** @type {any} */ (res.state));
 }
 

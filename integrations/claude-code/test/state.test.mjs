@@ -376,7 +376,10 @@ const MARKER = {
   state: 'ready',
   updated_at: 1765000000000,
   cold_start_until: 1765000020000,
-  recall: { sources: 6, tokens: 1187, ms: 842, empty_reason: '', rung: 1, dropped: 0 },
+  recall: {
+    sources: 6, tokens: 1187, ms: 842, empty_reason: '', rung: 1, dropped: 0,
+    dry_streak: 0, last_hit_at: 1765000000000,
+  },
   captured: { tools: 12, turns: 1, pending: 3 },
   lessons: { global: 3, checked_at: 1765000000000 },
   reflect: { at: 1765000000000, lessons_stored: 3, status: 'ok' },

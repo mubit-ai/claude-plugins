@@ -25,7 +25,7 @@
  * Bundled to `bin/statusline.mjs` by §11.2 and registered by `settings.json` (§3.4).
  */
 
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CONN_STATES, readBreaker } from '../lib/breaker.mjs';
@@ -42,6 +42,13 @@ import { dataDir, readJson, writeJsonAtomic } from '../lib/state.mjs';
  * asserting the install exists, and §16.2 wants a fresh install to touch nothing at all.
  */
 const LIVENESS_FILE = 'statusline-installed.json';
+
+/**
+ * Consecutive dry recalls before the line says so, mirroring §4.7's `TIMEOUT_ESCALATION`.
+ * The reasoning is the same one: a single empty recall is not a verdict — a fresh run has
+ * nothing to recall, and a narrow prompt legitimately matches nothing. A run of them is.
+ */
+const RECALL_DRY_ESCALATION = 3;
 
 /**
  * Claude Code writes the session blob and closes stdin immediately, so this only ever
@@ -266,7 +273,18 @@ export function render(payload = {}) {
 
   const sources = num(recall.sources);
   const tokens = num(recall.tokens);
-  if (sources > 0 || tokens > 0 || num(recall.ms) > 0) {
+  // §16.2 — a recall path that is permanently dead must say so somewhere the user looks.
+  // Until this, the worst case rendered as a green `●` beside `recall 0/0 tok`: every hook
+  // firing, every call timing out, nothing injected, and no fault reported anywhere. That is
+  // the failure that makes a memory plugin look useless rather than broken.
+  //
+  // Not a ConnState. `resolveDisplay` merges verdicts *about the connection*, and this is a
+  // verdict about content — the connection may be perfectly healthy and the store simply
+  // unreachable by policy. So it renders as its own segment and leaves the glyph alone.
+  const dry = int(num(recall.dry_streak));
+  if (dry >= RECALL_DRY_ESCALATION) {
+    parts.push(`recall dry ${dry}`);
+  } else if (sources > 0 || tokens > 0 || num(recall.ms) > 0) {
     parts.push(`recall ${int(sources)}/${compact(tokens)} tok`);
   }
 
@@ -456,8 +474,16 @@ export async function main() {
 
 const selfPath = fileURLToPath(import.meta.url);
 const entryPath = process.argv[1] ? resolve(process.argv[1]) : '';
+// The built status line sits behind a runtime-floor launcher (esbuild.config.mjs §11.1):
+// `settings.json` names `bin/statusline.mjs`, which checks the Node version and then imports
+// `bin/impl/statusline.mjs`. That handoff is still "run as the entry point" as far as the
+// user is concerned, but `process.argv[1]` names the launcher, so the identity check above
+// cannot see it. The launcher sets this flag immediately before the import; a test that
+// imports this module as a library sets nothing and still gets no side effects.
+const launched = typeof globalThis.__mubitLauncherEntry === 'string'
+  && basename(selfPath) === basename(globalThis.__mubitLauncherEntry);
 
-if (entryPath === selfPath) {
+if (entryPath === selfPath || launched) {
   process.exitCode = 0;
   // An unhandled rejection or a stray throw from anything above would print a stack trace
   // onto the user's prompt line and exit non-zero. §16.2 forbids both, so both are pinned

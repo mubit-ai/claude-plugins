@@ -25,7 +25,17 @@ function defaultMarker(runId = '') {
     state: 'unknown',
     updated_at: 0,
     cold_start_until: 0,
-    recall: { sources: 0, tokens: 0, ms: 0, empty_reason: '', rung: 0, dropped: 0 },
+    // `dry_streak` and `last_hit_at` are what make a permanently dead recall path visible.
+    // Everything else here describes the *last* recall, which is exactly the wrong shape for
+    // "recall has returned nothing for the last forty prompts": a run of total failures and a
+    // healthy run that happened to draw a blank write identical rows. The streak is the only
+    // field that distinguishes them, and `recall` is the right home for it — the status line
+    // and the doctor already read this group, and it is per-run, which is the scope recall
+    // quality actually has. (Endpoint-scoped health is the breaker's job, not this file's.)
+    recall: {
+      sources: 0, tokens: 0, ms: 0, empty_reason: '', rung: 0, dropped: 0,
+      dry_streak: 0, last_hit_at: 0,
+    },
     captured: { tools: 0, turns: 0, pending: 0 },
     lessons: { global: 0, checked_at: 0 },
     reflect: { at: 0, lessons_stored: 0, status: '' },

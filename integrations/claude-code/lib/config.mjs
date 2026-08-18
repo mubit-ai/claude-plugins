@@ -337,6 +337,14 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const recallTokenBudget = int(pick('recallTokenBudget', 'MUBIT_CC_RECALL_TOKENS'), 1500);
   const recallAssemble = enumOf(pick('recallAssemble', 'MUBIT_CC_RECALL_ASSEMBLE'),
     ['client', 'server'], 'client');
+  // What recall does when rung 1 (`direct_bypass`, zero LLM calls) is refused by instance
+  // policy. `none` is the default deliberately: rung 2 pays a routing LLM call, measured at a
+  // 5 s median and a long tail past 11 s, against a recall budget of 1500 ms inside a 3 s hook
+  // timeout — so on an instance with direct search disabled it aborts nearly every time,
+  // having spent the call. Blocking every prompt on that is worse than recalling nothing.
+  // Operators who would rather pay it can opt back in.
+  const recallFallback = enumOf(pick('recallFallback', 'MUBIT_CC_RECALL_FALLBACK'),
+    ['none', 'agent_routed'], 'none');
   const reflectOnEnd = bool(pick('reflectOnEnd', 'MUBIT_CC_REFLECT_ON_END'), true);
   const outcomeMode = enumOf(pick('outcomeMode', 'MUBIT_CC_OUTCOME_MODE'),
     ['off', 'implicit', 'explicit'], 'implicit');
@@ -390,6 +398,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     recallTokenBudget,
     recallBudgetMs,
     recallAssemble,
+    recallFallback,
     recallSections,
     policyTtlMs,
     outcomeMode,

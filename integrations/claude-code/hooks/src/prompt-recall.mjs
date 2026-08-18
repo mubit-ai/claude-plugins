@@ -15,8 +15,15 @@
  * | Rung | Request | LLM calls | Entered when |
  * | --- | --- | --- | --- |
  * | 1 | `query{mode:"direct_bypass", evidence_only:true, budget:"low"}` | **0** | always — the primary path |
- * | 2 | `query{mode:"agent_routed",  evidence_only:true, budget:"low"}` | 1 | rung 1 returned **403 permission_denied** |
+ * | 2 | `query{mode:"agent_routed",  evidence_only:true, budget:"low"}` | 1 | rung 1 got **403** *and* `recallFallback === "agent_routed"` |
  * | 3 | `context{mode:"sections"}` | **2** | only when `recallAssemble === "server"` |
+ *
+ * **Rung 2 is opt-in, and off by default** (`MUBIT_CC_RECALL_FALLBACK`). It buys the only
+ * recall an instance with direct search disabled can serve, and it pays for it with a routing
+ * LLM call on every prompt: measured median 5025 ms, tail past 11 s, against a 1500 ms recall
+ * budget inside a 3 s hook timeout. Nearly every one of those aborts *after* spending the
+ * call, so the default trades recall nobody was getting for latency everybody was paying.
+ * Rung 1 answers in ~30–250 ms server-side and is the path the docs call the default.
  *
  * So rung 3 is the *last* rung, not the first, and it is never reached by default — its
  * absence is asserted explicitly by the tests, because it is the first thing a well-meaning
@@ -33,8 +40,9 @@
  *
  *   - must **not** touch the breaker (`lib/http.mjs` never records a 403) or `auth_failed`;
  *   - **is** cached to `policy/<endpoint_hash>.json` with a 24 h TTL, so the next prompt
- *     skips rung 1 entirely instead of burning a round trip on it forever;
- *   - descends one rung, and never two.
+ *     skips rung 1 entirely instead of burning a round trip on it forever
+ *     (`MUBIT_CC_POLICY_TTL_MS=1` re-probes immediately once an operator flips the dial);
+ *   - descends one rung, and never two — and only when asked to.
  *
  * A **401** on the same call is the opposite: auth is broken, give up, and never cache it —
  * a cached 401 would hide a revoked key for a day. A **grant** is never cached either: rung
@@ -152,7 +160,17 @@ await runHook('prompt-recall', {
       // expired — is what the status line keeps showing.
       const b = readBreaker(cfg);
       log(cfg, 'debug', 'prompt-recall: breaker open; skipping recall', { run_id: runId });
-      if (isConnState(b.state)) updateMarker(cfg, runId, { mode: cfg.mode, state: b.state });
+      // The `recall` block goes with it. Without this the status line keeps rendering the
+      // last *successful* recall for the whole time the breaker is open — a green count
+      // describing a call that has not been made in minutes.
+      updateMarker(cfg, runId, {
+        mode: cfg.mode,
+        ...(isConnState(b.state) ? { state: b.state } : {}),
+        recall: {
+          sources: 0, tokens: 0, ms: 0, rung: 0, dropped: 0, empty_reason: 'breaker_open',
+          ...dryness(cfg, runId, false),
+        },
+      });
       return SUPPRESS;
     }
 
@@ -184,6 +202,7 @@ await runHook('prompt-recall', {
         empty_reason: outcome.emptyReason,
         rung: outcome.rung,
         dropped: outcome.dropped,
+        ...dryness(cfg, runId, outcome.refIds.length > 0),
       },
     });
 
@@ -263,9 +282,20 @@ async function ladder(cfg, o) {
     }
     if (res.status === 403) {
       // §5.2/F22: a policy verdict, not a fault. `lib/http.mjs` has already declined to
-      // record it with the breaker; all that is left is to remember it and descend.
+      // record it with the breaker; all that is left is to remember it and decide.
       cachePolicyDenial(cfg);
-      log(cfg, 'info', 'prompt-recall: direct_bypass is disabled by policy; descending to rung 2',
+      if (cfg.recallFallback !== 'agent_routed') {
+        // `warn`, not `info`: the default log level is `warn`, and this is the single most
+        // important fact about the install — every recall from here on returns nothing until
+        // an operator enables direct search. Logging it below the default level is how a
+        // permanently dead recall path stays invisible.
+        log(cfg, 'warn', 'prompt-recall: direct_bypass is disabled by instance policy and '
+          + 'MUBIT_CC_RECALL_FALLBACK is "none", so this recall returns empty. Ask your operator '
+          + 'to enable direct search, or set MUBIT_CC_RECALL_FALLBACK=agent_routed to pay an LLM '
+          + 'call per prompt instead.', { run_id: o.runId });
+        return empty(1, 'policy_denied');
+      }
+      log(cfg, 'warn', 'prompt-recall: direct_bypass is disabled by policy; descending to rung 2',
         { run_id: o.runId });
       denied = true;
     } else {
@@ -276,7 +306,11 @@ async function ladder(cfg, o) {
     }
   }
 
-  // --- RUNG 2. One LLM call, and only ever after a deliberate rung-1 probe was refused.
+  // --- RUNG 2. One LLM call, opt-in, and only ever after a rung-1 probe was refused.
+  // The cached-denial path arrives here too, on every prompt for the next 24 h — the fresh
+  // 403 above explains itself once, this keeps the door shut quietly thereafter.
+  if (cfg.recallFallback !== 'agent_routed') return empty(1, 'policy_denied');
+
   const left = o.deadline - Date.now();
   if (left < RUNG2_MIN_BUDGET_MS) {
     log(cfg, 'info', `prompt-recall: ${left}ms left is under the ${RUNG2_MIN_BUDGET_MS}ms rung-2 floor; skipping`,
@@ -513,8 +547,41 @@ function noteFailure(cfg, runId, outcome, ms) {
     // past the window that justified it.
     ...(known ? { state } : {}),
     last_error: str(outcome.error).slice(0, 200),
-    recall: { sources: 0, tokens: 0, ms, empty_reason: '', rung: outcome.rung, dropped: 0 },
+    recall: {
+      sources: 0, tokens: 0, ms, empty_reason: '', rung: outcome.rung, dropped: 0,
+      ...dryness(cfg, runId, false),
+    },
   });
+}
+
+/**
+ * §4.8 — the one field that can tell "recall is dead" from "recall found nothing this time".
+ *
+ * Every other field in the `recall` group describes the last call, so a path that has
+ * returned nothing for forty consecutive prompts is byte-identical to a healthy one that drew
+ * a blank. This counts consecutive dry recalls — empty, failed, policy-denied or skipped
+ * alike — and any single hit clears it.
+ *
+ * It follows `lib/breaker.mjs`'s `timeoutStreak` deliberately: a counter that moves on every
+ * bad event, a threshold that governs display rather than recording, and one success that
+ * resets everything. What it must NOT do is become a ConnState — a recall that returns
+ * nothing is not a verdict about the connection, and `CONN_STATES` is a closed union the
+ * status line iterates exhaustively.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {boolean} hit did this recall actually return evidence?
+ * @returns {{dry_streak: number, last_hit_at?: number}}
+ */
+function dryness(cfg, runId, hit) {
+  if (hit) return { dry_streak: 0, last_hit_at: Date.now() };
+  try {
+    const prior = numOr(readMarker(cfg, runId).recall?.dry_streak, 0);
+    return { dry_streak: (prior >= 0 ? prior : 0) + 1 };
+  } catch {
+    // §4.9: the marker is cosmetic. A read that fails costs a count, never the hook.
+    return { dry_streak: 1 };
+  }
 }
 
 /**
@@ -624,6 +691,7 @@ function safeConfig() {
     return /** @type {Record<string, any>} */ ({
       recall: true, recallBudgetMs: 1500, recallTokenBudget: 1500, timeoutMs: 4000,
       logLevel: process.env.MUBIT_CC_LOG_LEVEL || 'warn', recallAssemble: 'client',
+      recallFallback: 'none',
     });
   }
 }

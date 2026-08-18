@@ -39,6 +39,12 @@ const DENIED = {
 };
 
 /** Deterministic env: a pinned static run id makes every request body exactly assertable. */
+/**
+ * Rung 2 is opt-in as of the rung-1-only default (§5.2): tests that exercise the fallback
+ * ladder have to ask for it, exactly as an operator would.
+ */
+const FALLBACK_ON = { MUBIT_CC_RECALL_FALLBACK: 'agent_routed' };
+
 function env(dataDir, server, extra = {}) {
   return baseEnv({
     dataDir,
@@ -140,7 +146,7 @@ test('403 permission_denied on rung 1 falls to rung 2, byte-identical but for th
   t.after(() => server.close());
   const dir = makeDataDir();
 
-  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server, FALLBACK_ON) });
 
   assertHookContract(r);
   server.assertCalled('POST', '/v2/control/query', 2);
@@ -185,13 +191,13 @@ test('a cached denial routes the next prompt straight to rung 2', async (t) => {
   t.after(() => server.close());
   const dir = makeDataDir();
 
-  await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server, FALLBACK_ON) });
   server.assertCalled('POST', '/v2/control/query', 2);
 
   server.reset();
   server.route('POST /v2/control/query', { json: queryResponse({ mode: 'agent_routed' }) });
   const r2 = await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_second' }), {
-    env: env(dir, server),
+    env: env(dir, server, FALLBACK_ON),
   });
 
   assertHookContract(r2);
@@ -300,7 +306,7 @@ test('rungs 1 and 2 render byte-identical additionalContext for the same evidenc
   t.after(() => Promise.all([a.close(), b.close()]));
 
   const ra = await runHook('prompt-recall', userPromptSubmit(), { env: env(makeDataDir(), a) });
-  const rb = await runHook('prompt-recall', userPromptSubmit(), { env: env(makeDataDir(), b) });
+  const rb = await runHook('prompt-recall', userPromptSubmit(), { env: env(makeDataDir(), b, FALLBACK_ON) });
 
   assertHookContract(ra);
   assertHookContract(rb);
@@ -310,6 +316,110 @@ test('rungs 1 and 2 render byte-identical additionalContext for the same evidenc
     ra.json.hookSpecificOutput.additionalContext,
     rb.json.hookSpecificOutput.additionalContext,
     'the assembler owns the shape, not the rung');
+});
+
+// ---------------------------------------------------------------------------
+// Rung 1 only — the default. Rung 2 is a cost an operator opts into.
+// ---------------------------------------------------------------------------
+
+// The measured cost of the old default: rung 2 pays a routing LLM call at a ~5 s median
+// against a 1500 ms recall budget, so on a policy-denied instance nearly every prompt spent
+// the call and then aborted with nothing to show. Returning empty is strictly cheaper and no
+// less useful.
+test('403 on rung 1 does not descend by default — one request, no LLM call', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': [DENIED, { json: queryResponse() }] });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/query', 1);
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.mode, 'direct_bypass',
+    'the only request made must be the zero-LLM one');
+  server.assertNotCalled('POST', '/v2/control/context');
+});
+
+// The denial is still cached, so the next prompt does not even pay the rung-1 round trip —
+// and still must not reach for rung 2.
+test('a cached denial issues no request at all by default', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': [DENIED, { json: queryResponse() }] });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  server.reset();
+
+  const r2 = await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_second' }), {
+    env: env(dir, server),
+  });
+
+  assertHookContract(r2);
+  server.assertCalled('POST', '/v2/control/query', 0);
+});
+
+// A policy denial is not a transport fault (§5.2/F22), so it must not colour the status line
+// with a failure state — but it must be distinguishable from "the store had nothing".
+test('a policy denial records a reason without claiming a connection fault', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': [DENIED, { json: queryResponse() }] });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+
+  const m = marker(dir);
+  assert.equal(m.recall.empty_reason, 'policy_denied');
+  assert.equal(m.recall.sources, 0);
+  assert.notEqual(m.state, 'auth_failed', 'a 403 on a probed rung is not an auth failure');
+});
+
+// ---------------------------------------------------------------------------
+// MUB-2 — a permanently dead recall path has to be visible somewhere
+// ---------------------------------------------------------------------------
+
+// The failure this closes: every hook fires, every recall returns nothing, the marker says
+// `ready`, and no diagnostic anywhere reports a fault. `dry_streak` is the only field that
+// separates that from a healthy run that happened to draw a blank.
+test('consecutive empty recalls accumulate a dry streak', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { json: queryResponse({ evidence: [] }) } });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  for (let i = 1; i <= 3; i += 1) {
+    await runHook('prompt-recall', userPromptSubmit({ prompt_id: `p_${i}` }), { env: env(dir, server) });
+    assert.equal(marker(dir).recall.dry_streak, i, `after ${i} empty recalls`);
+  }
+  assert.equal(marker(dir).state, 'ready', 'an empty recall is still not a connection fault');
+});
+
+// One hit clears it, exactly as a success clears the breaker's timeout streak. Without this
+// the counter would only ever climb and the signal would be worthless.
+test('a recall that returns evidence clears the dry streak', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { json: queryResponse({ evidence: [] }) } });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_1' }), { env: env(dir, server) });
+  assert.equal(marker(dir).recall.dry_streak, 1);
+
+  server.route('POST /v2/control/query', { json: queryResponse() });
+  await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_2' }), { env: env(dir, server) });
+
+  const m = marker(dir);
+  assert.equal(m.recall.dry_streak, 0);
+  assert.ok(m.recall.last_hit_at > 0, 'a hit stamps when memory last actually arrived');
+});
+
+// A failed recall is dry too — the streak counts "the model got no memory", not "the server
+// said no". Otherwise a path that fails every time would report a streak of zero forever.
+test('a failed recall counts toward the dry streak', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { status: 500, json: { error: 'boom' } } });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+
+  assert.equal(marker(dir).recall.dry_streak, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -514,7 +624,7 @@ test('the marker records which rung served', async (t) => {
   assert.equal(typeof ma.recall.ms, 'number');
 
   const dirB = makeDataDir();
-  const rb = await runHook('prompt-recall', userPromptSubmit(), { env: env(dirB, denied) });
+  const rb = await runHook('prompt-recall', userPromptSubmit(), { env: env(dirB, denied, FALLBACK_ON) });
   assertHookContract(rb);
   assert.equal(marker(dirB).recall.rung, 2, '1 LLM call');
 });

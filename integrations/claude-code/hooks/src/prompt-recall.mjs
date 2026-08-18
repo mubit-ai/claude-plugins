@@ -649,11 +649,20 @@ function breakerOpen(cfg) {
  * §5.2 stdout. The wrapper names the run and states what was spent, so a user reading the
  * transcript can see where the injected block came from — and so the model can tell injected
  * memory apart from its own reasoning.
+ *
+ * It also says, once, what this block is not. Retrieval is a ranked guess over a token
+ * budget: items get dropped, an entry can be stale, and nothing here was re-checked against
+ * the repository as it stands right now. Rendered without that line, a bullet under
+ * "Active rules" reads with the authority of a project invariant, and the model will act on
+ * a year-old one rather than look. One sentence is the whole fix.
+ *
  * @param {string} runId @param {number} sources @param {number} tokens @param {string} block
  * @returns {string}
  */
 function wrap(runId, sources, tokens, block) {
   return `<mubit-memory run="${runId}" sources="${sources}" tokens="${tokens}">\n`
+    + 'Recalled from memory of earlier work — it may be incomplete or out of date, so verify '
+    + 'against the code before relying on it.\n\n'
     + `${block.replace(/\s+$/, '')}\n</mubit-memory>`;
 }
 

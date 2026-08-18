@@ -291,6 +291,10 @@ function steerBlock(cfg, runId, lessons) {
   ];
   if (lessons.length) {
     lines.push('', '## Standing lessons (global)');
+    // Same qualifier the per-turn injection carries. These were learned in other sessions,
+    // possibly in another part of the codebase, and nothing re-checked them against this one.
+    lines.push('Learned from earlier work — they may be out of date, so verify before relying '
+      + 'on one.');
     for (const l of lessons) lines.push(`- [${l.type}] ${l.content}`);
   }
   return `${lines.join('\n')}\n`;

@@ -169,6 +169,22 @@ test('stdout is a SessionStart steer block plus a one-line systemMessage', async
   assert.ok(!r.json.systemMessage.includes('\n'), 'systemMessage is one line');
 });
 
+/** The same qualifier on the other injection surface — these were learned elsewhere too. */
+test('the standing lessons section says they may be out of date', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /standing lessons/i);
+  assert.match(ctx, /may be out of date/i);
+  assert.match(ctx, /verify/i);
+});
+
 /**
  * A standing lesson steers the whole session, so it has to be able to earn that place — and
  * to lose it. Attribution runs on ids, and this hook used to parse `lesson_id` off the wire

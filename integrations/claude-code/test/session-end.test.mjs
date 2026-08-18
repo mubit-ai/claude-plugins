@@ -232,6 +232,32 @@ test('skips reflect when MUBIT_CC_REFLECT_ON_END=0, but still drains and heartbe
 
 // §5.7 — nothing ingested this session means there is nothing to reflect ON; an
 // LLM-backed call over an empty tail is pure cost.
+/**
+ * Reflection reads the server's tail of the run, so it is only meaningful over a run the
+ * server actually has. A non-empty spool means two opposite things: another drainer is about
+ * to land the work — which is why it counts as evidence in flight — or *our* drain stopped
+ * (budget spent, breaker open, ingest failed) and nobody is going to. In the second case
+ * reflecting draws conclusions from half a session and stores them as if they were the whole
+ * one; the next session drains the rest and can reflect over the real thing.
+ */
+test('skips reflect when this drain left the spool undelivered', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await fakeMubit({
+    'POST /v2/control/ingest': { status: 500, json: { error: 'nope' } },
+  });
+  t.after(() => server.close());
+  seedSpool(dataDir, 3);
+
+  const r = await runHook('session-end', fx.sessionEnd(),
+    { env: env(dataDir, server.url, { MUBIT_CC_BREAKER_THRESHOLD: '99' }) });
+  assertHookContract(r);
+
+  server.assertNotCalled('POST', '/v2/control/reflect');
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 3, 'precondition: the items are still here');
+  assert.equal(readMarker(dataDir).reflect.status, 'skipped:undrained',
+    'the marker has to say which skip this was');
+});
+
 test('skips reflect when nothing was ingested this session', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());

@@ -146,8 +146,9 @@ await runHook('session-end', {
       runId, agentId, budget: () => budgetFor(OUTCOME_MS, REFLECT_MS / 2),
     });
 
-    // §5.7 step 4 — REQUIRED (§1.4), and skipped only on the two documented conditions.
+    // §5.7 step 4 — REQUIRED (§1.4), and skipped only on the documented conditions.
     const priorIngested = numOr(readMarker(cfg, runId).captured?.ingested, 0);
+    const pending = spoolStats(cfg, runId).count;
     const reflect = await maybeReflect(cfg, {
       runId,
       budget: budgetFor(REFLECT_MS, HEARTBEAT_MS),
@@ -155,7 +156,12 @@ await runHook('session-end', {
       // it and reaches here before that drainer commits, so the marker's ingest count is stale
       // by design. The spool is the only term that sees the work that is about to land.
       anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0
-        || spoolStats(cfg, runId).count > 0,
+        || (drained.deferred && pending > 0),
+      // ...but a non-empty spool means the opposite when *our* drain is the one that stopped:
+      // budget spent, breaker open, or an ingest that failed. Then nobody is about to land
+      // it, and reflecting would draw conclusions from a session the server only half has.
+      undelivered: drained.failed && pending > 0,
+      pending,
     });
 
     // §5.7 step 5 — the agent is not gone, it is idle; re-registering it next session is
@@ -200,9 +206,13 @@ await runHook('session-end', {
  * error split (§5.5), and the next session's first drain applies it. A second copy of that
  * logic in a hook nobody is waiting on is how the two drift apart.
  *
+ * It reports *how* it ended, not just how much it sent. "The spool is not empty" has two
+ * opposite meanings — another drainer is about to land this work, or nobody is — and step 4
+ * has to tell them apart before deciding whether there is anything worth reflecting on.
+ *
  * @param {Record<string, any>} cfg
  * @param {{runId: string, agentId: string, sessionId: string, deadline: number}} o
- * @returns {Promise<{sent: number, batches: number}>}
+ * @returns {Promise<{sent: number, batches: number, deferred: boolean, failed: boolean}>}
  */
 async function drainInline(cfg, o) {
   let sent = 0;
@@ -214,8 +224,10 @@ async function drainInline(cfg, o) {
     // it would double-send the same batch and race the unlink.
     log(cfg, 'debug', 'session-end: another drainer holds the lock; leaving the spool to it',
       { run_id: o.runId });
-    return { sent, batches };
+    return { sent, batches, deferred: true, failed: false };
   }
+
+  let failed = false;
 
   try {
     const max = intOr(cfg.batchMaxItems, 32);
@@ -223,12 +235,14 @@ async function drainInline(cfg, o) {
       if (Date.now() >= o.deadline) {
         log(cfg, 'info', 'session-end: drain budget spent; the rest waits for the next session',
           { run_id: o.runId, pending: spoolStats(cfg, o.runId).count });
+        failed = true;
         break;
       }
       // A pure read: `request()` consults `allowRequest` itself, and consulting it twice
       // would spend the single half-open probe the dial is entitled to.
       if (breakerOpen(cfg)) {
         log(cfg, 'debug', 'session-end: breaker open; items stay spooled', { run_id: o.runId });
+        failed = true;
         break;
       }
 
@@ -252,6 +266,7 @@ async function drainInline(cfg, o) {
         log(cfg, 'warn', `session-end: ingest failed (${res.state}); items stay spooled`, {
           run_id: o.runId, status: res.status ?? 0, error: str(res.error).slice(0, 300),
         });
+        failed = true;
         break;
       }
 
@@ -280,7 +295,7 @@ async function drainInline(cfg, o) {
       },
     });
   }
-  return { sent, batches };
+  return { sent, batches, deferred: false, failed };
 }
 
 /**
@@ -413,11 +428,13 @@ async function flushOutcomes(cfg, o) {
  * A failure is logged and recorded as `reflect: failed`, never surfaced as a blocking error.
  *
  * Every exit stamps a `status`, so the marker can tell the skip reasons apart:
- * `skipped:disabled`, `skipped:not-ingested`, `failed`, `ok`. A blank status in a written
- * marker is therefore impossible — it means the hook died before the marker write.
+ * `skipped:disabled`, `skipped:not-ingested`, `skipped:undrained`, `failed`, `ok`. A blank
+ * status in a written marker is therefore impossible — it means the hook died before the
+ * marker write.
  *
  * @param {Record<string, any>} cfg
- * @param {{runId: string, budget: number, anythingIngested: boolean}} o
+ * @param {{runId: string, budget: number, anythingIngested: boolean, undelivered?: boolean,
+ *          pending?: number}} o
  * @returns {Promise<{attempted: boolean, status: string, lessons: number, at: number, error: string}>}
  */
 async function maybeReflect(cfg, o) {
@@ -427,6 +444,15 @@ async function maybeReflect(cfg, o) {
     log(cfg, 'info', 'session-end: reflect disabled by MUBIT_CC_REFLECT_ON_END=0 — this session\'s '
       + 'lessons stay at run scope', { run_id: o.runId });
     return { ...idle, at: Date.now(), status: 'skipped:disabled' };
+  }
+  if (o.undelivered) {
+    // Reflection reads the server's tail. Ours did not get there — this drain stopped with
+    // items still spooled and no other drainer holding the lock — so a reflection now would
+    // be drawn from a partial session and stored as if it were the whole one. The next
+    // session drains the rest and can reflect over a run the server actually has.
+    log(cfg, 'info', 'session-end: the spool did not drain; leaving reflect to the next session',
+      { run_id: o.runId, pending: o.pending ?? 0 });
+    return { ...idle, at: Date.now(), status: 'skipped:undrained' };
   }
   if (!o.anythingIngested) {
     log(cfg, 'debug', 'session-end: nothing ingested this session; nothing to reflect on',

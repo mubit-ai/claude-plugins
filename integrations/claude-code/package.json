@@ -1,17 +1,18 @@
 {
   "name": "@mubit-ai/claude-code-plugin",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "type": "module",
   "description": "Mubit memory plugin for Claude Code — involuntary capture, pre-prompt recall, and outcome attribution.",
   "engines": { "node": ">=20.0.0" },
   "scripts": {
     "build": "node esbuild.config.mjs",
     "build:watch": "node esbuild.config.mjs --watch",
-    "clean": "rm -rf hooks/dist mcp/dist",
+    "clean": "rm -rf hooks/dist mcp/dist bin/impl",
     "test": "node --test 'test/**/*.test.mjs'",
+    "test:dist": "MUBIT_CC_TEST_TARGET=dist node --test 'test/**/*.test.mjs'",
     "test:watch": "node --test --watch 'test/**/*.test.mjs'",
     "lint": "node --check hooks/src/*.mjs lib/*.mjs bin/*.mjs mcp/src/*.mjs",
-    "verify": "npm run clean && npm run build && npm run test && node scripts/verify-manifests.mjs",
+    "verify": "npm run clean && npm run build && npm run test && npm run test:dist && node scripts/verify-manifests.mjs",
     "context-cost": "node scripts/measure-context-cost.mjs",
     "version:check": "node scripts/set-version.mjs --check",
     "prepack": "npm run build"

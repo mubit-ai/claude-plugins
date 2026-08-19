@@ -88,11 +88,12 @@ failure glyph while the instance comes up — see [Connection states](#connectio
 
 ## What you get
 
-### Nine hook registrations
+### Ten hook registrations
 
 | Event | Runs | Timeout | What it does |
 | --- | --- | --- | --- |
 | `SessionStart` (`startup\|resume\|clear\|compact`) | `session-start.mjs` | 5 s | Derives the run id, checks health, registers the agent (heartbeats on `resume`), pulls up to 5 global lessons, injects a short steer block telling the model memory is active, that it need not open a turn by searching, and which tool to reach for when the injected memory falls short. On a `compact` source it also re-anchors the session to the checkpoint saved by `PreCompact`. |
+| `CwdChanged` | `cwd-changed.mjs` | 5 s | Zero network. The run id is derived from a directory, so a `cd` into another repo mid-session has to move it — and drain the run being left, which nothing else in the plugin would ever revisit. A `cd` within one repo costs nothing: the id resolves through the git toplevel. |
 | `UserPromptSubmit` | `prompt-recall.mjs` | 3 s | Queries Mubit and injects recalled memory as `additionalContext`. Blocking, with a 1500 ms internal budget. Injects nothing at all when the result is empty. |
 | `UserPromptSubmit` | `stage-prompt.mjs` | 3 s | Zero network. Stages the prompt so the `Stop` capture has both halves of the turn, and triggers the detached drain when the spool is full or stale. |
 | `PostToolUse` (every tool) | `capture.mjs` | 3 s | Redacts and spools the tool call, whatever the tool was — built-in or any MCP server's. Zero network. A short skip list drops the handful that carry no memory (mode switches, list-only queries), and Mubit's own tool calls are suppressed. |
@@ -103,7 +104,7 @@ failure glyph while the instance comes up — see [Connection states](#connectio
 | `PostCompact` | `checkpoint.mjs --post` | 5 s | Zero network. Records that the compaction happened; injects nothing, because Claude Code accepts no injected context on this event. The re-anchor arrives instead from `SessionStart`, which also fires on a `compact` source. |
 | `SessionEnd` | `session-end.mjs` | 8 s | Drains inline, flushes pending outcomes, then reflects. |
 
-(Nine events; `UserPromptSubmit` registers two commands.)
+(Ten events; `UserPromptSubmit` registers two commands.)
 
 Every hook exits 0, always. A memory layer has no business breaking a prompt — a dead server,
 an unwritable data dir, or a corrupt state file costs you a memory, never a turn.

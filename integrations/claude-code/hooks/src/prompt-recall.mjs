@@ -72,7 +72,7 @@ import { postContext, postQuery } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
 /** §5.2 step 0: "ok", "yes", "go on" carry no retrievable intent. */
@@ -214,10 +214,13 @@ await runHook('prompt-recall', {
 
     const query = prompt.slice(0, MAX_QUERY_CHARS);
     const promptId = safeId(payload?.prompt_id);
+    // Resolved once, from the same rule the run id uses, so the two can never disagree
+    // about which repo this prompt belongs to.
+    const projectDir = resolveProjectDir(cfg, payload);
 
     const outcome = cfg.recallAssemble === 'server'
       ? await rungThree(cfg, { runId, agentId, query, deadline })
-      : await ladder(cfg, { runId, agentId, query, deadline });
+      : await ladder(cfg, { runId, agentId, query, deadline, projectDir });
 
     const ms = Date.now() - started;
 
@@ -283,7 +286,8 @@ await runHook('prompt-recall', {
  * the whole point of caching it: one wasted round trip per day rather than one per prompt.
  *
  * @param {Record<string, any>} cfg
- * @param {{runId: string, agentId: string, query: string, deadline: number}} o
+ * @param {{runId: string, agentId: string, query: string, deadline: number,
+ *          projectDir: string}} o
  * @returns {Promise<Outcome>}
  */
 async function ladder(cfg, o) {
@@ -300,7 +304,10 @@ async function ladder(cfg, o) {
     include_working_memory: true,
     // §1.8: `env_tags` exists on AgentQueryRequest but NOT on ContextRequest — version-aware
     // tag scoring is capability rungs 1-2 gain over rung 3, not something they give up.
-    env_tags: envTags(cfg),
+    // Tagged from the directory this prompt was sent in, not the one the session launched
+    // in — the same reason the run id reads the payload. A recall scored against `repo:`
+    // tags from the wrong repo is worse than one scored against none.
+    env_tags: envTags(cfg, o.projectDir),
   };
 
   let denied = readPolicyDenial(cfg);

@@ -19,6 +19,11 @@
         { "type": "command", "command": "node", "timeout": 3, "if": "Bash(git push *)",
           "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/pre-tool.mjs"] } ] }
     ],
+    "SubagentStart": [
+      { "hooks": [
+        { "type": "command", "command": "node", "timeout": 3,
+          "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/subagent-start.mjs"] } ] }
+    ],
     "PostToolUse": [
       { "matcher": "*",
         "hooks": [ { "type": "command", "command": "node", "timeout": 3,

@@ -290,6 +290,56 @@ export function deriveAgentId(payload = {}) {
   return sub ? `${AGENT_ROLE}-sub-${sub}` : AGENT_ROLE;
 }
 
+// ---------------------------------------------------------------------------
+// deriveSubRunId
+// ---------------------------------------------------------------------------
+
+/**
+ * §4.3: the sub-run form — `<parent_run_id>-sub-<agentShort>`, the same suffix
+ * `deriveAgentId` puts on the role, applied to the run instead.
+ *
+ * ---------------------------------------------------------------------------
+ * The collapse this exists to undo, measured
+ * ---------------------------------------------------------------------------
+ * A live fan-out of two subagents on Claude Code 2.1.235 produced two `SubagentStart`s and
+ * two `SubagentStop`s carrying the parent's `session_id` **and** the parent's `prompt_id`.
+ * They differed in exactly one field: `agent_id`. Every coordinate this plugin keys state on
+ * is therefore identical across siblings — `runs/<run_id>/turns/<prompt_id>.json` is one
+ * file that six parallel subagents would all read as "their" turn — so `agent_id` is the
+ * only thing that can separate them, and this is its run-scoped form.
+ *
+ * ---------------------------------------------------------------------------
+ * What it is NOT for
+ * ---------------------------------------------------------------------------
+ * **Never query against it.** A sub-run id has no memory stored under it: the store knows
+ * the parent run, so asking about `cc-x-1-sub-ab55bb82d198` would return nothing for every
+ * subagent, forever. It is a *local* lane — a name for one subagent's own record — until
+ * there is a route that can join it back up. There is not one today: `lib/http.mjs`'s
+ * `ROUTES` has no `link_run`, so nothing on the wire relates a sub-run to its parent, and
+ * the parent id is carried alongside the record instead.
+ *
+ * A payload with no subagent identity answers with the parent unchanged. Minting a suffix
+ * out of nothing would open a lane that `SubagentStop` — deriving from the same missing
+ * field — could never find again, which is worse than the collapse it was meant to fix.
+ *
+ * @param {string} runId    the parent run, already derived
+ * @param {Record<string, any>} [payload] a `SubagentStart` / `SubagentStop` payload
+ * @returns {string}
+ * @throws {Error} when the parent run id is one `deriveRunId` would have refused to emit.
+ *   A sub-run id names a directory exactly as a run id does, so it inherits every rule —
+ *   including the one about `"default"` — rather than laundering a poisoned parent by
+ *   appending a suffix to it.
+ */
+export function deriveSubRunId(runId, payload = {}) {
+  const parent = assertUsableRunId(runId);
+  const short = subagentShort(isObject(payload) ? payload : {});
+  if (!short) return parent;
+  const suffix = `-sub-${short}`;
+  // Idempotent: a caller holding an already-derived sub-run id is ordinary once more than
+  // one hook derives one, and `…-sub-ab-sub-ab` would be a second lane for one subagent.
+  return parent.endsWith(suffix) ? parent : assertUsableRunId(`${parent}${suffix}`);
+}
+
 /**
  * @param {Record<string, any>} payload
  * @returns {string}

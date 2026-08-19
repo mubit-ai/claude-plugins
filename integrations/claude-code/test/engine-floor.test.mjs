@@ -45,8 +45,8 @@ const OLD_NODE = '12.22.9';
  * makes an unsupported Node cost the warning and nothing else.
  */
 function guardedScripts() {
-  const hooks = ['session-start', 'prompt-recall', 'stage-prompt', 'pre-tool', 'capture',
-    'checkpoint', 'session-end', 'drain'].map((n) => `hooks/dist/${n}.mjs`);
+  const hooks = ['session-start', 'prompt-recall', 'stage-prompt', 'pre-tool', 'subagent-start',
+    'capture', 'checkpoint', 'session-end', 'drain'].map((n) => `hooks/dist/${n}.mjs`);
   return [...hooks, 'bin/statusline.mjs'];
 }
 
@@ -109,7 +109,7 @@ async function runAsNode(rel, version) {
 test('every guarded script parses at the engine floor', async () => {
   const { transform } = await import('esbuild');
   const scripts = guardedScripts();
-  assert.equal(scripts.length, 9, 'the 8 hooks and the status line');
+  assert.equal(scripts.length, 10, 'the 9 hooks and the status line');
 
   for (const rel of scripts) {
     const abs = join(PLUGIN_ROOT, rel);
@@ -147,7 +147,7 @@ test('every registered entry point is a guarded one', () => {
 
 test('on an unsupported Node every hook refuses by name and exits 0', async () => {
   const hooks = guardedScripts().filter((s) => s.startsWith('hooks/'));
-  assert.equal(hooks.length, 8);
+  assert.equal(hooks.length, 9);
 
   for (const rel of hooks) {
     const r = await runAsNode(rel, OLD_NODE);

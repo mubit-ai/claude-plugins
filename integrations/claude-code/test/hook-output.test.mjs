@@ -194,6 +194,13 @@ const CASES = {
     setup: (dataDir) => { seedRule(dataDir); return {}; },
     payload: () => fx.preToolUse({ cwd: PROJECT_DIR }),
   },
+  'SubagentStart subagent-start': {
+    // The subagent's recall query is the parent turn's staged prompt — `SubagentStart`
+    // carries no task text of its own. Without this the hook reaches only its suppressing
+    // branch, and a case that never sees the speaking branch is not a case.
+    setup: (dataDir) => { stageParentTurn(dataDir); return {}; },
+    payload: () => fx.subagentStart({ cwd: PROJECT_DIR }),
+  },
   'PostToolUse capture': {
     payload: () => fx.postToolUse({ cwd: PROJECT_DIR }),
   },
@@ -255,6 +262,22 @@ function seedRule(dataDir) {
     version: 1,
     updated_at: Date.now(),
     rules: [{ ref: 'ref_rule_1', text: 'Never force-push to main; open a pull request instead.' }],
+  }));
+}
+
+/**
+ * §5.3: `runs/<run_id>/turns/<prompt_id>.json`, the turn `stage-prompt` writes on the
+ * parent's `UserPromptSubmit` and `subagent-start` reads its query back out of.
+ */
+function stageParentTurn(dataDir) {
+  const dir = join(dataDir, 'runs', RUN_ID, 'turns');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${fx.PROMPT_ID}.json`), JSON.stringify({
+    prompt: 'why is the ingest job stuck in queued?',
+    prompt_id: fx.PROMPT_ID,
+    session_id: fx.SESSION_ID,
+    started_at: Date.now(),
+    recalled: [],
   }));
 }
 

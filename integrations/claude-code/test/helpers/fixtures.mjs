@@ -243,6 +243,41 @@ export const stopFailure = (over = {}) => base({
   ...over,
 });
 
+/**
+ * SubagentStart — recorded off Claude Code 2.1.235, not composed from `base()`.
+ *
+ * The field list is the one the host actually delivered, in the order it delivered it:
+ *
+ *     session_id, transcript_path, cwd, prompt_id, agent_id, agent_type, hook_event_name
+ *
+ * Two things in that list are load-bearing and both are easy to get wrong by copying a
+ * neighbouring fixture:
+ *
+ *   - **There is no `permission_mode`.** `UserPromptSubmit` and `SubagentStop` both carry
+ *     one; this event does not. Building it through `base()` would invent the field, and a
+ *     hook that read it would look correct against a fixture that lied — the exact shape
+ *     the warning above `postToolUse` records.
+ *   - **There is no task text.** No `prompt`, no `description`, nothing naming what the
+ *     subagent was asked to do. A recall query therefore cannot come from this payload; it
+ *     has to be read from the parent turn `prompt_id` names. That absence is a fact about
+ *     the event, so the fixture states it by omission rather than by helpfully filling it in.
+ *
+ * `agent_id` is shaped like the two the live fan-out produced (`ab55bb82d19855fbc`,
+ * `a0a7d24f87136bee1`): a bare hex id with no `sub_` prefix.
+ *
+ * @param {Record<string,any>} [over]
+ */
+export const subagentStart = (over = {}) => ({
+  session_id: SESSION_ID,
+  transcript_path: `/Users/x/.claude/projects/-Users-x-repo/${SESSION_ID}.jsonl`,
+  cwd: '/Users/x/repo',
+  prompt_id: PROMPT_ID,
+  agent_id: 'ab55bb82d19855fbc',
+  agent_type: 'Explore',
+  hook_event_name: 'SubagentStart',
+  ...over,
+});
+
 /** @param {Record<string,any>} [over] */
 export const subagentStop = (over = {}) => base({
   hook_event_name: 'SubagentStop',

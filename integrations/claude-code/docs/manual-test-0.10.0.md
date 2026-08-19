@@ -494,10 +494,36 @@ Read the `outcome` column:
 | `dropped` | Abandoned after repeated failures — the turn is not retried forever |
 | `none` | Nothing was injected, so there was nothing to attribute |
 
-The four outcomes `lib/outcome.mjs` derives from the used-signal: `success +0.2` when the reply
-echoed the block, `failure −0.3` when it measurably did not, `neutral 0.0` with an **empty**
-`entry_ids[]` when the signal was unmeasurable, and nothing posted at all when nothing was
-injected. `MUBIT_CC_OUTCOME_MODE=off` silences the whole path.
+What `lib/outcome.mjs` posts, which is **not** a simple good/bad on the echo:
+
+| The turn | Posted | `entry_ids` |
+|---|---|---|
+| Nothing injected | nothing at all | — |
+| Injected, reply echoed the block | `success` +0.2, or `failure` −0.3 if the *turn itself* failed | the recalled ids |
+| Injected, reply echoed **none** of it | `neutral` **0.0** | **empty** |
+| Injected, signal not computable | `success` +0.2 / `failure` −0.3 as before | the recalled ids |
+
+Two things follow, and both surprise people:
+
+**A memory that goes unused is not penalised.** Row 3 posts `neutral` at exactly 0.0 — not
+`failure` — because the used-signal is dominated by false negatives and a penalty would punish
+memories the model read silently. `failure` −0.3 is driven by `turn.outcome === 'failure'`, i.e.
+the turn went badly, not by the echo being absent.
+
+**Row 3 deliberately withholds the ids.** Attributed reinforcement counts any signal ≥ 0 as one
+reinforcement, so naming the entries on a 0.0 record would credit exactly the memories nothing
+showed were read. The cost is that the record says "injected and unused" without saying which
+entries were ignored. That is the honest side of the trade, and it is why an unused entry's
+`reinforcement_count` stays `None` while a used one climbs.
+
+Measured, one turn each against `api.mubit.ai`:
+
+```
+3cb9921e  conf=0.665  reinforcements=3     last_outcome=success   ← echoed: credited
+ccedecb0  conf=0.500  reinforcements=None  last_outcome=None      ← not echoed: untouched
+```
+
+`MUBIT_CC_OUTCOME_MODE=off` silences the whole path, neutral records included.
 
 Confirm the confidence actually moved — `--resolve` prints it:
 

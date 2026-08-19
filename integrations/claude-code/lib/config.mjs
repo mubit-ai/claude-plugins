@@ -379,6 +379,13 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // registrations and would cost a second process per prompt to everyone, opted in or not.
   const recallAsync = bool(pick('recallAsync', 'MUBIT_CC_RECALL_ASYNC'), false);
   const reflectOnEnd = bool(pick('reflectOnEnd', 'MUBIT_CC_REFLECT_ON_END'), true);
+  // §5.7 runs in a process the host is free to take away: under `--print` Claude Code emits
+  // its result and *cancels* SessionEnd about a second in, and interactive sessions are
+  // cancelled too. On (the default) the hook hands its whole body to a detached child, which
+  // is the only thing that lets the end-of-session drain and the reflect finish at all. Off is
+  // an escape hatch for an environment that forbids background processes — and the switch the
+  // inline-path tests use — at the cost of a flush a teardown can still cut short.
+  const sessionEndDetach = bool(pick('sessionEndDetach', 'MUBIT_CC_SESSION_END_DETACH'), true);
   const outcomeMode = enumOf(pick('outcomeMode', 'MUBIT_CC_OUTCOME_MODE'),
     ['off', 'implicit', 'explicit'], 'implicit');
   const statusLine = bool(pick('statusLine', 'MUBIT_CC_STATUSLINE'), true);
@@ -461,6 +468,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     policyTtlMs,
     outcomeMode,
     reflectOnEnd,
+    sessionEndDetach,
     statusLine,
     preToolWarnings,
     mcpTools,

@@ -76,6 +76,7 @@ under ~10 seconds.
 | `attribution.test.mjs` | `reference_id` → `entry_ids` end to end |
 | `checkpoint.test.mjs` | redacted snapshot, spooled anchor, visible failure |
 | `session-end.test.mjs` | the required reflect, once-marker, best-effort ordering, one outcome rule shared with `drain` |
+| `session-end-detach.test.mjs` | the flush outliving the hook process: the hand-off, the order and the claim inside a detached child, the `reflect.status` table |
 | `statusline.test.mjs` | network-free, glyph precedence, empty-state survival |
 | `launch.test.mjs` | run-id derivation, env-before-import, allowlist default |
 | `skills.test.mjs` | frontmatter, tool prefixes, load-bearing prose |

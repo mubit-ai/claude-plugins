@@ -32,9 +32,39 @@
  * accepted. Outcomes go out before reflect for the opposite reason: `include_step_outcomes`
  * folds those signals into the evidence, and the negative ones produce the best lessons.
  *
- * The drain runs **inline, not detached**: the process is going away and a detached child
- * may be reaped before it finishes. It ignores the batch-size trigger — there is no "next
- * prompt" left to flush on.
+ * The drain runs **inline within this body**, not as a further `spawnDetached('drain')`: one
+ * hand-off is enough, and a second child would only race the first for the drain lock. It
+ * ignores the batch-size trigger — there is no "next prompt" left to flush on.
+ *
+ * ---------------------------------------------------------------------------
+ * ...and none of it runs in the process the host started
+ * ---------------------------------------------------------------------------
+ * The host does not promise this hook a chance to finish. Under `--print` Claude Code emits
+ * its final result and tears the session down about a second in — a **cancellation**, not a
+ * timeout, so no ceiling on either side of the boundary helps: a trial with
+ * `SessionEnd.timeout: 30` was cancelled at the same ~1 s, four times out of four. Interactive
+ * sessions are cancelled too, which is why runs that demonstrably stored lessons still read
+ * `reflect: {at: 0, status: ""}` — the request went out and the hook was killed before it
+ * could say so.
+ *
+ * So the ordered body above lives in a **detached child** (§4.9's `spawnDetached`, the same
+ * mechanism `drain.mjs` already uses), and this process does exactly three things: stash the
+ * payload, stamp the marker `detached`, spawn. The child is not on the host's 8 s clock,
+ * because nothing is waiting on it.
+ *
+ * Two details are load-bearing:
+ *
+ *   - **The claim stays in the body, not in the parent.** A parent that claimed and then
+ *     failed to spawn — or spawned a child that was reaped — would have burned the claim and
+ *     taken the session's whole flush with it.
+ *   - **The marker is stamped before the spawn**, so a fast child can only overwrite that
+ *     stamp, never lose a race to it. The parent never writes a terminal status and the child
+ *     never writes `detached`, which is what makes a marker left on `detached` a specific,
+ *     reportable failure — the child was reaped — rather than one more indistinguishable
+ *     blank.
+ *
+ * `MUBIT_CC_SESSION_END_DETACH=0` runs the body here instead, for an environment that forbids
+ * background processes; so does a hand-off that cannot be written. Neither drops the flush.
  *
  * `claimOnce` guards the whole thing: SessionEnd can fire more than once (a `reason=exit`
  * after a `reason=clear`, a wrapper re-running the hook), and a double flush is a double
@@ -48,13 +78,13 @@
  * crashed session's captures survive.
  */
 
-import { readdirSync } from 'node:fs';
+import { readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { readBreaker } from '../../lib/breaker.mjs';
 import { loadConfig } from '../../lib/config.mjs';
 import { ROUTES, heartbeat, postIngest, postOutcome, request } from '../../lib/http.mjs';
-import { runHook } from '../../lib/hook.mjs';
+import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
@@ -68,16 +98,27 @@ import {
 } from '../../lib/state.mjs';
 
 /**
- * §5.7 budgets. `hooks.json` allows this hook 8 s, so the internal deadline sits inside that
- * with room for the harness to still emit stdout and exit 0.
+ * §5.7 budgets, in the two lifetimes this hook has.
+ *
+ * In the process the host started, `hooks.json` allows 8 s and the internal deadline sits
+ * inside that with room to still emit stdout and exit 0 — though the hand-off spends
+ * milliseconds of it. In the detached child the ceiling stops applying the moment nothing is
+ * waiting on us, so the body gets `drain.mjs`-class headroom for an LLM-backed reflect.
  */
-const HARNESS_BUDGET_MS = 7200;
-const BUDGET_MS = 6800;
+const DETACHED = process.env.MUBIT_CC_DETACHED === '1';
+const HARNESS_BUDGET_MS = DETACHED ? 12_000 : 7200;
+const BUDGET_MS = DETACHED ? 11_500 : 6800;
 
 /** §5.7 step 2: "until empty or 3500 ms elapse". */
 const DRAIN_MS = 3500;
-/** §5.7 step 4: the reflect is LLM-backed, so it gets the largest single slice. */
-const REFLECT_MS = 4000;
+/**
+ * §5.7 step 4: the reflect is LLM-backed, so it gets the largest single slice — and inside a
+ * detached child that slice is what the extra headroom above is *for*. Measured against a
+ * hosted instance, 4000 ms is simply not enough: the first `--print` session ever to reach
+ * this call recorded `POST /v2/control/reflect: aborted after 4000ms`. The inline value is
+ * left exactly where it was, because there the host's 8 s ceiling still decides.
+ */
+const REFLECT_MS = DETACHED ? 8000 : 4000;
 const OUTCOME_MS = 1500;
 const HEARTBEAT_MS = 1000;
 
@@ -111,6 +152,12 @@ await runHook('session-end', {
       // `static` with no pin, or a derivation that could only have answered "default" (§4.3).
       // The spool waits for a run id worth writing to; nothing here is lost.
       log(cfg, 'warn', `session-end: no usable run id (${messageOf(err)})`);
+      return SUPPRESS;
+    }
+
+    // Before anything else, and before the claim: hand the whole body to a process the host
+    // does not own. Everything below this line is what the child then runs, unchanged.
+    if (!ctx?.detached && cfg.sessionEndDetach !== false && handOff(cfg, payload, runId)) {
       return SUPPRESS;
     }
 
@@ -184,13 +231,60 @@ await runHook('session-end', {
 });
 
 // ---------------------------------------------------------------------------
+// The hand-off
+// ---------------------------------------------------------------------------
+
+/**
+ * Stash the payload, stamp the marker, spawn, and report whether the child owns the flush.
+ *
+ * `spawnDetached` (§4.9) is re-used rather than reinvented: `detached: true`, `stdio:
+ * 'ignore'`, `unref()`, and the payload handed over by file because a detached child's
+ * inherited stdin is not reliably readable once the parent exits — and the parent exits
+ * within milliseconds, which is the entire point. `'session-end'` resolves as a sibling of
+ * `argv[1]` first, so the same call works from `hooks/src` and from the shipped `hooks/dist`.
+ *
+ * **Every failure here returns `false`, and false means "run the body yourself".** Losing a
+ * session's flush is the failure this whole path exists to stop; an unwritable `tmp/` is not
+ * a reason to reintroduce it.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} payload
+ * @param {string} runId
+ * @returns {boolean} true when the child owns the flush and this process is done
+ */
+function handOff(cfg, payload, runId) {
+  const path = stashPayload(cfg, payload);
+  if (!path) {
+    log(cfg, 'info', 'session-end: no handoff file could be written; flushing inline instead',
+      { run_id: runId });
+    return false;
+  }
+
+  // Stamped BEFORE the spawn, so a fast child can only overwrite this, never lose to it.
+  // `detached` is the parent's only marker write and is never terminal: a marker still
+  // reading it later means the child never reported.
+  updateMarker(cfg, runId, { reflect: { at: 0, lessons_stored: 0, status: 'detached' } });
+
+  const child = spawnDetached(cfg, 'session-end', [], path);
+  if (!child) {
+    try { unlinkSync(path); } catch { /* §7's tmp sweep gets it */ }
+    log(cfg, 'info', 'session-end: could not spawn the flush; running it inline instead',
+      { run_id: runId });
+    return false;
+  }
+
+  log(cfg, 'debug', 'session-end: flushing in a detached child', { run_id: runId, pid: child.pid });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // §5.7 step 2 — the inline drain
 // ---------------------------------------------------------------------------
 
 /**
  * One drainer at a time, one request per batch, and files unlinked only after a 2xx —
- * the same contract as `drain.mjs`, run in this process because a detached child may be
- * reaped when the session ends.
+ * the same contract as `drain.mjs`, run in this body rather than handed to yet another
+ * child: the body is already in one, and a second would only race the first for the lock.
  *
  * A failure stops the loop and leaves every spool file exactly where it is. Quarantine of a
  * genuinely bad payload is deliberately NOT duplicated here: `drain.mjs` owns the three-way

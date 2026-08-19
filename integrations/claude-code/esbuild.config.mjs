@@ -47,6 +47,24 @@ const MCP_SERVER_ENTRY = '../mcp/dist/index.js';
 /** How to produce `MCP_SERVER_ENTRY`. Quoted in the error when it is missing. */
 const MCP_SERVER_BUILD = 'npm --prefix ../mcp ci && npm --prefix ../mcp run build';
 
+/**
+ * The version stamped into the launcher as `__MUBIT_MCP_VERSION__`.
+ *
+ * The sibling manifest is the authority: it is the package `mcp/dist/server.js` was bundled
+ * from. In the generated `claude-plugins` mirror that sibling does not exist — the mirror
+ * carries this one plugin and vendors the server bundle — and reading it there threw at
+ * module scope, which made `npm run build` unusable for every other target too.
+ *
+ * This plugin's own version is the right fallback rather than a guess: the two ship in
+ * lockstep (`scripts/set-version.mjs` holds them together, and `manifests.test.mjs` enforces
+ * three-way lockstep across the manifests), and `mcp-surface.test.mjs` already asserts the
+ * server's advertised `serverInfo.version` equals this package's version — so the fallback
+ * is checked by a test rather than assumed.
+ */
+const MCP_VERSION = has('../mcp/package.json')
+  ? readJson('../mcp/package.json').version
+  : readJson('package.json').version;
+
 // ---------------------------------------------------------------------------
 // The runtime floor guard (§11.1 engines)
 // ---------------------------------------------------------------------------
@@ -148,7 +166,7 @@ const targets = [
     outfile: 'mcp/dist/index.js',
     ...shared,
     external: ['./server.js'],
-    define: { __MUBIT_MCP_VERSION__: JSON.stringify(readJson('../mcp/package.json').version) },
+    define: { __MUBIT_MCP_VERSION__: JSON.stringify(MCP_VERSION) },
   },
   // The server drags in @mubit-ai/sdk -> @grpc/grpc-js, which is CommonJS and reaches for
   // `require` at runtime. esbuild's ESM output defines a `__require` helper that throws
@@ -177,14 +195,24 @@ const targets = [
 // `mcp/dist/server.js` untouched, which means both CI gates that rebuild and then run
 // `git diff --exit-code` pass while never having rebuilt the server at all — a green build
 // that proves nothing, in precisely the place a stale server bundle already shipped once.
-if (!has(MCP_SERVER_ENTRY)) {
+//
+// The one exception is a checkout where the sibling is not merely uncompiled but absent:
+// the generated `claude-plugins` mirror vendors `mcp/dist/server.js` and has no `../mcp` to
+// build from, so the target is structurally unbuildable there and the refusal above blocks
+// every *other* target with it. `MUBIT_CC_BUILD_SKIP_SERVER=1` opts out explicitly — which
+// is the honest shape for this, where a silent skip would not be: the operator states that
+// they know the server bundle will not be rebuilt, and the target falls through to the skip
+// loop below, which warns and leaves the committed bundle untouched.
+if (!has(MCP_SERVER_ENTRY) && process.env.MUBIT_CC_BUILD_SKIP_SERVER !== '1') {
   console.error(
     `[esbuild] ${MCP_SERVER_ENTRY} does not exist.\n`
     + '  mcp/dist/server.js is bundled from the in-repo @mubit-ai/mcp, which is TypeScript and\n'
     + '  must be compiled first:\n'
     + `      ${MCP_SERVER_BUILD}\n`
     + '  Refusing to continue: skipping this target would leave the committed server bundle in\n'
-    + '  place and report success.');
+    + '  place and report success.\n'
+    + '  If this checkout has no ../mcp at all (the generated claude-plugins mirror vendors the\n'
+    + '  server bundle instead), say so: MUBIT_CC_BUILD_SKIP_SERVER=1.');
   process.exit(1);
 }
 

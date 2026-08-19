@@ -489,11 +489,19 @@ const USER_CONFIG_ROWS = [
   { key: 'redact', env: 'MUBIT_CC_REDACT', field: 'redact', raw: '0', optRaw: 'false', want: false },
   { key: 'recallTokenBudget', env: 'MUBIT_CC_RECALL_TOKENS', field: 'recallTokenBudget', raw: '900', want: 900 },
   { key: 'recallAssemble', env: 'MUBIT_CC_RECALL_ASSEMBLE', field: 'recallAssemble', raw: 'server', want: 'server' },
+  { key: 'recallRepeatMode', env: 'MUBIT_CC_RECALL_REPEAT_MODE', field: 'recallRepeatMode', raw: 'full', want: 'full' },
+  // Asserted ON rather than off: the default is already false, so a row that set it to false
+  // would pass just as well against a key `loadConfig` never reads.
+  { key: 'recallAsync', env: 'MUBIT_CC_RECALL_ASYNC', field: 'recallAsync', raw: '1', optRaw: 'true', want: true },
   { key: 'reflectOnEnd', env: 'MUBIT_CC_REFLECT_ON_END', field: 'reflectOnEnd', raw: '0', optRaw: 'false', want: false },
   { key: 'outcomeMode', env: 'MUBIT_CC_OUTCOME_MODE', field: 'outcomeMode', raw: 'explicit', want: 'explicit' },
   { key: 'statusLine', env: 'MUBIT_CC_STATUSLINE', field: 'statusLine', raw: '0', optRaw: 'false', want: false },
   { key: 'mcpTools', env: 'MUBIT_MCP_TOOLS', field: 'mcpTools', raw: 'mubit_recall,mubit_remember', want: ['mubit_recall', 'mubit_remember'] },
   { key: 'mcpLessonScope', env: 'MUBIT_MCP_LESSON_SCOPE', field: 'mcpLessonScope', raw: 'global', want: 'global' },
+  // The only row that defaults to `false`, so it is the opt-*in* direction that has to be
+  // proven here. Its default is asserted separately below, and again in `pre-tool.test.mjs`
+  // against the running hook — this is the stage that can put text in front of a tool call.
+  { key: 'preToolWarnings', env: 'MUBIT_CC_PRE_TOOL_WARNINGS', field: 'preToolWarnings', raw: '1', optRaw: 'true', want: true },
 ];
 
 for (const row of USER_CONFIG_ROWS) {
@@ -536,9 +544,20 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.recallBudgetMs, 1500);
   assert.equal(cfg.recallTokenBudget, 1500);
   assert.equal(cfg.recallAssemble, 'client');
+  // §5.2: a memory already injected this run is repeated as a one-line pointer rather than
+  // in full. `full` is the pre-seen-set behaviour and costs up to 1500 tokens every prompt.
+  assert.equal(cfg.recallRepeatMode, 'pointer');
+  // Carry-forward recall is opt-in. Default-on would hand every install a first prompt with
+  // no memory and a turn of staleness on every prompt after it, in exchange for latency
+  // most instances do not have a problem with.
+  assert.equal(cfg.recallAsync, false);
   assert.equal(cfg.outcomeMode, 'implicit');
   assert.equal(cfg.reflectOnEnd, true);
   assert.equal(cfg.statusLine, true);
+  // Off. This is the one setting that can put text in front of a tool call, so nothing
+  // changes for an existing user until they ask for it — which is also what makes "measure
+  // how often it fires" a safe thing to run.
+  assert.equal(cfg.preToolWarnings, false);
   assert.equal(cfg.maxParamBytes, 4096);
   assert.equal(cfg.maxOutputBytes, 8192);
   assert.equal(cfg.batchMaxItems, 32);

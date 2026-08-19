@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * `hooks/src/capture.mjs` — PostToolUse / PostToolUseFailure / Stop / SubagentStop (§5.4).
+ * `hooks/src/capture.mjs` — PostToolUse / PostToolUseFailure / Stop / StopFailure /
+ * SubagentStop (§5.4).
  *
- * One script, four modes by argv: none, `--failure`, `--stop`, `--subagent`.
+ * One script, five modes by argv: none, `--failure`, `--stop`, `--stop-failure`,
+ * `--subagent`.
  *
  * ---------------------------------------------------------------------------
  * The two properties that dominate this file
@@ -138,7 +140,36 @@ const MAX_TERMS_READ = 64;
 const TERM_MIN_CHARS = 4;
 const TERM_MAX_CHARS = 24;
 
+/**
+ * The mark `--stop-failure` writes on the turn file, and the whole reason that mode exists.
+ *
+ * `lib/outcome.mjs` reads this key and posts nothing for the turn. It is deliberately NOT
+ * `outcome: "failure"`, which build-guide §5.5 originally called for ("On a StopFailure turn:
+ * outcome 'failure', signal -0.3"): -0.3 against the turn's recalled ids is a claim that the
+ * *memory* was wrong, and a rate limit is not evidence about memory. See the fifth row of
+ * `decideOutcome`'s table.
+ */
+const API_ERROR_KEY = 'api_error';
+
+/**
+ * The taxonomy value is a closed vocabulary of short identifiers; this only bounds a host
+ * that sends something else. The free-text `error_details` beside it is deliberately not
+ * stored: the decision keys on the taxonomy value alone, and an unbounded API message is a
+ * §4.4 question with nothing on the other side of it.
+ */
+const MAX_API_ERROR_CHARS = 64;
+
+/**
+ * What the host itself substitutes for a missing `error` on the way to the matcher
+ * (`matchQuery: e.error ?? "unknown"`), and the taxonomy's own catch-all. An empty mark would
+ * read as "no API error at all" and put the turn straight back into the outcome path, so
+ * there is no path out of `--stop-failure` with a blank one.
+ */
+const API_ERROR_UNKNOWN = 'unknown';
+
 // ---------------------------------------------------------------------------
+
+/** @typedef {'tool'|'failure'|'stop'|'stop-failure'|'subagent'} Mode */
 
 const MODE = pickMode(process.argv.slice(2));
 
@@ -153,12 +184,17 @@ await runHook('capture', {
 });
 
 /**
+ * `Array.includes` is exact equality, not a prefix test, so `--stop-failure` and `--stop`
+ * cannot be confused for one another however these rows are ordered. The specific flag is
+ * checked first anyway, because the next person to read this will wonder.
+ *
  * @param {string[]} argv
- * @returns {'tool'|'failure'|'stop'|'subagent'}
+ * @returns {Mode}
  */
 function pickMode(argv) {
   const args = Array.isArray(argv) ? argv : [];
   if (args.includes('--failure')) return 'failure';
+  if (args.includes('--stop-failure')) return 'stop-failure';
   if (args.includes('--stop')) return 'stop';
   if (args.includes('--subagent')) return 'subagent';
   return 'tool';
@@ -170,7 +206,7 @@ function pickMode(argv) {
  *
  * @param {Record<string, any>} rawPayload
  * @param {Record<string, any>} cfg
- * @param {'tool'|'failure'|'stop'|'subagent'} mode
+ * @param {Mode} mode
  */
 function capture(rawPayload, cfg, mode) {
   const payload = isObject(rawPayload) ? rawPayload : {};
@@ -205,10 +241,18 @@ function capture(rawPayload, cfg, mode) {
   if (!runId) return;
 
   // 4-6. classify, build the text, redact.
+  //
+  // `--stop-failure` builds nothing. The turn produced no episode: its answer is whatever
+  // fragment the API managed before it fell over, and `Q: <prompt>\n\nA: <half a sentence>`
+  // is the half-a-conversation this file already refuses to store — except this time it would
+  // also be recalled later as though it were what the assistant had to say on the subject.
   const item = attempt(
-    () => (mode === 'stop' || mode === 'subagent'
-      ? buildTurnItem(payload, cfg, runId, mode)
-      : buildToolItem(payload, cfg, mode)),
+    () => {
+      if (mode === 'stop-failure') return null;
+      return mode === 'stop' || mode === 'subagent'
+        ? buildTurnItem(payload, cfg, runId, mode)
+        : buildToolItem(payload, cfg, mode);
+    },
     null,
   );
 
@@ -223,9 +267,49 @@ function capture(rawPayload, cfg, mode) {
     attempt(() => fireDrain(cfg, runId, payload, outcomeArgs(payload)));
     return;
   }
+
+  // 8b. `--stop-failure` closes the turn too — and it is the ONLY thing that ever will.
+  //
+  //     The host fires `StopFailure` **instead of** `Stop` (its own registry: "Fires instead
+  //     of Stop when an API error (rate limit, auth failure, etc.) ended the turn"), so on a
+  //     rate-limited turn `--stop` never runs. Before this mode existed the turn file was
+  //     simply abandoned mid-write: `prompt` and `recalled` staged, no `ended_at`, nothing
+  //     anywhere recording that the turn had died or why.
+  //
+  //     It closes the turn `outcome_pending` exactly like `--stop` does, on purpose. Leaving
+  //     the flag off would also stop `session-end`'s flush from posting — but by hiding the
+  //     turn from the sweep rather than by deciding about it, which puts the rule in the
+  //     shape of an omission that the next person to touch that filter deletes by accident.
+  //     One rule, in `lib/outcome.mjs`, read by both hooks (see its header).
+  //
+  //     And it does NOT force a drain. The only reason `--stop` always does is to carry
+  //     `--with-outcome`; there is no outcome to carry here, so this falls through to the
+  //     ordinary batch trigger below — the turn's captured tool calls were real work, and
+  //     the model's API falling over says nothing about Mubit's.
+  if (mode === 'stop-failure') {
+    attempt(() => closeTurn(cfg, runId, payload, apiErrorOf(payload)));
+  }
+
   if (attempt(() => drainTriggerFired(cfg, runId), false)) {
     attempt(() => fireDrain(cfg, runId, payload, []));
   }
+}
+
+/**
+ * The `StopFailure` payload's error kind, as the host spells it.
+ *
+ * The field is **`error`** — read out of Claude Code 2.1.235's own Zod schema
+ * (`hook_event_name: wt("StopFailure"), error: …, error_details: …optional(),
+ * last_assistant_message: …optional()`), not from the published hook reference, which calls
+ * it `error_type` in one place and `reason` in another. Reading the wrong name here would
+ * stamp every API-failed turn `unknown` while every test agreed with it.
+ *
+ * @param {Record<string, any>} payload
+ * @returns {string} never empty
+ */
+function apiErrorOf(payload) {
+  const raw = str(payload.error).trim();
+  return raw ? clamp(raw, MAX_API_ERROR_CHARS) : API_ERROR_UNKNOWN;
 }
 
 // ---------------------------------------------------------------------------
@@ -532,11 +616,15 @@ function readTurn(cfg, runId, promptId) {
  * — the staged terms and `last_assistant_message` — is in scope at one point in one function,
  * and the file is already being rewritten. One read, one write, no new lifecycle.
  *
+ * `apiError` is `StopFailure`'s half. It is the only difference between the two closes, and
+ * it turns the used-signal off — see below.
+ *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {Record<string, any>} payload
+ * @param {string} [apiError]  the taxonomy value that ended the turn; '' on a normal Stop
  */
-function closeTurn(cfg, runId, payload) {
+function closeTurn(cfg, runId, payload, apiError = '') {
   const p = turnPath(cfg, runId, payload.prompt_id);
   if (!p) return;
   const prev = readJson(p, null);
@@ -545,7 +633,12 @@ function closeTurn(cfg, runId, payload) {
     session_id: str(payload.session_id),
     started_at: Date.now(),
   };
-  const evidence = attempt(() => usedEvidence(base, payload), null);
+  // The signal asks whether the reply carried the injected memory's vocabulary. A reply the
+  // API cut off has no denominator for that question — `max_output_tokens` is literally "the
+  // answer stopped early" — and the answer it would produce is `used: false`, which
+  // `decideOutcome` reads as "the model ignored the memory". Unmeasurable is not unused, and
+  // this is the one place that distinction can still be made honestly.
+  const evidence = apiError ? null : attempt(() => usedEvidence(base, payload), null);
   writeJsonAtomic(p, {
     ...base,
     // Absent when nothing was staged to look for. An absent key means "unmeasured" and the
@@ -553,6 +646,7 @@ function closeTurn(cfg, runId, payload) {
     // nothing was found". Collapsing the two would report every turn from before this
     // existed as an injection the model ignored.
     ...(evidence ? { used_evidence: evidence } : {}),
+    ...(apiError ? { [API_ERROR_KEY]: apiError } : {}),
     ended_at: Date.now(),
     outcome_pending: true,
   });

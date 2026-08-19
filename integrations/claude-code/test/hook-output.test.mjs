@@ -171,9 +171,11 @@ function registrations() {
 /**
  * `setup` seeds whatever the hook needs to reach the branch that *speaks*, and returns payload
  * overrides. A gate that only ever exercised the suppressing branch would stay green against a
- * plugin that had stopped emitting anything at all.
+ * plugin that had stopped emitting anything at all. `env` adds environment on top of the
+ * shared one, for a hook whose speaking branch is behind an opt-in flag.
  *
  * @type {Record<string, {setup?: (dataDir: string) => Record<string, any>,
+ *                       env?: Record<string, string>,
  *                       payload: (over: Record<string, any>) => Record<string, any>}>}
  */
 const CASES = {
@@ -186,6 +188,21 @@ const CASES = {
   'UserPromptSubmit stage-prompt': {
     payload: () => fx.userPromptSubmit({ cwd: PROJECT_DIR }),
   },
+  'PreToolUse pre-tool': {
+    // The flag is off by default, and a suppressed hook would satisfy this gate vacuously —
+    // it is the *speaking* shape the host has to accept. So opt in and seed a rule the
+    // fixture's `git push --force origin main` actually matches.
+    env: { MUBIT_CC_PRE_TOOL_WARNINGS: '1' },
+    setup: (dataDir) => { seedRule(dataDir); return {}; },
+    payload: () => fx.preToolUse({ cwd: PROJECT_DIR }),
+  },
+  'SubagentStart subagent-start': {
+    // The subagent's recall query is the parent turn's staged prompt — `SubagentStart`
+    // carries no task text of its own. Without this the hook reaches only its suppressing
+    // branch, and a case that never sees the speaking branch is not a case.
+    setup: (dataDir) => { stageParentTurn(dataDir); return {}; },
+    payload: () => fx.subagentStart({ cwd: PROJECT_DIR }),
+  },
   'PostToolUse capture': {
     payload: () => fx.postToolUse({ cwd: PROJECT_DIR }),
   },
@@ -194,6 +211,15 @@ const CASES = {
   },
   'Stop capture --stop': {
     payload: () => fx.stop({ cwd: PROJECT_DIR }),
+  },
+  // `StopFailure` is NOT in `ACCEPTED_HOOK_EVENT_NAMES` above, so this registration has no
+  // `hookSpecificOutput` channel at all — not under its own name (rule 1) and not under a
+  // borrowed one (rule 2). The host says the same thing from the other direction: the
+  // registry describes it as "Fire-and-forget — hook output and exit codes are ignored". So
+  // the only correct stdout is `{"suppressOutput": true}` and nothing else, which the
+  // dedicated test below pins exactly rather than merely allowing.
+  'StopFailure capture --stop-failure': {
+    payload: () => fx.stopFailure({ cwd: PROJECT_DIR }),
   },
   'SubagentStop capture --subagent': {
     payload: () => fx.subagentStop({ cwd: PROJECT_DIR }),
@@ -233,6 +259,38 @@ function writeTranscript(dataDir) {
     line('assistant', 'It stays queued until indexing completes.'),
   ].join('\n')}\n`);
   return path;
+}
+
+/**
+ * §7: `runs/<run_id>/rules.json`, the store `session-start` and `prompt-recall` fill and
+ * `pre-tool` reads. The text has to share terms with the `preToolUse` fixture's command
+ * (`git push --force origin main`) or the hook correctly says nothing and this gate goes
+ * vacuous.
+ */
+function seedRule(dataDir) {
+  const dir = join(dataDir, 'runs', RUN_ID);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'rules.json'), JSON.stringify({
+    version: 1,
+    updated_at: Date.now(),
+    rules: [{ ref: 'ref_rule_1', text: 'Never force-push to main; open a pull request instead.' }],
+  }));
+}
+
+/**
+ * §5.3: `runs/<run_id>/turns/<prompt_id>.json`, the turn `stage-prompt` writes on the
+ * parent's `UserPromptSubmit` and `subagent-start` reads its query back out of.
+ */
+function stageParentTurn(dataDir) {
+  const dir = join(dataDir, 'runs', RUN_ID, 'turns');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${fx.PROMPT_ID}.json`), JSON.stringify({
+    prompt: 'why is the ingest job stuck in queued?',
+    prompt_id: fx.PROMPT_ID,
+    session_id: fx.SESSION_ID,
+    started_at: Date.now(),
+    recalled: [],
+  }));
 }
 
 /** §7: `runs/<run_id>/checkpoints.json`, the file `--pre` writes and `--post` reads. */
@@ -317,7 +375,7 @@ for (const reg of registrations()) {
     const over = spec.setup ? spec.setup(dataDir) : {};
 
     const r = await runHook(reg.hook, spec.payload(over), {
-      env: env(dataDir, server.url),
+      env: { ...env(dataDir, server.url), ...(spec.env ?? {}) },
       args: reg.args,
     });
 
@@ -327,3 +385,42 @@ for (const reg of registrations()) {
     assertHostContract(r.json ?? {}, reg.event, label);
   });
 }
+
+// ---------------------------------------------------------------------------
+// The registration with no channel at all
+// ---------------------------------------------------------------------------
+
+/**
+ * `StopFailure` is the first registration this plugin has on an event outside
+ * `ACCEPTED_HOOK_EVENT_NAMES`, so it is the first one for which "say nothing" is not a choice
+ * the hook makes but the only thing that exists.
+ *
+ * The gate above would pass a `StopFailure` hook that emitted `systemMessage` — it is a legal
+ * top-level key. This pins the stronger property, because the host's registry entry for the
+ * event says the output is not read at all:
+ *
+ *     "Fires instead of Stop when an API error (rate limit, auth failure, etc.) ended the
+ *      turn. Fire-and-forget — hook output and exit codes are ignored."
+ *
+ * Anything beyond `suppressOutput` would therefore be a field written for a reader that does
+ * not exist — the quietest kind of dead code, and the kind this file was written after
+ * `checkpoint --post` shipped a year of it.
+ */
+test('StopFailure capture --stop-failure emits suppressOutput and nothing else', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('capture', fx.stopFailure({ cwd: PROJECT_DIR }), {
+    env: env(dataDir, server.url),
+    args: ['--stop-failure'],
+  });
+
+  assertHookContract(r);
+  assert.deepEqual(r.json, { suppressOutput: true },
+    `StopFailure has no hookSpecificOutput channel (it is absent from the host's `
+    + `hookEventName union) and the host ignores this hook's output entirely, so anything `
+    + `beyond suppressOutput is written for nobody: ${r.stdout}`);
+  assert.ok(!('hookSpecificOutput' in (r.json ?? {})),
+    'a hookSpecificOutput here fails the host schema and would discard the WHOLE object');
+});

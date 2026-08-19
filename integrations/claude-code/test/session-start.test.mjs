@@ -461,8 +461,26 @@ test('source=compact with no stored checkpoint steers normally and names no anch
     `no stored anchor must mean no anchor paragraph, got:\n${ctx}`);
 });
 
-// §4.3 `fork`: same rule as compact — the fork inherits the parent record's run.
-test('source=fork reuses the parent session record run', async (t) => {
+/**
+ * §4.3 `fork`: `--fork-session`, the `/fork` background copy and `/branch` all continue an
+ * existing conversation, so the run continues with them — the same rule `compact` and
+ * `resume` follow, for the same reason.
+ *
+ * This is a regression test for a session that got nothing at all. `hooks/hooks.json` matched
+ * `startup|resume|clear|compact`; Claude Code reported `fork` from v2.1.214 onward and
+ * `resume` before it, so the four-source matcher used to catch a fork by accident and then
+ * stopped. Verified live on 2.1.235 in `docs/manual-test-hs-1.md` §5: a match-all SessionStart
+ * group logged `{"source":"fork"}` while a four-source group beside it logged nothing. Since
+ * this hook is the one that derives the run id, arms the cold-start window, writes the marker
+ * and injects the steer, the miss cost the whole feature — in exactly the sessions a user
+ * branched *because* the work mattered.
+ *
+ * Heartbeat, not register, is the second half. `deriveAgentId` (`lib/runid.mjs:287`) returns
+ * the bare role for a parent session, so the agent the forked-from session announced IS this
+ * agent; re-registering it is the reconciliation noise the `resume` branch already exists to
+ * avoid.
+ */
+test('source=fork reuses the parent run and heartbeats instead of registering', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -472,7 +490,88 @@ test('source=fork reuses the parent session record run', async (t) => {
     { env: env(dataDir, server.url) });
   assertHookContract(r);
 
-  assert.deepEqual(outgoingRunIds(server), [MAPPED_RUN]);
+  assert.deepEqual(seq(server), [
+    'GET /v2/core/health',
+    'POST /v2/control/agents/heartbeat',
+    'POST /v2/control/lessons',
+  ], 'a fork continues a session that never left, so re-announcing its agent is noise the '
+    + 'control plane has to reconcile');
+  server.assertNotCalled('POST', '/v2/control/agents/register');
+
+  assert.deepEqual(outgoingRunIds(server), [MAPPED_RUN],
+    'deriving a fresh run id here would cut the fork off from the parent conversation\'s '
+    + 'captured turns, which is the memory the user branched in order to keep');
+
+  // §4.8 — `status/<run_id>.json` is what `bin/statusline.mjs` renders and what every later
+  // hook in this session reads back. Without it a forked session shows no memory state at all.
+  const markers = readdirSync(join(dataDir, 'status')).filter((f) => f !== 'health.json');
+  assert.deepEqual(markers, [`${MAPPED_RUN}.json`],
+    'the marker must be written under the inherited run, not a fresh one or none');
+
+  // The claim this ticket exists to prove: a forked session is given the memory a resumed one
+  // is given — the run named, and the standing lessons rendered.
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.ok(ctx.includes(MAPPED_RUN),
+    `the steer block must name the inherited run, got:\n${ctx}`);
+  assert.match(ctx, /standing lessons/i,
+    'the global lessons a resumed session opens with must reach a forked one too');
+});
+
+/**
+ * The shape a *live* fork actually arrives in, which the mapped case above does not cover.
+ *
+ * A real `--fork-session` payload carries a brand-new `session_id` and no pointer whatsoever
+ * back to the parent — captured verbatim from Claude Code 2.1.235 in
+ * `docs/manual-test-hs-1.md` §5:
+ *
+ *     {"session_id":"e8303836-739a-45da-a09a-5861b96df5d1","transcript_path":"…","cwd":"…",
+ *      "hook_event_name":"SessionStart","source":"fork"}
+ *
+ * So on the first SessionStart of a fork there is no session map to reuse and
+ * `resolveRunId` falls through to `deriveFresh` (`lib/runid.mjs:157`). Continuity is then the
+ * strategy's job, and under the default `per-directory` the fork derives the very run its
+ * parent derived from the same directory. That is what makes the matcher fix sufficient
+ * rather than merely necessary: without this the fix would fire the hook and still hand the
+ * fork a stranger's run.
+ */
+test('an unmapped fork session id still lands on the run its parent derived', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  // The parent: an ordinary startup, mapping nothing this fork can look up.
+  const parent = await runHook('session-start',
+    fx.sessionStart({ source: 'startup', cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(parent);
+  const parentRun = server.lastCall('POST', '/v2/control/agents/register').body.run_id;
+
+  // The fork: a session id the plugin has never seen, exactly as the host delivers it.
+  const forkSession = 'e8303836-739a-45da-a09a-5861b96df5d1';
+  const fork = await runHook('session-start', fx.sessionStart({
+    source: 'fork',
+    session_id: forkSession,
+    transcript_path: `/Users/x/.claude/projects/-Users-x-repo/${forkSession}.jsonl`,
+    cwd: PROJECT_DIR,
+  }), { env: env(dataDir, server.url) });
+  assertHookContract(fork);
+
+  // The matcher change is what makes this hook run at all; the heartbeat is how it says
+  // so. Assert it landed before reading its body, or a fork that never reached the wire
+  // fails as a TypeError instead of as the missing round trip it is.
+  server.assertCalled('POST', '/v2/control/agents/heartbeat', 1);
+  assert.equal(server.lastCall('POST', '/v2/control/agents/heartbeat').body.run_id, parentRun,
+    'a fork carries a new host session id, so only the run strategy can keep it on the '
+    + 'parent\'s memory — a different run id here means the branch starts blind');
+
+  // The fork gets its OWN entry in the session map, beside the parent's rather than over it,
+  // so every later hook in the forked session resolves the run without re-deriving — and the
+  // parent, if it is still open, goes on resolving too.
+  assert.deepEqual(readdirSync(join(dataDir, 'sessions')).sort(),
+    [`${forkSession}.json`, `${fx.SESSION_ID}.json`].sort(),
+    'a fork must map its new session id without unmapping the session it forked from');
+  const rec = readJsonFile(join(dataDir, 'sessions', `${forkSession}.json`));
+  assert.equal(rec.run_id, parentRun, 'the fork\'s session record must point at the same run');
 });
 
 // ---------------------------------------------------------------------------

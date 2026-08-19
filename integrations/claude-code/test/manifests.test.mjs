@@ -53,7 +53,7 @@ const DEFAULT_ALLOWLIST = [
 const USER_CONFIG_KEYS = [
   'endpoint', 'apiKey', 'userId', 'runStrategy', 'capture', 'recall', 'redact',
   'recallTokenBudget', 'recallAssemble', 'reflectOnEnd', 'outcomeMode', 'statusLine',
-  'mcpTools',
+  'mcpTools', 'preToolWarnings',
 ];
 
 // ---------------------------------------------------------------------------
@@ -257,21 +257,22 @@ test('every hooks.json command uses exec form (command + args), never shell form
   }
 });
 
-// §3.2 — all ten registrations, with the exact events, ordering, matchers, extra args
-// and timeouts. `timeout` is in SECONDS; a millisecond value here silently gives every
-// hook a ~3ms budget.
+// §3.2 — all thirteen registrations, with the exact events, ordering, matchers, extra args,
+// `if` filters and timeouts. `timeout` is in SECONDS; a millisecond value here silently
+// gives every hook a ~3ms budget.
 test('hooks.json declares all ten registrations with the right events, args and timeouts', () => {
   const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
   const events = Object.keys(hooks.hooks ?? {});
 
   const expectedEvents = [
-    'SessionStart', 'CwdChanged', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
-    'Stop', 'SubagentStop', 'PreCompact', 'PostCompact', 'SessionEnd',
+    'SessionStart', 'CwdChanged', 'UserPromptSubmit', 'PreToolUse', 'SubagentStart',
+    'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'SubagentStop', 'PreCompact',
+    'PostCompact', 'SessionEnd',
   ];
   assert.deepEqual([...events].sort(), [...expectedEvents].sort(),
     `hooks.json must register exactly the ten events in §3.2; got [${events.join(', ')}]`);
 
-  /** event → flat list of {script, extraArgs, timeout} in declaration order */
+  /** event → flat list of {script, extraArgs, ifPattern, timeout} in declaration order */
   const flat = new Map();
   for (const { event, entry } of hookEntries(hooks)) {
     const args = (entry.args ?? []).map(String);
@@ -279,32 +280,56 @@ test('hooks.json declares all ten registrations with the right events, args and 
     const row = {
       script: scriptIdx >= 0 ? args[scriptIdx].split('/').pop() : '(none)',
       extraArgs: scriptIdx >= 0 ? args.slice(scriptIdx + 1) : [],
+      // `if` is per-hook-entry, not per-matcher-group — verified against the host's own
+      // `getMatchingHooks`, where the dedup key is built as `p(A.hook)` with
+      // `let p = (A) => A.if ?? ""`. Pinned here because it is the only thing standing
+      // between the PreToolUse hook and a process spawn on every tool call in the session.
+      ifPattern: entry.if ?? '',
       timeout: entry.timeout,
     };
     if (!flat.has(event)) flat.set(event, []);
     flat.get(event).push(row);
   }
 
-  /** @type {Record<string, Array<{script:string, extraArgs:string[], timeout:number}>>} */
+  /** @type {Record<string, Array<{script:string, extraArgs:string[], ifPattern:string, timeout:number}>>} */
   const expected = {
-    SessionStart: [{ script: 'session-start.mjs', extraArgs: [], timeout: 5 }],
+    SessionStart: [{ script: 'session-start.mjs', extraArgs: [], ifPattern: '', timeout: 5 }],
     // The run id is derived from a directory, so a `cd` into another repo has to move it —
     // and drain the run being left, which nothing else in the plugin would ever revisit.
-    CwdChanged: [{ script: 'cwd-changed.mjs', extraArgs: [], timeout: 5 }],
+    CwdChanged: [{ script: 'cwd-changed.mjs', extraArgs: [], ifPattern: '', timeout: 5 }],
     // Order matters: recall must run before the prompt is staged for the drain trigger.
     UserPromptSubmit: [
-      { script: 'prompt-recall.mjs', extraArgs: [], timeout: 3 },
-      { script: 'stage-prompt.mjs', extraArgs: [], timeout: 3 },
+      { script: 'prompt-recall.mjs', extraArgs: [], ifPattern: '', timeout: 3 },
+      { script: 'stage-prompt.mjs', extraArgs: [], ifPattern: '', timeout: 3 },
     ],
+    // Two entries, one per `if` pattern, because `if` takes a single permission rule and
+    // there is no list form. The host dedupes hook entries on
+    // `command \0 args \0 if`, so two entries differing only in `if` are two hooks — and a
+    // command cannot match both `rm *` and `git push *`, so this never doubles a spawn.
+    // WITHOUT `if` this would be one process per tool call for the whole session.
+    PreToolUse: [
+      { script: 'pre-tool.mjs', extraArgs: [], ifPattern: 'Bash(rm *)', timeout: 3 },
+      { script: 'pre-tool.mjs', extraArgs: [], ifPattern: 'Bash(git push *)', timeout: 3 },
+    ],
+    // Registered with NO matcher, deliberately. The matcher field for this event is
+    // `agent_type` and a matcher can only ever be positive, so "every agent except the
+    // plugin's own recall agent" is not a thing it can express — and the set of agent types
+    // a user might spawn is open, so an allowlist would silently exclude most of them. The
+    // self-exclusion therefore lives in the hook, where a test can drive both directions.
+    SubagentStart: [{ script: 'subagent-start.mjs', extraArgs: [], ifPattern: '', timeout: 3 }],
     // Exactly one, and match-all. Two groups both matching a tool would fire capture twice
     // for that one call — see the PostToolUse matcher test below.
-    PostToolUse: [{ script: 'capture.mjs', extraArgs: [], timeout: 3 }],
-    PostToolUseFailure: [{ script: 'capture.mjs', extraArgs: ['--failure'], timeout: 3 }],
-    Stop: [{ script: 'capture.mjs', extraArgs: ['--stop'], timeout: 5 }],
-    SubagentStop: [{ script: 'capture.mjs', extraArgs: ['--subagent'], timeout: 3 }],
-    PreCompact: [{ script: 'checkpoint.mjs', extraArgs: ['--pre'], timeout: 10 }],
-    PostCompact: [{ script: 'checkpoint.mjs', extraArgs: ['--post'], timeout: 5 }],
-    SessionEnd: [{ script: 'session-end.mjs', extraArgs: [], timeout: 8 }],
+    PostToolUse: [{ script: 'capture.mjs', extraArgs: [], ifPattern: '', timeout: 3 }],
+    PostToolUseFailure: [{ script: 'capture.mjs', extraArgs: ['--failure'], ifPattern: '', timeout: 3 }],
+    Stop: [{ script: 'capture.mjs', extraArgs: ['--stop'], ifPattern: '', timeout: 5 }],
+    // Fires INSTEAD of Stop when an API error ended the turn, so it is the only thing that
+    // ever closes those turns. Timeout 3 rather than Stop's 5: it writes one file and never
+    // forces a drain, because there is no outcome for a drain to carry.
+    StopFailure: [{ script: 'capture.mjs', extraArgs: ['--stop-failure'], ifPattern: '', timeout: 3 }],
+    SubagentStop: [{ script: 'capture.mjs', extraArgs: ['--subagent'], ifPattern: '', timeout: 3 }],
+    PreCompact: [{ script: 'checkpoint.mjs', extraArgs: ['--pre'], ifPattern: '', timeout: 10 }],
+    PostCompact: [{ script: 'checkpoint.mjs', extraArgs: ['--post'], ifPattern: '', timeout: 5 }],
+    SessionEnd: [{ script: 'session-end.mjs', extraArgs: [], ifPattern: '', timeout: 8 }],
   };
 
   for (const [event, rows] of Object.entries(expected)) {
@@ -315,12 +340,90 @@ test('hooks.json declares all ten registrations with the right events, args and 
 
 // §3.2 — SessionStart is matched on source; without the matcher the hook fires on
 // sources it has no handling for.
-test('hooks.json SessionStart matches startup|resume|clear|compact', () => {
+//
+// `fork` is the fifth source (`--fork-session`, `/fork`, `/branch`). Before Claude Code
+// v2.1.214 a forked session reported `resume` and this matcher caught it by accident; on
+// 2.1.235 it reports `fork` and the four-source matcher did not match — verified against
+// a live fork in `docs/manual-test-hs-1.md` §5, where the four-source group logged nothing
+// and a match-all group beside it logged `{"source":"fork"}`. The cost of the miss is not a
+// missing section: `session-start.mjs` is the hook that derives the run id, writes the
+// marker and injects the steer, so a forked session ran with no memory at all.
+test('hooks.json SessionStart matches startup|resume|clear|compact|fork', () => {
   const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
   const groups = hooks.hooks?.SessionStart ?? [];
   assert.equal(groups.length, 1, 'SessionStart should declare exactly one matcher group');
-  assert.equal(groups[0].matcher, 'startup|resume|clear|compact',
-    'SessionStart matcher must be "startup|resume|clear|compact" (§3.2)');
+  assert.equal(groups[0].matcher, 'startup|resume|clear|compact|fork',
+    'SessionStart matcher must be "startup|resume|clear|compact|fork" (§3.2) — dropping '
+    + '"fork" leaves /fork and /branch sessions with no run id, no marker and no memory');
+});
+
+/**
+ * §3.2 — `StopFailure` carries NO matcher, and that is a correctness requirement, not a
+ * shortcut.
+ *
+ * Its matcher filters on the payload's `error`, whose vocabulary the host publishes as:
+ *
+ *     matcherMetadata: {fieldToMatch: "error", values: ["rate_limit", "overloaded",
+ *       "authentication_failed", "oauth_org_not_allowed", ...fOr() ? ["account_on_hold"] : [],
+ *       "billing_error", "invalid_request", "model_not_found", "server_error",
+ *       "max_output_tokens", "unknown"]}
+ *
+ * — read out of Claude Code 2.1.235 the same way `hook-output.test.mjs` reads its constants.
+ * Note the spread: **the eleventh value is behind a runtime feature flag**, so the taxonomy is
+ * not the same list on every account. An enumerated matcher here would be correct on some
+ * installs and silently short on others, and the turns it dropped are exactly the ones this
+ * hook exists to catch — an account on hold is not evidence that a recalled memory was wrong.
+ * Matching everything cannot drift.
+ */
+test('hooks.json StopFailure declares no matcher, so no error value can slip past it', () => {
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
+  const groups = hooks.hooks?.StopFailure ?? [];
+  assert.equal(groups.length, 1, 'StopFailure should declare exactly one group');
+  assert.ok(!('matcher' in groups[0]) || ['', '*', '.*'].includes(String(groups[0].matcher)),
+    'StopFailure must match every error value — the taxonomy is feature-flagged, so an '
+    + `enumerated list is wrong on some accounts; found ${JSON.stringify(groups[0].matcher)}`);
+});
+
+/**
+ * HS-7 — PreToolUse is filtered twice over, and both filters are cost, not safety.
+ *
+ * The two are different mechanisms and are easy to conflate:
+ *
+ *   - **`matcher`** is tested against one field of the payload, and for this event that
+ *     field is `tool_name` (host 2.1.235, `getMatchingHooks`:
+ *     `case"PreToolUse": … a = n.tool_name`). `"Bash"` here means the hook is never even
+ *     considered for an `Edit` or a `Read`.
+ *   - **`if`** is a permission-rule pattern tested against the *contents* of the call —
+ *     the host describes it as "Permission rule syntax to filter when this hook runs
+ *     (e.g., \"Bash(git *)\"). Only runs if the tool call matches the pattern. Avoids
+ *     spawning hooks for non-matching commands."
+ *
+ * Neither is a security boundary and nothing in this plugin may treat them as one; the
+ * reference says outright to "use the permission system rather than a hook to enforce a
+ * hard allow or deny". What they buy is that the hook is not a process spawn in front of
+ * every tool call for the whole session — which, at ~30 ms of node start each, is the
+ * difference between a feature and a tax.
+ */
+test('hooks.json PreToolUse is narrowed by both a tool matcher and an if pattern', () => {
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
+  const groups = hooks.hooks?.PreToolUse ?? [];
+  assert.ok(groups.length > 0, 'hooks.json registers no PreToolUse hook (HS-7)');
+
+  for (const [gi, group] of groups.entries()) {
+    assert.equal(group.matcher, 'Bash',
+      `PreToolUse[${gi}] matcher must be "Bash" — the matcher field for this event is `
+      + 'tool_name, and a match-all here spawns a process for every tool call in the session');
+    for (const [hi, entry] of (group.hooks ?? []).entries()) {
+      assert.ok(typeof entry.if === 'string' && entry.if.trim(),
+        `PreToolUse[${gi}].hooks[${hi}] has no "if" filter. Without one this hook runs on `
+        + 'every Bash command the model issues, for a warning that applies to almost none '
+        + 'of them.');
+      assert.match(entry.if, /^Bash\([^)]+\)$/,
+        `PreToolUse[${gi}].hooks[${hi}] "if" is ${JSON.stringify(entry.if)}, which is not the `
+        + 'documented `Tool(pattern)` permission-rule form. A pattern the host cannot parse '
+        + 'is not a narrower filter, it is an unpredictable one.');
+    }
+  }
 });
 
 /**

@@ -2,7 +2,7 @@
 /**
  * `hooks/src/session-start.mjs` — SessionStart (blocking, injection only). Build-guide §5.1.
  *
- * Matchers `startup|resume|clear|compact`. **Budget 2500 ms internal against a 5 s hook
+ * Matchers `startup|resume|clear|compact|fork`. **Budget 2500 ms internal against a 5 s hook
  * timeout**, with three sub-budgets: health half the envelope, register 600 ms, lessons
  * 900 ms. Missing a sub-budget degrades *that section only* — a slow lesson list costs the
  * lesson list, not the steer block. The one thing this hook may never do is fail to speak:
@@ -24,7 +24,7 @@
  *      here, so a server still starting up does not read as "memory broken".
  *   4. `GET /v2/core/health` @`HEALTH_MS`. Not ok → skip 5-6 but **still steer**, saying memory
  *      is offline. Without that the model invents recall or apologises for its absence.
- *   5. `POST /v2/control/agents/register` @600 ms — or `/heartbeat` when `source === "resume"`,
+ *   5. `POST /v2/control/agents/register` @600 ms — or `/heartbeat` on `resume` and `fork`,
  *      because re-registering an agent that never left is noise the control plane reconciles.
  *   6. `POST /v2/control/lessons {scope:"global", limit:5}` @900 ms. **No `run_id`**:
  *      `ListLessonsRequest.run_id` is optional and empty means all runs, which is exactly what
@@ -51,6 +51,7 @@ import { runHook } from '../../lib/hook.mjs';
 import { health, heartbeat, postLessons, registerAgent } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
+import { recordRules } from '../../lib/rules.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import { dataDir, readJson, resolveDataDir, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -200,7 +201,19 @@ await runHook('session-start', {
     // A failure here that names the credential is therefore not just logged: it decides
     // which block the model gets.
     let authError = '';
-    const resuming = sourceOf(payload) === 'resume';
+    // `fork` sits on this side of the line with `resume`, and this is the only place in the
+    // hook where the source distinction is load-bearing at all. `--fork-session`, `/fork` and
+    // `/branch` continue a conversation that is already running under an agent this plugin
+    // already announced — `deriveAgentId` returns the bare role for a parent session
+    // (`lib/runid.mjs:287`), so the fork IS that agent. Re-announcing it is the same
+    // reconciliation noise the `resume` case exists to avoid, and it would do it on a run the
+    // fork inherited rather than one it opened.
+    //
+    // `compact` deliberately stays on the register side. That behaviour predates this change
+    // and nothing measured says it is wrong, so moving it too would be a second, untested
+    // decision riding along with this one.
+    const src = sourceOf(payload);
+    const resuming = src === 'resume' || src === 'fork';
     const identity = { run_id: runId, agent_id: agentId };
     const regBudget = budgetFor(REGISTER_MS);
     if (regBudget > 0) {
@@ -227,8 +240,19 @@ await runHook('session-start', {
     if (lessonBudget > 0) {
       const lres = await postLessons(cfg, { scope: 'global', limit: LESSON_LIMIT },
         { timeoutMs: lessonBudget });
-      if (lres.ok) lessons = readLessons(lres.body);
-      else {
+      if (lres.ok) {
+        lessons = readLessons(lres.body);
+        // HS-7 — the `rule`-typed ones also go to `runs/<run_id>/rules.json`, for
+        // `pre-tool.mjs` to read in front of a matching tool call. That hook may not dial, so
+        // its only supply is a hook that has already paid for a round trip; this is one of
+        // the two, and it is a pure side effect of a call that was made anyway. `recordRules`
+        // never throws and never blocks (`lib/rules.mjs`).
+        //
+        // The RAW array, not `lessons` above: `readLessons` renames `lesson_type` to `type`
+        // on the way through, and the store reads the wire names so that one normaliser can
+        // serve both producers.
+        recordRules(cfg, runId, Array.isArray(lres.body?.lessons) ? lres.body.lessons : []);
+      } else {
         log(cfg, 'info', `session-start: global lessons unavailable (${lres.error})`, { run_id: runId });
         if (!authError && connState(lres.state) === 'auth_failed') authError = String(lres.error ?? '');
       }
@@ -277,7 +301,7 @@ await runHook('session-start', {
     // so it costs no budget and needs no round trip. It sits below the offline branch on
     // purpose rather than beside it: the anchor's only use is asking the server for detail
     // that was compacted away, and the offline block has just told the model not to try.
-    const anchor = sourceOf(payload) === 'compact' ? latestCheckpointId(cfg, runId) : '';
+    const anchor = src === 'compact' ? latestCheckpointId(cfg, runId) : '';
 
     const summary = `mubit: ${cfg.mode}${DOT}run ${runId}${DOT}`
       + `${lessons.length} global lesson${lessons.length === 1 ? '' : 's'}`;

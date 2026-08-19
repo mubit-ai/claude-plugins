@@ -340,8 +340,27 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // the token budget almost never binds because a handful of one-line lessons fit inside it
   // easily. Anyone who wants a shorter block has had no dial for it until now.
   const recallMaxPerSection = int(pick('recallMaxPerSection', 'MUBIT_CC_RECALL_MAX_PER_SECTION'), 0);
+  // What a SUBAGENT's injected block may cost, well under the 1500 a parent gets.
+  //
+  // `UserPromptSubmit` does not fire for a subagent — measured on a live fan-out, which
+  // logged 2 SubagentStart / 2 SubagentStop / 1 UserPromptSubmit, the one being the
+  // parent's. So until `SubagentStart` was wired a subagent got no injected memory at all
+  // and this dial had nothing to govern. Now that it does, reusing `recallTokenBudget`
+  // unchanged would spend a parent-sized block on a three-turn Haiku agent whose window is
+  // smaller and whose task is narrower — and pay it once per spawn, so a fan-out of ten
+  // pays it ten times.
+  const subagentRecallTokenBudget = int(
+    pick('subagentRecallTokenBudget', 'MUBIT_CC_SUBAGENT_RECALL_TOKENS'), 600);
   const recallAssemble = enumOf(pick('recallAssemble', 'MUBIT_CC_RECALL_ASSEMBLE'),
     ['client', 'server'], 'client');
+  // § 5.2 — what to do with a memory this run has already injected. `pointer` renders it as
+  // its reference id plus its first clause (~20 tokens against ~200) and keeps the id in
+  // `recalled[]` so it can still be reinforced; `full` re-sends the whole entry on every
+  // prompt, which is what every release before the seen-set did. The measurement that
+  // decided the default: recall injection costs up to 1500 tokens on EVERY prompt, against
+  // 356 tokens once for the entire MCP tool surface it was assumed to be cheaper than.
+  const recallRepeatMode = enumOf(pick('recallRepeatMode', 'MUBIT_CC_RECALL_REPEAT_MODE'),
+    ['pointer', 'full'], 'pointer');
   // What recall does when rung 1 (`direct_bypass`, zero LLM calls) is refused by instance
   // policy. `none` is the default deliberately: rung 2 pays a routing LLM call, measured at a
   // 5 s median and a long tail past 11 s, against a recall budget of 1500 ms inside a 3 s hook
@@ -350,10 +369,32 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // Operators who would rather pay it can opt back in.
   const recallFallback = enumOf(pick('recallFallback', 'MUBIT_CC_RECALL_FALLBACK'),
     ['none', 'agent_routed'], 'none');
+  // §5.2 — carry-forward recall. On, `prompt-recall` renders the block the PREVIOUS turn's
+  // detached refresh left in `runs/<run_id>/carry.json` and returns without dialling, so the
+  // prompt never waits on the endpoint and `recallBudgetMs` stops being a tuning parameter
+  // anyone has to discover. It costs one turn of staleness and a first prompt with no recall.
+  //
+  // Default off, and the default is the whole point: the host's own `async`/`asyncRewake`
+  // manifest fields are real but static, so a flag expressed there would need two competing
+  // registrations and would cost a second process per prompt to everyone, opted in or not.
+  const recallAsync = bool(pick('recallAsync', 'MUBIT_CC_RECALL_ASYNC'), false);
   const reflectOnEnd = bool(pick('reflectOnEnd', 'MUBIT_CC_REFLECT_ON_END'), true);
   const outcomeMode = enumOf(pick('outcomeMode', 'MUBIT_CC_OUTCOME_MODE'),
     ['off', 'implicit', 'explicit'], 'implicit');
   const statusLine = bool(pick('statusLine', 'MUBIT_CC_STATUSLINE'), true);
+  // HS-7 stage 1 — `PreToolUse`, warnings only. **Default false, and deliberately so.**
+  //
+  // Every other setting here changes what the plugin costs or what it remembers. This one
+  // changes what it is allowed to put in front of a tool call, which is the only surface
+  // where a wrong memory interrupts work rather than merely wasting tokens. The hook denies
+  // nothing at any setting — it has no `permissionDecision` on any path and exits 0 on every
+  // one — but an unasked-for warning in front of `rm` is still an unasked-for warning, and it
+  // would be blamed on the plugin rather than on the lesson that produced it.
+  //
+  // Off by default is also what makes the next step of HS-7 runnable: an operator can turn it
+  // on for one run, measure how often it fires and on what, and decide from data whether the
+  // matching is good enough to be worth anyone's attention.
+  const preToolWarnings = bool(pick('preToolWarnings', 'MUBIT_CC_PRE_TOOL_WARNINGS'), false);
   const mcpToolsRaw = pick('mcpTools', 'MUBIT_MCP_TOOLS');
   const mcpTools = list(mcpToolsRaw, DEFAULT_MCP_TOOLS);
   // §8.2 — the ceiling on what an MCP write may claim for itself. The bundled SDK
@@ -409,15 +450,19 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     recall,
     redact,
     recallTokenBudget,
+    subagentRecallTokenBudget,
     recallMaxPerSection,
     recallBudgetMs,
     recallAssemble,
+    recallRepeatMode,
     recallFallback,
+    recallAsync,
     recallSections,
     policyTtlMs,
     outcomeMode,
     reflectOnEnd,
     statusLine,
+    preToolWarnings,
     mcpTools,
     mcpLessonScope,
     denyGlobs,

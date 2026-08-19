@@ -1,8 +1,10 @@
 // @ts-check
 /**
- * `hooks/src/capture.mjs` — PostToolUse / PostToolUseFailure / Stop / SubagentStop (§5.4).
+ * `hooks/src/capture.mjs` — PostToolUse / PostToolUseFailure / Stop / StopFailure /
+ * SubagentStop (§5.4).
  *
- * One script, four modes by argv: none, `--failure`, `--stop`, `--subagent`.
+ * One script, five modes by argv: none, `--failure`, `--stop`, `--stop-failure`,
+ * `--subagent`.
  *
  * Two properties dominate this file:
  *
@@ -29,7 +31,7 @@ import {
   makeProjectDir, spoolFiles, soleRunId, readJsonFile, tempDir,
 } from './helpers/harness.mjs';
 import {
-  postToolUse, postToolUseFailure, postToolUseLegacyOutput, stop, subagentStop,
+  postToolUse, postToolUseFailure, postToolUseLegacyOutput, stop, stopFailure, subagentStop,
   PROMPT_ID, SESSION_ID, TOOL_USE_ID, SECRETS, RECORDED_RESPONSES,
 } from './helpers/fixtures.mjs';
 
@@ -472,6 +474,175 @@ test('capture --stop: always spawns a drain with --with-outcome <prompt_id>', as
   assert.ok(spawns[0].argv.includes('--with-outcome'), `drain argv: ${JSON.stringify(spawns[0].argv)}`);
   assert.equal(spawns[0].argv[spawns[0].argv.indexOf('--with-outcome') + 1], PROMPT_ID);
   assert.equal(spawns[0].detached, '1');
+});
+
+// ---------------------------------------------------------------------------
+// `--stop-failure` — the turn the API killed
+// ---------------------------------------------------------------------------
+
+/**
+ * The fifth mode, and the one whose whole job is to make a *later* decision possible.
+ *
+ * The host's own registry, read out of Claude Code 2.1.235 the way the constants in
+ * `hook-output.test.mjs` are:
+ *
+ *     StopFailure: {summary: "When the turn ends due to an API error",
+ *       description: "Fires **instead of Stop** when an API error (rate limit, auth failure,
+ *       etc.) ended the turn. Fire-and-forget — hook output and exit codes are ignored."}
+ *
+ * "Instead of Stop" is the fact the whole ticket turns on. `capture --stop` is the only thing
+ * in this plugin that ever writes `ended_at` / `outcome_pending`, so on a rate-limited turn
+ * nothing closed the turn file at all: it sat there holding `recalled` ids, half-written,
+ * with no record anywhere that the turn had died or why. `--stop-failure` closes it and
+ * stamps `api_error` — and `lib/outcome.mjs` reads that stamp and posts nothing.
+ *
+ * The mark has to be a key of its own rather than `outcome: "failure"`, which is what the
+ * build guide's §5.5 originally called for ("On a StopFailure turn: outcome 'failure',
+ * signal -0.3"). That row is exactly the one this ticket overturns: -0.3 against the
+ * recalled ids says the *memory* was wrong, and a rate limit is not evidence about memory.
+ */
+
+/** A turn as `stage-prompt` + `prompt-recall` leave it, with terms staged to match against. */
+const seedTermedTurn = (dataDir, over = {}) => seedTurn(dataDir, {
+  recall: {
+    at: Date.now() - 3000, rung: 1, sources: 1, tokens: 40, chars: 160,
+    dropped: 0, empty_reason: '', terms: ['indexing', 'queued'],
+  },
+  ...over,
+});
+
+// THE test for this ticket, on capture's side of the wire: the turn is closed, the error is
+// on the record, and nothing that could attribute it was started.
+test('capture --stop-failure: closes the turn, stamps the API error, and starts no attribution', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  const turnPath = seedTurn(dataDir);
+  const { env, file } = withSpy(staticEnv(dataDir, server));
+
+  const r = await runHook('capture', stopFailure(), { env, args: ['--stop-failure'] });
+
+  assertHookContract(r);
+  // "Fire-and-forget — hook output and exit codes are ignored", and `StopFailure` is absent
+  // from the host's `hookEventName` union, so there is no channel to say anything on even if
+  // there were something to say. `hook-output.test.mjs` pins the same shape against the host.
+  assert.deepEqual(r.json, { suppressOutput: true });
+  await assertWithinBudget('capture --stop-failure', BUDGET_MS, r.ms, async () => {
+    const d = makeDataDir();
+    holdDrainLock(d);
+    seedTurn(d);
+    return (await runHook('capture', stopFailure(),
+      { env: withSpy(staticEnv(d, server)).env, args: ['--stop-failure'] })).ms;
+  });
+
+  const turn = readJsonFile(turnPath);
+  assert.equal(turn.api_error, 'rate_limit',
+    'without the stamp nothing downstream can tell a rate-limited turn from a completed one');
+  assert.equal(typeof turn.ended_at, 'number',
+    'Stop does not fire on this turn, so if --stop-failure does not close it nothing ever will');
+  assert.equal(turn.outcome_pending, true,
+    'the turn is a candidate for the outcome decision like any other; suppression is the '
+    + 'decision\'s job, not a matter of hiding the turn from it');
+  assert.equal(turn.prompt, STAGED_PROMPT, 'the staged prompt must survive the close');
+  assert.deepEqual(turn.recalled, ['ref_rule_1'],
+    'the recalled ids must survive: they are what a LATER, real outcome would attribute');
+
+  // A turn that died on a rate limit produced no episode. "Q: fix the bug\n\nA: " is the
+  // half-a-conversation this suite already has a name for, and paying to store and recall it
+  // is worse than not having it.
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0,
+    'an API-killed turn is not a memory; spooling it bills for storing a truncated answer');
+
+  assert.equal(server.requests.length, 0, `capture must issue ZERO HTTP requests; saw: ${server.summary()}`);
+  await new Promise((res) => setTimeout(res, 250));
+  assert.deepEqual(drainSpawns(file), [],
+    'unlike --stop, this mode must NOT force a drain: the only reason --stop always drains '
+    + 'is to carry --with-outcome, and this turn has no outcome to carry');
+});
+
+// The mark is the host's value, copied through. The taxonomy is not a list this plugin can
+// keep: 2.1.235 ships ten values plus a feature-flagged eleventh (`account_on_hold`, behind
+// `fOr()`), so the same host is right about the list on one account and wrong on another.
+// That is why the registration carries no matcher — and why the mark is whatever arrived.
+test('capture --stop-failure: records the error value the host sent, in or out of the taxonomy', async (t) => {
+  const server = await mubit(t);
+
+  /** @type {Array<{name: string, over: Record<string, any>, expect: string}>} */
+  const rows = [
+    { name: 'the common one', over: { error: 'rate_limit' }, expect: 'rate_limit' },
+    { name: 'the taxonomy\'s own catch-all', over: { error: 'unknown' }, expect: 'unknown' },
+    // Present only where `fOr()` is on. A hard-coded matcher list would silently drop this
+    // turn on the accounts that have it.
+    { name: 'the feature-flagged eleventh', over: { error: 'account_on_hold' }, expect: 'account_on_hold' },
+    // The list the plugin was handed is a snapshot of one host build. A value it has never
+    // heard of must still close the turn and still suppress the outcome.
+    { name: 'a value added after this plugin shipped', over: { error: 'context_window_exceeded' }, expect: 'context_window_exceeded' },
+    // The host itself defaults a missing one on the way to the matcher (`e.error ?? "unknown"`),
+    // so an absent field is `unknown` here too rather than an empty mark that reads as "no
+    // API error at all" — which would put the turn straight back into the outcome path.
+    { name: 'no error field at all', over: { error: undefined }, expect: 'unknown' },
+  ];
+
+  for (const row of rows) {
+    const dataDir = makeDataDir();
+    holdDrainLock(dataDir);
+    const turnPath = seedTurn(dataDir);
+
+    const r = await runHook('capture', stopFailure(row.over), {
+      env: staticEnv(dataDir, server), args: ['--stop-failure'],
+    });
+
+    assertHookContract(r);
+    assert.equal(readJsonFile(turnPath).api_error, row.expect,
+      `${row.name}: the stamp must carry the host's value, or the outcome decision reads the wrong turn`);
+  }
+});
+
+// §5.5's used-signal measures whether the reply carried the injected memory's vocabulary.
+// A reply the API cut off mid-sentence has no denominator — `max_output_tokens` is literally
+// "the answer stopped early" — so measuring it would manufacture a `used: false` that
+// `decideOutcome` reads as "the model ignored the memory". Left unmeasured on purpose.
+test('capture --stop-failure: leaves the used-signal unmeasured even with terms staged', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  const turnPath = seedTermedTurn(dataDir);
+
+  const r = await runHook('capture', stopFailure({
+    error: 'max_output_tokens',
+    last_assistant_message: 'The indexing queue is still draining, so the job stays qu',
+  }), { env: staticEnv(dataDir, server), args: ['--stop-failure'] });
+
+  assertHookContract(r);
+  const turn = readJsonFile(turnPath);
+  assert.equal(turn.used_evidence, undefined,
+    'a truncated reply is unmeasurable, not unused — recording `used: false` here would '
+    + `report the memory as ignored: ${JSON.stringify(turn.used_evidence)}`);
+  assert.equal(turn.api_error, 'max_output_tokens');
+  assert.equal(turn.outcome_pending, true);
+});
+
+// The spool is still real work and still deserves to be sent — the model's API fell over,
+// not Mubit's. So the ordinary batch trigger still applies; what never happens is the
+// `--with-outcome` drain that only `--stop` fires.
+test('capture --stop-failure: a batch trigger still drains, but never with --with-outcome', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  seedTurn(dataDir);
+  // One captured tool call already in the spool, and a batch size of 1 so it is over the line.
+  const { env, file } = withSpy(staticEnv(dataDir, server, { MUBIT_CC_BATCH_MAX_ITEMS: '1' }));
+  assertHookContract(await runHook('capture', postToolUse(), { env }));
+
+  const r = await runHook('capture', stopFailure(), { env, args: ['--stop-failure'] });
+  assertHookContract(r);
+
+  const spawns = await waitForSpawn(file);
+  assert.ok(spawns.length >= 1, 'a full batch must still be drained; the API error is the model\'s, not Mubit\'s');
+  for (const s of spawns) {
+    assert.ok(!s.argv.includes('--with-outcome'),
+      `no drain from this path may carry attribution: ${JSON.stringify(s.argv)}`);
+  }
 });
 
 // §5.4 step 8 — plain PostToolUse spawns a drain ONLY when a trigger fires. Spawning one

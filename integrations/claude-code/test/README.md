@@ -67,6 +67,7 @@ under ~10 seconds.
 | `hook.test.mjs` | exit-code discipline, budgets, `spawnDetached` |
 | `capture.test.mjs` | four modes, zero HTTP, one spool file, stable `item_id`, the Stop used-signal |
 | `stage-prompt.test.mjs` | turn staging, the write race with `prompt-recall` |
+| `pre-tool.test.mjs` | the rule store and its term matching, and — the load-bearing one — that **no path denies**: no `permissionDecision`, no `updatedInput`, exit 0, zero HTTP |
 | `cwd-changed.test.mjs` | the run follows a mid-session `cd`; the run being left is drained, not orphaned |
 | `drain.test.mjs` | batching, the 2xx/5xx/4xx split, idempotency, "ignored" vs "not injected" |
 | `session-start.test.mjs` | the `source` table, sub-budgets, the offline steer block |
@@ -98,6 +99,12 @@ reasonable person would "fix" them in the wrong direction:
 - **`claimOnce` returns `true` when it fails.** Losing a batch is worse than sending it twice.
 - **The recall hook must never call `/v2/control/context` by default.** That call costs two LLM
   calls per prompt; the absence is asserted explicitly.
+- **The `PreToolUse` hook must never deny, and exit 2 is a deny.** The host blocks the tool call
+  on exit code 2 and lets every *other* non-zero code through, so the dangerous value is the one
+  a naive error handler picks. `pre-tool.test.mjs` enumerates paths — flag off, empty store,
+  corrupt store, unparseable stdin, underivable run id, unwritable data dir — and asserts exit 0
+  and the absent keys on each, then greps the built bundle for the same, because the paths a test
+  cannot reach are the ones the guarantee has to cover too.
 
 When one of those fails, re-read the guide section cited in the comment above it before
 changing the assertion.

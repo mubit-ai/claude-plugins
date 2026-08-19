@@ -147,6 +147,50 @@ test('the injected block says memory may be incomplete and should be verified', 
   assert.match(ctx, /<\/mubit-memory>$/);
 });
 
+// §5.2 rung 1 / §7 — the recall hook is also the rule store's supplier.
+//
+// `hooks/src/pre-tool.mjs` runs while the user waits on a tool call and may never dial, so
+// its only supply is a hook that has already paid for a round trip. This is that hook, and
+// the wiring is easy to lose: the call lives in `lib/recall.mjs`'s `fromEvidence`, one file
+// removed from the hook under test, and nothing else in the suite drives it end to end —
+// `pre-tool.test.mjs` and `hook-output.test.mjs` both seed `rules.json` by hand. Without
+// this test the producer half could be deleted outright and the suite would stay green.
+test('a rule in the recall response reaches rules.json, and a non-rule does not', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': {
+      json: queryResponse({
+        evidence: [
+          evidence({
+            id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule',
+            content: 'Never force-push to main; it is protected and the push will be rejected.',
+          }),
+          evidence({
+            id: 'e2', reference_id: 'ref_fact_1', entry_type: 'fact',
+            content: 'The ingest worker polls every thirty seconds.',
+          }),
+        ],
+      }),
+    },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  assertHookContract(r);
+  // Without this, a mis-keyed route reads as "the store was not written" and sends the next
+  // reader hunting through `lib/rules.mjs` for a bug that is in the fixture.
+  server.assertCalled('POST', '/v2/control/query', 1);
+
+  const stored = readJsonFile(join(dir, 'runs', RUN_ID, 'rules.json'));
+  assert.ok(stored, 'prompt-recall recalled a rule and stored none, so pre-tool has nothing '
+    + 'to warn from — the store is only ever filled by a hook that already paid for a call');
+
+  const refs = (stored.rules ?? []).map((/** @type {any} */ x) => x.ref);
+  assert.deepEqual(refs, ['ref_rule_1'],
+    'the store must hold the rule and only the rule: a fact surfaced as a tool-call warning '
+    + `is noise the user cannot act on (got ${JSON.stringify(refs)})`);
+});
+
 test('rung 1 request body matches §5.2 exactly', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
@@ -808,4 +852,195 @@ test('a secret inside recalled evidence never reaches the staged terms', async (
     `a fragment of the credential survived as a term: ${terms.join(', ')}`);
   assert.ok(!terms.includes('redacted'),
     'the placeholder is not memory vocabulary; it must not become a term to match on');
+});
+
+// ---------------------------------------------------------------------------
+// The cross-turn seen-set — §5.2 step 6, `lib/seen.mjs`
+// ---------------------------------------------------------------------------
+
+/*
+ * The plugin was built believing hooks are free and MCP is expensive. Measurement inverted
+ * it: the whole MCP tool-name surface is 356 tokens, once, and recall injection is up to
+ * 1500 tokens on EVERY prompt. Six memories about the task at hand do not stop being about
+ * the task at hand on the next prompt, so before this the same six were re-sent — and
+ * re-paid for — twenty times in a row.
+ *
+ * `hooks/src/prompt-recall.mjs` now reads `runs/<run_id>/seen.json` before assembling and
+ * marks it after, next to the ids it stages for attribution.
+ */
+
+/** ~200 tokens each: the per-memory size a 1500-token budget over six memories implies. */
+const bulky = (tag, ch) => `${tag} because ${ch.repeat(760)} TAIL_${tag}`;
+
+const STICKY_EVIDENCE = () => [
+  evidence({ id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', score: 0.91, content: bulky('RULE', 'r') }),
+  evidence({ id: 'e2', reference_id: 'ref_lesson_1', entry_type: 'lesson', score: 0.84, content: bulky('LESSON', 'l') }),
+  evidence({ id: 'e3', reference_id: 'ref_fact_1', entry_type: 'fact', score: 0.55, content: bulky('FACT', 'f') }),
+];
+
+const seenPath = (d) => join(d, 'runs', RUN_ID, 'seen.json');
+
+/** A distinct `prompt_id` per turn, because the turn file is keyed on it. */
+const nthPrompt = (n) => userPromptSubmit({
+  prompt_id: `p_seen_${String(n).padStart(3, '0')}`,
+  prompt: `${PROMPT} (attempt ${n})`,
+});
+
+/*
+ * THE number. Forty prompts, identical evidence every time, one process per prompt exactly
+ * as the harness spawns them.
+ *
+ * Two assertions, and both matter. The tokens have to fall by a large margin — that is the
+ * saving. And `recalled[]` has to stay the same length on every single turn — that is the
+ * proof the saving did not come from quietly injecting less memory, which is the one way a
+ * token graph can improve while the plugin gets worse.
+ */
+test('forty prompts against identical evidence pay for a memory once, not forty times', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: STICKY_EVIDENCE() }) },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  const TURNS = 40;
+  /** @type {number[]} */
+  const tokens = [];
+  for (let i = 1; i <= TURNS; i++) {
+    const r = await runHook('prompt-recall', nthPrompt(i), { env: e });
+    assertHookContract(r);
+    const staged = turn(dir, `p_seen_${String(i).padStart(3, '0')}`);
+    assert.equal(staged.recalled.length, 3,
+      `turn ${i} injected ${staged.recalled.length} memories instead of 3 — a token saving `
+      + 'that comes from recalling less is not a saving, it is a regression with a nice graph');
+    tokens.push(staged.recall.tokens);
+  }
+
+  const before = tokens[0] * TURNS;   // what forty identical full-price renders cost
+  const after = tokens.reduce((a, b) => a + b, 0);
+  assert.ok(after * 2 < before,
+    `forty prompts cost ${after} tokens against ${before} for the same evidence rendered in `
+    + `full every time — under a 2x drop this mechanism is not paying for its complexity`);
+  assert.ok(tokens[1] * 3 < tokens[0],
+    `the second prompt cost ${tokens[1]} tokens against the first's ${tokens[0]}; the whole `
+    + 'claim is that a lesson relevant for twenty prompts is paid for once at full price');
+  assert.equal(tokens.at(-1), tokens[1],
+    'once every entry has been seen the per-prompt cost is flat — a drift here means the '
+    + 'roll-up is being rebuilt or expired inside a single session');
+});
+
+// The seam the saving rides on: what was injected is written down where the NEXT process
+// can find it. Two separate `node` processes; nothing is shared but the data dir.
+test('a prompt marks what it injected into the run seen-set', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: STICKY_EVIDENCE() }) },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  const first = await runHook('prompt-recall', nthPrompt(1), { env: e });
+  assertHookContract(first);
+
+  const rolled = readJsonFile(seenPath(dir));
+  assert.deepEqual(Object.keys(rolled.refs).sort(), ['ref_fact_1', 'ref_lesson_1', 'ref_rule_1'],
+    'the roll-up records reference_id, the same values that reach RecordOutcome.entry_ids');
+
+  const second = await runHook('prompt-recall', nthPrompt(2), { env: e });
+  assertHookContract(second);
+  const block = second.json.hookSpecificOutput.additionalContext;
+  assert.ok(block.includes('ref_rule_1'), 'the repeat points at the entry by reference id');
+  assert.ok(!block.includes('TAIL_RULE'), 'and does not re-send a body the model already has');
+  assert.deepEqual(turn(dir, 'p_seen_002').recalled,
+    ['ref_rule_1', 'ref_lesson_1', 'ref_fact_1'],
+    'a degraded entry is still attributed — dropping it would stop reinforcing exactly the '
+    + 'memories that stayed relevant longest');
+});
+
+// The block is written for a model, not for a log. A line that names a memory without
+// carrying it has to say so, or it reads as a memory that was truncated.
+test('a block containing pointers says what a pointer is', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: STICKY_EVIDENCE() }) },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  const first = await runHook('prompt-recall', nthPrompt(1), { env: e });
+  const second = await runHook('prompt-recall', nthPrompt(2), { env: e });
+  assertHookContract(second);
+
+  const plain = first.json.hookSpecificOutput.additionalContext;
+  const pointed = second.json.hookSpecificOutput.additionalContext;
+  assert.ok(!/injected in full earlier/i.test(plain),
+    'a block with nothing degraded must not spend tokens explaining pointers');
+  assert.ok(/injected in full earlier/i.test(pointed),
+    'the model has to be told that a pointer line is a reference, not a shortened memory');
+});
+
+// §6.1: the opt-out. `full` is the behaviour of every release before this one.
+test('recallRepeatMode "full" pays full price on every prompt', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: STICKY_EVIDENCE() }) },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server, { MUBIT_CC_RECALL_REPEAT_MODE: 'full' });
+
+  assertHookContract(await runHook('prompt-recall', nthPrompt(1), { env: e }));
+  const second = await runHook('prompt-recall', nthPrompt(2), { env: e });
+  assertHookContract(second);
+
+  const one = turn(dir, 'p_seen_001').recall;
+  const two = turn(dir, 'p_seen_002').recall;
+  assert.equal(two.tokens, one.tokens,
+    'an operator who opted out of degrading repeats must get the old cost back exactly');
+  assert.equal(two.pointers, 0);
+  assert.ok(second.json.hookSpecificOutput.additionalContext.includes('TAIL_RULE'));
+});
+
+// The turn file is where a run's cost is measured (`scripts/mubit-inspect.mjs`). A token
+// count that fell for an unrecorded reason is a number nobody can act on.
+test('the staged turn records how many entries were degraded', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: STICKY_EVIDENCE() }) },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  assertHookContract(await runHook('prompt-recall', nthPrompt(1), { env: e }));
+  assertHookContract(await runHook('prompt-recall', nthPrompt(2), { env: e }));
+
+  assert.equal(turn(dir, 'p_seen_001').recall.pointers, 0);
+  assert.equal(turn(dir, 'p_seen_002').recall.pointers, 3,
+    'all three entries were already shown, so all three are pointed at');
+});
+
+// §4.9: a recall that never reached the model must not claim it did. Marking on failure
+// would make the NEXT prompt point at a memory that was never injected at all.
+test('a failed recall marks nothing as seen', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': [
+      { json: queryResponse({ evidence: STICKY_EVIDENCE() }) },
+      { status: 500, json: { error: 'boom' } },
+      { json: queryResponse({ evidence: STICKY_EVIDENCE() }) },
+    ],
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  assertHookContract(await runHook('prompt-recall', nthPrompt(1), { env: e }));
+  const before = readJsonFile(seenPath(dir));
+
+  assertHookContract(await runHook('prompt-recall', nthPrompt(2), { env: e }));
+  const after = readJsonFile(seenPath(dir));
+  assert.deepEqual(Object.keys(after.refs).sort(), Object.keys(before.refs).sort(),
+    'a 500 injected nothing, so it must record nothing as shown');
+  for (const id of Object.keys(before.refs)) {
+    assert.equal(after.refs[id].count, before.refs[id].count,
+      `${id} was counted as shown again by a turn that showed nothing`);
+  }
 });

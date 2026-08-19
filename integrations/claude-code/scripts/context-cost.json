@@ -1,8 +1,8 @@
 {
-  "measuredAt": "2026-08-17T11:41:33.218Z",
-  "value": 3316,
+  "measuredAt": "2026-08-19T15:03:18.737Z",
+  "value": 3672,
   "cached": 0,
-  "curatedValue": 3316,
+  "curatedValue": 3672,
   "allowlistHonoured": true,
   "method": "word/number/symbol segmentation; see the header of scripts/measure-context-cost.mjs",
   "surface": {
@@ -48,6 +48,11 @@
       "tokens": 2907,
       "chars": 7981,
       "count": 10
+    },
+    "serverInstructions": {
+      "tokens": 356,
+      "chars": 1206,
+      "count": 1
     },
     "curatedToolSchemas": {
       "tokens": 2907,

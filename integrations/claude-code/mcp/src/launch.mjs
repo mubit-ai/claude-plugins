@@ -13,6 +13,11 @@
  * indistinguishable from not setting them at all, because the constants have already been
  * captured. That is why there is a launcher at all rather than a richer `.mcp.json`.
  *
+ * The same rule governs the two things here that are not environment variables. The egress
+ * guard wraps `globalThis.fetch` and the instructions guard wraps `process.stdout.write`;
+ * the server captures both handles as it starts, so either one installed after the import
+ * would sit on a handle nobody is holding.
+ *
  * **The literal `"default"` is the bug being fixed.** The facade maps `session_id` onto
  * the control-plane `run_id`, so today every MCP user writes every project on every machine
  * into one shared run. This launcher derives the run id with **the same strategy the hooks
@@ -33,6 +38,7 @@ import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
 import { deriveRunId } from '../../lib/runid.mjs';
 import { installFetchGuard, resolveCeiling } from './egress.mjs';
+import { INSTRUCTIONS, installInstructionsGuard } from './instructions.mjs';
 
 /**
  * §8.2 — ten of the server's twenty-one tools, in the guide's order.
@@ -150,9 +156,19 @@ function prepare(env) {
   const ceiling = resolveCeiling(cfg.mcpLessonScope);
   installFetchGuard({ ceiling, runId, pinRun: true });
 
+  // And the seventh. Under tool search the host loads only tool *names* and the server's
+  // `instructions` field at session start, and a subagent sees neither the SessionStart
+  // steer block nor per-turn recall — so for both, this string is the only statement of when
+  // Mubit is worth reaching for. The bundled server cannot supply it (`createServer()` is
+  // `new McpServer({name, version})` with no options object, and no env var feeds the
+  // field), so the launcher fills it into the outbound `initialize` frame. Same ordering
+  // rule as the guard above, and for the same reason: `StdioServerTransport` takes
+  // `process.stdout` as a constructor default and holds it from then on.
+  installInstructionsGuard({ instructions: INSTRUCTIONS });
+
   log(cfg, 'info', 'mcp: starting server', {
     run_id: runId, endpoint: cfg.endpoint, mode: cfg.mode, tools: tools.length,
-    lesson_scope: ceiling, pin_run: true,
+    lesson_scope: ceiling, pin_run: true, instruction_chars: INSTRUCTIONS.length,
   });
   return true;
 }

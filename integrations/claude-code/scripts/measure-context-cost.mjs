@@ -13,9 +13,16 @@
  *   1. **MCP tool schemas.** Every tool the server registers at `tools/list` — name,
  *      description and the full JSON Schema — under the host's qualified prefix
  *      `mcp__plugin_mubit-memory_mubit__`, which is itself 30 characters per tool.
- *   2. **Skill frontmatter.** `name` + `description` for each skill. The SKILL.md body is
+ *   2. **The server's `instructions`.** The string on the `initialize` result, which the
+ *      host puts in the system prompt under "MCP Server Instructions". It is the one item
+ *      here that is loaded even when the schemas are not: with tool search on — the
+ *      default — the host defers the descriptions and loads tool names plus this. Measured
+ *      from a live handshake for the same reason the schemas are, and because the launcher
+ *      fills the field in on the outbound frame (`mcp/src/instructions.mjs`) rather than
+ *      declaring it anywhere a static read could find.
+ *   3. **Skill frontmatter.** `name` + `description` for each skill. The SKILL.md body is
  *      loaded on invocation, not up front, so only the frontmatter counts here.
- *   3. **Agent frontmatter**, on the same rule.
+ *   4. **Agent frontmatter**, on the same rule.
  *
  * Hooks, `lib/`, and the bundles cost nothing — they run out of process and their output
  * enters context only when a hook actually injects something.
@@ -95,11 +102,15 @@ async function main() {
 
   const registered = costOfTools(listed.tools);
   const curated = costOfTools(listed.tools.filter((t) => DEFAULT_ALLOWLIST.includes(t.name)));
+  const instructionCost = costOfText(listed.instructions);
   const skillCost = costOfFrontmatter(skills);
   const agentCost = costOfFrontmatter(agents);
 
-  const value = registered.tokens + skillCost.tokens + agentCost.tokens;
-  const curatedValue = curated.tokens + skillCost.tokens + agentCost.tokens;
+  // `instructions` is in both totals unchanged: the allowlist bounds how many tool schemas
+  // are resident and has no bearing on this string, which is one server-level field.
+  const fixed = instructionCost.tokens + skillCost.tokens + agentCost.tokens;
+  const value = registered.tokens + fixed;
+  const curatedValue = curated.tokens + fixed;
 
   const result = {
     value,
@@ -115,6 +126,10 @@ async function main() {
     },
     breakdown: {
       toolSchemas: { tokens: registered.tokens, chars: registered.chars, count: registered.count },
+      serverInstructions: {
+        tokens: instructionCost.tokens, chars: instructionCost.chars,
+        count: listed.instructions ? 1 : 0,
+      },
       curatedToolSchemas: { tokens: curated.tokens, chars: curated.chars, count: curated.count },
       skillFrontmatter: { tokens: skillCost.tokens, chars: skillCost.chars, count: skills.length },
       agentFrontmatter: { tokens: agentCost.tokens, chars: agentCost.chars, count: agents.length },
@@ -137,7 +152,8 @@ async function main() {
 
 /**
  * @param {string} entry
- * @returns {Promise<{server: any, tools: Array<{name: string, description?: string, inputSchema?: any}>}>}
+ * @returns {Promise<{server: any, instructions: string,
+ *                    tools: Array<{name: string, description?: string, inputSchema?: any}>}>}
  */
 async function listTools(entry) {
   if (!existsSync(entry)) {
@@ -189,7 +205,11 @@ async function listTools(entry) {
     });
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
     const listed = await rpc(2, 'tools/list', {});
-    return { server: init.result?.serverInfo ?? null, tools: listed.result?.tools ?? [] };
+    return {
+      server: init.result?.serverInfo ?? null,
+      instructions: typeof init.result?.instructions === 'string' ? init.result.instructions : '',
+      tools: listed.result?.tools ?? [],
+    };
   } finally {
     child.kill('SIGKILL');
   }
@@ -237,6 +257,16 @@ function tokensOfTool(t) {
   return estimateTokens(`${QUALIFIED_PREFIX}${t.name}`)
     + estimateTokens(t.description ?? '')
     + estimateTokens(JSON.stringify(t.inputSchema ?? {}));
+}
+
+/**
+ * A block of prose costs exactly itself. Separate from `costOfTools` because the host does
+ * not wrap it in anything — no qualified prefix, no schema — so there is nothing to add.
+ * @param {string} text
+ */
+function costOfText(text) {
+  const s = typeof text === 'string' ? text : '';
+  return { chars: estimateChars(s), tokens: estimateTokens(s) };
 }
 
 /**
@@ -320,6 +350,8 @@ function report(r) {
 
   process.stdout.write(`server    ${r.server?.name ?? '(unnamed)'} ${r.server?.version ?? ''}\n\n`);
   process.stdout.write(row('MCP tool schemas', b.toolSchemas.tokens, b.toolSchemas.chars, `${b.toolSchemas.count} tools`));
+  process.stdout.write(row('server instructions', b.serverInstructions.tokens, b.serverInstructions.chars,
+    b.serverInstructions.count ? 'loaded even under tool search' : 'ABSENT — see mcp/src/instructions.mjs'));
   process.stdout.write(row('skill frontmatter', b.skillFrontmatter.tokens, b.skillFrontmatter.chars, `${b.skillFrontmatter.count} skills`));
   process.stdout.write(row('agent frontmatter', b.agentFrontmatter.tokens, b.agentFrontmatter.chars, `${b.agentFrontmatter.count} agents`));
   process.stdout.write(`  ${'—'.repeat(58)}\n`);
@@ -334,7 +366,8 @@ function report(r) {
       + 'A server that ignores it is a stale bundle — rebuild:\n'
       + '  npm --prefix ../mcp ci && npm --prefix ../mcp run build && npm run build\n');
   }
-  const chars = b.toolSchemas.chars + b.skillFrontmatter.chars + b.agentFrontmatter.chars;
+  const chars = b.toolSchemas.chars + b.serverInstructions.chars
+    + b.skillFrontmatter.chars + b.agentFrontmatter.chars;
   process.stdout.write(`\nDeliberate over-estimate, not a tokenizer count: ${(chars / r.value).toFixed(2)} chars/token `
     + 'over this surface, where a real BPE runs nearer 3.5 on schema JSON.\n'
     + 'Method in this script\'s header; --json prints the raw character counts.\n');

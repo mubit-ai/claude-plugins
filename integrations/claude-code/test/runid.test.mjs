@@ -436,6 +436,69 @@ test('deriveAgentId(): a payload echoing the parent id is not a subagent', async
 });
 
 // ===========================================================================
+// §4.3 — deriveSubRunId
+// ===========================================================================
+
+/**
+ * Why a sub-run id exists at all, measured rather than assumed.
+ *
+ * A live fan-out of two subagents on Claude Code 2.1.235 produced two `SubagentStart`s and
+ * two `SubagentStop`s that shared the parent's `session_id` **and** its `prompt_id`, and
+ * differed only in `agent_id`. Every coordinate the plugin keys state on is therefore the
+ * same for all siblings: `runs/<run_id>/turns/<prompt_id>.json` is one file that six
+ * subagents all read as "their" turn. `agent_id` is the only thing that separates them, so
+ * the run-scoped form of it is the only lane a subagent's own evidence can live in.
+ */
+test('deriveSubRunId(): <parent>-sub-<agentShort>, one lane per subagent', async () => {
+  const runid = await lib('runid.mjs');
+  const parent = 'cc-my-project-9f2a11c4';
+
+  const a = runid.deriveSubRunId(parent, fx.subagentStart({ agent_id: 'ab55bb82d19855fbc' }));
+  const b = runid.deriveSubRunId(parent, fx.subagentStart({ agent_id: 'a0a7d24f87136bee1' }));
+
+  assert.ok(a.startsWith(`${parent}-sub-`), `"${a}" is not derivable from its parent`);
+  assert.notEqual(a, b,
+    'the two ids the live fan-out produced must not collapse — that collapse is the entire '
+    + 'reason this function exists');
+  assert.equal(runid.deriveSubRunId(parent, fx.subagentStart({ agent_id: 'ab55bb82d19855fbc' })), a,
+    'SubagentStart and SubagentStop carry the same agent_id, so the same input must give the '
+    + 'same lane on both events or nothing can ever be joined back up');
+});
+
+// A run id names a directory under the data dir. A sub-run id is a run id, so it inherits
+// every restriction — including the one this whole module exists for.
+test('deriveSubRunId(): the poisoned literal cannot be reached through the sub form', async () => {
+  const runid = await lib('runid.mjs');
+
+  assert.throws(() => runid.deriveSubRunId('default', fx.subagentStart()), /default/i,
+    'a poisoned parent must not be laundered into a usable id by appending a suffix');
+  assert.throws(() => runid.deriveSubRunId('', fx.subagentStart()),
+    'an empty parent would resolve to a bare "-sub-…" directly under runs/');
+  assert.doesNotMatch(runid.deriveSubRunId('cc-x-1', fx.subagentStart({ agent_id: '../../etc' })),
+    /[\\/]|\.\./, 'agent_id arrives from outside the process and lands in a path');
+});
+
+// No subagent means nothing to isolate. Minting a suffix anyway would produce a lane that
+// `SubagentStop` — which derives from the same missing field — could never find again.
+test('deriveSubRunId(): a payload with no subagent identity answers with the parent', async () => {
+  const runid = await lib('runid.mjs');
+  const parent = 'cc-my-project-9f2a11c4';
+  const anon = fx.subagentStart();
+  delete anon.agent_id;
+
+  assert.equal(runid.deriveSubRunId(parent, anon), parent);
+  assert.equal(runid.deriveSubRunId(parent, {}), parent);
+});
+
+// Idempotent, because a caller holding an already-derived id is the normal case once more
+// than one hook derives one. `cc-x-1-sub-ab-sub-ab` would be a second lane for one subagent.
+test('deriveSubRunId(): deriving twice is deriving once', async () => {
+  const runid = await lib('runid.mjs');
+  const once = runid.deriveSubRunId('cc-x-1', fx.subagentStart());
+  assert.equal(runid.deriveSubRunId(once, fx.subagentStart()), once);
+});
+
+// ===========================================================================
 // §4.3 — the session map
 // ===========================================================================
 

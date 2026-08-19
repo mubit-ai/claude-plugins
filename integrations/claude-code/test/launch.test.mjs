@@ -24,7 +24,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { PLUGIN_ROOT, REPO_ROOT, makeDataDir, makeProjectDir, tempDir, baseEnv, lib } from './helpers/harness.mjs';
+import { PLUGIN_ROOT, REPO_ROOT, makeDataDir, makeProjectDir, tempDir, baseEnv, lib, mod } from './helpers/harness.mjs';
 
 /** §8.2 — the curated ten, in the guide's order. */
 const DEFAULT_ALLOWLIST = [
@@ -52,14 +52,15 @@ const STUB_SERVER = `
 // moment the module is evaluated — i.e. everything the real server would read at module
 // scope — and does nothing else.
 //
-// It also records the egress guard's marker. The guard is not an env var: it is a wrapper
-// around globalThis.fetch, and "installed before the import" is the same ordering property
-// the env vars have, for the same reason — the real server captures its transport at
-// module scope, so a guard installed afterwards would never see a request.
+// It also records both guards' markers. Neither is an env var — one wraps globalThis.fetch,
+// the other process.stdout.write — and "installed before the import" is the same ordering
+// property the env vars have, for the same reason: the real server captures its transport
+// at module scope, so a guard installed afterwards would never see the frame it is for.
 import { writeFileSync } from 'node:fs';
 writeFileSync(process.env.MUBIT_TEST_ENV_SNAPSHOT, JSON.stringify({
   env: { ...process.env },
   guard: globalThis.fetch?.mubitEgressGuard ?? null,
+  instructions: process.stdout.write?.mubitInstructionsGuard ?? null,
 }));
 export function createServer() { return { tool() {}, connect: async () => {} }; }
 export default { createServer };
@@ -97,7 +98,7 @@ setTimeout(() => process.exit(0), 1500).unref();
  * @param {{extra?: Record<string,string>, projectDir?: string}} [o]
  * @returns {Promise<{code:number|null, stdout:string, stderr:string,
  *                    importedServer:boolean, envAtImport:Record<string,string>,
- *                    guardAtImport:any}>}
+ *                    guardAtImport:any, instructionsAtImport:any}>}
  */
 async function runLauncher(o = {}) {
   const launch = launcherScript();
@@ -141,7 +142,11 @@ async function runLauncher(o = {}) {
   const snap = importedServer ? JSON.parse(readFileSync(snapshot, 'utf8')) : {};
   const envAtImport = snap.env ?? {};
   const guardAtImport = snap.guard ?? null;
-  return { code, stdout: out, stderr: err, importedServer, envAtImport, guardAtImport, env, projectDir };
+  const instructionsAtImport = snap.instructions ?? null;
+  return {
+    code, stdout: out, stderr: err, importedServer,
+    envAtImport, guardAtImport, instructionsAtImport, env, projectDir,
+  };
 }
 
 /** The run id the hooks would derive for the same directory (§4.3). */
@@ -408,4 +413,46 @@ test('the guard pins to the same run id the server was given', async () => {
 
   assert.equal(r.guardAtImport?.runId, r.envAtImport.MUBIT_DEFAULT_SESSION_ID,
     'the guard and the server must agree on which run this session writes into');
+});
+
+// ---------------------------------------------------------------------------
+// §8.3 — the instructions guard, on the same schedule as everything else
+// ---------------------------------------------------------------------------
+
+// Under tool search the host loads only tool *names* and the server's `instructions` field
+// at session start, and a subagent is handed neither the SessionStart preamble nor the
+// per-turn injection (`hooks.json` registers both in the parent conversation only). So
+// `instructions` is the only statement of when Mubit is worth reaching for that some models
+// ever see — and the bundled server has no way to set it. `createServer()` builds
+// `new McpServer({name, version})` with no options object, and no MUBIT_* variable feeds the
+// field, so the launcher fills it in on the outbound `initialize` frame instead.
+//
+// That wrapper goes on `process.stdout.write`, which is the transport's only exit
+// (`StdioServerTransport.send` calls `this._stdout.write(serializeMessage(message))`), and
+// it is subject to the same ordering rule as the env vars and the egress guard: the
+// transport captures `process.stdout` when it is constructed, so a wrapper installed after
+// the import is a wrapper on a handle nobody is holding. This assertion is the whole
+// correctness argument for the feature.
+test('installs the instructions guard BEFORE importing the server', async () => {
+  const r = await runLauncher();
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+
+  assert.ok(r.instructionsAtImport,
+    'process.stdout.write carried no instructions guard when the server was imported, so the '
+    + 'initialize frame goes out exactly as the bundle built it — with no `instructions` field '
+    + 'at all (§8.3)');
+  assert.ok(Number(r.instructionsAtImport.chars) > 0,
+    'the instructions guard was installed with nothing to say, which is indistinguishable '
+    + 'from not installing it');
+});
+
+// The guard is handed a constant that lives in source and is edited there. If the launcher
+// passed anything else, editing `INSTRUCTIONS` would change nothing a model reads.
+test('the guard carries the launcher\'s own INSTRUCTIONS constant', async () => {
+  const r = await runLauncher();
+  const { INSTRUCTIONS } = await mod('mcp/src/instructions.mjs');
+
+  assert.equal(r.instructionsAtImport?.chars, INSTRUCTIONS.length,
+    'the text installed before the import is not the INSTRUCTIONS constant in '
+    + 'mcp/src/instructions.mjs — the editable copy and the shipped copy have drifted');
 });

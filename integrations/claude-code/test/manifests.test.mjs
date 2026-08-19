@@ -312,12 +312,21 @@ test('hooks.json declares all nine registrations with the right events, args and
 
 // §3.2 — SessionStart is matched on source; without the matcher the hook fires on
 // sources it has no handling for.
-test('hooks.json SessionStart matches startup|resume|clear|compact', () => {
+//
+// `fork` is the fifth source (`--fork-session`, `/fork`, `/branch`). Before Claude Code
+// v2.1.214 a forked session reported `resume` and this matcher caught it by accident; on
+// 2.1.235 it reports `fork` and the four-source matcher did not match — verified against
+// a live fork in `docs/manual-test-hs-1.md` §5, where the four-source group logged nothing
+// and a match-all group beside it logged `{"source":"fork"}`. The cost of the miss is not a
+// missing section: `session-start.mjs` is the hook that derives the run id, writes the
+// marker and injects the steer, so a forked session ran with no memory at all.
+test('hooks.json SessionStart matches startup|resume|clear|compact|fork', () => {
   const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
   const groups = hooks.hooks?.SessionStart ?? [];
   assert.equal(groups.length, 1, 'SessionStart should declare exactly one matcher group');
-  assert.equal(groups[0].matcher, 'startup|resume|clear|compact',
-    'SessionStart matcher must be "startup|resume|clear|compact" (§3.2)');
+  assert.equal(groups[0].matcher, 'startup|resume|clear|compact|fork',
+    'SessionStart matcher must be "startup|resume|clear|compact|fork" (§3.2) — dropping '
+    + '"fork" leaves /fork and /branch sessions with no run id, no marker and no memory');
 });
 
 /**

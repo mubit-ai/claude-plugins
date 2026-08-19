@@ -159,8 +159,9 @@ if (hooks) {
   ok(missing.length === 0 && extra.length === 0,
     `hooks.json must register exactly the nine events in §3.2; missing [${missing}], unexpected [${extra}]`);
 
-  ok(hooks.hooks?.SessionStart?.[0]?.matcher === 'startup|resume|clear|compact',
-    'SessionStart matcher must be "startup|resume|clear|compact" (§3.2)');
+  ok(hooks.hooks?.SessionStart?.[0]?.matcher === 'startup|resume|clear|compact|fork',
+    'SessionStart matcher must be "startup|resume|clear|compact|fork" (§3.2) — without '
+    + '"fork" the hook never runs for /fork, /branch or --fork-session');
   // Exactly ONE group, matching everything. Two groups was the old shape — a built-in tool
   // alternation plus `^mcp__.*` — and it dropped every tool the alternation had not been
   // updated for. It is one group now rather than two match-all ones because a second group

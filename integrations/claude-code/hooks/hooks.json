@@ -1,7 +1,7 @@
 {
   "hooks": {
     "SessionStart": [
-      { "matcher": "startup|resume|clear|compact", "hooks": [
+      { "matcher": "startup|resume|clear|compact|fork", "hooks": [
         { "type": "command", "command": "node", "timeout": 5,
           "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/session-start.mjs"] } ] }
     ],

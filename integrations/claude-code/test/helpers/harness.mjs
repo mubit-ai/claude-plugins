@@ -533,8 +533,7 @@ export function assertHookContract(r) {
 // ---------------------------------------------------------------------------
 
 /**
- * Speak real newline-delimited JSON-RPC to the plugin's MCP server and return what it
- * advertises — build-guide §8.
+ * Drive the plugin's MCP server over real newline-delimited JSON-RPC — build-guide §8.
  *
  * Everything else in this file stubs the server out: `test/launch.test.mjs` swaps
  * `./server.js` for a module that snapshots `process.env`, which is the right tool for the
@@ -546,34 +545,37 @@ export function assertHookContract(r) {
  * Runs `mcp/dist/index.js` — the committed bundle `.mcp.json` actually points at, not
  * `mcp/src/launch.mjs`. The bundle is the product; there is no build step at install time.
  *
- * No network: the endpoint is port 1, where nothing listens. `tools/list` is answered from
- * the server's local tool table, so no request is ever made. The API key is a fixture the
- * launcher only has to find non-empty, and the data dir is a fresh temp tree — a test that
- * resolved the real one would write its fixture config into the developer's own install.
+ * `initialize` first, then every step in order, collected by JSON-RPC id. A step's failure
+ * is returned rather than thrown: `tools/call` failing is a result some tests assert on,
+ * and only the caller knows which.
  *
- * @param {{extra?: Record<string,string>, timeoutMs?: number}} [opts]
- *   `extra` overrides env (e.g. `MUBIT_MCP_TOOLS`) for this launch only.
- * @returns {Promise<{server: any, tools: any[], names: string[], stderr: string}>}
+ * @param {{extra?: Record<string,string>, endpoint?: string, dataDir?: string,
+ *          runId?: string, steps?: Array<{method: string, params?: any}>,
+ *          timeoutMs?: number}} [opts]
+ * @returns {Promise<{init: any, results: Array<{result?: any, error?: any}>, stderr: string}>}
  */
-export async function mcpListTools(opts = {}) {
+async function mcpDrive(opts = {}) {
   const entry = join(PLUGIN_ROOT, 'mcp', 'dist', 'index.js');
   if (!existsSync(entry)) {
     throw new Error(`mcp/dist/index.js does not exist yet: ${entry}\n  Run \`npm run build\`.`);
   }
 
   const env = baseEnv({
-    dataDir: makeDataDir(),
-    endpoint: 'http://127.0.0.1:1',
+    dataDir: opts.dataDir ?? makeDataDir(),
+    // No network by default: port 1 is where nothing listens. A caller that needs the
+    // server to actually reach something passes a `fakeMubit` url instead.
+    endpoint: opts.endpoint ?? 'http://127.0.0.1:1',
     apiKey: 'mbt_test_0123456789abcdef_deadbeefcafebabe0123456789abcdef',
     extra: {
       // The launcher refuses to import the server at all if deriveRunId throws, and a
       // per-directory derivation over a temp dir is a git call this test does not need.
       MUBIT_CC_RUN_STRATEGY: 'static',
-      MUBIT_CC_RUN_ID: 'mcp-surface-test-run',
+      MUBIT_CC_RUN_ID: opts.runId ?? 'mcp-surface-test-run',
       ...(opts.extra ?? {}),
     },
   });
 
+  const steps = opts.steps ?? [];
   const child = spawn(process.execPath, [entry], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   const timeoutMs = opts.timeoutMs ?? 15_000;
 
@@ -589,7 +591,7 @@ export async function mcpListTools(opts = {}) {
       fn(v);
     };
     const fail = (why) => finish(rej, new Error(`${why}\n  server stderr:\n${stderr || '(silent)'}`));
-    const timer = setTimeout(() => fail(`MCP server did not answer tools/list within ${timeoutMs}ms`), timeoutMs);
+    const timer = setTimeout(() => fail(`MCP server did not answer within ${timeoutMs}ms`), timeoutMs);
     const send = (msg) => child.stdin.write(`${JSON.stringify(msg)}\n`);
 
     // A bundle Node cannot parse dies here rather than answering — the failure a test that
@@ -598,6 +600,9 @@ export async function mcpListTools(opts = {}) {
     child.on('close', (code) => fail(`the MCP server exited (code ${code}) before answering`));
 
     let init = null;
+    const results = new Array(steps.length).fill(null);
+    let outstanding = steps.length;
+
     child.stdout.on('data', (d) => {
       buf += d;
       for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
@@ -612,16 +617,13 @@ export async function mcpListTools(opts = {}) {
         if (msg.id === 1) {
           init = msg.result ?? null;
           send({ jsonrpc: '2.0', method: 'notifications/initialized' });
-          send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-        } else if (msg.id === 2) {
-          if (!msg.result) return fail(`tools/list failed: ${JSON.stringify(msg.error ?? msg)}`);
-          const tools = msg.result.tools ?? [];
-          finish(res, {
-            server: init?.serverInfo ?? null,
-            tools,
-            names: tools.map((t) => t.name).sort(),
-            stderr,
-          });
+          if (!steps.length) return finish(res, { init, results, stderr });
+          steps.forEach((s, i) => send({ jsonrpc: '2.0', id: i + 2, method: s.method, params: s.params ?? {} }));
+        } else if (typeof msg.id === 'number' && msg.id >= 2) {
+          const i = msg.id - 2;
+          if (i < 0 || i >= results.length || results[i] !== null) continue;
+          results[i] = { result: msg.result, error: msg.error };
+          if (--outstanding === 0) finish(res, { init, results, stderr });
         }
       }
     });
@@ -637,6 +639,70 @@ export async function mcpListTools(opts = {}) {
       },
     });
   });
+}
+
+/**
+ * What the server advertises at `tools/list` — the surface a model is handed.
+ *
+ * No network: the endpoint is port 1, where nothing listens. `tools/list` is answered from
+ * the server's local tool table, so no request is ever made. The API key is a fixture the
+ * launcher only has to find non-empty, and the data dir is a fresh temp tree — a test that
+ * resolved the real one would write its fixture config into the developer's own install.
+ *
+ * @param {{extra?: Record<string,string>, timeoutMs?: number}} [opts]
+ *   `extra` overrides env (e.g. `MUBIT_MCP_TOOLS`) for this launch only.
+ * @returns {Promise<{server: any, tools: any[], names: string[], stderr: string}>}
+ */
+export async function mcpListTools(opts = {}) {
+  const { init, results, stderr } = await mcpDrive({
+    ...opts,
+    steps: [{ method: 'tools/list' }],
+  });
+  const { result, error } = results[0] ?? {};
+  if (!result) {
+    throw new Error(`tools/list failed: ${JSON.stringify(error ?? null)}\n`
+      + `  server stderr:\n${stderr || '(silent)'}`);
+  }
+  const tools = result.tools ?? [];
+  return { server: init?.serverInfo ?? null, tools, names: tools.map((t) => t.name).sort(), stderr };
+}
+
+/**
+ * Invoke one tool for real and hand back both the tool result and, through the caller's
+ * `fakeMubit`, everything the server put on the wire to answer it.
+ *
+ * This is the only helper that lets the server reach a network, and that is the point:
+ * `mcpListTools` proves what is *advertised*, and nothing here proved what a write
+ * actually *sends*. Point `endpoint` at a `fakeMubit` and assert on `server.lastCall(...)`.
+ *
+ * A tool that fails is returned, not thrown — `isError` and `text` carry the server's own
+ * account of it, which several tests assert on directly.
+ *
+ * @param {string} name  the tool, e.g. `mubit_learned`
+ * @param {Record<string, any>} [args]  the tool's arguments
+ * @param {{extra?: Record<string,string>, endpoint?: string, dataDir?: string,
+ *          runId?: string, timeoutMs?: number}} [opts]
+ * @returns {Promise<{server: any, result: any, error: any, text: string, json: any,
+ *                   isError: boolean, stderr: string}>}
+ */
+export async function mcpCallTool(name, args = {}, opts = {}) {
+  const { init, results, stderr } = await mcpDrive({
+    ...opts,
+    steps: [{ method: 'tools/call', params: { name, arguments: args } }],
+  });
+  const { result, error } = results[0] ?? {};
+  const text = (result?.content ?? []).map((c) => c?.text ?? '').join('\n');
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* a tool may answer prose; callers use `text` */ }
+  return {
+    server: init?.serverInfo ?? null,
+    result: result ?? null,
+    error: error ?? null,
+    text,
+    json,
+    isError: result?.isError === true,
+    stderr,
+  };
 }
 
 // ---------------------------------------------------------------------------

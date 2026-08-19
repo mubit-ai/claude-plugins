@@ -32,6 +32,7 @@ import { loadConfig } from '../../lib/config.mjs';
 import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
 import { deriveRunId } from '../../lib/runid.mjs';
+import { installFetchGuard, resolveCeiling } from './egress.mjs';
 
 /**
  * §8.2 — ten of the server's twenty-one tools, in the guide's order.
@@ -137,8 +138,21 @@ function prepare(env) {
   env.MUBIT_MCP_TOOLS = tools.join(',');
   if (SERVER_VERSION) env.MUBIT_MCP_VERSION = SERVER_VERSION;
 
+  // The sixth thing that has to be in place before the import, and the only one that is not
+  // an environment variable. The bundled server dials the endpoint itself with global
+  // `fetch` and captures its transport at module scope, so this is subject to exactly the
+  // ordering rule above: installed afterwards, it would never see a request.
+  //
+  // `pinRun: true` because this server was launched by the plugin, which already derived
+  // the run — the same `runId` published on the line above, so the guard and the server
+  // cannot disagree about which run this session writes into. A caller-supplied
+  // `session_id` would otherwise move an agent's write into any run it could name.
+  const ceiling = resolveCeiling(cfg.mcpLessonScope);
+  installFetchGuard({ ceiling, runId, pinRun: true });
+
   log(cfg, 'info', 'mcp: starting server', {
     run_id: runId, endpoint: cfg.endpoint, mode: cfg.mode, tools: tools.length,
+    lesson_scope: ceiling, pin_run: true,
   });
   return true;
 }

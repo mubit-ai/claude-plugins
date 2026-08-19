@@ -493,6 +493,7 @@ const USER_CONFIG_ROWS = [
   { key: 'outcomeMode', env: 'MUBIT_CC_OUTCOME_MODE', field: 'outcomeMode', raw: 'explicit', want: 'explicit' },
   { key: 'statusLine', env: 'MUBIT_CC_STATUSLINE', field: 'statusLine', raw: '0', optRaw: 'false', want: false },
   { key: 'mcpTools', env: 'MUBIT_MCP_TOOLS', field: 'mcpTools', raw: 'mubit_recall,mubit_remember', want: ['mubit_recall', 'mubit_remember'] },
+  { key: 'mcpLessonScope', env: 'MUBIT_MCP_LESSON_SCOPE', field: 'mcpLessonScope', raw: 'global', want: 'global' },
 ];
 
 for (const row of USER_CONFIG_ROWS) {
@@ -550,6 +551,9 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.projectDir, projectDir);
   assert.ok(Array.isArray(cfg.mcpTools), 'mcpTools must be an array');
   assert.ok(cfg.mcpTools.length > 0, 'a blank MUBIT_MCP_TOOLS means the curated set, not none');
+  assert.equal(cfg.mcpLessonScope, 'run',
+    'the ceiling on an agent-written lesson defaults to the run it was written in — a wider\n'
+    + 'default is the cross-run leak the MCP egress guard exists to close');
   assert.ok(Array.isArray(cfg.denyGlobs), 'denyGlobs must be an array');
 });
 
@@ -663,4 +667,39 @@ test('loadConfig(): a corrupt config.json is ignored', async () => {
     MUBIT_ENDPOINT: 'https://mubit.example.com',
   }));
   assert.equal(cfg.endpoint, 'https://mubit.example.com');
+});
+
+// ===========================================================================
+// §8.2 mcpLessonScope — the ceiling on what an MCP write may claim
+// ===========================================================================
+
+// `run` is the only safe fallback. The value this setting overrides is the bundled SDK's
+// hard-coded `session`, which the control plane reads across runs — so "unparseable, keep
+// what the SDK sent" would let a typo silently reinstate the leak.
+test('loadConfig(): an unrecognised mcpLessonScope falls back to run', async () => {
+  const config = await lib('config.mjs');
+  const projectDir = makeProjectDir();
+
+  for (const bad of ['', '   ', 'banana', 'org', 'RUN?', 'session,global']) {
+    const cfg = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: bad }));
+    assert.equal(cfg.mcpLessonScope, 'run',
+      `${JSON.stringify(bad)} resolved to ${JSON.stringify(cfg.mcpLessonScope)} — the fallback `
+      + 'must be the narrowest scope, never the widest and never the SDK default');
+  }
+});
+
+// The three the control plane accepts from a client. `org` is promotion-only (§1.6) and is
+// deliberately absent: a client that could name it could write a tenant-wide rule.
+test('loadConfig(): mcpLessonScope accepts run, session and global — and nothing else', async () => {
+  const config = await lib('config.mjs');
+  const projectDir = makeProjectDir();
+
+  for (const good of ['run', 'session', 'global']) {
+    const cfg = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: good }));
+    assert.equal(cfg.mcpLessonScope, good);
+  }
+
+  const org = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: 'org' }));
+  assert.equal(org.mcpLessonScope, 'run',
+    'org is promotion-only and must never be client-written (§1.6)');
 });

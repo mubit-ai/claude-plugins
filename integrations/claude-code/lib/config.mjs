@@ -356,6 +356,14 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const statusLine = bool(pick('statusLine', 'MUBIT_CC_STATUSLINE'), true);
   const mcpToolsRaw = pick('mcpTools', 'MUBIT_MCP_TOOLS');
   const mcpTools = list(mcpToolsRaw, DEFAULT_MCP_TOOLS);
+  // §8.2 — the ceiling on what an MCP write may claim for itself. The bundled SDK
+  // hard-codes `lesson_scope: "session"` on `mubit_learned`, and the control plane surfaces
+  // every lesson whose scope is not `run` to other runs, so the shipped default was a
+  // cross-run write dressed as a session-local one. `mcp/src/egress.mjs` clamps it to this.
+  // `org` is deliberately absent: it is promotion-only (§1.6), and a client that could name
+  // it could write a tenant-wide rule.
+  const mcpLessonScope = enumOf(pick('mcpLessonScope', 'MUBIT_MCP_LESSON_SCOPE'),
+    ['run', 'session', 'global'], 'run');
 
   // §6.1 environment-only rows -------------------------------------------
   const only = (envVar, key) => {
@@ -411,6 +419,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     reflectOnEnd,
     statusLine,
     mcpTools,
+    mcpLessonScope,
     denyGlobs,
     respectGitignore,
     maxParamBytes,

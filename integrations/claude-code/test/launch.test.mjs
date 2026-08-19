@@ -51,8 +51,16 @@ const STUB_SERVER = `
 // Stands in for the bundled @mubit-ai/mcp server. It records process.env at the exact
 // moment the module is evaluated — i.e. everything the real server would read at module
 // scope — and does nothing else.
+//
+// It also records the egress guard's marker. The guard is not an env var: it is a wrapper
+// around globalThis.fetch, and "installed before the import" is the same ordering property
+// the env vars have, for the same reason — the real server captures its transport at
+// module scope, so a guard installed afterwards would never see a request.
 import { writeFileSync } from 'node:fs';
-writeFileSync(process.env.MUBIT_TEST_ENV_SNAPSHOT, JSON.stringify({ ...process.env }));
+writeFileSync(process.env.MUBIT_TEST_ENV_SNAPSHOT, JSON.stringify({
+  env: { ...process.env },
+  guard: globalThis.fetch?.mubitEgressGuard ?? null,
+}));
 export function createServer() { return { tool() {}, connect: async () => {} }; }
 export default { createServer };
 `;
@@ -88,7 +96,8 @@ setTimeout(() => process.exit(0), 1500).unref();
  * Run the launcher with a stubbed server.
  * @param {{extra?: Record<string,string>, projectDir?: string}} [o]
  * @returns {Promise<{code:number|null, stdout:string, stderr:string,
- *                    importedServer:boolean, envAtImport:Record<string,string>}>}
+ *                    importedServer:boolean, envAtImport:Record<string,string>,
+ *                    guardAtImport:any}>}
  */
 async function runLauncher(o = {}) {
   const launch = launcherScript();
@@ -129,8 +138,10 @@ async function runLauncher(o = {}) {
   });
 
   const importedServer = existsSync(snapshot);
-  const envAtImport = importedServer ? JSON.parse(readFileSync(snapshot, 'utf8')) : {};
-  return { code, stdout: out, stderr: err, importedServer, envAtImport, env, projectDir };
+  const snap = importedServer ? JSON.parse(readFileSync(snapshot, 'utf8')) : {};
+  const envAtImport = snap.env ?? {};
+  const guardAtImport = snap.guard ?? null;
+  return { code, stdout: out, stderr: err, importedServer, envAtImport, guardAtImport, env, projectDir };
 }
 
 /** The run id the hooks would derive for the same directory (§4.3). */
@@ -353,4 +364,48 @@ test('the bundled server honours the allowlist, and context-cost.json says so', 
   assert.equal(cost.breakdown?.toolSchemas?.count, DEFAULT_ALLOWLIST.length,
     `every session pays for ${DEFAULT_ALLOWLIST.length} tool schemas, but context-cost.json bills for `
     + `${cost.breakdown?.toolSchemas?.count}`);
+});
+
+// ---------------------------------------------------------------------------
+// §8.3 — the egress guard, installed on the same schedule as the env
+// ---------------------------------------------------------------------------
+
+// The bundled server dials the endpoint itself: nothing in this repo sees the request, and
+// the SDK inside it hard-codes `lesson_scope: "session"` on the one write tool a default
+// install exposes — a scope the control plane reads across runs. The guard wraps
+// `globalThis.fetch` to clamp that, and it is subject to the same ordering rule as every
+// env var here: the server captures its transport at module scope, so a guard installed
+// after the import would never see a single request.
+test('installs the egress guard BEFORE importing the server', async () => {
+  const r = await runLauncher();
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+
+  assert.ok(r.guardAtImport,
+    'globalThis.fetch carried no egress guard when the server was imported — every MCP write '
+    + 'then leaves this machine unexamined (§8.3)');
+  assert.equal(r.guardAtImport.ceiling, 'run',
+    'the default ceiling must be the run the write was made in');
+  assert.equal(r.guardAtImport.pinRun, true,
+    'a plugin-launched server must ignore a caller-supplied session_id — the launcher '
+    + 'already derived the run, and a write that follows the caller elsewhere breaks the '
+    + 'per-run boundary the run id exists to draw');
+});
+
+// §6.2 — the ceiling is a userConfig key, so it has to travel the same path as the rest of
+// the config rather than being read out of the environment a second time inside the guard.
+test('carries mcpLessonScope through to the guard', async () => {
+  const r = await runLauncher({ extra: { MUBIT_MCP_LESSON_SCOPE: 'global' } });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+
+  assert.equal(r.guardAtImport?.ceiling, 'global');
+});
+
+// The guard clamps to a run id, so it needs the same one the rest of the launcher published.
+// If these two ever disagreed, a pinned write would land in a run the hooks never read.
+test('the guard pins to the same run id the server was given', async () => {
+  const r = await runLauncher({ extra: { MUBIT_DEFAULT_SESSION_ID: 'default' } });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+
+  assert.equal(r.guardAtImport?.runId, r.envAtImport.MUBIT_DEFAULT_SESSION_ID,
+    'the guard and the server must agree on which run this session writes into');
 });

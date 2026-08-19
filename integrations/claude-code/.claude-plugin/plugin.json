@@ -36,6 +36,8 @@
     "statusLine": { "type": "boolean", "title": "Status line", "default": true,
       "description": "Show Mubit connection and capture stats in the status line." },
     "mcpTools": { "type": "string", "title": "MCP tool allowlist", "default": "",
-      "description": "Comma-separated allowlist of Mubit MCP tools. Blank uses the curated default set." }
+      "description": "Comma-separated allowlist of Mubit MCP tools. Blank uses the curated default set." },
+    "mcpLessonScope": { "type": "string", "title": "MCP lesson scope ceiling", "default": "run",
+      "description": "The widest scope a lesson written by an MCP tool may claim: run, session, or global. Anything wider than run is read by unrelated runs, so the default keeps an agent's lesson in the run that wrote it; reflection is still the path that promotes one beyond it." }
   }
 }

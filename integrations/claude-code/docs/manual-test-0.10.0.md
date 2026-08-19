@@ -35,7 +35,40 @@ signed in with**, and you will test the wrong instance without a single warning.
 you start:
 
 ```bash
-echo "endpoint=${MUBIT_ENDPOINT:-(unset)}  key=${MUBIT_API_KEY:+set}${MUBIT_API_KEY:-(unset)}"
+env | grep -iE '^(MUBIT|CLAUDE_PLUGIN)' | sed 's/\(MUBIT_API_KEY=.\{0,10\}\).*/\1…/' | sort
+```
+
+**Expect nothing at all.** Anything printed here is already steering the plugin, and four
+variables in particular decide which plugin, which server and which state directory you are
+about to measure:
+
+| Variable | If set, it silently redirects |
+|---|---|
+| `MUBIT_CC_DATA_DIR` / `CLAUDE_PLUGIN_DATA` | **every byte of state** — markers, turns, spool, logs |
+| `MUBIT_ENDPOINT` / `MUBIT_API_KEY` | which Mubit you are testing, overriding the key you signed in with |
+| `CLAUDE_PLUGIN_ROOT` | which copy of the plugin loads |
+
+This is not theoretical. A terminal that has sourced the Milestone-1/M3 runbook environment
+carries `MUBIT_CC_DATA_DIR=/tmp/mubit-cc-m3`, `MUBIT_ENDPOINT=http://127.0.0.1:3100` and a local
+admin key. A Claude Code session started from it looks completely normal, writes nothing to
+`~/.claude/plugins/data/`, and answers every question about "the hosted instance" with facts
+about a local one. Inspecting the marketplace data dir in that state tells you about *previous*
+sessions and nothing about the one you are in.
+
+**Hooks read the environment of the Claude Code process, fixed at launch.** You cannot correct
+this from inside a running session — exporting a variable in the terminal does not reach hooks
+that are already running. Start a clean one:
+
+```bash
+env -u MUBIT_ENDPOINT -u MUBIT_API_KEY -u MUBIT_CC_DATA_DIR \
+    -u CLAUDE_PLUGIN_DATA -u CLAUDE_PLUGIN_ROOT -u MUBIT_BASE_URL claude
+```
+
+If you are unsure which data dir a live session is using, ask it rather than guess — the answer
+is in the config the plugin cached for itself:
+
+```bash
+node "$PLUG/scripts/mubit-inspect.mjs" --runs        # every data dir it can find, newest first
 ```
 
 Now paste this whole block into the terminal you will use for the rest of the run:
@@ -235,6 +268,20 @@ The cache is stale.
 | `policy_denied` | Rung 1 was refused, or a cached denial is being replayed | Re-probe, below |
 | `budget_exhausted` | The block did not fit `MUBIT_CC_RECALL_TOKENS` | Raise it, or accept the trim |
 | `breaker_open` | The circuit is open after 5 failures | §9 |
+| *(blank)*, state `◌ not_responding`, `ms` at ~1500 | The recall **budget** expired before the server answered — not a policy problem at all | Raise it, below |
+
+**The local server is slower than the shipped budget.** A debug-build Mubit on `127.0.0.1:3100`
+answers a rung-1 query in 1.4–2.3 s; `MUBIT_CC_RECALL_BUDGET_MS` defaults to **1500**. So recall
+aborts, injects nothing, and the marker reads `not_responding` with
+`last_error: POST /v2/control/query: aborted after 1460ms` — while `rung` still says 1, because
+direct bypass was granted and simply did not finish. Measured here at `ms 1505`.
+
+Do not read this as a plugin defect, and do not raise the shipped default — 1500 ms is sized for
+a 3 s hook timeout in a real session. Raise it only for the run:
+
+```bash
+MUBIT_CC_RECALL_BUDGET_MS=8000 MUBIT_CC_TIMEOUT_MS=8000 claude --plugin-dir "$PLUG"
+```
 
 **Force a re-probe** — one prompt with a 1 ms TTL re-asks the instance and rewrites or clears
 the cache:

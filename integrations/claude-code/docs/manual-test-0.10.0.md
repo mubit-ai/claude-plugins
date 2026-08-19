@@ -193,14 +193,21 @@ and recall injects nothing the whole time.
 This is not hypothetical. Check your real install:
 
 ```bash
-for f in ~/.claude/plugins/data/mubit-memory*/policy/*.json; do
-  echo "--- $f"; python3 -c "
-import json,time
-j=json.load(open('$f')); ob=j.get('observed_at',0)
+find ~/.claude/plugins/data -path '*/policy/*.json' 2>/dev/null \
+  | tee /dev/stderr | while read -r f; do python3 -c "
+import json,sys,time
+j=json.load(open(sys.argv[1])); ob=j.get('observed_at',0)
 print(j)
 print('cached %.1f h ago, expires in %.1f h' % ((time.time()*1000-ob)/3.6e6, (ob+j.get('ttl_ms',0)-time.time()*1000)/3.6e6))
-"; done
+" "$f"; done
 ```
+
+> Written with `find` rather than a `*/policy/*.json` glob on purpose. **zsh aborts the whole
+> command on a glob that matches nothing** (`zsh: no matches found:`) where bash would pass the
+> pattern through — so on the happy path, when there is no cached denial, the glob version fails
+> in a way that looks like an error and is actually the result you wanted.
+
+**No output at all is the good answer**: no cached denial exists, so nothing is blocking rung 1.
 
 **Expect**, if you are affected — measured on this machine:
 
@@ -240,8 +247,14 @@ ls -A "$DATA/policy" 2>/dev/null | wc -l     # 0 = rung 1 granted
 Or just delete the file — it is a cache, and losing it costs one extra probe:
 
 ```bash
-rm -f ~/.claude/plugins/data/mubit-memory*/policy/*.json
+find ~/.claude/plugins/data -path '*/policy/*.json' -delete
 ```
+
+> **The marker keeps saying `policy_denied` after you clear the cache, and that is not a
+> relapse.** `status/<run>.json` is last-write-wins: it describes the last prompt that run
+> actually saw. Until you send another prompt in that run, it goes on reporting the old verdict.
+> Judge the current state from `policy/` (empty = not blocked) and from the *next* prompt's
+> `empty_reason`, never from a marker that has not been rewritten since.
 
 > If the re-probe writes the denial back, the instance really does have direct search off. Then
 > the dial is server-side (`spec.policy.enableDirectSearch: true` plus a pod restart — the env

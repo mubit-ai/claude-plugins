@@ -112,6 +112,32 @@ const CHARS_PER_TOKEN = 4;
 /** A single rendered line is capped so one pathological entry cannot eat a whole budget. */
 const MAX_ITEM_CHARS = 2000;
 
+/**
+ * The mark on a degraded repeat (§5.2, `lib/seen.mjs`).
+ *
+ * A `reference_id` already injected earlier in this run renders as a pointer — the id plus
+ * the entry's first clause — instead of its whole content. It is a **degrade, not a drop**:
+ * the id still reaches `sourceRefIds`, so `Stop` can attribute against it. Dropping a repeat
+ * would silently stop reinforcing exactly the memories relevant enough to keep surfacing,
+ * which is the opposite of what `record_outcome` is for.
+ *
+ * The mark is a stable prefix on purpose. `isPointerLine` is the seam
+ * `hooks/src/prompt-recall.mjs` uses to keep a pointer's words out of the Stop-side
+ * used-signal: a reference id is a handle, not vocabulary, and matching a reply against one
+ * guarantees a miss — which would file an *ignored* verdict against a memory that is working.
+ */
+export const POINTER_MARK = '(seen earlier)';
+
+/** How much of an entry's first clause a pointer carries. 64 chars is ~16 tokens. */
+const MAX_POINTER_CHARS = 64;
+
+/**
+ * Below this a "clause" is not a clause. Plenty of stored memory opens with a short lead-in
+ * — `Rule. Never force-push to main.` or `never_force_push: …` — and a pointer that renders
+ * as `Rule…` names nothing the model can act on or recognise.
+ */
+const MIN_POINTER_CHARS = 24;
+
 // ---------------------------------------------------------------------------
 // sectionFor
 // ---------------------------------------------------------------------------
@@ -163,6 +189,7 @@ export function estimateTokens(text) {
  * @property {SectionSummary[]} sections  rendered sections, in emission order
  * @property {string[]} sourceRefIds  `reference_id` of every rendered item, in render order
  * @property {number} dropped         candidates that did not render
+ * @property {number} pointers        rendered items degraded to a one-line pointer
  * @property {string} emptyReason     `''` | `'no_evidence'` | `'budget_exhausted'`
  */
 
@@ -179,8 +206,13 @@ export function estimateTokens(text) {
  * shorter item from a later section may still fit, and reporting `dropped` is what lets the
  * status line say "budget-truncated" instead of "empty".
  *
+ * `seen` is the set of `reference_id`s this run has already injected (`lib/seen.mjs`). An
+ * entry in it is degraded to a pointer rather than dropped — see `POINTER_MARK`. Passing no
+ * `seen`, or `repeatMode: 'full'`, reproduces the pre-seen-set block byte for byte.
+ *
  * @param {any[]} evidence  `QueryEvidence[]` from rung 1 or 2
- * @param {{tokenBudget?: number, sections?: string[], perSection?: number}} [opts]
+ * @param {{tokenBudget?: number, sections?: string[], perSection?: number,
+ *          seen?: Set<string>|string[], repeatMode?: string}} [opts]
  * @returns {Assembled}
  */
 export function assembleContext(evidence, opts = {}) {
@@ -190,6 +222,9 @@ export function assembleContext(evidence, opts = {}) {
   const allowed = Array.isArray(o.sections) && o.sections.length
     ? new Set(o.sections.filter((s) => typeof s === 'string').map((s) => s.trim()))
     : null;
+  // §6.1 `recallRepeatMode`. `full` is every release before the seen-set: an operator who
+  // opted out gets the old block back, and a caller who passes no set never degrades at all.
+  const seen = str(o.repeatMode) === 'full' ? null : seenSetOf(o.seen);
 
   const list = Array.isArray(evidence) ? evidence : [];
 
@@ -224,7 +259,7 @@ export function assembleContext(evidence, opts = {}) {
   if (candidates === 0) {
     return {
       block: '', tokenEstimate: 0, sections: [], sourceRefIds: [],
-      dropped: 0, emptyReason: 'no_evidence',
+      dropped: 0, pointers: 0, emptyReason: 'no_evidence',
     };
   }
 
@@ -238,6 +273,7 @@ export function assembleContext(evidence, opts = {}) {
 
   let used = 0;
   let rendered = 0;
+  let pointers = 0;
 
   for (const key of RENDER_ORDER) {
     const bucket = bySection.get(key);
@@ -256,8 +292,17 @@ export function assembleContext(evidence, opts = {}) {
       if (perSection > 0 && count >= perSection) { continue; }
 
       // §4.10: the server marks an entry stale; a mark the client renders nowhere is a mark
-      // that does nothing. It rides on the line it qualifies, where the model reads it.
-      const line = `- ${item.stale ? '(stale) ' : ''}${item.text}\n`;
+      // that does nothing. It rides on the line it qualifies, where the model reads it —
+      // including on a pointer, where the model still has to know not to trust the entry.
+      const full = `- ${item.stale ? '(stale) ' : ''}${item.text}\n`;
+      const pointer = seen && item.ref && seen.has(item.ref)
+        ? `- ${POINTER_MARK} ${item.stale ? '(stale) ' : ''}${item.ref} — ${firstClause(item.text)}\n`
+        : '';
+      // A pointer longer than the entry it points at is a pessimisation in the costume of an
+      // optimisation, and one-line lessons are both common and already cheap.
+      const degraded = !!pointer && pointer.length < full.length;
+      const line = degraded ? pointer : full;
+
       const cost = estimateTokens(line) + (open ? 0 : headingCost);
       if (used + cost > budget) continue;   // skipped, counted below; a later item may fit
 
@@ -266,6 +311,7 @@ export function assembleContext(evidence, opts = {}) {
       used += cost;
       count++;
       rendered++;
+      if (degraded) pointers++;
       // §4.10/§5.5: reference_id, never id. Deduped, because the same entry surfacing
       // through two retrieval lanes must not be reinforced twice for one turn.
       if (item.ref && !seenRefs.has(item.ref)) {
@@ -286,8 +332,74 @@ export function assembleContext(evidence, opts = {}) {
     sections,
     sourceRefIds,
     dropped: Math.max(0, candidates - rendered),
+    // A degraded entry is rendered, not dropped: it counts here and nowhere else, so a
+    // reader can tell a block that shrank from a block that lost half its evidence.
+    pointers,
     emptyReason: rendered > 0 ? '' : 'budget_exhausted',
   };
+}
+
+// ---------------------------------------------------------------------------
+// Pointers
+// ---------------------------------------------------------------------------
+
+/**
+ * Is this rendered line a pointer at an entry injected on an earlier turn?
+ *
+ * The one place the pointer format is decoded, so a caller never has to re-spell it.
+ * `hooks/src/prompt-recall.mjs` uses it to exclude these lines from the vocabulary it
+ * stages for the Stop-side used-signal — see `POINTER_MARK`.
+ *
+ * @param {string} line
+ * @returns {boolean}
+ */
+export function isPointerLine(line) {
+  return typeof line === 'string' && line.startsWith(`- ${POINTER_MARK} `);
+}
+
+/**
+ * Enough of an entry for the model to recognise which memory is being pointed at: its first
+ * clause, or the first `MAX_POINTER_CHARS` characters, whichever comes first.
+ *
+ * Clause rather than sentence because a memory's first sentence is routinely the whole
+ * memory, and the point of the pointer is that it is not.
+ *
+ * `:` is deliberately NOT a boundary, even though it reads like one. Stored memories very
+ * often lead with a label — `Rule: never force-push to main` — and cutting there yields a
+ * pointer that identifies nothing. `MIN_POINTER_CHARS` covers the same shape spelled with a
+ * full stop.
+ *
+ * @param {string} text  already collapsed to one line by `oneLine`
+ * @returns {string}
+ */
+function firstClause(text) {
+  const s = typeof text === 'string' ? text.trim() : '';
+  if (!s) return '';
+  const stop = s.search(/[.;!?]/);
+  let end = stop > 0 ? Math.min(stop, MAX_POINTER_CHARS) : MAX_POINTER_CHARS;
+  if (end < MIN_POINTER_CHARS) end = Math.min(s.length, MAX_POINTER_CHARS);
+  const clause = s.slice(0, end).trim() || s.slice(0, MAX_POINTER_CHARS).trim();
+  return clause.length < s.length ? `${clause}…` : clause;
+}
+
+/**
+ * The seen set, however the caller spells it.
+ *
+ * `readSeen(...).ids` is a `Set`; an array is accepted because a caller who passes one and
+ * silently gets full-price rendering has a bug nothing surfaces until someone counts
+ * tokens. Anything else — a string, a plain object, `null` — degrades nothing, which is the
+ * behaviour of every release before the seen-set existed.
+ *
+ * @param {any} v
+ * @returns {Set<string>|null}
+ */
+function seenSetOf(v) {
+  if (v instanceof Set) return v.size ? v : null;
+  if (Array.isArray(v)) {
+    const set = new Set(v.filter((s) => typeof s === 'string' && s.trim()));
+    return set.size ? set : null;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

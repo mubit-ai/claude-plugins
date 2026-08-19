@@ -80,6 +80,7 @@ import { postCheckpoint } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { clearSeen } from '../../lib/seen.mjs';
 import { appendItem } from '../../lib/spool.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -256,9 +257,24 @@ async function precompact(payload, cfg, ctx) {
 // ---------------------------------------------------------------------------
 
 /**
- * §5.6: note which anchor the freshly compacted session belongs to. Reads one file and dials
- * nothing — 800 ms is not a network budget, and a PostCompact that waited on a socket would be
- * a stall on the first turn after every compaction.
+ * §5.6: note which anchor the freshly compacted session belongs to, and reset the cross-turn
+ * seen-set. Reads one file, unlinks one, and dials nothing — 800 ms is not a network budget,
+ * and a PostCompact that waited on a socket would be a stall on the first turn after every
+ * compaction.
+ *
+ * ---------------------------------------------------------------------------
+ * Why the seen-set is cleared here
+ * ---------------------------------------------------------------------------
+ * `hooks/src/prompt-recall.mjs` degrades a memory it has already injected into a one-line
+ * pointer, on the strength of `runs/<run_id>/seen.json` saying the model has it
+ * (`lib/seen.mjs`). **Compaction resets the model's window, not the file.** After this event
+ * the transcript those entries were injected into is gone, so a surviving pointer names a
+ * memory that exists nowhere in the conversation — the model is told a memory applies and is
+ * given no way to read it, which is strictly worse than having paid full price for it.
+ *
+ * The clear runs before every other decision in this function on purpose. A compaction with
+ * no stored anchor still emptied the window; gating the reset on `--pre` having succeeded
+ * would leave stale pointers behind on exactly the runs that already lost their checkpoint.
  *
  * Emits `{"suppressOutput": true}` on every path, including the one that found an anchor. See
  * the header: `PostCompact` has no `hookSpecificOutput` channel, so the only shapes available
@@ -279,6 +295,9 @@ function postcompact(payload, cfg) {
     return SUPPRESS;
   }
 
+  // The seen-set reset, ahead of every other decision here — see the header above.
+  clearSeen(cfg, runId);
+
   const latest = readHistory(cfg, runId).at(-1);
   const checkpointId = str(latest?.checkpoint_id);
   if (!checkpointId) {
@@ -290,7 +309,7 @@ function postcompact(payload, cfg) {
     return SUPPRESS;
   }
 
-  // The only lasting effect of this hook. It is what answers "why was nothing re-anchored?"
+  // The other lasting effect of this hook. It is what answers "why was nothing re-anchored?"
   // when the SessionStart that follows a compaction turns out to have read a different run.
   log(cfg, 'info', `checkpoint: compaction re-anchors to ${clamp(checkpointId, MAX_ID_CHARS)}`, {
     run_id: runId, trigger: str(payload.trigger),

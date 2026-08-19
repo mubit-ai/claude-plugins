@@ -489,6 +489,7 @@ const USER_CONFIG_ROWS = [
   { key: 'redact', env: 'MUBIT_CC_REDACT', field: 'redact', raw: '0', optRaw: 'false', want: false },
   { key: 'recallTokenBudget', env: 'MUBIT_CC_RECALL_TOKENS', field: 'recallTokenBudget', raw: '900', want: 900 },
   { key: 'recallAssemble', env: 'MUBIT_CC_RECALL_ASSEMBLE', field: 'recallAssemble', raw: 'server', want: 'server' },
+  { key: 'recallRepeatMode', env: 'MUBIT_CC_RECALL_REPEAT_MODE', field: 'recallRepeatMode', raw: 'full', want: 'full' },
   { key: 'reflectOnEnd', env: 'MUBIT_CC_REFLECT_ON_END', field: 'reflectOnEnd', raw: '0', optRaw: 'false', want: false },
   { key: 'outcomeMode', env: 'MUBIT_CC_OUTCOME_MODE', field: 'outcomeMode', raw: 'explicit', want: 'explicit' },
   { key: 'statusLine', env: 'MUBIT_CC_STATUSLINE', field: 'statusLine', raw: '0', optRaw: 'false', want: false },
@@ -536,6 +537,9 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.recallBudgetMs, 1500);
   assert.equal(cfg.recallTokenBudget, 1500);
   assert.equal(cfg.recallAssemble, 'client');
+  // §5.2: a memory already injected this run is repeated as a one-line pointer rather than
+  // in full. `full` is the pre-seen-set behaviour and costs up to 1500 tokens every prompt.
+  assert.equal(cfg.recallRepeatMode, 'pointer');
   assert.equal(cfg.outcomeMode, 'implicit');
   assert.equal(cfg.reflectOnEnd, true);
   assert.equal(cfg.statusLine, true);

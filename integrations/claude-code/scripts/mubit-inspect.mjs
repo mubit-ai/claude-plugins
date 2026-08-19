@@ -17,7 +17,9 @@
  *
  *   - **cost, per prompt** — `tok`/`chars` are what the injected block actually spent.
  *     `tok` is the plugin's four-chars-per-token estimate; `chars` is there so you can
- *     re-derive it with a real tokenizer instead of inheriting the estimate.
+ *     re-derive it with a real tokenizer instead of inheriting the estimate. `ptr` is how
+ *     many of that prompt's memories were repeats, rendered as a one-line pointer rather
+ *     than in full — it is what makes a falling `tok` attributable to the seen-set.
  *   - **which memories** — `recalled[]` holds `reference_id` values in render order.
  *     `--resolve` turns them into text.
  *   - **whether they were used** — only as the `memory-term-echo/v1` proxy the capture hook
@@ -186,6 +188,11 @@ function row(turn) {
     tokens: Number(r.tokens) || 0,
     chars: Number(r.chars) || 0,
     dropped: Number(r.dropped) || 0,
+    // How many of `sources` were repeats rendered as a one-line pointer because this run had
+    // already injected them (`lib/seen.mjs`). Without it a falling `tok` is unattributable:
+    // a block that shrank because the seen-set worked reads the same as one that shrank
+    // because recall found half as much.
+    pointers: Number(r.pointers) || 0,
     empty_reason: String(r.empty_reason || ''),
     recalled: Array.isArray(turn.recalled) ? turn.recalled : [],
     // Filled in by --cross-run, which is the only thing that knows: the turn file records
@@ -225,6 +232,7 @@ const COLS = [
   { label: 'tok',      get: (r) => r.tokens, right: true },
   { label: 'chars',    get: (r) => r.chars, right: true },
   { label: 'drop',     get: (r) => r.dropped, right: true },
+  { label: 'ptr',      get: (r) => r.pointers, right: true },
   { label: 'empty_reason', get: (r) => dash(r.empty_reason) },
   { label: 'used(m/c)',get: (r) => r.used },
   { label: 'outcome',  get: (r) => dash(r.outcome) },

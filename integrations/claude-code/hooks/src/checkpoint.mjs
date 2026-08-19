@@ -80,7 +80,7 @@ import { runHook } from '../../lib/hook.mjs';
 import { postCheckpoint } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
 import { clearSeen } from '../../lib/seen.mjs';
 import { appendItem } from '../../lib/spool.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
@@ -562,7 +562,11 @@ function spoolSummary(cfg, runId, payload, snap, label) {
     source: 'agent',
     // Unix SECONDS (`control.proto`); milliseconds here dates every memory to the year 57000.
     occurrence_time: Math.floor(Date.now() / 1000),
-    env_tags: attempt(() => envTags(cfg, str(cfg?.projectDir)), ['tool:claude-code']),
+    // From the payload's directory, not the launch one: after a mid-session `cd` the run id
+    // follows the new repo, and `repo:`/`branch:` have to follow it or the item lands in the
+    // right run wearing the wrong labels.
+    env_tags: attempt(
+      () => envTags(cfg, resolveProjectDir(cfg, payload)), ['tool:claude-code']),
     metadata_json: safeJson({
       hook_event: str(payload.hook_event_name) || 'PreCompact',
       source: 'PreCompact',

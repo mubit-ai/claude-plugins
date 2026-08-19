@@ -75,7 +75,9 @@ const HOST_VERSION = '2.1.233';
  *
  * The zod union that runs *first*, and whose rejection reads `(root): Invalid input`, is a
  * strict superset: it adds `CwdChanged`, `FileChanged`, `Notification` and `WorktreeCreate`,
- * which validate and then fall through the switch.
+ * which validate and then fall through the switch. `CwdChanged` is one this plugin registers,
+ * so that distinction is load-bearing here rather than trivia: its hook has to deliver its
+ * effect by writing state, because anything it said would be accepted and discarded.
  *
  *     strings -a "$V" | grep -o 'hookEventName:[A-Za-z0-9_$]*("[A-Za-z]*")' \
  *       | grep -o '"[A-Za-z]*"' | sort -u
@@ -234,6 +236,16 @@ const CASES = {
   },
   'SessionEnd session-end': {
     payload: () => fx.sessionEnd({ cwd: PROJECT_DIR }),
+  },
+  // `CwdChanged` is in the zod union and NOT in the dispatch switch — it validates and is then
+  // ignored, so it has no `hookSpecificOutput` channel and there is no branch here that speaks.
+  // The `cd` this drives is one that does not move the run (the env above pins `static`, which
+  // no directory can move); the branch that remaps, drains and marks is driven end to end in
+  // `test/cwd-changed.test.mjs`, where a spawn spy and a real second repo belong.
+  'CwdChanged cwd-changed': {
+    payload: () => fx.cwdChanged({
+      cwd: PROJECT_DIR, old_cwd: PROJECT_DIR, new_cwd: PROJECT_DIR,
+    }),
   },
 };
 

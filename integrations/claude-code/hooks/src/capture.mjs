@@ -35,7 +35,7 @@ import { envTags } from '../../lib/config.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { classifyTool, classifyTurn } from '../../lib/classify.mjs';
 import { isDeniedPath, isSelfReference, redactParams, redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
 import { appendItem, spoolStats } from '../../lib/spool.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -369,6 +369,7 @@ function buildToolItem(payload, cfg, mode) {
 
   return item({
     cfg,
+    payload,
     // §5.4: "item_id is stable per tool call so a retried drain deduplicates." Derived from
     // `tool_use_id` and nothing else — a timestamp in here would make every retry a new
     // entry, which is the exact failure the dedup exists to prevent.
@@ -434,6 +435,7 @@ function buildTurnItem(payload, cfg, runId, mode) {
 
   return item({
     cfg,
+    payload,
     id: mode === 'subagent'
       ? `cc-sub-${idPart(payload.agent_id) || 'anon'}-${idPart(payload.prompt_id) || idPart(payload.session_id) || 'turn'}`
       : `cc-stop-${idPart(payload.prompt_id) || idPart(payload.session_id) || 'turn'}`,
@@ -457,8 +459,8 @@ function buildTurnItem(payload, cfg, runId, mode) {
  * The §5.4 wire shape. `item_id` and `content_type` are REQUIRED (§1.3) — a missing one is a
  * 422 for the whole batch, not just this item — and `intent` is always set (§1.5).
  *
- * @param {{cfg: Record<string, any>, id: string, text: string, intent: any,
- *          importance: any, metadata: Record<string, any>}} o
+ * @param {{cfg: Record<string, any>, payload: Record<string, any>, id: string, text: string,
+ *          intent: any, importance: any, metadata: Record<string, any>}} o
  * @returns {Record<string, any>}
  */
 function item(o) {
@@ -474,7 +476,11 @@ function item(o) {
     // Unix SECONDS, as in the §5.4 example — `occurrence_time` is an int64 of seconds
     // (control.proto) and handing it milliseconds dates every memory to the year 57000.
     occurrence_time: Math.floor(Date.now() / 1000),
-    env_tags: attempt(() => envTags(cfg, str(cfg.projectDir)), ['tool:claude-code']),
+    // The tags are derived from a directory too, and they ride on every ingested item. A
+    // run id that follows a mid-session `cd` while `repo:`/`branch:` stay on the launch repo
+    // would be half a fix: the memory would land in the right run wearing the wrong labels.
+    env_tags: attempt(
+      () => envTags(cfg, resolveProjectDir(cfg, o.payload)), ['tool:claude-code']),
     metadata_json: safeJson(o.metadata),
   };
   const userId = str(cfg.userId);

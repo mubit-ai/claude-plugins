@@ -945,3 +945,37 @@ test('capture: hostile tool_input drops the item rather than spooling it unredac
     assertRequiredItemFields(JSON.parse(raw));
   }
 });
+
+// ---------------------------------------------------------------------------
+// §4.1 env_tags — the directory the work happened in
+// ---------------------------------------------------------------------------
+
+/*
+ * `repo:` and `branch:` come from shelling out in a directory, and that directory used to be
+ * `CLAUDE_PROJECT_DIR` — the session's launch root, which a mid-session `cd` cannot move. The
+ * tags ride on every ingested item and are permanent once ingested, so getting the run id to
+ * follow a `cd` while leaving these behind would have shipped half a fix: the memory lands in
+ * the right run wearing the wrong labels.
+ *
+ * The run is pinned here so the run id cannot be what makes this pass or fail. Only the tags
+ * are in question.
+ */
+test('capture: env_tags name the repo the tool call happened in, not the launch one', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const launchedIn = makeProjectDir({ git: true });
+  const workingIn = makeProjectDir({ git: true });
+  holdDrainLock(dataDir);
+
+  const r = await runHook('capture', postToolUse({ cwd: workingIn }), {
+    env: staticEnv(dataDir, server, { CLAUDE_PROJECT_DIR: launchedIn }),
+  });
+  assertHookContract(r);
+
+  const tags = soleItem(dataDir, RUN_ID).env_tags;
+  assert.ok(tags.includes(`repo:${basename(workingIn)}`),
+    `expected repo:${basename(workingIn)}; got ${JSON.stringify(tags)}`);
+  assert.ok(!tags.includes(`repo:${basename(launchedIn)}`),
+    'the launch repo is not where this tool call happened');
+});

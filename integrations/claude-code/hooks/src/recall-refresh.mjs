@@ -59,7 +59,7 @@ import { CONN_STATES } from '../../lib/breaker.mjs';
 import { writeCarry } from '../../lib/carry.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
-import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
 import { readSeen } from '../../lib/seen.mjs';
 import { safeSegment } from '../../lib/state.mjs';
 
@@ -121,6 +121,9 @@ await runHook('recall-refresh', {
       query: prompt.slice(0, MAX_QUERY_CHARS),
       deadline: started + REFRESH_BUDGET_MS,
       seen,
+      // The refresh runs detached but carries the spawning turn's payload, so it tags against
+      // the directory that turn was sent in rather than wherever this process happens to sit.
+      projectDir: resolveProjectDir(cfg, payload),
     });
     const fetchMs = Date.now() - started;
 

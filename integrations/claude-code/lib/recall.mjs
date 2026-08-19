@@ -119,6 +119,7 @@ const ENDPOINT_HASH_LEN = 12;
  * @property {number} [tokenBudget]      defaults to `cfg.recallTokenBudget`
  * @property {number} [perSection]       defaults to `cfg.recallMaxPerSection`
  * @property {string} [repeatMode]       defaults to `cfg.recallRepeatMode`
+ * @property {string} [projectDir]      the directory THIS prompt was sent in, for `env_tags`
  */
 
 /**
@@ -167,7 +168,10 @@ async function ladder(cfg, o) {
     include_working_memory: true,
     // §1.8: `env_tags` exists on AgentQueryRequest but NOT on ContextRequest — version-aware
     // tag scoring is capability rungs 1-2 gain over rung 3, not something they give up.
-    env_tags: envTags(cfg),
+    // Tagged from the directory this prompt was sent in, not the one the session launched
+    // in — the same reason the run id reads the payload. A recall scored against `repo:`
+    // tags from the wrong repo is worse than one scored against none.
+    env_tags: envTags(cfg, o.projectDir),
   };
 
   let denied = readPolicyDenial(cfg);

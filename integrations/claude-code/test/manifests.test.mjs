@@ -257,7 +257,7 @@ test('every hooks.json command uses exec form (command + args), never shell form
   }
 });
 
-// §3.2 — all twelve registrations, with the exact events, ordering, matchers, extra args,
+// §3.2 — all thirteen registrations, with the exact events, ordering, matchers, extra args,
 // `if` filters and timeouts. `timeout` is in SECONDS; a millisecond value here silently
 // gives every hook a ~3ms budget.
 test('hooks.json declares all ten registrations with the right events, args and timeouts', () => {
@@ -265,9 +265,9 @@ test('hooks.json declares all ten registrations with the right events, args and 
   const events = Object.keys(hooks.hooks ?? {});
 
   const expectedEvents = [
-    'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'SubagentStart', 'PostToolUse',
-    'PostToolUseFailure', 'Stop', 'StopFailure', 'SubagentStop', 'PreCompact', 'PostCompact',
-    'SessionEnd',
+    'SessionStart', 'CwdChanged', 'UserPromptSubmit', 'PreToolUse', 'SubagentStart',
+    'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'SubagentStop', 'PreCompact',
+    'PostCompact', 'SessionEnd',
   ];
   assert.deepEqual([...events].sort(), [...expectedEvents].sort(),
     `hooks.json must register exactly the ten events in §3.2; got [${events.join(', ')}]`);
@@ -294,6 +294,9 @@ test('hooks.json declares all ten registrations with the right events, args and 
   /** @type {Record<string, Array<{script:string, extraArgs:string[], ifPattern:string, timeout:number}>>} */
   const expected = {
     SessionStart: [{ script: 'session-start.mjs', extraArgs: [], ifPattern: '', timeout: 5 }],
+    // The run id is derived from a directory, so a `cd` into another repo has to move it —
+    // and drain the run being left, which nothing else in the plugin would ever revisit.
+    CwdChanged: [{ script: 'cwd-changed.mjs', extraArgs: [], ifPattern: '', timeout: 5 }],
     // Order matters: recall must run before the prompt is staged for the drain trigger.
     UserPromptSubmit: [
       { script: 'prompt-recall.mjs', extraArgs: [], ifPattern: '', timeout: 3 },

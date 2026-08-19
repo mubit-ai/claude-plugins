@@ -128,15 +128,15 @@ claude plugin details mubit-memory
 Component inventory
   Skills (7)  auth, doctor, forget, recall, reflect, remember, setup
   Agents (1)  mubit-recall
-  Hooks (9)  SessionStart, UserPromptSubmit, PostToolUse, PostToolUseFailure, Stop,
-             SubagentStop, PreCompact, PostCompact, SessionEnd  (harness-only — no model context cost)
+  Hooks (10)  SessionStart, CwdChanged, UserPromptSubmit, PostToolUse, PostToolUseFailure,
+             Stop, SubagentStop, PreCompact, PostCompact, SessionEnd  (harness-only — no model context cost)
   MCP servers (1)  mubit  (tool schemas resolved at runtime; not counted)
 
 Projected token cost
   Always-on:   ~452 tok   added to every session
 ```
 
-Seven skills, one agent, nine hook events. That number is what the skill descriptions and the
+Seven skills, one agent, ten hook events. That number is what the skill descriptions and the
 agent cost you in every session; hooks cost nothing in context because they run in the harness,
 not the model.
 
@@ -239,6 +239,7 @@ What happens on its own:
 | When | What the plugin does |
 | --- | --- |
 | Session starts | Derives a run id from your directory, registers the agent, pulls up to 5 global lessons, and tells the model memory is active |
+| You `cd` into another repo | Moves the session to that repo's run, and flushes what the run you left had spooled. A `cd` inside one repo changes nothing |
 | Every prompt you send | Queries memory and injects what is relevant, within a 1500 ms budget and a 1500-token cap. **Zero LLM calls** — assembly is local |
 | Every tool call | Redacts and spools it. Zero network on the hot path |
 | Every tool failure | Captured — these produce the most useful lessons |
@@ -401,6 +402,16 @@ Everything below is in `/plugin` → Mubit Memory → configure.
 > if you genuinely want isolation and can live with that.
 
 `/clear` starts a fresh run (`-c1`, `-c2` …). Resume, compact and fork reuse the same one.
+
+A `cd` into a different repo moves the session onto that repo's run under `per-directory` and
+`git-branch`, and drains whatever the run you left still had spooled. `per-conversation` and
+`static` are not derived from a directory, so they do not move. A `cd` *within* one repo never
+moves anything — the id resolves through `git rev-parse --show-toplevel`.
+
+> The MCP server does not follow. It derives its run once, when the session starts it, and
+> pins every write to that value; moving it would need a server restart the plugin cannot ask
+> for. After a `cd`, what the hooks capture lands in the new repo's run while what
+> `/mubit-memory:remember` writes lands in the one you started in.
 
 ### How much context memory is allowed to spend
 

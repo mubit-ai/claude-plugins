@@ -25,7 +25,7 @@ const shared = {
 // `drain` and `recall-refresh` are absent from `hooks.json` on purpose — they are spawned
 // detached, by `stage-prompt`/`capture` and by `prompt-recall` respectively — but they are
 // still exec'd by path, so they need the same launcher and the same runtime floor.
-const HOOKS = ['session-start','prompt-recall','stage-prompt','pre-tool','subagent-start','capture','checkpoint','session-end','drain','recall-refresh'];
+const HOOKS = ['session-start','cwd-changed','prompt-recall','stage-prompt','pre-tool','subagent-start','capture','checkpoint','session-end','drain','recall-refresh'];
 
 /**
  * The bundled @mubit-ai/mcp server (§8.3) — the **in-repo** package, not the registry copy.
@@ -139,7 +139,7 @@ const targets = [
   // outExtension is load-bearing: with `outdir`, esbuild names output `<entry>.js` no matter
   // what the entry was called, so hooks/src/capture.mjs becomes hooks/dist/capture.js while
   // hooks.json points at capture.mjs. Every hook silently becomes a dead path — the plugin
-  // installs, registers nine hooks, and none of them exist. (Guide §11.2 omits this; the
+  // installs, registers ten hooks, and none of them exist. (Guide §11.2 omits this; the
   // `outfile` targets below are unaffected because they name the extension outright.)
   {
     entryPoints: HOOKS.map((n) => `hooks/src/${n}.mjs`),

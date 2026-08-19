@@ -84,7 +84,7 @@ import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
-import { deriveAgentId, deriveRunId, deriveSubRunId } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, deriveSubRunId, resolveProjectDir } from '../../lib/runid.mjs';
 import { readJson, runDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
 /**
@@ -170,6 +170,9 @@ await runHook('subagent-start', {
       query,
       deadline,
       tokenBudget: CFG.subagentRecallTokenBudget,
+      // The directory the SPAWN happened in, not the one the session launched in — a subagent
+      // spawned after a `cd` belongs to the repo it is working in, same rule as the parent's.
+      projectDir: resolveProjectDir(cfg, payload),
       // `seen` is deliberately omitted. See point 2 in the header — a subagent has seen
       // nothing earlier, so there is nothing here that could honestly be degraded.
     });

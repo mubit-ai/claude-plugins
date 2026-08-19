@@ -21,11 +21,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
 import {
   fakeMubit, queryResponse, evidence, runHook, assertHookContract,
-  baseEnv, makeDataDir, readJsonFile, readJsonDir,
+  baseEnv, makeDataDir, makeProjectDir, readJsonFile, readJsonDir,
 } from './helpers/harness.mjs';
 import { userPromptSubmit, PROMPT_ID, SECRETS } from './helpers/fixtures.mjs';
 
@@ -214,6 +214,30 @@ test('rung 1 request body matches §5.2 exactly', async (t) => {
   assert.ok(body.env_tags.includes('tool:claude-code'));
   assert.ok(body.env_tags.includes('ci:test'), 'MUBIT_CC_ENV_TAGS extras are appended verbatim');
   assert.ok(body.env_tags.length <= 8, 'env_tags is capped at 8 (§4.1)');
+});
+
+/*
+ * §4.1 `repo:`/`branch:` come from shelling out in a directory, and until now that directory
+ * was `CLAUDE_PROJECT_DIR` — the session's launch root, which a mid-session `cd` cannot move.
+ * A recall scored against the tags of a repo the user left is worse than one scored against
+ * no tags at all, so the query reads the payload's `cwd` for the same reason the run id does.
+ */
+test('env_tags follow the prompt\'s directory, not the launch one', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const launchedIn = makeProjectDir({ git: true });
+  const workingIn = makeProjectDir({ git: true });
+
+  const r = await runHook('prompt-recall', userPromptSubmit({ cwd: workingIn }), {
+    env: env(makeDataDir(), server, { CLAUDE_PROJECT_DIR: launchedIn }),
+  });
+  assertHookContract(r);
+
+  const tags = server.lastCall('POST', '/v2/control/query').body.env_tags;
+  assert.ok(tags.includes(`repo:${basename(workingIn)}`),
+    `expected repo:${basename(workingIn)} — the directory the prompt was sent in; got ${JSON.stringify(tags)}`);
+  assert.ok(!tags.includes(`repo:${basename(launchedIn)}`),
+    'the launch repo is not where this prompt happened');
 });
 
 // §5.2: "query truncates to 2000 chars — recall quality does not improve past that and a

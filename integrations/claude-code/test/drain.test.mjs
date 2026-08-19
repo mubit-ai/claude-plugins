@@ -603,3 +603,62 @@ test('drain: releases the lock even when a post-send step throws', async (t) => 
     'a throw must not leave drain.lock behind — it would stop all capture for 60s');
   assert.ok(statSync(join(runDir(dataDir), 'jobs.json')).isDirectory());
 });
+
+// ---------------------------------------------------------------------------
+// --run — draining a run the session has already left
+// ---------------------------------------------------------------------------
+
+/*
+ * `cwd-changed` spawns this drain for the run a session is walking away from, and then
+ * rewrites `sessions/<host_session_id>.json` to name the new one. A detached child that
+ * re-derived would read whichever version of that file it happened to win the race against,
+ * so the run it must drain is passed on the argv instead of being worked out.
+ *
+ * The two runs here differ in every input the derivation has: the pin in the environment
+ * says one thing, the flag says another, and only the flag may be obeyed.
+ */
+test('drain --run: drains the named run and ignores the derivation', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const LEFT = 'cc-left-behind-0000';
+
+  // Two spools: the run this process would derive, and the run it is told to drain.
+  seedSpool(dataDir, 2);
+  const leftDir = join(dataDir, 'runs', LEFT, 'spool');
+  mkdirSync(leftDir, { recursive: true });
+  writeFileSync(join(leftDir, `${Date.now()}-000000.json`),
+    JSON.stringify(spoolItem({ item_id: 'cc-orphan-1', text: 'left behind by a cd' })));
+
+  const r = await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--run', LEFT],
+  });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  const body = server.lastCall('POST', '/v2/control/ingest').body;
+  assert.equal(body.run_id, LEFT,
+    'the batch must be attributed to the run named on the argv, not to MUBIT_CC_RUN_ID');
+  assert.deepEqual(body.items.map((i) => i.item_id), ['cc-orphan-1']);
+
+  assert.equal(spoolFiles(dataDir, LEFT).length, 0, 'the named run is drained');
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 2,
+    'the run this process would have derived is left alone entirely');
+});
+
+// A pin that could only name the poisoned shared run is refused, exactly as a derivation
+// that could only answer `"default"` is (§4.3). The spool waits for a run id worth writing to.
+test('drain --run: a "default" pin drains nothing', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--run', 'default'],
+  });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0, `saw unexpected HTTP: ${server.summary()}`);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 2);
+});

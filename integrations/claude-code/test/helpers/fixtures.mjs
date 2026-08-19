@@ -4,7 +4,7 @@
  *
  * Common fields on every payload: `session_id`, `prompt_id`, `transcript_path`,
  * `cwd`, `permission_mode`, `hook_event_name`, `agent_id`, `agent_type`.
- * `SessionStart` adds `model`.
+ * `SessionStart` adds `model`; `CwdChanged` adds `old_cwd` and `new_cwd`.
  *
  * Every builder takes an overrides object so a test can vary one field without
  * restating the shape.
@@ -308,6 +308,27 @@ export const postCompact = (over = {}) => base({
 export const sessionEnd = (over = {}) => base({
   hook_event_name: 'SessionEnd',
   reason: 'exit',
+  ...over,
+});
+
+/**
+ * `CwdChanged` — fired after the working directory has already moved.
+ *
+ * The field names are `old_cwd` and `new_cwd`, read out of the shipping host (2.1.235):
+ *
+ *     {...Ly(e,Vt()), hook_event_name:"CwdChanged", old_cwd:t, new_cwd:r}
+ *
+ * Not `previous_cwd`, whatever the published reference says. The common `cwd` comes from the
+ * host's own live getter and has therefore already moved by the time this fires, so it agrees
+ * with `new_cwd` here — but `new_cwd` is the authority and the hook reads it first.
+ *
+ * @param {Record<string,any>} [over]
+ */
+export const cwdChanged = (over = {}) => base({
+  hook_event_name: 'CwdChanged',
+  old_cwd: '/Users/x/repo',
+  new_cwd: '/Users/x/other-repo',
+  cwd: '/Users/x/other-repo',
   ...over,
 });
 

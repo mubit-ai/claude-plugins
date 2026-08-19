@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -481,4 +481,109 @@ test('loadSessionMap(): a corrupt session file returns null', async () => {
 
   const got = withEnv(env, () => runid.loadSessionMap(fx.SESSION_ID));
   assert.equal(got, null);
+});
+
+// ===========================================================================
+// §4.3 — one session that changes directory
+// ===========================================================================
+
+/*
+ * `per-directory` is the default, and until now the directory it meant was the one the
+ * session was *launched* in: `cfg.projectDir` is `CLAUDE_PROJECT_DIR`, which is fixed for
+ * the life of the process, and every non-SessionStart hook took the reuse branch, which
+ * validated the strategy and never the directory. A `cd` into another repo mid-session kept
+ * writing the first repo's run — memory crossing projects by a different route than the
+ * `session`-scope leak.
+ *
+ * Every hook payload has carried `cwd` from the start (`test/helpers/fixtures.mjs`). Nothing
+ * read it. The cases below are the ones the existing suite could not fail on: the stability
+ * test above deliberately uses separate data dirs AND separate session ids, so no session map
+ * is in play at all, and that is exactly the file this bug lives in.
+ */
+
+test('per-directory: one session that cd\'s into another repo follows it', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repoA = makeProjectDir({ git: true });
+  const repoB = makeProjectDir({ git: true });
+  // One data dir, one session id, and `CLAUDE_PROJECT_DIR` pinned to the launch repo — it
+  // is the launch root and never moves, which is the whole reason the payload has to win.
+  const env = envFor(dataDir, repoA, 'per-directory');
+
+  const inA = derive(config, runid, env, fx.sessionStart({ cwd: repoA }));
+  // No `source`: this is the reuse branch, which is where every hook after SessionStart goes.
+  const inB = derive(config, runid, env, fx.postToolUse({ cwd: repoB }));
+
+  assert.notEqual(inA, inB,
+    'work done in repo B was written to repo A\'s run — the mid-session cwd drift');
+  assert.match(inB, HASH8);
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.run_id, inB, 'the session map must follow the session');
+  assert.equal(rec.project_dir, repoB);
+  // `git rev-parse --show-toplevel` resolves symlinks and the raw path does not (on macOS
+  // every temp dir is one), so the two fields legitimately differ. That is the point of
+  // recording the root separately: it is the value the run id is actually hashed from.
+  assert.equal(rec.project_root, realpathSync(repoB),
+    'the record carries the resolved git root, not the raw dir');
+});
+
+// The churn guard. `directoryRunId` resolves through `git rev-parse --show-toplevel`, so a
+// `cd` *within* one repo must not move the run — otherwise every `cd src/` would fork the
+// memory of the project it is inside.
+test('per-directory: a cd within one repo keeps the same run', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repo = makeProjectDir({ git: true });
+  const deep = join(repo, 'src', 'service');
+  mkdirSync(deep, { recursive: true });
+  const env = envFor(dataDir, repo, 'per-directory');
+
+  const atRoot = derive(config, runid, env, fx.sessionStart({ cwd: repo }));
+  const inSub = derive(config, runid, env, fx.postToolUse({ cwd: deep }));
+
+  assert.equal(inSub, atRoot, 'a subdirectory of the same repo is the same run');
+});
+
+// Upgrade safety. Every record written before `project_root` existed says nothing about
+// where it was written, and "unknown" must not invalidate a mapping that is working: the
+// alternative is that installing this version moves every live session to a new run.
+test('a session record with no project_root is still reused', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'per-directory');
+
+  // `record()` is the §4.3 shape as it shipped: `project_dir`, no `project_root`.
+  withEnv(env, () => runid.saveSessionMap(fx.SESSION_ID, record({ run_id: 'cc-upgraded-deadbeef' })));
+  const id = derive(config, runid, env, fx.postToolUse({ cwd: makeProjectDir({ git: true }) }));
+
+  assert.equal(id, 'cc-upgraded-deadbeef',
+    'an unknown root is not a mismatch; the next write stamps it');
+});
+
+/*
+ * `deriveRunId(cfg, {})` is the shape `mcp/src/launch.mjs` and `bin/statusline.src.mjs` pass
+ * deliberately — an empty payload, so the derivation takes the "no host session id" path and
+ * never writes a `SessionRecord`. It has no `cwd` either, so it must keep answering from
+ * `CLAUDE_PROJECT_DIR` exactly as before, whatever the session has since done.
+ */
+test('deriveRunId(cfg, {}) still answers from CLAUDE_PROJECT_DIR after the session moved', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repoA = makeProjectDir({ git: true });
+  const repoB = makeProjectDir({ git: true });
+  const env = envFor(dataDir, repoA, 'per-directory');
+
+  const inA = derive(config, runid, env, fx.sessionStart({ cwd: repoA }));
+  const bare = withEnv(env, () => runid.deriveRunId(config.loadConfig(env), {}));
+  assert.equal(bare, inA);
+
+  derive(config, runid, env, fx.postToolUse({ cwd: repoB }));
+
+  assert.equal(withEnv(env, () => runid.deriveRunId(config.loadConfig(env), {})), bare,
+    'the empty-payload derivation is the launcher\'s and the status line\'s; it may not move');
 });

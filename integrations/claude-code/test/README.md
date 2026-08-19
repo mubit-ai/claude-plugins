@@ -57,7 +57,7 @@ under ~10 seconds.
 | `config.test.mjs` | precedence, loopback detection, env tags, frozen defaults |
 | `credentials.test.mjs` | the 0600 store, merge-not-replace, never throws |
 | `auth.test.mjs` | the key ladder, PKCE + loopback, the four outcomes |
-| `runid.test.mjs` | four strategies, the `source` table, never `"default"` |
+| `runid.test.mjs` | four strategies, the `source` table, never `"default"`, the mid-session `cd` |
 | `redact.test.mjs` | patterns, denylist, caps, scrub-before-cap, self-reference |
 | `breaker.test.mjs` | five states, "a timeout is not a verdict", half-open |
 | `http.test.mjs` | pre-flight guards, never-throws, retry policy |
@@ -67,6 +67,7 @@ under ~10 seconds.
 | `hook.test.mjs` | exit-code discipline, budgets, `spawnDetached` |
 | `capture.test.mjs` | four modes, zero HTTP, one spool file, stable `item_id`, the Stop used-signal |
 | `stage-prompt.test.mjs` | turn staging, the write race with `prompt-recall` |
+| `cwd-changed.test.mjs` | the run follows a mid-session `cd`; the run being left is drained, not orphaned |
 | `drain.test.mjs` | batching, the 2xx/5xx/4xx split, idempotency, "ignored" vs "not injected" |
 | `session-start.test.mjs` | the `source` table, sub-budgets, the offline steer block |
 | `assemble.test.mjs` | section mapping and order, budget, `sourceRefIds` |

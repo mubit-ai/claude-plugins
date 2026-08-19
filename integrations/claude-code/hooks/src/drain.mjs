@@ -7,9 +7,11 @@
  * whole plugin that ever asks `lib/http.mjs` for `{retry: true}` — it is detached and
  * nobody is waiting on it, so one extra dial after a transport timeout costs nothing.
  *
- * Not registered in `hooks.json`. It is spawned only by `stage-prompt`, `capture --stop`
- * or `session-end`, which is what keeps the per-tool-call hot path free of node's startup
- * cost a second time. Nothing waits on it, so everything here must be safe to abandon:
+ * Not registered in `hooks.json`. It is spawned only by `stage-prompt`, `capture --stop`,
+ * `session-end` or `cwd-changed`, which is what keeps the per-tool-call hot path free of
+ * node's startup cost a second time. The last of those passes `--run <id>`: it drains the
+ * run a session has just walked away from, and a child that re-derived would read the
+ * session map that hook is in the middle of rewriting. Nothing waits on it, so everything here must be safe to abandon:
  * one drainer at a time, one request per batch, and a spool that is only ever unlinked
  * after a 2xx.
  *
@@ -153,6 +155,7 @@ async function main() {
   const payloadPath = flagValue(argv, '--payload');
   const outcomeArg = flagValue(argv, '--with-outcome');
   const wantsOutcome = argv.includes('--with-outcome');
+  const pinnedRun = flagValue(argv, '--run');
 
   // Invoked two ways: with the payload on stdin (foreground, as the tests do) and with
   // `--payload <file>` (detached — a detached child's inherited stdin is not reliably
@@ -163,13 +166,32 @@ async function main() {
   cfgRef = cfg;
 
   let runId = '';
-  try {
-    runId = deriveRunId(cfg, payload);
-  } catch (err) {
-    // `static` with no pin, or a derivation that could only have answered "default".
-    // Refusing is the honest answer; the spool waits for a run id worth writing to (§4.3).
-    log(cfg, 'error', `drain: no usable run id — ${messageOf(err)}`);
-    return;
+  if (pinnedRun) {
+    // `--run <id>`: drain THIS run, whatever this process would have derived.
+    //
+    // `cwd-changed` spawns a drain for the run a session is walking away from and then
+    // rewrites `sessions/<host_session_id>.json` to name the new one. A child that
+    // re-derived would read whichever version of that file it won the race against, and
+    // would drain the run it was spawned to leave alone. The flag removes the race rather
+    // than making it unlikely.
+    //
+    // It is still checked: a run id names a directory under the data dir as well as a run,
+    // and `"default"` is the value that collapses every user and project into one shared
+    // run (§4.3). An unusable pin drains nothing — the spool waits.
+    runId = usableRunId(pinnedRun);
+    if (!runId) {
+      log(cfg, 'error', `drain: refusing the pinned run id ${JSON.stringify(pinnedRun)}`);
+      return;
+    }
+  } else {
+    try {
+      runId = deriveRunId(cfg, payload);
+    } catch (err) {
+      // `static` with no pin, or a derivation that could only have answered "default".
+      // Refusing is the honest answer; the spool waits for a run id worth writing to (§4.3).
+      log(cfg, 'error', `drain: no usable run id — ${messageOf(err)}`);
+      return;
+    }
   }
 
   const agentId = deriveAgentId(payload);
@@ -659,6 +681,19 @@ function readStdin(limitMs = 1000) {
  * @param {string[]} argv @param {string} name
  * @returns {string}
  */
+/**
+ * The same refusal `lib/runid.mjs` applies to a `static` pin, for a run id that arrived on
+ * this process's argv instead. `''` means "not a run id", and the caller drains nothing.
+ * @param {string} raw
+ * @returns {string}
+ */
+function usableRunId(raw) {
+  const id = typeof raw === 'string' ? raw.trim() : '';
+  if (!id || id.toLowerCase() === 'default') return '';
+  if (/[\\/]/.test(id) || /^\.+$/.test(id)) return '';
+  return id;
+}
+
 function flagValue(argv, name) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];

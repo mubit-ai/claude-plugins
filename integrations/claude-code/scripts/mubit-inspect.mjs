@@ -35,6 +35,7 @@
  *   node scripts/mubit-inspect.mjs --data <dir>         # pin one data dir
  *   node scripts/mubit-inspect.mjs --prompt <prompt_id> # one turn, in full
  *   node scripts/mubit-inspect.mjs --resolve            # dereference the recalled ids
+ *   node scripts/mubit-inspect.mjs --cross-run          # which injections came from another run
  *   node scripts/mubit-inspect.mjs --json               # the same data, machine-readable
  */
 
@@ -47,11 +48,12 @@ import { homedir } from 'node:os';
 /* -------------------------------------------------------------------------- */
 
 function parseArgs(argv) {
-  const out = { last: 15, json: false, resolve: false, runs: false, help: false };
+  const out = { last: 15, json: false, resolve: false, runs: false, help: false, crossRun: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--json') out.json = true;
     else if (a === '--resolve') out.resolve = true;
+    else if (a === '--cross-run') out.crossRun = true;
     else if (a === '--runs') out.runs = true;
     else if (a === '-h' || a === '--help') out.help = true;
     else if (a === '--last') out.last = Math.max(1, Number(argv[++i]) || 15);
@@ -73,6 +75,8 @@ const HELP = `mubit-inspect — read the Mubit plugin's own on-disk state
   --last N           how many prompts to show (default 15)
   --prompt <id>      one turn in full, including recalled ids and matched terms
   --resolve          dereference recalled ids into text (one HTTP call per id)
+  --cross-run        report which injected memories came from a DIFFERENT run
+                     (one HTTP call per distinct recalled id in the window shown)
   --json             machine-readable output
 `;
 
@@ -176,6 +180,10 @@ function row(turn) {
     dropped: Number(r.dropped) || 0,
     empty_reason: String(r.empty_reason || ''),
     recalled: Array.isArray(turn.recalled) ? turn.recalled : [],
+    // Filled in by --cross-run, which is the only thing that knows: the turn file records
+    // reference ids and nothing about where they came from, so the originating run costs one
+    // dereference call per id. Null means "not asked", never "none".
+    cross_run: null,
     used: usedCell(turn),
     used_evidence: turn.used_evidence || null,
     outcome: outcomeState(turn),
@@ -213,6 +221,37 @@ const COLS = [
   { label: 'used(m/c)',get: (r) => r.used },
   { label: 'outcome',  get: (r) => dash(r.outcome) },
 ];
+
+/**
+ * `--cross-run` only. Appended where the table is printed rather than declared into `COLS`,
+ * because `COLS` is evaluated at module scope — before `args` exists.
+ *
+ * `foreign/injected`: how many of this prompt's injected memories were written by a
+ * different run. At the `run` scope ceiling the answer is 0 for every prompt; anything else
+ * is a lesson that followed an agent out of the run that wrote it.
+ */
+const CROSS_RUN_COL = {
+  label: 'x-run',
+  get: (r) => {
+    if (!r.cross_run) return '—';
+    if (!r.cross_run.injected) return '—';
+    const unresolved = r.cross_run.unresolved ? `+${r.cross_run.unresolved}?` : '';
+    return `${r.cross_run.foreign}/${r.cross_run.injected}${unresolved}`;
+  },
+};
+
+/** Server run ids are scoped (`state::<tenant>::<run>`); the local ones are not. */
+const bareRun = (id) => String(id || '').split('::').pop().trim();
+
+/** The run a dereferenced entry was written in, or '' when the call could not say. */
+function originRunOf(item) {
+  if (!item || item.status !== 200) return '';
+  const body = item.entry || {};
+  if (body.found === false) return '';
+  const e = body.evidence || body.entry || body;
+  const inner = Array.isArray(e) ? (e[0] || {}) : e;
+  return bareRun(inner.run_id);
+}
 
 /* -------------------------------------------------------------------------- */
 /* resolve                                                                     */
@@ -351,6 +390,51 @@ if (args.prompt) {
 
 /* the run */
 const shown = allTurns.slice(-args.last);
+
+/* --cross-run: the injection side of the scope question.
+ *
+ * `scripts/scope-audit.mjs` counts what runs have *written* at a cross-run scope. This
+ * counts what this run was *given* from somewhere else — the half the original report had
+ * to reconstruct by hand. Zero is the target for a run at the `run` ceiling.
+ *
+ * Only the window being displayed is resolved: one HTTP call per distinct id, and a
+ * `--last 400` would otherwise be four hundred of them. */
+let crossRun = null;
+if (args.crossRun) {
+  const ids = [...new Set(shown.flatMap((r) => r.recalled))];
+  const resolved = ids.length
+    ? await resolveIds(ids, chosen.runId, chosen.dir)
+    : { items: [], endpoint: '', from: '' };
+  const origin = new Map();
+  for (const item of resolved.items || []) origin.set(item.id, originRunOf(item));
+
+  let injected = 0; let foreign = 0; let unresolved = 0;
+  const foreignRuns = new Set();
+  for (const r of shown) {
+    let f = 0; let u = 0;
+    for (const id of r.recalled) {
+      const o = origin.get(id) || '';
+      // An id that cannot be dereferenced is counted as unknown, never as same-run: a
+      // deleted or out-of-scope entry is exactly the case where a silent 0 would lie.
+      if (!o) u += 1;
+      else if (o !== bareRun(chosen.runId)) { f += 1; foreignRuns.add(o); }
+    }
+    r.cross_run = { injected: r.recalled.length, foreign: f, unresolved: u };
+    injected += r.recalled.length; foreign += f; unresolved += u;
+  }
+  crossRun = {
+    prompts: shown.length,
+    injected,
+    foreign,
+    unresolved,
+    per_100_prompts: shown.length ? Math.round((foreign / shown.length) * 1000) / 10 : 0,
+    foreign_runs: [...foreignRuns].sort(),
+    calls: ids.length,
+    endpoint: resolved.endpoint || '',
+    error: resolved.error || '',
+  };
+}
+
 const hits = allTurns.filter((r) => r.sources > 0).length;
 const totalTok = allTurns.reduce((a, r) => a + r.tokens, 0);
 const totalSrc = allTurns.reduce((a, r) => a + r.sources, 0);
@@ -370,6 +454,7 @@ if (args.json) {
       used_measured: measured.length, used_echoed: echoed,
     },
     turns: shown,
+    cross_run: crossRun,
     jobs,
     spool_pending: spoolCount(chosen.dir, chosen.runId),
   }, null, 2)}\n`);
@@ -388,9 +473,19 @@ out.push('');
 if (shown.length === 0) {
   out.push('no turns recorded for this run yet — the prompt hooks have not run, or state was pruned');
 } else {
-  out.push(...table(shown, COLS));
+  out.push(...table(shown, args.crossRun ? [...COLS, CROSS_RUN_COL] : COLS));
   out.push('');
   out.push(`totals      ${allTurns.length} prompts · ${totalTok} tok injected · ${totalSrc} sources · ${hits}/${allTurns.length} prompts got an injection`);
+  if (crossRun) {
+    out.push(`cross-run   ${crossRun.foreign} of ${crossRun.injected} injections came from another run`
+      + ` · ${crossRun.per_100_prompts} per 100 prompts`
+      + (crossRun.unresolved ? ` · ${crossRun.unresolved} ids could not be dereferenced` : '')
+      + ` (${crossRun.calls} calls over the ${crossRun.prompts} prompts shown)`);
+    if (crossRun.foreign_runs.length) {
+      out.push(`            from ${crossRun.foreign_runs.join(', ')}`);
+    }
+    if (crossRun.error) out.push(`            resolve failed: ${crossRun.error}`);
+  }
   out.push(`used-signal ${echoed}/${measured.length} measurable turns echoed the injected vocabulary (memory-term-echo/v1; false negatives dominate)`);
   if (shown.length < allTurns.length) out.push(`            showing the last ${shown.length} — pass --last ${allTurns.length} for all`);
 }

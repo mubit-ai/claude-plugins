@@ -340,6 +340,17 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // the token budget almost never binds because a handful of one-line lessons fit inside it
   // easily. Anyone who wants a shorter block has had no dial for it until now.
   const recallMaxPerSection = int(pick('recallMaxPerSection', 'MUBIT_CC_RECALL_MAX_PER_SECTION'), 0);
+  // What a SUBAGENT's injected block may cost, well under the 1500 a parent gets.
+  //
+  // `UserPromptSubmit` does not fire for a subagent — measured on a live fan-out, which
+  // logged 2 SubagentStart / 2 SubagentStop / 1 UserPromptSubmit, the one being the
+  // parent's. So until `SubagentStart` was wired a subagent got no injected memory at all
+  // and this dial had nothing to govern. Now that it does, reusing `recallTokenBudget`
+  // unchanged would spend a parent-sized block on a three-turn Haiku agent whose window is
+  // smaller and whose task is narrower — and pay it once per spawn, so a fan-out of ten
+  // pays it ten times.
+  const subagentRecallTokenBudget = int(
+    pick('subagentRecallTokenBudget', 'MUBIT_CC_SUBAGENT_RECALL_TOKENS'), 600);
   const recallAssemble = enumOf(pick('recallAssemble', 'MUBIT_CC_RECALL_ASSEMBLE'),
     ['client', 'server'], 'client');
   // § 5.2 — what to do with a memory this run has already injected. `pointer` renders it as
@@ -417,6 +428,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     recall,
     redact,
     recallTokenBudget,
+    subagentRecallTokenBudget,
     recallMaxPerSection,
     recallBudgetMs,
     recallAssemble,

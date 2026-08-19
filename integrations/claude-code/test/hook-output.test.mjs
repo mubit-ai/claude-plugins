@@ -184,6 +184,13 @@ const CASES = {
   'UserPromptSubmit stage-prompt': {
     payload: () => fx.userPromptSubmit({ cwd: PROJECT_DIR }),
   },
+  'SubagentStart subagent-start': {
+    // The subagent's recall query is the parent turn's staged prompt — `SubagentStart`
+    // carries no task text of its own. Without this the hook reaches only its suppressing
+    // branch, and a case that never sees the speaking branch is not a case.
+    setup: (dataDir) => { stageParentTurn(dataDir); return {}; },
+    payload: () => fx.subagentStart({ cwd: PROJECT_DIR }),
+  },
   'PostToolUse capture': {
     payload: () => fx.postToolUse({ cwd: PROJECT_DIR }),
   },
@@ -221,6 +228,22 @@ function writeTranscript(dataDir) {
     line('assistant', 'It stays queued until indexing completes.'),
   ].join('\n')}\n`);
   return path;
+}
+
+/**
+ * §5.3: `runs/<run_id>/turns/<prompt_id>.json`, the turn `stage-prompt` writes on the
+ * parent's `UserPromptSubmit` and `subagent-start` reads its query back out of.
+ */
+function stageParentTurn(dataDir) {
+  const dir = join(dataDir, 'runs', RUN_ID, 'turns');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${fx.PROMPT_ID}.json`), JSON.stringify({
+    prompt: 'why is the ingest job stuck in queued?',
+    prompt_id: fx.PROMPT_ID,
+    session_id: fx.SESSION_ID,
+    started_at: Date.now(),
+    recalled: [],
+  }));
 }
 
 /** §7: `runs/<run_id>/checkpoints.json`, the file `--pre` writes and `--post` reads. */

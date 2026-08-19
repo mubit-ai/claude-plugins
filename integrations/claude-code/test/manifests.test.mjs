@@ -257,19 +257,19 @@ test('every hooks.json command uses exec form (command + args), never shell form
   }
 });
 
-// §3.2 — all nine registrations, with the exact events, ordering, matchers, extra args
+// §3.2 — all ten registrations, with the exact events, ordering, matchers, extra args
 // and timeouts. `timeout` is in SECONDS; a millisecond value here silently gives every
 // hook a ~3ms budget.
-test('hooks.json declares all nine registrations with the right events, args and timeouts', () => {
+test('hooks.json declares all ten registrations with the right events, args and timeouts', () => {
   const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
   const events = Object.keys(hooks.hooks ?? {});
 
   const expectedEvents = [
-    'SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
+    'SessionStart', 'UserPromptSubmit', 'SubagentStart', 'PostToolUse', 'PostToolUseFailure',
     'Stop', 'SubagentStop', 'PreCompact', 'PostCompact', 'SessionEnd',
   ];
   assert.deepEqual([...events].sort(), [...expectedEvents].sort(),
-    `hooks.json must register exactly the nine events in §3.2; got [${events.join(', ')}]`);
+    `hooks.json must register exactly the ten events in §3.2; got [${events.join(', ')}]`);
 
   /** event → flat list of {script, extraArgs, timeout} in declaration order */
   const flat = new Map();
@@ -293,6 +293,12 @@ test('hooks.json declares all nine registrations with the right events, args and
       { script: 'prompt-recall.mjs', extraArgs: [], timeout: 3 },
       { script: 'stage-prompt.mjs', extraArgs: [], timeout: 3 },
     ],
+    // Registered with NO matcher, deliberately. The matcher field for this event is
+    // `agent_type` and a matcher can only ever be positive, so "every agent except the
+    // plugin's own recall agent" is not a thing it can express — and the set of agent types
+    // a user might spawn is open, so an allowlist would silently exclude most of them. The
+    // self-exclusion therefore lives in the hook, where a test can drive both directions.
+    SubagentStart: [{ script: 'subagent-start.mjs', extraArgs: [], timeout: 3 }],
     // Exactly one, and match-all. Two groups both matching a tool would fire capture twice
     // for that one call — see the PostToolUse matcher test below.
     PostToolUse: [{ script: 'capture.mjs', extraArgs: [], timeout: 3 }],

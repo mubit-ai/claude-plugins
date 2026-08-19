@@ -151,13 +151,13 @@ if (hooks) {
       `${where}: ${script} does not exist → ${abs}\n    Build it: npm --prefix integrations/claude-code run build (§11.2)`);
   }
 
-  const expectedEvents = ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
-    'Stop', 'SubagentStop', 'PreCompact', 'PostCompact', 'SessionEnd'];
+  const expectedEvents = ['SessionStart', 'UserPromptSubmit', 'SubagentStart', 'PostToolUse',
+    'PostToolUseFailure', 'Stop', 'SubagentStop', 'PreCompact', 'PostCompact', 'SessionEnd'];
   const events = Object.keys(hooks.hooks ?? {});
   const missing = expectedEvents.filter((e) => !events.includes(e));
   const extra = events.filter((e) => !expectedEvents.includes(e));
   ok(missing.length === 0 && extra.length === 0,
-    `hooks.json must register exactly the nine events in §3.2; missing [${missing}], unexpected [${extra}]`);
+    `hooks.json must register exactly the ten events in §3.2; missing [${missing}], unexpected [${extra}]`);
 
   ok(hooks.hooks?.SessionStart?.[0]?.matcher === 'startup|resume|clear|compact',
     'SessionStart matcher must be "startup|resume|clear|compact" (§3.2)');

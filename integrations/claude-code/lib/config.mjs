@@ -354,6 +354,19 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const outcomeMode = enumOf(pick('outcomeMode', 'MUBIT_CC_OUTCOME_MODE'),
     ['off', 'implicit', 'explicit'], 'implicit');
   const statusLine = bool(pick('statusLine', 'MUBIT_CC_STATUSLINE'), true);
+  // HS-7 stage 1 — `PreToolUse`, warnings only. **Default false, and deliberately so.**
+  //
+  // Every other setting here changes what the plugin costs or what it remembers. This one
+  // changes what it is allowed to put in front of a tool call, which is the only surface
+  // where a wrong memory interrupts work rather than merely wasting tokens. The hook denies
+  // nothing at any setting — it has no `permissionDecision` on any path and exits 0 on every
+  // one — but an unasked-for warning in front of `rm` is still an unasked-for warning, and it
+  // would be blamed on the plugin rather than on the lesson that produced it.
+  //
+  // Off by default is also what makes the next step of HS-7 runnable: an operator can turn it
+  // on for one run, measure how often it fires and on what, and decide from data whether the
+  // matching is good enough to be worth anyone's attention.
+  const preToolWarnings = bool(pick('preToolWarnings', 'MUBIT_CC_PRE_TOOL_WARNINGS'), false);
   const mcpToolsRaw = pick('mcpTools', 'MUBIT_MCP_TOOLS');
   const mcpTools = list(mcpToolsRaw, DEFAULT_MCP_TOOLS);
   // §8.2 — the ceiling on what an MCP write may claim for itself. The bundled SDK
@@ -418,6 +431,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     outcomeMode,
     reflectOnEnd,
     statusLine,
+    preToolWarnings,
     mcpTools,
     mcpLessonScope,
     denyGlobs,

@@ -72,6 +72,7 @@ import { postContext, postQuery } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { redactText } from '../../lib/redact.mjs';
+import { recordRules } from '../../lib/rules.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -316,7 +317,7 @@ async function ladder(cfg, o) {
     if (res.ok) {
       // A grant is never cached; a stale denial that has just been disproved is cleared.
       clearPolicy(cfg);
-      return fromEvidence(cfg, res.body, 1);
+      return fromEvidence(cfg, res.body, 1, o.runId);
     }
     if (res.status === 403) {
       // §5.2/F22: a policy verdict, not a fault. `lib/http.mjs` has already declined to
@@ -359,7 +360,7 @@ async function ladder(cfg, o) {
   const res = await postQuery(cfg, { ...body, mode: 'agent_routed' },
     { timeoutMs: remaining(cfg, o.deadline) });
   if (!res.ok) return failure(res.state, res.error, 2);
-  return fromEvidence(cfg, res.body, 2);
+  return fromEvidence(cfg, res.body, 2, o.runId);
 }
 
 /**
@@ -416,14 +417,29 @@ async function rungThree(cfg, o) {
  * in the same order, with the same `emptyReason` vocabulary rung 3 would have produced
  * (§4.10). That is what makes `additionalContext` rung-agnostic.
  *
+ * It is also where HS-7's rule store is filled. The `rule`-typed entries in this same
+ * `evidence[]` are written to `runs/<run_id>/rules.json` for `hooks/src/pre-tool.mjs` to read
+ * in front of a matching tool call. That hook may not dial — it runs while the user waits on
+ * the call — so its only supply is a hook that has already paid for a round trip, and this is
+ * the one that pays on every prompt. A pure side effect: `recordRules` never throws, writes
+ * one small file, and cannot change what this function returns.
+ *
+ * Rung 3 has no equivalent and deliberately gets none: `POST /v2/control/context` answers
+ * with a pre-assembled `context_block` and `sources[]`, and no per-entry `entry_type` at all,
+ * so there is nothing there to filter to `rule`. On the opt-in `recallAssemble: "server"`
+ * path the store is therefore fed by `session-start` alone — worth knowing before reading a
+ * quiet `pre-tool` as a bug.
+ *
  * @param {Record<string, any>} cfg
  * @param {any} responseBody
  * @param {number} rung
+ * @param {string} [runId]
  * @returns {Outcome}
  */
-function fromEvidence(cfg, responseBody, rung) {
+function fromEvidence(cfg, responseBody, rung, runId = '') {
   const b = isObject(responseBody) ? responseBody : {};
   const evidence = Array.isArray(b.evidence) ? b.evidence : [];
+  if (runId) recordRules(cfg, runId, evidence);
   const a = assembleContext(evidence, {
     tokenBudget: intOr(cfg.recallTokenBudget, 1500),
     perSection: intOr(cfg.recallMaxPerSection, 0),

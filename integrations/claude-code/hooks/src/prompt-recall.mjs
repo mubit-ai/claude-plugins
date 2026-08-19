@@ -4,49 +4,37 @@
  * `hooks/src/prompt-recall.mjs` — UserPromptSubmit, blocking (§5.2, §1.8).
  *
  * ---------------------------------------------------------------------------
- * The ladder, and why it looks inverted
+ * What is here, and what moved
  * ---------------------------------------------------------------------------
- * The obvious design — ask `/v2/control/context` for a ready-to-inject `context_block` —
- * rests on the belief that `GetContext` is pure assembly with no LLM. **That belief is
- * false.** It builds an internal `AgentQueryRequest` and re-enters `query()` as
- * `AgentRouted` with `evidence_only` left at `false`, pays a routing
- * call *and* a synthesis call, and then throws the synthesized answer away.
+ * The three-rung read ladder — and the counter-intuitive fact that
+ * `/v2/control/context` is the *most* expensive rung rather than the cheapest — lives in
+ * `lib/recall.mjs`, because it now has more than one caller. Read that file's header before
+ * touching anything about which request gets made.
  *
- * | Rung | Request | LLM calls | Entered when |
- * | --- | --- | --- | --- |
- * | 1 | `query{mode:"direct_bypass", evidence_only:true, budget:"low"}` | **0** | always — the primary path |
- * | 2 | `query{mode:"agent_routed",  evidence_only:true, budget:"low"}` | 1 | rung 1 got **403** *and* `recallFallback === "agent_routed"` |
- * | 3 | `context{mode:"sections"}` | **2** | only when `recallAssemble === "server"` |
- *
- * **Rung 2 is opt-in, and off by default** (`MUBIT_CC_RECALL_FALLBACK`). It buys the only
- * recall an instance with direct search disabled can serve, and it pays for it with a routing
- * LLM call on every prompt: measured median 5025 ms, tail past 11 s, against a 1500 ms recall
- * budget inside a 3 s hook timeout. Nearly every one of those aborts *after* spending the
- * call, so the default trades recall nobody was getting for latency everybody was paying.
- * Rung 1 answers in ~30–250 ms server-side and is the path the docs call the default.
- *
- * So rung 3 is the *last* rung, not the first, and it is never reached by default — its
- * absence is asserted explicitly by the tests, because it is the first thing a well-meaning
- * maintainer would "simplify" into place, at two LLM calls in front of every keystroke.
- *
- * `recallAssemble: "server"` substitutes rung 3 for the ladder rather than appending itself
- * to it: paying rung 1 and then rung 3 would cost three LLM calls for one recall.
+ * What is left here is the part that is specific to a *user prompt*: deciding whether this
+ * prompt is worth recalling against at all, deriving the run, and then writing down what the
+ * injection cost and what it named so `Stop` can attribute against it (§5.5).
  *
  * ---------------------------------------------------------------------------
- * A 403 on rung 1 is a verdict, not a fault
+ * The cross-turn seen-set
  * ---------------------------------------------------------------------------
- * `direct_bypass` is policy-gated.
- * An operator turning it off is an ordinary, supported configuration, so a 403 here:
+ * Recall fires before every prompt with no relevance gate, and six memories about the task
+ * at hand do not stop being about the task at hand on the next prompt. So the same entries
+ * were re-rendered, and re-paid for, on every prompt of a session — up to 1500 tokens each
+ * time, against 356 tokens *once* for the entire MCP tool surface.
  *
- *   - must **not** touch the breaker (`lib/http.mjs` never records a 403) or `auth_failed`;
- *   - **is** cached to `policy/<endpoint_hash>.json` with a 24 h TTL, so the next prompt
- *     skips rung 1 entirely instead of burning a round trip on it forever
- *     (`MUBIT_CC_POLICY_TTL_MS=1` re-probes immediately once an operator flips the dial);
- *   - descends one rung, and never two — and only when asked to.
+ * This hook now reads `runs/<run_id>/seen.json` (`lib/seen.mjs`) before assembling and marks
+ * it after, beside the ids it stages on the turn. A repeat is **degraded, not dropped**: it
+ * renders as a pointer and keeps its `reference_id` in `recalled[]`, because dropping it
+ * would break attribution for exactly the memories that are helping most.
  *
- * A **401** on the same call is the opposite: auth is broken, give up, and never cache it —
- * a cached 401 would hide a revoked key for a day. A **grant** is never cached either: rung
- * 1 succeeding is self-evident, and storing it would only add a stale-state failure mode.
+ * Two consequences that are easy to get wrong, both pinned by tests:
+ *
+ *   - **Mark only what was rendered.** A failed or empty recall marks nothing, or the next
+ *     prompt points at a memory the model was never given.
+ *   - **A pointer's words are not memory vocabulary.** `memoryTerms` excludes pointer lines,
+ *     so a degraded turn lands in `lib/outcome.mjs`'s *unmeasured* row rather than its
+ *     *injected-and-ignored* row. See the note on `memoryTerms`.
  *
  * ---------------------------------------------------------------------------
  * Budget and failure
@@ -60,19 +48,18 @@
  * model to distrust the channel. The hook never blocks and never exits non-zero (§4.9).
  */
 
-import { createHash } from 'node:crypto';
-import { unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { assembleContext, estimateTokens } from '../../lib/assemble.mjs';
+import { isPointerLine, POINTER_MARK } from '../../lib/assemble.mjs';
 import { CONN_STATES, readBreaker } from '../../lib/breaker.mjs';
-import { envTags, isConfigured, loadConfig } from '../../lib/config.mjs';
+import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
-import { postContext, postQuery } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
+import { recallBlock } from '../../lib/recall.mjs';
 import { redactText } from '../../lib/redact.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { markSeen, readSeen } from '../../lib/seen.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
 /** §5.2 step 0: "ok", "yes", "go on" carry no retrievable intent. */
@@ -80,20 +67,6 @@ const MIN_PROMPT_CHARS = 8;
 
 /** §5.2: recall quality does not improve past this, and a 40 KB paste is a slow embedding. */
 const MAX_QUERY_CHARS = 2000;
-
-/** §5.2 step 3: rung 2 costs an LLM call; do not start one that cannot land. */
-const RUNG2_MIN_BUDGET_MS = 500;
-
-/** §5.2 rung-1 body, verbatim. */
-const ENTRY_TYPES = Object.freeze(['mental_model', 'rule', 'lesson', 'fact', 'trace']);
-const QUERY_LIMIT = 8;
-
-/** §5.2 rung-3 body, verbatim. */
-const CONTEXT_LIMIT = 6;
-
-/** §5.2/§7: the policy verdict file, keyed by endpoint hash — the same scheme as the breaker. */
-const POLICY_TTL_MS = 86_400_000;
-const ENDPOINT_HASH_LEN = 12;
 
 /** U+00B7, the separator the status line and every systemMessage share. */
 const DOT = ' · ';
@@ -215,9 +188,12 @@ await runHook('prompt-recall', {
     const query = prompt.slice(0, MAX_QUERY_CHARS);
     const promptId = safeId(payload?.prompt_id);
 
-    const outcome = cfg.recallAssemble === 'server'
-      ? await rungThree(cfg, { runId, agentId, query, deadline })
-      : await ladder(cfg, { runId, agentId, query, deadline });
+    // What this run has already put in front of the model. Read before the call so the
+    // assembler can degrade a repeat into a pointer; `lib/seen.mjs` is total, so a data dir
+    // that cannot be read costs the saving and nothing else.
+    const seen = readSeen(cfg, runId).ids;
+
+    const outcome = await recallBlock(cfg, { runId, agentId, query, deadline, seen });
 
     const ms = Date.now() - started;
 
@@ -229,6 +205,13 @@ await runHook('prompt-recall', {
     // §5.2 step 6: what was rendered is what `Stop` attributes against (§5.5). Written even
     // when it is empty — an absent key is a different value from an empty one downstream.
     persistRecalled(cfg, runId, promptId, payload, outcome);
+
+    // …and the same ids, rolled up per run, so the NEXT prompt can point at them instead of
+    // paying for them again. After `persistRecalled` deliberately: attribution is the
+    // load-bearing write and must not be behind an optimisation's bookkeeping. Only the ids
+    // that actually rendered are marked — `outcome.refIds` is empty on every failed and
+    // every empty recall, so nothing that never reached the model is recorded as shown.
+    markSeen(cfg, runId, outcome.refIds);
 
     updateMarker(cfg, runId, {
       state: 'ready',
@@ -251,7 +234,7 @@ await runHook('prompt-recall', {
     return {
       hookSpecificOutput: {
         hookEventName: 'UserPromptSubmit',
-        additionalContext: wrap(runId, sources, outcome.tokens, outcome.block),
+        additionalContext: wrap(runId, sources, outcome.tokens, outcome.block, outcome.pointers),
       },
       systemMessage: `mubit: ${sources} ${sources === 1 ? 'memory' : 'memories'}`
         + `${DOT}${formatTokens(outcome.tokens)} tok${DOT}${ms}ms`,
@@ -259,208 +242,6 @@ await runHook('prompt-recall', {
     };
   },
 });
-
-// ---------------------------------------------------------------------------
-// The ladder — §1.8, §5.2 steps 1-4
-// ---------------------------------------------------------------------------
-
-/**
- * @typedef {object} Outcome
- * @property {boolean} failed
- * @property {number} rung
- * @property {string} block
- * @property {number} tokens
- * @property {number} sources
- * @property {number} dropped
- * @property {string} emptyReason
- * @property {string[]} refIds
- * @property {string} [state]   the §4.7 ConnState, on failure only
- * @property {string} [error]
- */
-
-/**
- * Rungs 1 and 2. Rung 1 is skipped entirely while a valid policy denial is cached, which is
- * the whole point of caching it: one wasted round trip per day rather than one per prompt.
- *
- * @param {Record<string, any>} cfg
- * @param {{runId: string, agentId: string, query: string, deadline: number}} o
- * @returns {Promise<Outcome>}
- */
-async function ladder(cfg, o) {
-  const body = {
-    run_id: o.runId,
-    agent_id: o.agentId,
-    query: o.query,
-    mode: 'direct_bypass',
-    direct_lane: 'semantic_search',
-    evidence_only: true,
-    budget: 'low',
-    limit: QUERY_LIMIT,
-    entry_types: [...ENTRY_TYPES],
-    include_working_memory: true,
-    // §1.8: `env_tags` exists on AgentQueryRequest but NOT on ContextRequest — version-aware
-    // tag scoring is capability rungs 1-2 gain over rung 3, not something they give up.
-    env_tags: envTags(cfg),
-  };
-
-  let denied = readPolicyDenial(cfg);
-
-  // --- RUNG 1. Zero LLM calls.
-  if (!denied) {
-    const budget = remaining(cfg, o.deadline);
-    // Our own budget ran out, which is not a verdict about the server: reported as an empty
-    // result so it cannot colour the status line with a failure state nobody earned.
-    if (budget <= 0) return empty(0, 'budget_exhausted');
-
-    const res = await postQuery(cfg, body, { timeoutMs: budget });
-    if (res.ok) {
-      // A grant is never cached; a stale denial that has just been disproved is cleared.
-      clearPolicy(cfg);
-      return fromEvidence(cfg, res.body, 1);
-    }
-    if (res.status === 403) {
-      // §5.2/F22: a policy verdict, not a fault. `lib/http.mjs` has already declined to
-      // record it with the breaker; all that is left is to remember it and decide.
-      cachePolicyDenial(cfg);
-      if (cfg.recallFallback !== 'agent_routed') {
-        // `warn`, not `info`: the default log level is `warn`, and this is the single most
-        // important fact about the install — every recall from here on returns nothing until
-        // an operator enables direct search. Logging it below the default level is how a
-        // permanently dead recall path stays invisible.
-        log(cfg, 'warn', 'prompt-recall: direct_bypass is disabled by instance policy and '
-          + 'MUBIT_CC_RECALL_FALLBACK is "none", so this recall returns empty. Ask your operator '
-          + 'to enable direct search, or set MUBIT_CC_RECALL_FALLBACK=agent_routed to pay an LLM '
-          + 'call per prompt instead.', { run_id: o.runId });
-        return empty(1, 'policy_denied');
-      }
-      log(cfg, 'warn', 'prompt-recall: direct_bypass is disabled by policy; descending to rung 2',
-        { run_id: o.runId });
-      denied = true;
-    } else {
-      // §5.2: "Any other failure → give up; this is a transport/server problem, not policy."
-      // A 401 lands here, deliberately: spending an LLM call on rung 2 with a broken key
-      // buys a second 401.
-      return failure(res.state, res.error, 1);
-    }
-  }
-
-  // --- RUNG 2. One LLM call, opt-in, and only ever after a rung-1 probe was refused.
-  // The cached-denial path arrives here too, on every prompt for the next 24 h — the fresh
-  // 403 above explains itself once, this keeps the door shut quietly thereafter.
-  if (cfg.recallFallback !== 'agent_routed') return empty(1, 'policy_denied');
-
-  const left = o.deadline - Date.now();
-  if (left < RUNG2_MIN_BUDGET_MS) {
-    log(cfg, 'info', `prompt-recall: ${left}ms left is under the ${RUNG2_MIN_BUDGET_MS}ms rung-2 floor; skipping`,
-      { run_id: o.runId });
-    return empty(0, 'budget_exhausted');
-  }
-
-  const res = await postQuery(cfg, { ...body, mode: 'agent_routed' },
-    { timeoutMs: remaining(cfg, o.deadline) });
-  if (!res.ok) return failure(res.state, res.error, 2);
-  return fromEvidence(cfg, res.body, 2);
-}
-
-/**
- * Rung 3 — `POST /v2/control/context`, two LLM calls, opt-in only. The server has already
- * assembled the block, so it is injected verbatim: re-assembling what two LLM calls just
- * paid for would be pure waste.
- *
- * @param {Record<string, any>} cfg
- * @param {{runId: string, agentId: string, query: string, deadline: number}} o
- * @returns {Promise<Outcome>}
- */
-async function rungThree(cfg, o) {
-  const budget = remaining(cfg, o.deadline);
-  if (budget <= 0) return empty(0, 'budget_exhausted');
-
-  const res = await postContext(cfg, {
-    run_id: o.runId,
-    agent_id: o.agentId,
-    query: o.query,
-    mode: 'sections',
-    sections: [...(cfg.recallSections ?? [])],
-    max_token_budget: intOr(cfg.recallTokenBudget, 1500),
-    limit: CONTEXT_LIMIT,
-    include_working_memory: true,
-    format: 'structured',
-  }, { timeoutMs: budget });
-
-  if (!res.ok) return failure(res.state, res.error, 3);
-
-  const b = isObject(res.body) ? res.body : {};
-  const block = typeof b.context_block === 'string' ? b.context_block.trim() : '';
-  const refIds = Array.isArray(b.sources)
-    ? [...new Set(b.sources.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim()))]
-    : [];
-  const summaries = Array.isArray(b.section_summaries) ? b.section_summaries : [];
-  const counted = summaries.reduce((n, s) => n + (isObject(s) ? numOr(s.count, 0) : 0), 0);
-
-  return {
-    failed: false,
-    rung: 3,
-    block,
-    tokens: numOr(b.token_estimate, 0) || estimateTokens(block),
-    sources: refIds.length || counted,
-    dropped: numOr(b.evidence_dropped_by_budget, 0),
-    emptyReason: typeof b.empty_reason === 'string' && b.empty_reason
-      ? b.empty_reason
-      : (block ? '' : 'no_evidence'),
-    refIds,
-  };
-}
-
-/**
- * Rungs 1-2 answer with `evidence[]`; `lib/assemble.mjs` renders it into the same shape,
- * in the same order, with the same `emptyReason` vocabulary rung 3 would have produced
- * (§4.10). That is what makes `additionalContext` rung-agnostic.
- *
- * @param {Record<string, any>} cfg
- * @param {any} responseBody
- * @param {number} rung
- * @returns {Outcome}
- */
-function fromEvidence(cfg, responseBody, rung) {
-  const b = isObject(responseBody) ? responseBody : {};
-  const evidence = Array.isArray(b.evidence) ? b.evidence : [];
-  const a = assembleContext(evidence, {
-    tokenBudget: intOr(cfg.recallTokenBudget, 1500),
-    perSection: intOr(cfg.recallMaxPerSection, 0),
-  });
-  return {
-    failed: false,
-    rung,
-    block: a.block,
-    tokens: a.tokenEstimate,
-    sources: a.sourceRefIds.length,
-    dropped: a.dropped,
-    emptyReason: a.emptyReason,
-    refIds: a.sourceRefIds,
-  };
-}
-
-/**
- * A rung that was never run — the ladder ended without a verdict from the server. Reported
- * as an empty result rather than a failure: nothing is broken, there was simply no budget.
- * @param {number} rung @param {string} reason @returns {Outcome}
- */
-function empty(rung, reason) {
-  return {
-    failed: false, rung, block: '', tokens: 0, sources: 0, dropped: 0,
-    emptyReason: reason, refIds: [],
-  };
-}
-
-/** @param {any} state @param {any} error @param {number} rung @returns {Outcome} */
-function failure(state, error, rung) {
-  return {
-    failed: true, rung, block: '', tokens: 0, sources: 0, dropped: 0,
-    emptyReason: '', refIds: [],
-    state: typeof state === 'string' ? state : 'server_error',
-    error: typeof error === 'string' ? error : String(error ?? ''),
-  };
-}
 
 // ---------------------------------------------------------------------------
 // §5.2 step 6 — the staged turn
@@ -519,6 +300,10 @@ function persistRecalled(cfg, runId, promptId, payload, outcome) {
         // inherit it.
         chars: outcome.block.length,
         dropped: outcome.dropped,
+        // How many of `sources` were repeats the model already had. Without it a smaller
+        // `tokens` is unattributable — a block that shrank because the seen-set worked and
+        // one that shrank because recall found half as much read identically.
+        pointers: outcome.pointers,
         empty_reason: outcome.emptyReason,
         terms: memoryTerms(cfg, outcome.block, str(payload?.prompt)),
       },
@@ -537,6 +322,25 @@ function persistRecalled(cfg, runId, promptId, payload, outcome) {
  * The words the memory contributed and the prompt did not, in render order (so the sections
  * that fill first — mental models, then rules — are the ones that survive the cap).
  *
+ * ---------------------------------------------------------------------------
+ * Only the rendered entries, and only the ones sent in full
+ * ---------------------------------------------------------------------------
+ * Two kinds of line in the block are not memory vocabulary, and counting either of them
+ * turns a working memory into a measured failure:
+ *
+ *   - **Section headings.** "Active rules", "Lessons", "Facts" are words this plugin prints,
+ *     not words a memory contributed. A reply that happens to say "rules" would score as an
+ *     echo of memory that was never read.
+ *   - **Pointer lines.** A degraded repeat carries a `reference_id` and a clause, and the
+ *     model has no reason to echo a reference id — so a pointer-only turn would stage a term
+ *     set that is guaranteed to miss. `capture --stop` would then record `used: false`, and
+ *     `lib/outcome.mjs` row 3 would file a `neutral` against every memory relevant enough to
+ *     keep surfacing. With the pointers excluded the turn stages no terms at all, lands on
+ *     `reason: 'no_distinct_terms'`, and is correctly read as **unmeasured** (row 4).
+ *
+ * A rung-3 block is the server's own rendering and has no bullets to trust, so there only
+ * the headings are dropped. It cannot carry pointers: rung 3 assembles server-side.
+ *
  * §4.4: the block is scrubbed before any of it is written down. Evidence content is not
  * necessarily this plugin's own redacted capture — another client, or `mubit_remember`, can
  * put anything in the store — and the turn file is a new place for a secret to land. The
@@ -551,9 +355,10 @@ function persistRecalled(cfg, runId, promptId, payload, outcome) {
 function memoryTerms(cfg, block, prompt) {
   try {
     if (!block) return [];
-    let text = block;
+    let text = vocabularyOf(block);
+    if (!text) return [];
     try {
-      text = str(redactText(block, cfg, 'output')?.text) || '';
+      text = str(redactText(text, cfg, 'output')?.text) || '';
     } catch {
       // A scrub that threw is not a licence to write the raw block's words down.
       return [];
@@ -611,68 +416,29 @@ function claimStandingLessons(cfg, runId) {
   }
 }
 
+/**
+ * The rendered entries' own text: bullets only, pointer lines excluded, and the leading
+ * markers stripped so `(stale)` is not vocabulary either. See the note on `memoryTerms`.
+ * @param {string} block
+ * @returns {string}
+ */
+function vocabularyOf(block) {
+  const lines = String(block ?? '').split('\n');
+  const bullets = lines.filter((l) => l.startsWith('- '));
+  // A block with no bullets was assembled somewhere else (rung 3). Drop the headings, which
+  // are structure in any rendering, and trust the rest.
+  if (bullets.length === 0) return lines.filter((l) => !l.startsWith('#')).join('\n');
+  return bullets
+    .filter((l) => !isPointerLine(l))
+    .map((l) => l.slice(2).replace(/^\(stale\)\s+/, ''))
+    .join('\n');
+}
+
 /** @param {string} s @returns {Set<string>} */
 function termSet(s) {
   const set = new Set();
   for (const m of String(s ?? '').matchAll(TERM_RE)) set.add(m[0].toLowerCase());
   return set;
-}
-
-// ---------------------------------------------------------------------------
-// §5.2/§7 — the policy-verdict cache
-// ---------------------------------------------------------------------------
-
-/**
- * `${CLAUDE_PLUGIN_DATA}/policy/<sha256(endpoint)[0:12]>.json`. Keyed by endpoint so a local
- * and a hosted instance hold independent verdicts — one operator disabling `direct_bypass`
- * must not tax the other instance.
- * @param {Record<string, any>} cfg
- * @returns {string}
- */
-function policyPath(cfg) {
-  const endpoint = typeof cfg?.endpoint === 'string' ? cfg.endpoint : '';
-  const hash = createHash('sha256').update(endpoint).digest('hex').slice(0, ENDPOINT_HASH_LEN);
-  return join(resolveDataDir(cfg), 'policy', `${hash}.json`);
-}
-
-/**
- * Is there a *valid* cached denial? An expired one answers false, which re-probes rung 1
- * exactly once — an operator who flips the instance's direct-search policy back on gets the
- * free path back within a day, with no reinstall.
- * @param {Record<string, any>} cfg
- * @returns {boolean}
- */
-function readPolicyDenial(cfg) {
-  try {
-    const v = readJson(policyPath(cfg), null);
-    if (!isObject(v) || v.direct_bypass !== 'denied') return false;
-    const ttl = intOr(cfg.policyTtlMs, 0) || intOr(v.ttl_ms, 0) || POLICY_TTL_MS;
-    const observed = numOr(v.observed_at, 0);
-    return observed > 0 && (Date.now() - observed) < ttl;
-  } catch {
-    return false;
-  }
-}
-
-/** @param {Record<string, any>} cfg @returns {void} */
-function cachePolicyDenial(cfg) {
-  try {
-    writeJsonAtomic(policyPath(cfg), {
-      direct_bypass: 'denied',
-      observed_at: Date.now(),
-      ttl_ms: intOr(cfg.policyTtlMs, POLICY_TTL_MS),
-    });
-  } catch { /* an unwritable data dir costs one round trip per prompt, never the prompt */ }
-}
-
-/**
- * A verdict the server has just contradicted. Grants are never *stored* (§5.2), but an old
- * denial that has been disproved is removed rather than left to confuse the doctor skill.
- * @param {Record<string, any>} cfg
- * @returns {void}
- */
-function clearPolicy(cfg) {
-  try { unlinkSync(policyPath(cfg)); } catch { /* nothing cached, which is the normal case */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -781,14 +547,24 @@ function breakerOpen(cfg) {
  * "Active rules" reads with the authority of a project invariant, and the model will act on
  * a year-old one rather than look. One sentence is the whole fix.
  *
+ * A block carrying pointers says so, once, and only when it carries one. A line that names
+ * a memory without carrying it reads exactly like a memory that was truncated, and a model
+ * that reads it that way will either ignore it or invent the rest. Roughly twenty tokens to
+ * make the other ~180 legible; on a block with nothing degraded it is not spent at all.
+ *
  * @param {string} runId @param {number} sources @param {number} tokens @param {string} block
+ * @param {number} [pointers]
  * @returns {string}
  */
-function wrap(runId, sources, tokens, block) {
+function wrap(runId, sources, tokens, block, pointers = 0) {
   return `<mubit-memory run="${runId}" sources="${sources}" tokens="${tokens}">\n`
     + 'Recalled from memory of earlier work — it may be incomplete or out of date, so verify '
-    + 'against the code before relying on it.\n\n'
-    + `${block.replace(/\s+$/, '')}\n</mubit-memory>`;
+    + 'against the code before relying on it.\n'
+    + (pointers > 0
+      ? `A line marked "${POINTER_MARK}" was injected in full earlier in this conversation `
+        + 'and is repeated here only as a reference; ask mubit_dereference for its text.\n'
+      : '')
+    + `\n${block.replace(/\s+$/, '')}\n</mubit-memory>`;
 }
 
 /** `1187` → `1.2k`; small counts stay exact. @param {number} n @returns {string} */
@@ -800,19 +576,6 @@ function formatTokens(n) {
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
-
-/**
- * The per-call timeout: whatever is left of the recall budget, never more than
- * `MUBIT_CC_TIMEOUT_MS`. A non-positive value means "do not dial" — `lib/http.mjs` reads one
- * as "unset" and would fall back to its 4000 ms default, which is the entire budget spent on
- * a call that had already run out of time.
- * @param {Record<string, any>} cfg @param {number} deadline @returns {number}
- */
-function remaining(cfg, deadline) {
-  const left = deadline - Date.now();
-  if (left <= 0) return 0;
-  return Math.max(1, Math.min(left, intOr(cfg.timeoutMs, 4000)));
-}
 
 /** @param {any} v @returns {string} */
 function safeId(v) {

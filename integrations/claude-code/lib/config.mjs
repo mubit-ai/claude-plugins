@@ -342,6 +342,14 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const recallMaxPerSection = int(pick('recallMaxPerSection', 'MUBIT_CC_RECALL_MAX_PER_SECTION'), 0);
   const recallAssemble = enumOf(pick('recallAssemble', 'MUBIT_CC_RECALL_ASSEMBLE'),
     ['client', 'server'], 'client');
+  // § 5.2 — what to do with a memory this run has already injected. `pointer` renders it as
+  // its reference id plus its first clause (~20 tokens against ~200) and keeps the id in
+  // `recalled[]` so it can still be reinforced; `full` re-sends the whole entry on every
+  // prompt, which is what every release before the seen-set did. The measurement that
+  // decided the default: recall injection costs up to 1500 tokens on EVERY prompt, against
+  // 356 tokens once for the entire MCP tool surface it was assumed to be cheaper than.
+  const recallRepeatMode = enumOf(pick('recallRepeatMode', 'MUBIT_CC_RECALL_REPEAT_MODE'),
+    ['pointer', 'full'], 'pointer');
   // What recall does when rung 1 (`direct_bypass`, zero LLM calls) is refused by instance
   // policy. `none` is the default deliberately: rung 2 pays a routing LLM call, measured at a
   // 5 s median and a long tail past 11 s, against a recall budget of 1500 ms inside a 3 s hook
@@ -412,6 +420,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     recallMaxPerSection,
     recallBudgetMs,
     recallAssemble,
+    recallRepeatMode,
     recallFallback,
     recallSections,
     policyTtlMs,

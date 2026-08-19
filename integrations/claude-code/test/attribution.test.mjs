@@ -364,3 +364,128 @@ test('a successful outcome post still records one attempt and is never re-sent',
   assert.ok(turn.outcome_sent_at > 0);
   assert.notEqual(turn.outcome_abandoned, true);
 });
+
+// ---------------------------------------------------------------------------
+// The seen-set's attribution trap — `lib/outcome.mjs` row 3 vs row 4
+// ---------------------------------------------------------------------------
+
+/*
+ * `hooks/src/prompt-recall.mjs` degrades a memory it has already injected into a one-line
+ * pointer. The pointer keeps its `reference_id` in `recalled[]`, so the entry is still
+ * attributable — that is the whole reason to degrade rather than drop.
+ *
+ * The trap is on the other side of the loop. `capture --stop`'s used-signal works by
+ * matching distinctive memory terms echoed in the reply, and a pointer-only render carries
+ * almost none. `lib/outcome.mjs:129-152` gives that four rows, and two of them are one
+ * character apart in the turn file and worlds apart in meaning:
+ *
+ *   row 3 — `used_evidence.used === false`  → `neutral` 0.0, entry_ids EMPTY
+ *           "memory was injected and the reply shows no sign of it"
+ *   row 4 — `used_evidence.used` ABSENT     → `success` +0.2, entry_ids INTACT
+ *           "the signal could not be computed; this turn was never measured"
+ *
+ * A degraded turn belongs in row 4. If it lands in row 3 instead, every prompt after the
+ * first quietly files a neutral against the memories that are working hardest — the ones
+ * relevant enough to keep surfacing — and the reinforcement signal degrades in exact
+ * proportion to how well recall is doing. That failure is silent, cumulative, and shows up
+ * only as memory that mysteriously stops being trusted.
+ */
+
+/** ~200 tokens each, so every repeat is genuinely worth degrading. */
+const bulky = (tag, ch) => `${tag} because ${ch.repeat(760)} TAIL_${tag}`;
+
+const STICKY = () => queryResponse({
+  evidence: [
+    evidence({ id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', score: 0.91, content: bulky('RULE', 'r') }),
+    evidence({ id: 'e2', reference_id: 'ref_lesson_1', entry_type: 'lesson', score: 0.84, content: bulky('LESSON', 'l') }),
+    evidence({ id: 'e3', reference_id: 'ref_fact_1', entry_type: 'fact', score: 0.55, content: bulky('FACT', 'f') }),
+  ],
+});
+
+/** A reply that echoes none of the injected vocabulary, on purpose. */
+const SILENT_REPLY = 'I read the diff and nothing needed changing there.';
+
+const nth = (n) => `p_degrade_${n}`;
+
+/** The outcome posted for one turn, found by the key `lib/outcome.mjs` derives from it. */
+function outcomeFor(server, promptId) {
+  return server.calls('POST', '/v2/control/outcome')
+    .map((c) => c.body)
+    .find((b) => String(b?.idempotency_key ?? '').endsWith(promptId));
+}
+
+async function turnCycle(e, server, promptId) {
+  assertHookContract(await runHook('prompt-recall',
+    userPromptSubmit({ prompt_id: promptId, prompt: 'why is the ingest job stuck in queued?' }),
+    { env: e }));
+  assertHookContract(await runHook('capture',
+    stop({ prompt_id: promptId, last_assistant_message: SILENT_REPLY }),
+    { env: e, args: ['--stop'] }));
+  assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', promptId] }));
+  await waitFor(() => outcomeFor(server, promptId) !== undefined, 5000);
+  return outcomeFor(server, promptId);
+}
+
+// THE test. Both landings, same evidence, same reply, one scenario — because the whole
+// point is that the two turns must be read differently.
+test('a degraded repeat lands as unmeasured, not as "the model ignored it"', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { json: STICKY() } });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  // Turn 1 — every entry rendered in full. The reply carries none of it, which is a
+  // measured verdict: row 3.
+  const first = await turnCycle(e, server, nth(1));
+  const t1 = readJsonFile(turnPath(dir, nth(1)));
+  assert.ok(t1.recall.terms.length > 0, 'a full render stages the memory\'s own vocabulary');
+  assert.equal(t1.used_evidence.used, false,
+    'the reply echoed none of it, and the signal could see that — this is a measurement');
+  assert.equal(first.outcome, 'neutral');
+  assert.deepEqual(first.entry_ids, [],
+    'row 3 names no entries: crediting the ones nothing showed were read would invent a '
+    + 'denominator');
+
+  // Turn 2 — identical evidence, now all pointers. Same reply, same silence, and a
+  // completely different fact about the world.
+  const second = await turnCycle(e, server, nth(2));
+  const t2 = readJsonFile(turnPath(dir, nth(2)));
+  assert.equal(t2.recall.pointers, 3, 'all three entries were already shown');
+  assert.deepEqual(t2.recalled, RECALLED, 'a pointer is still attributable');
+
+  assert.equal(t2.used_evidence.reason, 'no_distinct_terms',
+    'a pointer carries no vocabulary to match on, so this turn was never measured');
+  assert.equal('used' in t2.used_evidence, false,
+    'an ABSENT `used` is what `lib/outcome.mjs` reads as unmeasured; a `false` here would '
+    + 'be read as "the model ignored it" and is the whole failure this test exists to catch');
+
+  assert.notEqual(second.outcome, 'neutral',
+    'a degraded repeat must not file a neutral. Doing so would penalise — in reach, not in '
+    + 'score — precisely the memories relevant enough to keep surfacing');
+  assert.equal(second.outcome, 'success');
+  assert.equal(second.signal, 0.2, 'row 4 keeps the pre-signal behaviour unchanged');
+  assert.deepEqual(second.entry_ids, RECALLED,
+    'the entries stay attributed: degrading how a memory is rendered must not change '
+    + 'whether it can be reinforced');
+});
+
+// The concrete mechanism behind the row above, pinned on its own so a future change to the
+// pointer format cannot quietly reintroduce it.
+test('a reference id printed in a pointer never becomes a memory term', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { json: STICKY() } });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  const p = (n) => userPromptSubmit({ prompt_id: nth(n), prompt: 'why is the ingest job stuck in queued?' });
+  assertHookContract(await runHook('prompt-recall', p(1), { env: e }));
+  assertHookContract(await runHook('prompt-recall', p(2), { env: e }));
+
+  const terms = readJsonFile(turnPath(dir, nth(2))).recall.terms;
+  assert.deepEqual(terms, [],
+    `a pointer-only block contributed ${terms.length} terms (${terms.join(', ')}). Every one `
+    + 'of them is a word the model has no reason to echo, so every one of them turns a '
+    + 'working memory into a measured "ignored".');
+  assert.ok(!terms.includes('ref_rule_1'),
+    'a reference id is a handle, not vocabulary — matching on it guarantees a miss');
+});

@@ -37,6 +37,30 @@
  *     *injected-and-ignored* row. See the note on `memoryTerms`.
  *
  * ---------------------------------------------------------------------------
+ * Carry-forward, when `recallAsync` is on
+ * ---------------------------------------------------------------------------
+ * With the flag set this hook stops dialing. It renders the block the PREVIOUS turn's
+ * detached `recall-refresh` left in `runs/<run_id>/carry.json`, marks it seen, spawns the
+ * refresh that will produce the next one, and returns — a couple of milliseconds, whatever
+ * the endpoint is doing. `recallBudgetMs` stops being a number anyone has to discover.
+ *
+ * Two things about it are worth stating before someone "simplifies" them:
+ *
+ *   - **It is not `"async": true` in the manifest.** That field is real — the 2.1.235 binary
+ *     describes it as "if true, hook runs in background without blocking" — but it is a
+ *     *static* manifest field and cannot be conditioned on a config key. A flag expressed
+ *     that way needs two registrations no-oping against each other, which is two processes
+ *     per prompt for everyone, including the people who never opted in. See `lib/carry.mjs`.
+ *   - **Attribution is correct by construction, not by bookkeeping.** The write happens here,
+ *     on the synchronous read, with the *receiving* turn's `prompt_id` in hand. Nothing has
+ *     to remember which prompt asked for the block.
+ *
+ * The order below is load-bearing: render, then `markSeen`, then spawn. `markSeen` is
+ * synchronous and the child's `readSeen` happens a node boot later, so the refresh always
+ * assembles against a set that already contains this turn's ids. Spawn first and the repeat
+ * is not degraded on the next turn — the seen-set saving silently reverts, with nothing red.
+ *
+ * ---------------------------------------------------------------------------
  * Budget and failure
  * ---------------------------------------------------------------------------
  * 1500 ms internal (`MUBIT_CC_RECALL_BUDGET_MS`) against a 3 s hook timeout, on a hook that
@@ -52,8 +76,9 @@ import { join } from 'node:path';
 
 import { isPointerLine, POINTER_MARK } from '../../lib/assemble.mjs';
 import { CONN_STATES, readBreaker } from '../../lib/breaker.mjs';
+import { takeCarry } from '../../lib/carry.mjs';
 import { isConfigured, loadConfig } from '../../lib/config.mjs';
-import { runHook } from '../../lib/hook.mjs';
+import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
@@ -160,6 +185,10 @@ await runHook('prompt-recall', {
       return SUPPRESS;
     }
 
+    // §5.2 — the carry-forward path. Everything below this line dials; nothing beyond this
+    // point in `carryForward` does. See the header for why the order inside it is fixed.
+    if (cfg.recallAsync) return carryForward(cfg, payload, runId, started);
+
     // §4.7/F7: a blocking hook in front of every prompt must not pay a connect timeout to a
     // server already known to be down. Read-only — `allowRequest` would spend the single
     // half-open probe that `lib/http.mjs` is about to ask for itself.
@@ -242,6 +271,128 @@ await runHook('prompt-recall', {
     };
   },
 });
+
+// ---------------------------------------------------------------------------
+// §5.2 — carry-forward (`recallAsync`)
+// ---------------------------------------------------------------------------
+
+/**
+ * The whole of the flag's synchronous half: read one file, render it, record it, start the
+ * refresh that fills the file again. No socket, no deadline, nothing that can time out.
+ *
+ * The four steps happen in this order and the order is not incidental:
+ *
+ *   1. **`takeCarry` consumes.** A block is injectable exactly once. A refresh that stops
+ *      answering must not leave the last good block to be re-injected on every prompt for
+ *      the rest of the session (`lib/carry.mjs`).
+ *   2. **`persistRecalled` against THIS `prompt_id`.** This is where the handoff's stated
+ *      hard part goes away: the ids are staged by the process that just handed the block to
+ *      the model, so they land on the turn that received it. `Stop` then reinforces exactly
+ *      the memories that were in front of the model when it answered.
+ *   3. **`markSeen`, before the spawn.** It is synchronous; the child's `readSeen` is a node
+ *      boot away. Do it after the spawn and the refresh assembles against a stale set, the
+ *      repeat is re-sent in full next turn, and the HS-3 saving reverts with nothing red.
+ *   4. **Spawn, unless the breaker is open.** A block already on disk is rendered either
+ *      way — it cost a round trip nobody should pay twice — but F7's rule still holds for
+ *      the dial: no process per prompt against a server already known to be down.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} payload
+ * @param {string} runId
+ * @param {number} started
+ * @returns {Record<string, any>}
+ */
+function carryForward(cfg, payload, runId, started) {
+  const promptId = safeId(payload?.prompt_id);
+  const carry = takeCarry(cfg, runId);
+  const rendered = !!(carry && carry.block);
+
+  if (rendered) {
+    persistRecalled(cfg, runId, promptId, payload, carry);
+    markSeen(cfg, runId, carry.refIds);
+  }
+
+  const open = breakerOpen(cfg);
+  const b = open ? readBreaker(cfg) : null;
+  const ms = Date.now() - started;
+
+  updateMarker(cfg, runId, {
+    mode: cfg.mode,
+    // The connection state is the refresh's to write — it is the process that dials. The one
+    // exception is a verdict this side can read for itself off the breaker file.
+    ...(open && isConnState(b?.state) ? { state: b.state } : {}),
+    recall: {
+      sources: rendered ? carry.refIds.length : 0,
+      tokens: rendered ? carry.tokens : 0,
+      // What the PROMPT paid, which under this flag is a file read. The endpoint's own
+      // latency is in `carry.json` as `fetch_ms`; separating the two is the measurement.
+      ms,
+      rung: rendered ? carry.rung : 0,
+      dropped: rendered ? carry.dropped : 0,
+      // Literally what happened: no previous turn left a block for this one. Named rather
+      // than blank, because a blank `empty_reason` under this flag is indistinguishable from
+      // a recall path that has quietly died. It deliberately does NOT say *why* — the
+      // ordinary first prompt of a session and a refresh that has been failing for ten
+      // prompts both land here, and `state` plus `dry_streak` are what tell them apart:
+      // `ready` with a streak of 1 is priming, `not_responding` with a climbing streak is
+      // the endpoint. A name that guessed between them would send half the readers to the
+      // wrong fix.
+      empty_reason: rendered
+        ? carry.emptyReason
+        : (open ? 'breaker_open' : 'async_no_carry'),
+      ...dryness(cfg, runId, rendered),
+    },
+  });
+
+  if (open) {
+    log(cfg, 'debug', 'prompt-recall: breaker open; carrying nothing forward', { run_id: runId });
+  } else {
+    spawnRefresh(cfg, payload, runId);
+  }
+
+  if (!rendered) return SUPPRESS;
+
+  const sources = carry.refIds.length || carry.sources;
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'UserPromptSubmit',
+      additionalContext: wrap(runId, sources, carry.tokens, carry.block, carry.pointers, true),
+    },
+    systemMessage: `mubit: ${sources} ${sources === 1 ? 'memory' : 'memories'}`
+      + `${DOT}${formatTokens(carry.tokens)} tok${DOT}${ms}ms`,
+    suppressOutput: true,
+  };
+}
+
+/**
+ * Fire `recall-refresh` and forget about it — the same call `stage-prompt.mjs` makes to start
+ * the drain, and for the same reason: the payload travels through a file because a detached
+ * child's inherited stdin is not reliably readable once this process exits, and this process
+ * exits within milliseconds.
+ *
+ * A refresh that could not be started costs the *next* prompt its recall and nothing else.
+ * The one after it tries again, because every prompt spawns one.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} payload
+ * @param {string} runId
+ * @returns {void}
+ */
+function spawnRefresh(cfg, payload, runId) {
+  try {
+    const payloadPath = stashPayload(cfg, payload);
+    if (!payloadPath) {
+      log(cfg, 'warn', 'prompt-recall: could not stage the refresh payload; the next prompt '
+        + 'recalls nothing', { run_id: runId });
+      return;
+    }
+    spawnDetached(cfg, 'recall-refresh', [], payloadPath);
+    log(cfg, 'debug', 'prompt-recall: refresh spawned', { run_id: runId });
+  } catch (err) {
+    log(cfg, 'warn', `prompt-recall: could not start the refresh (${messageOf(err)})`,
+      { run_id: runId });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // §5.2 step 6 — the staged turn
@@ -552,14 +703,25 @@ function breakerOpen(cfg) {
  * that reads it that way will either ignore it or invent the rest. Roughly twenty tokens to
  * make the other ~180 legible; on a block with nothing degraded it is not spent at all.
  *
+ * A carried-forward block says *that*, too, and only under `recallAsync`. It was retrieved
+ * against the previous message, so without the line the model reads a block about the last
+ * question as an answer to this one — and quietly concludes that recall is unreliable rather
+ * than that it is one turn behind. One turn of staleness is the mode's whole cost; stating it
+ * is far cheaper than hiding it.
+ *
  * @param {string} runId @param {number} sources @param {number} tokens @param {string} block
  * @param {number} [pointers]
+ * @param {boolean} [carried]  the block came from the previous turn's refresh
  * @returns {string}
  */
-function wrap(runId, sources, tokens, block, pointers = 0) {
+function wrap(runId, sources, tokens, block, pointers = 0, carried = false) {
   return `<mubit-memory run="${runId}" sources="${sources}" tokens="${tokens}">\n`
     + 'Recalled from memory of earlier work — it may be incomplete or out of date, so verify '
     + 'against the code before relying on it.\n'
+    + (carried
+      ? 'It was retrieved against the previous message in this conversation, not this one, '
+        + 'so treat it as background rather than as an answer to what was just asked.\n'
+      : '')
     + (pointers > 0
       ? `A line marked "${POINTER_MARK}" was injected in full earlier in this conversation `
         + 'and is repeated here only as a reference; ask mubit_dereference for its text.\n'

@@ -273,6 +273,7 @@ that cache, and writing credentials invalidates it immediately rather than after
 | `recallRepeatMode` | `pointer` | `MUBIT_CC_RECALL_REPEAT_MODE` | What happens to a memory this run has already injected. `pointer` repeats it as its reference id plus its first clause — roughly 20 tokens against 200 — and keeps the id attributable, so `Stop` still reinforces it. `full` re-sends the whole entry on every prompt, which is what releases before 0.10 did. Recall injection is the plugin's largest recurring context cost: up to 1500 tokens on *every* prompt, against 356 tokens *once* for the whole MCP tool surface. Compaction resets the set, because after it the model has not seen any of it. |
 | `recallAssemble` | `client` | `MUBIT_CC_RECALL_ASSEMBLE` | `client` assembles the context block locally for **0 LLM calls**. `server` uses `/v2/control/context`, which costs **2 LLM calls per prompt** and replaces the free path rather than adding to it. |
 | `recallFallback` | `none` | `MUBIT_CC_RECALL_FALLBACK` | What recall does when the instance has direct-access recall disabled. `none` returns nothing, for **0 LLM calls**. `agent_routed` pays **1 LLM call per prompt** to get recall anyway — typically several seconds, against a recall budget of 1500 ms, so most prompts spend the call and still inject nothing. See [When recall returns nothing](#when-recall-returns-nothing). |
+| `recallAsync` | `false` | `MUBIT_CC_RECALL_ASYNC` | Never make a prompt wait on recall. On, `UserPromptSubmit` injects the block that a **detached refresh retrieved just after the previous prompt** and returns without dialling — so the hook's wall clock is a file read, however slow the endpoint is, and `MUBIT_CC_RECALL_BUDGET_MS` stops being something you have to discover and tune. It costs one turn of staleness (the block says so, in the block) and the first prompt of a session gets no recalled memory — `SessionStart`'s standing lessons still land, so the session is not memoryless. Attribution is unaffected: the ids are staged against the turn that received the block. Off by default. |
 | `reflectOnEnd` | `true` | `MUBIT_CC_REFLECT_ON_END` | Reflect at `SessionEnd`. This is the only path that promotes a lesson beyond its own run, so turning it off to save a few seconds trades away cross-session memory entirely. See below. |
 | `outcomeMode` | `implicit` | `MUBIT_CC_OUTCOME_MODE` | `implicit`: a turn whose reply carried the recalled memory's own vocabulary is attributed to those memories; a turn that carried none of it is recorded as `neutral` against the run and attributed to no entry, so an injection nobody used is counted rather than being invisible. `explicit`: only the model's own `mubit_outcome` calls count. `off`: no attribution, and no measurement of it either. |
 | `statusLine` | `true` | `MUBIT_CC_STATUSLINE` | Render the status line. When false it prints an empty line and exits 0 rather than erroring per frame. |
@@ -327,6 +328,32 @@ You can tell this is what is happening from the status line — `recall dry N` a
 consecutive empty recalls — or from `/mubit-memory:doctor`, which reads `recall.empty_reason`
 and names `policy_denied` specifically. Note that the connection state stays `ready`
 throughout, because nothing is wrong with the connection.
+
+### When recall is slow rather than empty
+
+A different symptom, with a different fix. If the status line shows `◌ not_responding` and
+`recall.empty_reason` is blank rather than `policy_denied`, the instance is answering — just
+not inside the budget. A self-hosted Mubit typically returns a rung-1 query in 1.4-2.3 s
+against a `MUBIT_CC_RECALL_BUDGET_MS` of 1500, so the call is abandoned after it has already
+been paid for.
+
+Raising the budget trades one problem for another: it exists because the hook blocks your
+prompt, so a bigger number is a longer wait before every message you send.
+
+`MUBIT_CC_RECALL_ASYNC=1` removes the trade instead of tuning it. With it on, the hook injects
+the block a **detached refresh** retrieved just after your previous prompt and returns without
+dialling anything, so what it costs is one file read no matter how slow the endpoint is. The
+refresh is not bound by the prompt budget — nothing is waiting on it.
+
+What you give up:
+
+- **One turn of staleness.** The block was retrieved against your previous message. It says so,
+  in the block, so the model reads it as background rather than as an answer.
+- **The first prompt of a session recalls nothing.** `SessionStart`'s standing lessons still
+  land, so a fresh session is not memoryless.
+
+What you keep: attribution. The recalled ids are staged against the turn that *received* the
+block, so `Stop` reinforces exactly the memories the model actually had.
 
 ### Turning off `reflectOnEnd`
 

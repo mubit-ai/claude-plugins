@@ -34,13 +34,14 @@ const FLOOR_TARGET = 'node12.20';
 const OLD_NODE = '12.22.9';
 
 /**
- * Every guarded entry point that a process actually execs. `drain.mjs` is deliberately
- * included and is deliberately absent from `hooks.json`: `capture` spawns it detached, so it
- * is exec'd by path like the rest and needs the same floor.
+ * Every guarded entry point that a process actually execs. `drain.mjs` and
+ * `recall-refresh.mjs` are deliberately included and are deliberately absent from
+ * `hooks.json`: `capture` spawns the one and `prompt-recall` spawns the other, detached, so
+ * both are exec'd by path like the rest and need the same floor.
  */
 function guardedScripts() {
   const hooks = ['session-start', 'prompt-recall', 'stage-prompt', 'capture', 'checkpoint',
-    'session-end', 'drain'].map((n) => `hooks/dist/${n}.mjs`);
+    'session-end', 'drain', 'recall-refresh'].map((n) => `hooks/dist/${n}.mjs`);
   return [...hooks, 'bin/statusline.mjs'];
 }
 
@@ -103,7 +104,7 @@ async function runAsNode(rel, version) {
 test('every guarded script parses at the engine floor', async () => {
   const { transform } = await import('esbuild');
   const scripts = guardedScripts();
-  assert.equal(scripts.length, 8, 'the 7 hooks and the status line');
+  assert.equal(scripts.length, 9, 'the 8 hooks and the status line');
 
   for (const rel of scripts) {
     const abs = join(PLUGIN_ROOT, rel);
@@ -141,7 +142,7 @@ test('every registered entry point is a guarded one', () => {
 
 test('on an unsupported Node every hook refuses by name and exits 0', async () => {
   const hooks = guardedScripts().filter((s) => s.startsWith('hooks/'));
-  assert.equal(hooks.length, 7);
+  assert.equal(hooks.length, 8);
 
   for (const rel of hooks) {
     const r = await runAsNode(rel, OLD_NODE);

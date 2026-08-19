@@ -358,6 +358,15 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // Operators who would rather pay it can opt back in.
   const recallFallback = enumOf(pick('recallFallback', 'MUBIT_CC_RECALL_FALLBACK'),
     ['none', 'agent_routed'], 'none');
+  // §5.2 — carry-forward recall. On, `prompt-recall` renders the block the PREVIOUS turn's
+  // detached refresh left in `runs/<run_id>/carry.json` and returns without dialling, so the
+  // prompt never waits on the endpoint and `recallBudgetMs` stops being a tuning parameter
+  // anyone has to discover. It costs one turn of staleness and a first prompt with no recall.
+  //
+  // Default off, and the default is the whole point: the host's own `async`/`asyncRewake`
+  // manifest fields are real but static, so a flag expressed there would need two competing
+  // registrations and would cost a second process per prompt to everyone, opted in or not.
+  const recallAsync = bool(pick('recallAsync', 'MUBIT_CC_RECALL_ASYNC'), false);
   const reflectOnEnd = bool(pick('reflectOnEnd', 'MUBIT_CC_REFLECT_ON_END'), true);
   const outcomeMode = enumOf(pick('outcomeMode', 'MUBIT_CC_OUTCOME_MODE'),
     ['off', 'implicit', 'explicit'], 'implicit');
@@ -422,6 +431,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     recallAssemble,
     recallRepeatMode,
     recallFallback,
+    recallAsync,
     recallSections,
     policyTtlMs,
     outcomeMode,

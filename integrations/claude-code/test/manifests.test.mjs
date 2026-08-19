@@ -257,19 +257,19 @@ test('every hooks.json command uses exec form (command + args), never shell form
   }
 });
 
-// §3.2 — all nine registrations, with the exact events, ordering, matchers, extra args
+// §3.2 — all ten registrations, with the exact events, ordering, matchers, extra args
 // and timeouts. `timeout` is in SECONDS; a millisecond value here silently gives every
 // hook a ~3ms budget.
-test('hooks.json declares all nine registrations with the right events, args and timeouts', () => {
+test('hooks.json declares all ten registrations with the right events, args and timeouts', () => {
   const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
   const events = Object.keys(hooks.hooks ?? {});
 
   const expectedEvents = [
     'SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
-    'Stop', 'SubagentStop', 'PreCompact', 'PostCompact', 'SessionEnd',
+    'Stop', 'StopFailure', 'SubagentStop', 'PreCompact', 'PostCompact', 'SessionEnd',
   ];
   assert.deepEqual([...events].sort(), [...expectedEvents].sort(),
-    `hooks.json must register exactly the nine events in §3.2; got [${events.join(', ')}]`);
+    `hooks.json must register exactly the ten events in §3.2; got [${events.join(', ')}]`);
 
   /** event → flat list of {script, extraArgs, timeout} in declaration order */
   const flat = new Map();
@@ -298,6 +298,10 @@ test('hooks.json declares all nine registrations with the right events, args and
     PostToolUse: [{ script: 'capture.mjs', extraArgs: [], timeout: 3 }],
     PostToolUseFailure: [{ script: 'capture.mjs', extraArgs: ['--failure'], timeout: 3 }],
     Stop: [{ script: 'capture.mjs', extraArgs: ['--stop'], timeout: 5 }],
+    // Fires INSTEAD of Stop when an API error ended the turn, so it is the only thing that
+    // ever closes those turns. Timeout 3 rather than Stop's 5: it writes one file and never
+    // forces a drain, because there is no outcome for a drain to carry.
+    StopFailure: [{ script: 'capture.mjs', extraArgs: ['--stop-failure'], timeout: 3 }],
     SubagentStop: [{ script: 'capture.mjs', extraArgs: ['--subagent'], timeout: 3 }],
     PreCompact: [{ script: 'checkpoint.mjs', extraArgs: ['--pre'], timeout: 10 }],
     PostCompact: [{ script: 'checkpoint.mjs', extraArgs: ['--post'], timeout: 5 }],
@@ -327,6 +331,33 @@ test('hooks.json SessionStart matches startup|resume|clear|compact|fork', () => 
   assert.equal(groups[0].matcher, 'startup|resume|clear|compact|fork',
     'SessionStart matcher must be "startup|resume|clear|compact|fork" (§3.2) — dropping '
     + '"fork" leaves /fork and /branch sessions with no run id, no marker and no memory');
+});
+
+/**
+ * §3.2 — `StopFailure` carries NO matcher, and that is a correctness requirement, not a
+ * shortcut.
+ *
+ * Its matcher filters on the payload's `error`, whose vocabulary the host publishes as:
+ *
+ *     matcherMetadata: {fieldToMatch: "error", values: ["rate_limit", "overloaded",
+ *       "authentication_failed", "oauth_org_not_allowed", ...fOr() ? ["account_on_hold"] : [],
+ *       "billing_error", "invalid_request", "model_not_found", "server_error",
+ *       "max_output_tokens", "unknown"]}
+ *
+ * — read out of Claude Code 2.1.235 the same way `hook-output.test.mjs` reads its constants.
+ * Note the spread: **the eleventh value is behind a runtime feature flag**, so the taxonomy is
+ * not the same list on every account. An enumerated matcher here would be correct on some
+ * installs and silently short on others, and the turns it dropped are exactly the ones this
+ * hook exists to catch — an account on hold is not evidence that a recalled memory was wrong.
+ * Matching everything cannot drift.
+ */
+test('hooks.json StopFailure declares no matcher, so no error value can slip past it', () => {
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
+  const groups = hooks.hooks?.StopFailure ?? [];
+  assert.equal(groups.length, 1, 'StopFailure should declare exactly one group');
+  assert.ok(!('matcher' in groups[0]) || ['', '*', '.*'].includes(String(groups[0].matcher)),
+    'StopFailure must match every error value — the taxonomy is feature-flagged, so an '
+    + `enumerated list is wrong on some accounts; found ${JSON.stringify(groups[0].matcher)}`);
 });
 
 /**

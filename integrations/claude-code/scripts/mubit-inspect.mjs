@@ -147,10 +147,18 @@ function breakerFor(dir) {
 /* shaping                                                                     */
 /* -------------------------------------------------------------------------- */
 
-/** The one field the outcome path spreads across four keys, collapsed to a word. */
+/**
+ * The one field the outcome path spreads across five keys, collapsed to a word.
+ *
+ * `api:<error>` comes first because it is the only one that explains itself: a turn the API
+ * killed is closed AND stays `outcome_pending` forever, since `lib/outcome.mjs` suppresses
+ * its outcome rather than sending one. Reading that as plain `pending` would look like a
+ * flush that never happened, which is a bug hunt with nothing at the end of it.
+ */
 function outcomeState(turn) {
   if (turn.outcome_abandoned === true) return 'dropped';
   if (Number(turn.outcome_sent_at) > 0) return 'sent';
+  if (typeof turn.api_error === 'string' && turn.api_error) return `api:${turn.api_error}`;
   if (turn.outcome_pending === true) return 'pending';
   if (turn.ended_at) return 'none';
   return '';

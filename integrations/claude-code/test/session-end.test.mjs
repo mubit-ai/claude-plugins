@@ -386,6 +386,47 @@ for (const row of [
   });
 }
 
+/**
+ * THE test for this ticket, on the flush side — and the one that has to exist because of
+ * *how* `StopFailure` fires.
+ *
+ * The host's registry (Claude Code 2.1.235): `StopFailure` "fires **instead of** Stop when an
+ * API error … ended the turn". So `capture --stop` never runs on a rate-limited turn, and
+ * `capture --stop-failure` is what closes it — `outcome_pending: true`, exactly like any
+ * other closed turn, because hiding the turn from the sweep is not the same as deciding
+ * about it. This flush therefore genuinely picks the turn up, reads it, and posts nothing;
+ * `lib/outcome.mjs` is the only thing standing between it and a `-0.3`.
+ *
+ * That is also why this is a *pair* of tests with `drain.test.mjs` rather than one: the two
+ * hooks are separate esbuild entry points that cannot import one another, and the last time
+ * a rule like this lived in both files the copies drifted for a release without either one
+ * looking wrong on its own.
+ */
+test('a turn the API killed is swept, and flushed as nothing at all', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 1);
+  seedPendingTurn(dataDir, fx.PROMPT_ID, ['ref_lesson_1', 'ref_rule_1']);
+  // `capture --stop-failure`'s mark, on a turn that is otherwise the +0.2 row: recalled ids,
+  // pending, and no used-signal because the reply was cut off.
+  const turnPath = join(runDir(dataDir), 'turns', `${fx.PROMPT_ID}.json`);
+  writeFileSync(turnPath, JSON.stringify({ ...readJsonFile(turnPath), api_error: 'rate_limit' }));
+
+  assertHookContract(await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) }));
+
+  // The session still ingests and still reflects: the model's API fell over, not Mubit's.
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  server.assertNotCalled('POST', '/v2/control/outcome');
+
+  const after = readJsonFile(turnPath);
+  assert.equal(after.api_error, 'rate_limit', 'the mark is the flush\'s input, not its scratch space');
+  assert.ok(!(Number(after.outcome_attempts) > 0),
+    `a suppressed turn must not spend an attempt: ${JSON.stringify(after.outcome_attempts)}`);
+  assert.ok(!after.outcome_sent_at, 'nothing was sent, so nothing may claim it was');
+});
+
 // The other half of the distinction, in this hook too: nothing injected is still silence, so
 // "no post" means one thing only.
 test('a turn that recalled nothing is not flushed at all', async (t) => {

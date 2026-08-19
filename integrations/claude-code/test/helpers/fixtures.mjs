@@ -182,6 +182,39 @@ export const stop = (over = {}) => base({
   ...over,
 });
 
+/**
+ * StopFailure — the turn ended on an API error.
+ *
+ * The field names are the host's own, read out of the Claude Code 2.1.235 Zod schema rather
+ * than from the published hook reference, which spells two of them differently:
+ *
+ *     strings -a ~/.local/share/claude/versions/2.1.235 \
+ *       | grep -o 'hook_event_name:wt("StopFailure").\{0,160\}'
+ *     → hook_event_name:wt("StopFailure"), error:Mzc(), error_details:N().optional(),
+ *       last_assistant_message:N().optional()
+ *
+ * So the error kind rides in **`error`**, not `reason` and not `error_type`. That distinction
+ * is the whole payload as far as this plugin is concerned — a fixture with the wrong name
+ * would agree with an implementation reading the wrong name and both would be green while
+ * every API-failed turn was recorded as `unknown`. See the warning at the head of
+ * `postToolUse` for the last time that happened here.
+ *
+ * `error`'s vocabulary is the ten-value taxonomy plus a feature-flagged eleventh
+ * (`account_on_hold`), and the host defaults a missing one to `"unknown"` on its way to the
+ * matcher (`matchQuery: e.error ?? "unknown"`).
+ *
+ * @param {Record<string,any>} [over]
+ */
+export const stopFailure = (over = {}) => base({
+  hook_event_name: 'StopFailure',
+  prompt_id: PROMPT_ID,
+  error: 'rate_limit',
+  error_details: 'This request would exceed your organization\'s rate limit of 80,000 '
+    + 'input tokens per minute.',
+  last_assistant_message: 'Let me check the indexing queue',
+  ...over,
+});
+
 /** @param {Record<string,any>} [over] */
 export const subagentStop = (over = {}) => base({
   hook_event_name: 'SubagentStop',

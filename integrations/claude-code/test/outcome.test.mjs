@@ -102,14 +102,15 @@ describe('the constants live in exactly one place', () => {
 });
 
 // ===========================================================================
-// §5.5 step 7 — the four-case table
+// §5.5 step 7 — the five-case table
 // ===========================================================================
 
-describe('decideOutcome — the four cases, one row each', () => {
+describe('decideOutcome — the five cases, one row each', () => {
   /**
    * | turn | posted |
    * | --- | --- |
    * | nothing injected | nothing |
+   * | the API killed the turn | nothing |
    * | injected, the reply carried the memory's vocabulary | success +0.2 / failure -0.3, with entry_ids |
    * | injected, the reply carried none of it | neutral 0.0, with an EMPTY entry_ids |
    * | injected, the signal could not be computed | as before: success +0.2 / failure -0.3 |
@@ -117,6 +118,16 @@ describe('decideOutcome — the four cases, one row each', () => {
   const TABLE = [
     { name: 'nothing injected', turn: turn({ recalled: [] }), post: false },
     { name: 'nothing injected, and the turn failed', turn: turn({ recalled: [], outcome: 'failure' }), post: false },
+
+    // Row 2 — the turn ended on an API error, so NOTHING is posted, not even a neutral.
+    // `neutral` already means something specific and hard to read: "memory was injected and
+    // the reply shows no sign of it", which is a real (if noisy) fact about the memory.
+    // A rate limit is a fact about the endpoint. Filing it under `neutral` would put
+    // infrastructure noise into the one row whose denominator the whole precision number
+    // depends on, and nothing on the wire would say which records were which.
+    { name: 'the API killed the turn', turn: turn({ api_error: 'rate_limit' }), post: false },
+    { name: 'the API killed the turn, and it echoed the memory anyway', turn: turn({ api_error: 'max_output_tokens', used_evidence: evidence(true) }), post: false },
+    { name: 'the API killed the turn, and it echoed nothing', turn: turn({ api_error: 'overloaded', used_evidence: evidence(false) }), post: false },
 
     { name: 'measured used, turn completed', turn: turn({ used_evidence: evidence(true) }), post: true, outcome: 'success', signal: 0.2, entryIds: RECALLED },
     { name: 'measured used, turn failed', turn: turn({ used_evidence: evidence(true), outcome: 'failure' }), post: true, outcome: 'failure', signal: -0.3, entryIds: RECALLED },
@@ -240,6 +251,56 @@ describe('decideOutcome — the reasons not to post', () => {
       const d = decideOutcome(turn({ recalled }));
       assert.equal(d.post, false, `recalled=${JSON.stringify(recalled)} must post nothing`);
       assert.ok(typeof d.reason === 'string' && d.reason.length > 0, 'a skip must say why');
+    }
+  });
+
+  /**
+   * The `StopFailure` row, stated as the reason rather than only as an absence.
+   *
+   * `capture --stop-failure` stamps `api_error` and closes the turn `outcome_pending`, which
+   * is exactly what makes this guard load-bearing: the turn IS swept by `session-end`'s
+   * flush and IS handed to this function, and this is the only thing between it and a
+   * `-0.3` posted against ids the model never got to use. Without the guard the turn reads
+   * as "injected, unmeasured, turn completed" — the +0.2 row — because the used-signal is
+   * deliberately absent on a truncated reply.
+   *
+   * `api_failed` is checked before `attempts_exhausted` on purpose: a turn nothing will ever
+   * dial must never accumulate a dial count.
+   */
+  it('a turn the API killed is not posted at all, whatever else the turn says', async () => {
+    const { decideOutcome } = await O();
+    const rows = [
+      { name: 'the common one', over: { api_error: 'rate_limit' } },
+      { name: 'the catch-all', over: { api_error: 'unknown' } },
+      { name: 'a value from a newer host', over: { api_error: 'context_window_exceeded' } },
+      { name: 'measured used', over: { api_error: 'overloaded', used_evidence: evidence(true) } },
+      { name: 'measured unused', over: { api_error: 'server_error', used_evidence: evidence(false) } },
+      // The row that would otherwise post -0.3 against every recalled id.
+      { name: 'the file also says the turn failed', over: { api_error: 'rate_limit', outcome: 'failure' } },
+      // Never dialled, so it must never look like a turn that ran out of retries — that
+      // reason is the one the callers act on by marking the turn abandoned.
+      { name: 'attempts already counted by an older build', over: { api_error: 'rate_limit', outcome_attempts: 3 } },
+    ];
+    for (const row of rows) {
+      const d = decideOutcome(turn(row.over));
+      assert.equal(d.post, false, `${row.name}: ${JSON.stringify(d)}`);
+      assert.equal(d.reason, 'api_failed',
+        `${row.name}: the skip must name the API failure — "${d.reason}" would send a reader `
+        + 'looking for a memory problem that is not there');
+      assert.equal(d.entryIds, undefined, `${row.name}: nothing is attributed, so nothing is named`);
+    }
+  });
+
+  // The mark is the only thing that turns suppression on, so a turn without one must go on
+  // being posted exactly as before. An over-broad guard here is worse than none: it would
+  // silently stop the reinforcement signal for every turn in the run.
+  it('an absent or empty api_error leaves the ordinary rows untouched', async () => {
+    const { decideOutcome } = await O();
+    for (const api_error of [undefined, null, '', '   ', 0, false]) {
+      const d = decideOutcome(turn({ api_error }));
+      assert.equal(d.post, true, `api_error=${JSON.stringify(api_error)} must not suppress anything`);
+      assert.equal(d.outcome, 'success');
+      assert.deepEqual(d.entryIds, RECALLED);
     }
   });
 

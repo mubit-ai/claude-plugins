@@ -89,6 +89,18 @@ export const RUN_LEVEL_REFERENCE = 'global';
 export const MAX_OUTCOME_ATTEMPTS = 3;
 
 /**
+ * The turn-file key `capture --stop-failure` stamps when the host reports the turn ended on
+ * an API error, and the fifth row of the table below.
+ *
+ * It is a key of its own rather than `outcome: "failure"` — which is what build-guide §5.5
+ * originally prescribed ("On a StopFailure turn: outcome: 'failure', signal: -0.3") — because
+ * the two mean opposite things about the memory. `outcome: "failure"` says the work went
+ * badly, which is weak evidence against whatever was recalled. `api_error` says the turn
+ * never got to finish, which is evidence about nothing at all.
+ */
+export const API_ERROR_KEY = 'api_error';
+
+/**
  * §6.1: the two `outcomeMode` values that silence the implicit path.
  *
  * `off` disables implicit attribution altogether. `explicit` hands the call to the model
@@ -132,17 +144,39 @@ export function implicitOutcomesEnabled(cfg) {
  * | turn | posted |
  * | --- | --- |
  * | nothing injected | nothing |
+ * | the API killed the turn (`api_error`) | nothing |
  * | injected, the reply carried the memory's vocabulary | `success` +0.2 / `failure` -0.3, with `entry_ids` |
  * | injected, the reply carried none of it | `neutral` 0.0, with an empty `entry_ids` |
  * | injected, but the signal could not be computed | as before: `success` +0.2 / `failure` -0.3 |
  *
- * **Row 1 is what makes row 3 legible.** A turn that recalled nothing is never sent with an
+ * **Row 1 is what makes row 4 legible.** A turn that recalled nothing is never sent with an
  * empty `recalled[]`: an outcome attributed to nothing is a wasted round trip that also
  * pollutes the run-level signal history the reflect path reads. Because that call is skipped,
  * "no post" means one thing and one thing only — *nothing was injected* — and the neutral
  * record is the only way "injected and unused" reaches the wire.
  *
- * **Row 4 is not a hedge.** A turn staged before the used-signal existed, or one whose every
+ * **Row 2 posts nothing rather than a `neutral`, and that was the whole decision.**
+ * A turn that ended on `rate_limit`, `overloaded` or `max_output_tokens` did not fail because
+ * the recalled memory was wrong, so the failure branch is plainly out. `neutral` looks like
+ * the safe middle and is not, for two reasons that compound:
+ *
+ *   - `neutral` is not "no opinion". It is a specific claim — *memory was injected and the
+ *     reply shows no sign of it* — and it is already the hardest row to read, because the
+ *     signal behind it is dominated by false negatives. Filing API failures under it mixes
+ *     "the model ignored this memory" with "the endpoint fell over" in one bucket, with
+ *     nothing on the wire to separate them afterwards. Row 4 is the denominator of any
+ *     precision number this plugin can produce; diluting it costs the measurement the whole
+ *     used-signal was built to make possible.
+ *   - Every record still costs a round trip and a row in the run-level signal history the
+ *     reflect path reads. A rate limit rarely arrives alone — one throttled minute can be
+ *     several turns — so the failure mode is a burst of records that say nothing, precisely
+ *     when the endpoint is least able to absorb them.
+ *
+ * Suppression loses one thing, and it is worth naming: the count of turns lost to API errors
+ * never leaves the machine. It stays on the turn file (`api_error`, alongside `ended_at`),
+ * where `scripts/mubit-inspect.mjs` prints it per prompt — local diagnosis, not reinforcement.
+ *
+ * **Row 5 is not a hedge.** A turn staged before the used-signal existed, or one whose every
  * distinctive term was already in the user's prompt, was never measured. Reading that as "the
  * model ignored it" would invent a denominator, so it keeps the old behaviour — which is why
  * `used` is compared strictly against `false`: an absent key is "unmeasured" and must not
@@ -160,6 +194,16 @@ export function decideOutcome(turn) {
   // Already attributed by an earlier drain or flush. The stable key below makes a re-post a
   // server-side no-op anyway, but there is no reason to spend the round trip.
   if (numOr(turn.outcome_sent_at, 0) > 0) return { post: false, reason: 'already_sent' };
+
+  // Row 2 — the turn ended on an API error. `capture --stop-failure` is the only writer of
+  // this key, and it writes it because `StopFailure` fires *instead of* `Stop`: without it
+  // the turn would look like an ordinary unmeasured one and post +0.2 against ids the model
+  // never got to use.
+  //
+  // Checked before `attempts_exhausted` on purpose: a turn nothing will ever dial must never
+  // accumulate a dial count, and `attempts_exhausted` is the one reason a caller acts on by
+  // marking the turn abandoned — a state that would misreport this as three failed posts.
+  if (str(turn[API_ERROR_KEY])) return { post: false, reason: 'api_failed' };
 
   // Posted, never answered, repeatedly. The caller marks the turn abandoned on this reason —
   // this module reads the turn and never writes it.

@@ -397,9 +397,22 @@ test('drain --with-outcome: skips the outcome call when outcomeMode is "off"', a
   server.assertNotCalled('POST', '/v2/control/outcome');
 });
 
-// §5.5 — "On a StopFailure turn: outcome: "failure", signal: -0.3." The turn file records
-// how the turn ended, so the drain never has to re-derive it.
-test('drain --with-outcome: a StopFailure turn posts outcome "failure" at signal -0.3', async (t) => {
+/**
+ * §5.5 — a turn whose file records `outcome: "failure"` posts `failure` / -0.3. The turn file
+ * records how the turn ended, so the drain never has to re-derive it.
+ *
+ * This used to be titled "a StopFailure turn", after §5.5's line *"On a StopFailure turn:
+ * outcome: 'failure', signal: -0.3."* It never was one. Nothing in the plugin has ever
+ * written `outcome` onto a turn file — the key exists only here and in the other tests that
+ * seed it — because `StopFailure` was not registered, and the host fires it **instead of**
+ * `Stop`, so the hook that would have written it never ran on those turns.
+ *
+ * Now that `StopFailure` IS registered, the guide's row is the one thing this ticket
+ * overturns: an API-failed turn posts nothing at all (see `api_error` below). The row this
+ * test covers is the different and still-real one — a turn the *file* records as having
+ * failed, whatever wrote that.
+ */
+test('drain --with-outcome: a turn recorded as failed posts outcome "failure" at signal -0.3', async (t) => {
   const dataDir = makeDataDir();
   const server = await mubit(t);
   seedSpool(dataDir, 1);
@@ -415,6 +428,40 @@ test('drain --with-outcome: a StopFailure turn posts outcome "failure" at signal
   assert.equal(body.outcome, 'failure');
   assert.equal(body.signal, -0.3);
   assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
+});
+
+/**
+ * The `StopFailure` row, through the drain — one of the two hooks that share
+ * `lib/outcome.mjs`, and the one the ticket's claim is written against: *a turn that died on
+ * `rate_limit` never reaches `record_outcome`.*
+ *
+ * The drain reaches this turn only if something hands it `--with-outcome`, which
+ * `capture --stop-failure` deliberately does not do. That makes this the belt to
+ * `capture.mjs`'s braces: the ingest still goes out (those tool calls were real work), and
+ * the outcome does not, even when the argv says to attribute.
+ */
+test('drain --with-outcome: a turn the API killed ingests, and posts no outcome', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 2);
+  seedTurn(dataDir, { api_error: 'rate_limit' });
+
+  const r = await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--with-outcome', PROMPT_ID],
+  });
+  assertHookContract(r);
+
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  server.assertNotCalled('POST', '/v2/control/outcome');
+
+  // Not dialled, so not counted. `attempts` is a budget for posts that may have landed
+  // unanswered; spending it on a turn nothing will ever send would eventually mark a turn
+  // abandoned for a failure that never happened.
+  const turn = readJsonFile(join(runDir(dataDir), 'turns', `${PROMPT_ID}.json`));
+  assert.ok(!(Number(turn.outcome_attempts) > 0),
+    `a suppressed turn must not spend an attempt: ${JSON.stringify(turn.outcome_attempts)}`);
+  assert.ok(!turn.outcome_sent_at, 'nothing was sent, so nothing may claim it was');
 });
 
 // ---------------------------------------------------------------------------

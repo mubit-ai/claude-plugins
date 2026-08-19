@@ -147,6 +147,50 @@ test('the injected block says memory may be incomplete and should be verified', 
   assert.match(ctx, /<\/mubit-memory>$/);
 });
 
+// §5.2 rung 1 / §7 — the recall hook is also the rule store's supplier.
+//
+// `hooks/src/pre-tool.mjs` runs while the user waits on a tool call and may never dial, so
+// its only supply is a hook that has already paid for a round trip. This is that hook, and
+// the wiring is easy to lose: the call lives in `lib/recall.mjs`'s `fromEvidence`, one file
+// removed from the hook under test, and nothing else in the suite drives it end to end —
+// `pre-tool.test.mjs` and `hook-output.test.mjs` both seed `rules.json` by hand. Without
+// this test the producer half could be deleted outright and the suite would stay green.
+test('a rule in the recall response reaches rules.json, and a non-rule does not', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': {
+      json: queryResponse({
+        evidence: [
+          evidence({
+            id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule',
+            content: 'Never force-push to main; it is protected and the push will be rejected.',
+          }),
+          evidence({
+            id: 'e2', reference_id: 'ref_fact_1', entry_type: 'fact',
+            content: 'The ingest worker polls every thirty seconds.',
+          }),
+        ],
+      }),
+    },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  assertHookContract(r);
+  // Without this, a mis-keyed route reads as "the store was not written" and sends the next
+  // reader hunting through `lib/rules.mjs` for a bug that is in the fixture.
+  server.assertCalled('POST', '/v2/control/query', 1);
+
+  const stored = readJsonFile(join(dir, 'runs', RUN_ID, 'rules.json'));
+  assert.ok(stored, 'prompt-recall recalled a rule and stored none, so pre-tool has nothing '
+    + 'to warn from — the store is only ever filled by a hook that already paid for a call');
+
+  const refs = (stored.rules ?? []).map((/** @type {any} */ x) => x.ref);
+  assert.deepEqual(refs, ['ref_rule_1'],
+    'the store must hold the rule and only the rule: a fact surfaced as a tool-call warning '
+    + `is noise the user cannot act on (got ${JSON.stringify(refs)})`);
+});
+
 test('rung 1 request body matches §5.2 exactly', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());

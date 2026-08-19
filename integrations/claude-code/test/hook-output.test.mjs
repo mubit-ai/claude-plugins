@@ -169,9 +169,11 @@ function registrations() {
 /**
  * `setup` seeds whatever the hook needs to reach the branch that *speaks*, and returns payload
  * overrides. A gate that only ever exercised the suppressing branch would stay green against a
- * plugin that had stopped emitting anything at all.
+ * plugin that had stopped emitting anything at all. `env` adds environment on top of the
+ * shared one, for a hook whose speaking branch is behind an opt-in flag.
  *
  * @type {Record<string, {setup?: (dataDir: string) => Record<string, any>,
+ *                       env?: Record<string, string>,
  *                       payload: (over: Record<string, any>) => Record<string, any>}>}
  */
 const CASES = {
@@ -183,6 +185,14 @@ const CASES = {
   },
   'UserPromptSubmit stage-prompt': {
     payload: () => fx.userPromptSubmit({ cwd: PROJECT_DIR }),
+  },
+  'PreToolUse pre-tool': {
+    // The flag is off by default, and a suppressed hook would satisfy this gate vacuously —
+    // it is the *speaking* shape the host has to accept. So opt in and seed a rule the
+    // fixture's `git push --force origin main` actually matches.
+    env: { MUBIT_CC_PRE_TOOL_WARNINGS: '1' },
+    setup: (dataDir) => { seedRule(dataDir); return {}; },
+    payload: () => fx.preToolUse({ cwd: PROJECT_DIR }),
   },
   'PostToolUse capture': {
     payload: () => fx.postToolUse({ cwd: PROJECT_DIR }),
@@ -230,6 +240,22 @@ function writeTranscript(dataDir) {
     line('assistant', 'It stays queued until indexing completes.'),
   ].join('\n')}\n`);
   return path;
+}
+
+/**
+ * §7: `runs/<run_id>/rules.json`, the store `session-start` and `prompt-recall` fill and
+ * `pre-tool` reads. The text has to share terms with the `preToolUse` fixture's command
+ * (`git push --force origin main`) or the hook correctly says nothing and this gate goes
+ * vacuous.
+ */
+function seedRule(dataDir) {
+  const dir = join(dataDir, 'runs', RUN_ID);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'rules.json'), JSON.stringify({
+    version: 1,
+    updated_at: Date.now(),
+    rules: [{ ref: 'ref_rule_1', text: 'Never force-push to main; open a pull request instead.' }],
+  }));
 }
 
 /** §7: `runs/<run_id>/checkpoints.json`, the file `--pre` writes and `--post` reads. */
@@ -314,7 +340,7 @@ for (const reg of registrations()) {
     const over = spec.setup ? spec.setup(dataDir) : {};
 
     const r = await runHook(reg.hook, spec.payload(over), {
-      env: env(dataDir, server.url),
+      env: { ...env(dataDir, server.url), ...(spec.env ?? {}) },
       args: reg.args,
     });
 

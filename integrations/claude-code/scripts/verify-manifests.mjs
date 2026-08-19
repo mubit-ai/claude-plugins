@@ -151,8 +151,9 @@ if (hooks) {
       `${where}: ${script} does not exist → ${abs}\n    Build it: npm --prefix integrations/claude-code run build (§11.2)`);
   }
 
-  const expectedEvents = ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
-    'Stop', 'StopFailure', 'SubagentStop', 'PreCompact', 'PostCompact', 'SessionEnd'];
+  const expectedEvents = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse',
+    'PostToolUseFailure', 'Stop', 'StopFailure', 'SubagentStop', 'PreCompact', 'PostCompact',
+    'SessionEnd'];
   const events = Object.keys(hooks.hooks ?? {});
   const missing = expectedEvents.filter((e) => !events.includes(e));
   const extra = events.filter((e) => !expectedEvents.includes(e));

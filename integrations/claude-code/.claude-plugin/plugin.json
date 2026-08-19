@@ -37,6 +37,8 @@
       "description": "How turn outcomes are attributed back to recalled memories: off, implicit, or explicit." },
     "statusLine": { "type": "boolean", "title": "Status line", "default": true,
       "description": "Show Mubit connection and capture stats in the status line." },
+    "preToolWarnings": { "type": "boolean", "title": "Warn before matching tool calls", "default": false,
+      "description": "Show the model a stored Mubit rule just before a matching Bash command runs (rm, git push). It only ever warns: it never blocks, rewrites or asks about a tool call, and it is a memory-informed reminder rather than a security boundary — use permissions for a hard allow or deny. Off by default." },
     "mcpTools": { "type": "string", "title": "MCP tool allowlist", "default": "",
       "description": "Comma-separated allowlist of Mubit MCP tools. Blank uses the curated default set." },
     "mcpLessonScope": { "type": "string", "title": "MCP lesson scope ceiling", "default": "run",

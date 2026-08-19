@@ -77,6 +77,7 @@ import { assembleContext, estimateTokens } from './assemble.mjs';
 import { envTags } from './config.mjs';
 import { postContext, postQuery } from './http.mjs';
 import { log } from './log.mjs';
+import { recordRules } from './rules.mjs';
 import { readJson, resolveDataDir, writeJsonAtomic } from './state.mjs';
 
 /** §5.2 step 3: rung 2 costs an LLM call; do not start one that cannot land. */
@@ -287,6 +288,19 @@ async function rungThree(cfg, o) {
  * in the same order, with the same `emptyReason` vocabulary rung 3 would have produced
  * (§4.10). That is what makes `additionalContext` rung-agnostic.
  *
+ * It is also where the rule store is filled. The `rule`-typed entries in this same
+ * `evidence[]` are written to `runs/<run_id>/rules.json` for `hooks/src/pre-tool.mjs` to read
+ * in front of a matching tool call. That hook may not dial — it runs while the user waits on
+ * the call — so its only supply is a hook that has already paid for a round trip, and this is
+ * the one that pays on every prompt. A pure side effect: `recordRules` never throws, writes
+ * one small file, and cannot change what this function returns.
+ *
+ * Rung 3 has no equivalent and deliberately gets none: `POST /v2/control/context` answers
+ * with a pre-assembled `context_block` and `sources[]`, and no per-entry `entry_type` at all,
+ * so there is nothing there to filter to `rule`. On the opt-in `recallAssemble: "server"`
+ * path the store is therefore fed by `session-start` alone — worth knowing before reading a
+ * quiet `pre-tool` as a bug.
+ *
  * @param {Record<string, any>} cfg
  * @param {any} responseBody
  * @param {number} rung
@@ -296,6 +310,7 @@ async function rungThree(cfg, o) {
 function fromEvidence(cfg, responseBody, rung, o) {
   const b = isObject(responseBody) ? responseBody : {};
   const evidence = Array.isArray(b.evidence) ? b.evidence : [];
+  if (o?.runId) recordRules(cfg, o.runId, evidence);
   const a = assembleContext(evidence, {
     tokenBudget: tokenBudgetOf(cfg, o),
     perSection: intOr(o.perSection ?? cfg.recallMaxPerSection, 0),

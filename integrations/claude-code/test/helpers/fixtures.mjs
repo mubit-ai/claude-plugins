@@ -42,6 +42,34 @@ export const userPromptSubmit = (over = {}) => base({
 });
 
 /**
+ * PreToolUse — the tool call as the host is *about* to run it.
+ *
+ * Read off Claude Code 2.1.235's own executor rather than imagined, by the `strings -a`
+ * technique `hook-output.test.mjs:80-88` documents:
+ *
+ *     async function*Rrr(e,t,r,n,o,i,s=f_,a){ … let c={...Ly(n.session,Vt(),o,n),
+ *       hook_event_name:"PreToolUse",tool_name:e,tool_input:r,tool_use_id:t}; … }
+ *
+ * and `Ly` — the shared base every hook input is spread from — supplies
+ * `{session_id, transcript_path, cwd, prompt_id, permission_mode, agent_id, agent_type,
+ * effort}`.
+ *
+ * So there is **no `tool_response` and no `duration_ms`**: the call has not run, which is the
+ * entire point of the event. A hook that reaches for a result here reads `undefined` on every
+ * call and cannot tell that from a tool that returned nothing.
+ *
+ * @param {Record<string,any>} [over]
+ */
+export const preToolUse = (over = {}) => base({
+  hook_event_name: 'PreToolUse',
+  prompt_id: PROMPT_ID,
+  tool_name: 'Bash',
+  tool_input: { command: 'git push --force origin main' },
+  tool_use_id: TOOL_USE_ID,
+  ...over,
+});
+
+/**
  * PostToolUse.
  *
  * The tool's result rides in **`tool_response`**, and the duration in **`duration_ms`**.

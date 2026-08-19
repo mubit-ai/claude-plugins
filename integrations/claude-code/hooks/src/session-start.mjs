@@ -51,6 +51,7 @@ import { runHook } from '../../lib/hook.mjs';
 import { health, heartbeat, postLessons, registerAgent } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
+import { recordRules } from '../../lib/rules.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import { dataDir, readJson, resolveDataDir, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -239,8 +240,19 @@ await runHook('session-start', {
     if (lessonBudget > 0) {
       const lres = await postLessons(cfg, { scope: 'global', limit: LESSON_LIMIT },
         { timeoutMs: lessonBudget });
-      if (lres.ok) lessons = readLessons(lres.body);
-      else {
+      if (lres.ok) {
+        lessons = readLessons(lres.body);
+        // HS-7 — the `rule`-typed ones also go to `runs/<run_id>/rules.json`, for
+        // `pre-tool.mjs` to read in front of a matching tool call. That hook may not dial, so
+        // its only supply is a hook that has already paid for a round trip; this is one of
+        // the two, and it is a pure side effect of a call that was made anyway. `recordRules`
+        // never throws and never blocks (`lib/rules.mjs`).
+        //
+        // The RAW array, not `lessons` above: `readLessons` renames `lesson_type` to `type`
+        // on the way through, and the store reads the wire names so that one normaliser can
+        // serve both producers.
+        recordRules(cfg, runId, Array.isArray(lres.body?.lessons) ? lres.body.lessons : []);
+      } else {
         log(cfg, 'info', `session-start: global lessons unavailable (${lres.error})`, { run_id: runId });
         if (!authError && connState(lres.state) === 'auth_failed') authError = String(lres.error ?? '');
       }

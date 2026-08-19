@@ -495,6 +495,10 @@ const USER_CONFIG_ROWS = [
   { key: 'statusLine', env: 'MUBIT_CC_STATUSLINE', field: 'statusLine', raw: '0', optRaw: 'false', want: false },
   { key: 'mcpTools', env: 'MUBIT_MCP_TOOLS', field: 'mcpTools', raw: 'mubit_recall,mubit_remember', want: ['mubit_recall', 'mubit_remember'] },
   { key: 'mcpLessonScope', env: 'MUBIT_MCP_LESSON_SCOPE', field: 'mcpLessonScope', raw: 'global', want: 'global' },
+  // The only row that defaults to `false`, so it is the opt-*in* direction that has to be
+  // proven here. Its default is asserted separately below, and again in `pre-tool.test.mjs`
+  // against the running hook — this is the stage that can put text in front of a tool call.
+  { key: 'preToolWarnings', env: 'MUBIT_CC_PRE_TOOL_WARNINGS', field: 'preToolWarnings', raw: '1', optRaw: 'true', want: true },
 ];
 
 for (const row of USER_CONFIG_ROWS) {
@@ -543,6 +547,10 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.outcomeMode, 'implicit');
   assert.equal(cfg.reflectOnEnd, true);
   assert.equal(cfg.statusLine, true);
+  // Off. This is the one setting that can put text in front of a tool call, so nothing
+  // changes for an existing user until they ask for it — which is also what makes "measure
+  // how often it fires" a safe thing to run.
+  assert.equal(cfg.preToolWarnings, false);
   assert.equal(cfg.maxParamBytes, 4096);
   assert.equal(cfg.maxOutputBytes, 8192);
   assert.equal(cfg.batchMaxItems, 32);

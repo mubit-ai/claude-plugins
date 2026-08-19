@@ -12,6 +12,13 @@
         { "type": "command", "command": "node", "timeout": 3,
           "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/stage-prompt.mjs"] } ] }
     ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [
+        { "type": "command", "command": "node", "timeout": 3, "if": "Bash(rm *)",
+          "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/pre-tool.mjs"] },
+        { "type": "command", "command": "node", "timeout": 3, "if": "Bash(git push *)",
+          "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/pre-tool.mjs"] } ] }
+    ],
     "PostToolUse": [
       { "matcher": "*",
         "hooks": [ { "type": "command", "command": "node", "timeout": 3,

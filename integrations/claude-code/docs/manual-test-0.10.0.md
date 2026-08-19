@@ -393,88 +393,181 @@ with. It records no score, on purpose. False negatives dominate: a model that re
 
 ## §5 — Capture, and what never leaves the machine
 
-Capture runs on every tool call with **zero network I/O** — it classifies, redacts, and writes
-one spool file. Work normally in `$SCRATCH` for a few turns, then:
-
-```bash
-find "$DATA/runs" -path '*/spool/*.json' | wc -l          # pending items
-python3 -m json.tool "$(find "$DATA/runs" -path '*/spool/*.json' | head -1)" | head -12
-```
-
-**Expect** an item whose `intent` is set and never `unclassified` — an unclassified item makes
-the server run an LLM classification call *per item* — and whose `text` has something after the
-arrow. If it ends at `-> ` the capture recorded that a file was touched and not what was in it.
-
-**Prove redaction drops rather than scrubs.** A capture whose subject is a denied path is
-discarded whole:
+Capture runs on every tool call with **zero network I/O** — it classifies, redacts, and spools
+locally. Do some real work first:
 
 ```bash
 cd "$SCRATCH"
-printf 'MUBIT_API_KEY=mbt_live_dontleakme\n' > .env
-before=$(find "$DATA/runs" -path '*/spool/*.json' | wc -l)
-claude --plugin-dir "$PLUG" -p "read the .env file in this directory and tell me what is in it"
-echo "spool grew by $(( $(find "$DATA/runs" -path '*/spool/*.json' | wc -l) - before ))   (expect 0)"
-grep -rl "dontleakme" "$DATA" || echo "the secret is nowhere on disk ✓"
+printf 'export const add = (a,b) => a+b;\n' > calc.js
+git add -A && git commit -qm calc
+claude --plugin-dir "$PLUG" --allowedTools "Read,Write,Edit,Bash,Glob,Grep" \
+  -p "read calc.js, then add a subtract function to it"
+
+node "$PLUG/scripts/mubit-inspect.mjs" | grep capture
+```
+
+**Expect** — the spool reads 0 because the drain already flushed it, which is the healthy state:
+
+```
+capture     tools 0 · turns 0 · pending 0 · ingested 3 · spool 0 · jobs 1 (last: queued, 3 items)
+```
+
+> `captured.tools` and `captured.turns` are live gauges, not lifetime counters — they fall back
+> to 0 once a drain clears the spool. `ingested` is the cumulative one. This is why the status
+> line's `saved Nt/Nq` segment is usually absent on a quiet run.
+
+**`queued` is not `stored`.** A 200 is an acknowledgement; the job is where it becomes durable:
+
+```bash
+RUN=$(basename $(find "$DATA/runs" -maxdepth 1 -mindepth 1 -type d | head -1))
+JOB=$(python3 -c "import json;print(json.load(open('$DATA/runs/$RUN/jobs.json'))[-1]['job_id'])")
+curl -s -H "Authorization: Bearer $MUBIT_API_KEY" \
+  "https://api.mubit.ai/v2/control/ingest/jobs/$JOB?run_id=$RUN" \
+ | python3 -c "import json,sys;d=json.load(sys.stdin);print('status=%s done=%s'%(d.get('status'),d.get('done')))"
+```
+
+**Expect** `status=completed done=True`. If it never leaves `queued`, the embedding service
+behind your instance is down — the most common backend failure by a wide margin.
+
+### Redaction drops, it does not scrub
+
+The strongest version of this test: let the model actually read the secrets and print them in
+its reply, then check whether any of it reached the plugin's state.
+
+```bash
+cd "$SCRATCH"
+printf 'MUBIT_API_KEY=mbt_live_dontleakme_0000\nDB_PASSWORD=hunter2_dontleakme\n' > .env
+mkdir -p build && printf 'console.log("bundled dontleakme");\n' > build/bundle.js
+printf 'node_modules/\nbuild/\n' > .gitignore
+
+claude --plugin-dir "$PLUG" --allowedTools "Read,Bash,Glob" \
+  -p "read the .env file and the build/bundle.js file and tell me the first word of each"
+
+grep -rl "dontleakme" "$DATA" && echo "!! LEAKED" || echo "the secret is nowhere on disk ✓"
+grep -rl "hunter2"    "$DATA" || echo "not present ✓"
 rm -f .env
 ```
 
-**Expect** `spool grew by 0` and `the secret is nowhere on disk ✓`.
+**Expect** — the model answers using both files, and neither string reaches disk:
 
-Then push the spool to Mubit and watch the job become durable:
-
-```bash
-node "$PLUG/scripts/mubit-inspect.mjs" | grep -E 'capture|totals'
+```
+the secret is nowhere on disk ✓
+not present ✓
 ```
 
-**Expect** `jobs N (last: queued, M items)`.
+Two independent rules fired: `.env` is a denied path, and `build/` is git-ignored
+(`MUBIT_CC_RESPECT_GITIGNORE`, default true). A capture whose subject is denied is discarded
+whole rather than scrubbed — there is no redacted stub left behind.
 
-> `queued` means **queued, not stored**. A 200 is an acknowledgement; the job is where it becomes
-> durable. If a job never leaves `queued`, the embedding service behind your instance is down —
-> by a wide margin the most common cause.
+You can see the third rule at work in §4's resolved output, where a captured `Edit` came back as
+`Edit([REDACTED:high-entropy].js, …)`: a path that looked like a secret was scrubbed inside an
+item that was otherwise kept.
 
----
 
 ## §6 — Lessons: generated → recalled → used
 
-> **Do this in an interactive session.** In headless `-p` mode the host cancels SessionEnd about
-> a second in, so reflect never runs. You will see this exactly once per headless call:
-> `SessionEnd hook […] failed: Hook cancelled`. It is a known harness limitation, not a plugin
-> fault, and it means **lesson generation cannot be tested with `-p`.**
+> **Reflection needs an interactive session.** Under `--print` the host cancels SessionEnd about
+> a second in — you will see `SessionEnd hook […] failed: Hook cancelled` on every headless run —
+> so end-of-session reflection never fires. The explicit skills below work headlessly because
+> they call the MCP tools directly; only the *automatic* reflection is unavailable.
 
-Start a session — `claude --plugin-dir "$PLUG"` — and walk the lifecycle:
-
-| Step | Type | What to check |
-|---|---|---|
-| 1. Generate | `/mubit-memory:remember we always deploy from the release branch, never from main` | reports a lesson id |
-| 2. Generate (bulk) | `/mubit-memory:reflect` | reports each lesson with id, type, scope. An empty result is a real answer, not an error |
-| 3. Recall | `/mubit-memory:recall what did we decide about deploys` | the lesson comes back |
-| 4. Recall (deep) | `@mubit-memory:mubit-recall what do we know about our deploy process` | a synthesis, not raw evidence. Bounded: Haiku, low effort, 3 turns, ≤3 queries |
-| 5. Delete | `/mubit-memory:forget <lesson id>` | no dry run, no undo |
-
-Between steps, from another terminal with the same `$DATA` exported:
+Headless, grant the tools explicitly:
 
 ```bash
-node "$PLUG/scripts/mubit-inspect.mjs" | tail -6
+MCP=mcp__plugin_mubit-memory_mubit
+claude --plugin-dir "$PLUG" \
+  --allowedTools "${MCP}__mubit_learned,${MCP}__mubit_lessons,${MCP}__mubit_recall,${MCP}__mubit_forget" \
+  -p "use the mubit remember skill to save this lesson: always run node --check before committing in this project"
 ```
 
-**Expect** the `lessons` line to move:
+Interactively it is just `/mubit-memory:remember …`.
+
+### 1. It was written — but check the scope
+
+```bash
+for S in global session run; do
+  printf '%-8s ' "$S"
+  curl -s -X POST -H "Authorization: Bearer $MUBIT_API_KEY" -H 'content-type: application/json' \
+    -d "{\"run_id\":\"$RUN\",\"scope\":\"$S\",\"limit\":50}" https://api.mubit.ai/v2/control/lessons \
+  | python3 -c "import json,sys;print(len(json.load(sys.stdin).get('lessons',[])))"
+done
+```
+
+**Expect**
 
 ```
-lessons     global 3 · injected_ids 2 (credited) · reflect: 1 stored, status=ok
+global   0
+session  1
+run      0
 ```
 
-`reflect.status` is one of `ok`, `failed`, `skipped:disabled`, `skipped:not-ingested`,
-`skipped:undrained`. A **blank** status on a written marker means the hook was killed mid-flight.
+> **A remembered lesson never reaches `global` scope, whatever you type.** The remember skill's
+> only write tool is `mubit_learned`, which hardcodes `lesson_scope: "session"`. So the lesson
+> follows this project and does not follow you to another repo. Reflection is the only path that
+> widens scope. This is a known limitation, not a misuse of the skill.
 
-> Reflection at session end is the only path that promotes a lesson beyond the run that produced
-> it. `reflectOnEnd` defaults to true; turning it off to save a few seconds at exit trades away
-> cross-session memory entirely.
+### 2. It comes back on its own
 
-> Known limit: `/mubit-memory:remember` writes through `mubit_learned`, which hardcodes
-> `lesson_scope: "session"`. A remembered lesson therefore never lands at `global` scope, no
-> matter what you type. Check with `mubit_lessons` at each scope if it matters to you.
+The point of the whole system: not that you can search for it, but that you do not have to.
+Give ingest a few seconds to index, then ask a question in the same run that never mentions the
+lesson:
 
----
+```bash
+sleep 10
+claude --plugin-dir "$PLUG" --debug-file /tmp/s6.log -p "what should I do before committing in this project?"
+grep -ao 'mubit: [0-9][^"\\]*' /tmp/s6.log | head -1
+```
+
+**Expect** an injection, with no tool call and no search:
+
+```
+mubit: 3 memories · 283 tok · 670ms
+```
+
+```bash
+node "$PLUG/scripts/mubit-inspect.mjs" --prompt <that prompt id> --resolve
+```
+
+**Expect** the lesson named, alongside the traces that produced it:
+
+```
+recalled (3)
+  d6d47b2f-…
+    [lesson conf 0.66] …always run the build with `node --check` before committing…
+  519c1311-…
+    [trace conf 0.50] Skill(skill=mubit-memory:remember, args=…) -> {"success":true,…
+  0acd2a16-…
+    [trace conf 0.57] Edit([REDACTED:high-entropy].js, old_string=export const add …
+```
+
+### 3. Deleting one
+
+```
+/mubit-memory:forget d6d47b2f-c6c0-4c2c-8a2a-170bda484e6d
+```
+
+**Expect it to refuse the first time.** Measured: the skill explains that deletion cannot be
+undone, offers a negative outcome as the softer alternative, and waits. That is deliberate — say
+"yes, delete it" to proceed:
+
+```
+Deleted. Lesson d6d47b2f-… is gone from Mubit memory — mubit_forget returned success.
+That deletion can't be undone.
+```
+
+Verify against the store, not the reply:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $MUBIT_API_KEY" -H 'content-type: application/json' \
+  -d "{\"run_id\":\"$RUN\",\"scope\":\"session\",\"limit\":10}" https://api.mubit.ai/v2/control/lessons \
+| python3 -c "import json,sys;print(len(json.load(sys.stdin).get('lessons',[])))"
+```
+
+**Expect** `0`.
+
+For a lesson that is merely *wrong* rather than harmful, prefer letting outcome attribution
+down-weight it (§7) — deletion has no undo.
+
 
 ## §7 — Attribution: did the memory earn its keep
 
@@ -539,71 +632,169 @@ belief that outcomes move over time, the second is per-query relevance, recomput
 
 ## §8 — Compaction
 
-In a long session, run `/compact`.
+In a long session, run `/compact`. To exercise it now without one, drive the hook the way the
+host does — build a transcript and feed it in:
 
-**Expect**, before the host throws the transcript away:
+```bash
+python3 -c "
+import json
+with open('/tmp/transcript.jsonl','w') as f:
+    for i in range(300):
+        f.write(json.dumps({'type':'assistant','message':{'role':'assistant',
+            'content':[{'type':'text','text':'turn %d: the drain lock is stolen after 60s.'%i}]}})+'\n')"
 
+echo "{\"session_id\":\"g\",\"transcript_path\":\"/tmp/transcript.jsonl\",\"cwd\":\"$SCRATCH\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"manual\"}" \
+ | CLAUDE_PROJECT_DIR="$SCRATCH" node "$PLUG/hooks/dist/checkpoint.mjs" --pre
 ```
-mubit: checkpoint <id> saved (3.4k tok) before compaction
+
+**Expect** the one message the plugin puts in front of a user during compaction:
+
+```json
+{"systemMessage":"mubit: checkpoint 007b4f01-2379-4e1e-b717-b7bfb0f25351 saved (8.0k tok) before compaction"}
 ```
 
 ```bash
-python3 -m json.tool "$DATA/runs/<run id>/checkpoints.json"
+find "$DATA/runs" -name checkpoints.json -exec python3 -m json.tool {} \;
 ```
 
-**Expect** an array of `{checkpoint_id, token_estimate, at}`.
+**Expect**
 
-> **PostCompact is silent in 0.10.0, and that is the fix.** Earlier builds emitted a
-> `systemMessage` there; the host rejects `PostCompact` as a `hookSpecificOutput.hookEventName`,
-> so every one of those re-anchor messages was silently discarded. The hook now returns
-> `{"suppressOutput": true}` on every path and the re-anchor moved into SessionStart's `compact`
-> source. If you see a PostCompact message, you are on an older build.
+```json
+[ { "checkpoint_id": "007b4f01-…", "token_estimate": 8035, "at": 1787102504451 } ]
+```
 
-PreCompact is the one blocking network call in the plugin (5000 ms budget). It is also the only
-hook that will show you a failure in the UI:
+**PostCompact must say nothing.** Measured:
+
+```bash
+echo "{\"session_id\":\"g\",\"hook_event_name\":\"PostCompact\"}" \
+ | node "$PLUG/hooks/dist/checkpoint.mjs" --post
+```
+
+```json
+{"suppressOutput":true}
+```
+
+> That silence is the 0.10.0 fix, not a regression. Earlier builds emitted a `systemMessage`
+> here, and the host rejects `PostCompact` as a `hookSpecificOutput.hookEventName` — so every one
+> of those re-anchor messages was silently discarded. The re-anchor moved into SessionStart's
+> `compact` source. If you see a PostCompact message, you are on an older build.
+
+PreCompact is the one blocking network call in the plugin (5000 ms budget), and the only hook
+that shows a failure in the UI:
 `mubit: checkpoint failed (<state>) — pre-compaction context not saved`.
 
----
 
 ## §9 — Failure drills
 
 The actual deliverable of the whole design: capture that works is easy, capture that cannot make
 a session worse is the thing people keep installed. **Every hook exits 0, always.**
 
-**A wrong key stays visible.** It is the one error a user can fix, so it must not hide behind a
-cooldown:
+These drive the hooks directly rather than starting a session each time — same code path, same
+bundles, seconds instead of minutes.
+
+> ### The trap that will silently void these drills
+>
+> **`MIN_PROMPT_CHARS = 8`.** `prompt-recall.mjs:174` returns early on any prompt shorter than
+> eight characters — before the config is used, before the network, before any marker or breaker
+> is written. A drill driven with `"note 1"` (six characters) touches nothing at all and leaves
+> only `config.json` on disk, which reads exactly like a plugin that has stopped working.
+> Measured, against a dead endpoint where any network attempt would leave a breaker file:
+>
+> ```
+> len=1   "a"                        -> 1 files (skipped, no network)
+> len=6   "note 1"                   -> 1 files (skipped, no network)
+> len=7   "note 12"                  -> 1 files (skipped, no network)
+> len=8   "note 123"                 -> 5 files (recall ran)
+> len=25  "a much longer prompt here" -> 5 files (recall ran)
+> ```
+>
+> Use a realistic sentence in every payload below.
+
+### A wrong key stays visible
+
+It is the one error a user can actually fix, so it must not hide behind a cooldown.
 
 ```bash
-BAD=/tmp/mubit-ux-badkey && rm -rf $BAD && mkdir -p $BAD
-MUBIT_CC_DATA_DIR=$BAD MUBIT_API_KEY=mbt_live_wrongkey_00000000000000000000 \
-  claude --plugin-dir "$PLUG" -p "anything at all"; echo "exit=$?"
-python3 -m json.tool $BAD/breaker/*.json | head -6
+BAD=/tmp/mubit-badkey && rm -rf $BAD && mkdir -p $BAD
+echo "{\"session_id\":\"bad\",\"prompt_id\":\"p_bad\",\"cwd\":\"$SCRATCH\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"anything at all here\"}" \
+ | MUBIT_CC_DATA_DIR=$BAD CLAUDE_PLUGIN_DATA=$BAD MUBIT_ENDPOINT=https://api.mubit.ai \
+   MUBIT_API_KEY=mbt_live_wrongkey_000000000000000000 CLAUDE_PROJECT_DIR="$SCRATCH" \
+   node "$PLUG/hooks/dist/prompt-recall.mjs"; echo "  exit=$?"
+
+python3 -c "
+import json,glob
+for f in glob.glob('$BAD/breaker/*.json'):
+    j=json.load(open(f)); print({k:j[k] for k in ('state','failures','openedAt')})
+for f in glob.glob('$BAD/status/cc-*.json'):
+    print('marker state =', json.load(open(f))['state'])"
 ```
 
-**Expect** `exit=0`, state `auth_failed`, and `failures` still **empty** — a 401 deliberately
-does not feed the failure counter.
+**Expect**, and it held identically across three consecutive trials:
 
-**A dead endpoint loses nothing.** Pointing at a closed port exercises the identical
-`ECONNREFUSED` path as killing the process, and costs nothing to undo:
+```
+{"suppressOutput":true}
+  exit=0
+{'state': 'auth_failed', 'failures': [], 'openedAt': 0}
+marker state = auth_failed
+```
+
+`failures` is **empty** and the breaker never opened. A 401 deliberately does not feed the
+failure counter — opening a circuit on a bad key hides the one fault the user could have fixed
+behind a 120-second cooldown.
+
+### A dead endpoint loses nothing, and opens the circuit at exactly five
 
 ```bash
-DEAD=/tmp/mubit-ux-dead && rm -rf $DEAD && mkdir -p $DEAD
-for i in 1 2 3 4 5 6; do
-  MUBIT_CC_DATA_DIR=$DEAD MUBIT_ENDPOINT=http://127.0.0.1:9 \
-    claude --plugin-dir "$PLUG" -p "note $i" >/dev/null 2>&1; echo "run $i exit=$?"
+D=/tmp/mubit-dead && rm -rf $D && mkdir -p $D
+for i in 1 2 3 4 5 6 7; do
+  echo "{\"session_id\":\"d\",\"prompt_id\":\"p$i\",\"cwd\":\"$SCRATCH\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"this is prompt number $i, long enough to trigger recall\"}" \
+   | MUBIT_CC_DATA_DIR=$D CLAUDE_PLUGIN_DATA=$D MUBIT_ENDPOINT=http://127.0.0.1:9 \
+     MUBIT_API_KEY=mbt_live_wrongkey_000000000000000000 CLAUDE_PROJECT_DIR="$SCRATCH" \
+     node "$PLUG/hooks/dist/prompt-recall.mjs" >/dev/null
+  rc=$?
+  python3 -c "
+import json,glob
+f=sorted(glob.glob('$D/breaker/*.json')); j=json.load(open(f[0])) if f else {}
+print('call $i exit=$rc  breaker=%-12s failures=%s open=%s' % (j.get('state','-'), len(j.get('failures',[])), j.get('openedAt',0)>0))"
 done
-find $DEAD/runs -path '*/spool/*.json' | wc -l    # must have GROWN
-node "$PLUG/scripts/mubit-inspect.mjs" --data $DEAD | tail -3
 ```
 
-**Expect** every exit `0`, the spool grown, and the breaker open after **exactly 5** failures.
-`breaker` state is **per endpoint** — one file per hashed endpoint — so a healthy instance's
-verdict is never touched by a dead one's.
+**Expect**
 
-`○ warming` inside the 20 s cold-start window and `· paused Ns` while the breaker cools down are
+```
+call 1 exit=0  breaker=unreachable  failures=1 open=False
+call 2 exit=0  breaker=unreachable  failures=2 open=False
+call 3 exit=0  breaker=unreachable  failures=3 open=False
+call 4 exit=0  breaker=unreachable  failures=4 open=False
+call 5 exit=0  breaker=unreachable  failures=5 open=True
+call 6 exit=0  breaker=unreachable  failures=5 open=True
+call 7 exit=0  breaker=unreachable  failures=5 open=True
+```
+
+Four things at once: every hook exited **0**, the failure count climbed, the circuit opened at
+**exactly 5**, and it stopped counting after that rather than growing without bound.
+
+### Breaker state is per endpoint
+
+Send one prompt to a healthy instance using the *same* data dir, then look at both files:
+
+```bash
+python3 -c "
+import json,glob
+for f in sorted(glob.glob('$D/breaker/*.json')):
+    j=json.load(open(f)); print('%-13s failures=%s open=%-5s %s' % (j['state'], len(j['failures']), j['openedAt']>0, j.get('endpoint') or '(none)'))"
+```
+
+**Expect** two files, and the healthy instance's verdict untouched by the dead one's:
+
+```
+unreachable   failures=5 open=True  http://127.0.0.1:9
+ready         failures=0 open=False https://api.mubit.ai
+```
+
+`◍ warming` inside the 20 s cold-start window and `· paused Ns` while the breaker cools down are
 **not faults**. Auth failure is never masked by the warming window.
 
----
 
 ## §10 — The status line
 
@@ -614,19 +805,37 @@ yourself. After two sessions where the widget never ran, SessionStart says so, o
 Check it without changing any settings — pipe a payload straight in:
 
 ```bash
-echo '{"session_id":"x","cwd":"'"$SCRATCH"'","workspace":{"current_dir":"'"$SCRATCH"'"}}' \
- | MUBIT_CC_RUN_STRATEGY=static MUBIT_CC_RUN_ID=<run id> node "$PLUG/bin/statusline.mjs"
+render() { echo "{\"session_id\":\"x\",\"cwd\":\"$SCRATCH\",\"workspace\":{\"current_dir\":\"$SCRATCH\"}}" \
+  | MUBIT_CC_DATA_DIR=$1 CLAUDE_PLUGIN_DATA=$1 CLAUDE_PROJECT_DIR="$SCRATCH" node "$PLUG/bin/statusline.mjs"; }
+
+render /tmp/mubit-guide-data    # healthy
+render /tmp/mubit-badkey        # §9's auth failure
+render /tmp/mubit-dead          # §9's dead endpoint
+render /tmp/nothing-here        # never run
 ```
 
-**Expect**
+**Expect** — all four measured:
 
 ```
-● mubit: cc-mubit-plugin-testing-41703b8c · hosted · recall 1/77 tok
+● mubit: cc-mubit-guide-52fe1a38 · hosted · recall 4/320 tok
+✖ mubit: cc-mubit-guide-52fe1a38 · hosted · auth failed · recall 0/0 tok
+✖ mubit: cc-mubit-guide-52fe1a38 · hosted · unreachable · recall dry 5
+                                        ← nothing at all, exit 0
 ```
+
+`recall dry 5` is the dry-streak escalation: after **3** consecutive empty recalls the token
+figure is replaced by the streak, because "recall 0/0 tok" and "recall has been dead for five
+prompts" are the same row otherwise.
+
+> **The marker is last-write-wins, so the line describes the last prompt that data dir saw** —
+> not the health of the endpoint you are thinking about. A dead-endpoint data dir that later
+> served one healthy prompt renders `● ready`, correctly. If you want to see a degraded glyph,
+> make the *last* write the failing one.
 
 > Export the **same** run-strategy env the session used. The status line re-derives the run id
 > from the working directory, so without it you get the directory's run and its numbers, not the
 > one you were testing.
+
 
 | Field | Meaning |
 |---|---|
@@ -757,9 +966,27 @@ counters.
 ### 4. Hook latency
 
 ```bash
-grep -a 'exceeded its' "$DATA/logs/mubit-cc.log" | tail -5
-grep -a '"msg":"drain' "$DATA/logs/mubit-cc.log" | tail -3
+python3 -c "
+import json,glob
+for f in glob.glob('$DATA/logs/mubit-cc.log*'):
+    for line in open(f):
+        try: j=json.loads(line)
+        except: continue
+        if 'ms' in j or 'exceeded' in j.get('msg',''):
+            print('%-5s %-46s %s' % (j['level'], j['msg'][:46], {k:v for k,v in j.items() if k in ('ms','budget_ms','elapsed_ms')}))"
 ```
+
+**Expect** the drain's wall time per batch, and a `warn` line for any hook that blew its budget:
+
+```
+info  drain: 3 item(s) in 1 batch(es)                 {'ms': 167}
+info  drain: 1 item(s) in 1 batch(es)                 {'ms': 517}
+info  drain: 4 item(s) in 1 batch(es)                 {'ms': 4251}
+info  drain: outcome post failed (not_responding)     {}
+```
+
+A drain taking 4.2 s is not a stall — it runs detached, off the hot path, which is the whole
+reason capture can be free at the point of the tool call.
 
 The ring log is NDJSON, one object per line, redacted on write, 1 MiB × 2. Budget overruns log
 at `warn` with `{budget_ms, elapsed_ms}`. Hook budgets: SessionStart 5 s, UserPromptSubmit 3 s,
@@ -788,6 +1015,11 @@ grep -ao 'mubit: [0-9][^"\\]*' /tmp/cc-recall.log
 | `npm run version:check` fails | It calls `scripts/set-version.mjs`, which the mirror excludes by design. Same for `test/release.test.mjs` |
 | `npm test` fails only on `engine-floor` | That gate needs the `esbuild` devDependency; the rest of the suite has zero dependencies |
 | `/mcp` shows 21 tools | A pre-0.9.2 MCP bundle. This build ships 10 |
+| A hand-driven hook leaves only `config.json` | The prompt was under 8 characters. `MIN_PROMPT_CHARS = 8` returns before any network, marker or breaker write (§9) |
+| `captured.tools` / `turns` sit at 0 while `ingested` climbs | They are live gauges cleared by each drain, not lifetime counters (§5) |
+| `forget` asks before deleting | Deliberate — deletion has no undo. Confirm explicitly (§6) |
+| A remembered lesson never reaches `global` scope | `mubit_learned` hardcodes `session` scope. Only reflection widens it (§6) |
+| Recall injects something irrelevant on a sparse run | There is no relevance floor — the top semantic hit is returned whatever its score. The used-signal will score it 0 and post `neutral` (§7) |
 | `docs/user-guide.md` says `mcpTools` has no effect | Stale as of 0.10.0 — the allowlist **is** honoured now, which is exactly why `contextCost` fell 5382 → 3316 |
 
 Troubleshooting the rest:

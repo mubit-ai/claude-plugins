@@ -490,6 +490,9 @@ const USER_CONFIG_ROWS = [
   { key: 'recallTokenBudget', env: 'MUBIT_CC_RECALL_TOKENS', field: 'recallTokenBudget', raw: '900', want: 900 },
   { key: 'recallAssemble', env: 'MUBIT_CC_RECALL_ASSEMBLE', field: 'recallAssemble', raw: 'server', want: 'server' },
   { key: 'recallRepeatMode', env: 'MUBIT_CC_RECALL_REPEAT_MODE', field: 'recallRepeatMode', raw: 'full', want: 'full' },
+  // Asserted ON rather than off: the default is already false, so a row that set it to false
+  // would pass just as well against a key `loadConfig` never reads.
+  { key: 'recallAsync', env: 'MUBIT_CC_RECALL_ASYNC', field: 'recallAsync', raw: '1', optRaw: 'true', want: true },
   { key: 'reflectOnEnd', env: 'MUBIT_CC_REFLECT_ON_END', field: 'reflectOnEnd', raw: '0', optRaw: 'false', want: false },
   { key: 'outcomeMode', env: 'MUBIT_CC_OUTCOME_MODE', field: 'outcomeMode', raw: 'explicit', want: 'explicit' },
   { key: 'statusLine', env: 'MUBIT_CC_STATUSLINE', field: 'statusLine', raw: '0', optRaw: 'false', want: false },
@@ -544,6 +547,10 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   // §5.2: a memory already injected this run is repeated as a one-line pointer rather than
   // in full. `full` is the pre-seen-set behaviour and costs up to 1500 tokens every prompt.
   assert.equal(cfg.recallRepeatMode, 'pointer');
+  // Carry-forward recall is opt-in. Default-on would hand every install a first prompt with
+  // no memory and a turn of staleness on every prompt after it, in exchange for latency
+  // most instances do not have a problem with.
+  assert.equal(cfg.recallAsync, false);
   assert.equal(cfg.outcomeMode, 'implicit');
   assert.equal(cfg.reflectOnEnd, true);
   assert.equal(cfg.statusLine, true);

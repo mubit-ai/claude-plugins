@@ -73,6 +73,7 @@
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { clearCarry } from '../../lib/carry.mjs';
 import { classifyTurn } from '../../lib/classify.mjs';
 import { envTags } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
@@ -297,6 +298,11 @@ function postcompact(payload, cfg) {
 
   // The seen-set reset, ahead of every other decision here — see the header above.
   clearSeen(cfg, runId);
+  // …and the block `recallAsync` left for the next prompt, for the same reason and no other.
+  // A carried block was assembled against the pre-compaction seen-set, so its pointer lines
+  // are already baked in — clearing the set alone would leave a block promising that the full
+  // entries are earlier in a transcript that no longer exists.
+  clearCarry(cfg, runId);
 
   const latest = readHistory(cfg, runId).at(-1);
   const checkpointId = str(latest?.checkpoint_id);

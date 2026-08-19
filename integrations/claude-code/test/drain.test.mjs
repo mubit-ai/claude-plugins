@@ -21,7 +21,7 @@ import { join } from 'node:path';
 
 import {
   runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir,
-  readJsonFile, readJsonDir, spoolFiles,
+  readJsonFile, readJsonDir, spoolFiles, waitFor,
 } from './helpers/harness.mjs';
 import { stop, spoolItem, PROMPT_ID } from './helpers/fixtures.mjs';
 
@@ -231,9 +231,11 @@ test('drain and session-end send one batch under one idempotency_key', async (t)
   assertHookContract(await runHook('drain', stop(), { env }));
   assert.equal(spoolFiles(dataDir, RUN_ID).length, 4, 'a 5xx leaves the batch in place');
 
-  // The session ends, and the other drainer picks up exactly those files.
+  // The session ends, and the other drainer picks up exactly those files — in a detached
+  // child, since the host cancels the session-end hook on the way out.
   assertHookContract(await runHook('session-end',
     { hook_event_name: 'SessionEnd', reason: 'exit' }, { env }));
+  await waitFor(() => server.countOf('POST', '/v2/control/ingest') >= 2, 12_000);
 
   const calls = server.calls('POST', '/v2/control/ingest');
   assert.equal(calls.length, 2, 'both drainers sent the batch');

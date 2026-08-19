@@ -393,6 +393,7 @@ function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
  * @property {string} stderr
  * @property {any} json            parsed stdout, or `undefined` when stdout was empty
  * @property {number} ms           wall clock
+ * @property {string|null} signal  the signal that killed it, when `killAfterMs` took it away
  */
 
 /**
@@ -402,10 +403,17 @@ function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
  * Defaults to `hooks/src/<name>.mjs` so you can iterate without rebuilding.
  * Set `target: 'dist'` (or `MUBIT_CC_TEST_TARGET=dist`) to run the shipped bundle.
  *
+ * `killAfterMs` SIGKILLs the hook that many milliseconds in, which is the only way to
+ * reproduce what the host actually does: under `--print` Claude Code tears the session down
+ * about a second into `SessionEnd` — a cancellation, not a timeout, so no budget on either
+ * side of the boundary saves the work. A hook whose work has to outlive its process can only
+ * be tested by taking the process away. The kill is best-effort: a hook that already handed
+ * its work over and exited is simply not there to receive it, which is the passing case.
+ *
  * @param {string} name  e.g. 'capture', 'prompt-recall'
  * @param {object} payload  the stdin JSON (see fixtures.mjs)
  * @param {{env?: Record<string,string>, args?: string[], timeoutMs?: number,
- *          target?: 'src'|'dist', stdinRaw?: string}} [opts]
+ *          target?: 'src'|'dist', stdinRaw?: string, killAfterMs?: number}} [opts]
  * @returns {Promise<HookResult>}
  */
 export async function runHook(name, payload, opts = {}) {
@@ -429,15 +437,21 @@ export async function runHook(name, payload, opts = {}) {
   const raw = opts.stdinRaw ?? JSON.stringify(payload ?? {});
   child.stdin.end(raw);
 
-  const code = await new Promise((res, rej) => {
+  const killAt = Number(opts.killAfterMs) > 0 ? Number(opts.killAfterMs) : 0;
+  const killer = killAt
+    ? setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } }, killAt)
+    : null;
+
+  const done = await new Promise((res, rej) => {
     const t = setTimeout(() => { child.kill('SIGKILL'); rej(new Error(`hook ${name} exceeded ${opts.timeoutMs ?? 15000}ms`)); },
       opts.timeoutMs ?? 15000);
-    child.on('close', (c) => { clearTimeout(t); res(c); });
-    child.on('error', (e) => { clearTimeout(t); rej(e); });
+    const stop = () => { clearTimeout(t); if (killer) clearTimeout(killer); };
+    child.on('close', (c, s) => { stop(); res({ code: c, signal: s ?? null }); });
+    child.on('error', (e) => { stop(); rej(e); });
   });
 
   return {
-    code, stdout: out, stderr: err, ms: Date.now() - started,
+    code: done.code, signal: done.signal, stdout: out, stderr: err, ms: Date.now() - started,
     json: out.trim() ? safeJson(out.trim()) : undefined,
   };
 }

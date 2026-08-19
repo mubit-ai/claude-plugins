@@ -30,7 +30,7 @@ import {
 
 import {
   assertHookContract, baseEnv, fakeMubit, lib, makeDataDir, queryResponse,
-  readJsonDir, readJsonFile, runHook, spoolFiles,
+  readJsonDir, readJsonFile, runHook, spoolFiles, waitFor,
 } from './helpers/harness.mjs';
 import * as fx from './helpers/fixtures.mjs';
 
@@ -1077,9 +1077,14 @@ describe('session end', () => {
     const res = await runHook('session-end', fx.sessionEnd(), { env });
     assertHookContract(res);
 
+    // The body runs in a detached child by default — the host cancels this hook on the way
+    // out, so its work has to outlive it. What that work does on a failing reflect is
+    // unchanged, which is what the rest of this test asserts.
+    await waitFor(() => marker(dataDir)?.reflect?.status === 'failed', 12_000);
+
     srv.assertCalled('POST', '/v2/control/ingest', 1);
     assert.equal(spoolFiles(dataDir, RUN).length, 0,
-      'the inline drain must commit before reflect is even attempted — a failed reflect cannot cost captures');
+      'the drain must commit before reflect is even attempted — a failed reflect cannot cost captures');
     srv.assertCalled('POST', '/v2/control/reflect');
 
     const m = marker(dataDir);

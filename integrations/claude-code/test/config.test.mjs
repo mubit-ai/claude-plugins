@@ -494,6 +494,10 @@ const USER_CONFIG_ROWS = [
   // would pass just as well against a key `loadConfig` never reads.
   { key: 'recallAsync', env: 'MUBIT_CC_RECALL_ASYNC', field: 'recallAsync', raw: '1', optRaw: 'true', want: true },
   { key: 'reflectOnEnd', env: 'MUBIT_CC_REFLECT_ON_END', field: 'reflectOnEnd', raw: '0', optRaw: 'false', want: false },
+  // The escape hatch for an environment that forbids background processes. Asserted off,
+  // because on is the default and a row that set it to true would pass just as well against
+  // a key `loadConfig` never reads.
+  { key: 'sessionEndDetach', env: 'MUBIT_CC_SESSION_END_DETACH', field: 'sessionEndDetach', raw: '0', optRaw: 'false', want: false },
   { key: 'outcomeMode', env: 'MUBIT_CC_OUTCOME_MODE', field: 'outcomeMode', raw: 'explicit', want: 'explicit' },
   { key: 'statusLine', env: 'MUBIT_CC_STATUSLINE', field: 'statusLine', raw: '0', optRaw: 'false', want: false },
   { key: 'mcpTools', env: 'MUBIT_MCP_TOOLS', field: 'mcpTools', raw: 'mubit_recall,mubit_remember', want: ['mubit_recall', 'mubit_remember'] },
@@ -553,6 +557,9 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.recallAsync, false);
   assert.equal(cfg.outcomeMode, 'implicit');
   assert.equal(cfg.reflectOnEnd, true);
+  // On, because the hook it governs is cancelled by the host on the way out and everything
+  // left inside it — the last drain and the only call that promotes a lesson — dies there.
+  assert.equal(cfg.sessionEndDetach, true);
   assert.equal(cfg.statusLine, true);
   // Off. This is the one setting that can put text in front of a tool call, so nothing
   // changes for an existing user until they ask for it — which is also what makes "measure

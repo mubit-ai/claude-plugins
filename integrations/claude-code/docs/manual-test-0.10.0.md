@@ -466,10 +466,13 @@ item that was otherwise kept.
 
 ## §6 — Lessons: generated → recalled → used
 
-> **Reflection needs an interactive session.** Under `--print` the host cancels SessionEnd about
-> a second in — you will see `SessionEnd hook […] failed: Hook cancelled` on every headless run —
-> so end-of-session reflection never fires. The explicit skills below work headlessly because
-> they call the MCP tools directly; only the *automatic* reflection is unavailable.
+> **Headless reflection is a background process, so give it a moment.** Under `--print` the host
+> still cancels SessionEnd about a second in — `SessionEnd hook […] failed: Hook cancelled` on
+> every headless run is expected and no longer means anything was lost. The hook hands the drain
+> and the reflection to a detached child before that happens, so they finish after the CLI has
+> returned: wait a few seconds before reading `status/<run_id>.json`, and expect
+> `reflect.status` to read `detached` until the child reports. The explicit skills below do not
+> wait on any of that — they call the MCP tools directly.
 
 Headless, grant the tools explicitly:
 
@@ -1013,7 +1016,7 @@ grep -ao 'mubit: [0-9][^"\\]*' /tmp/cc-recall.log
 
 | What you will see | Why |
 |---|---|
-| `SessionEnd hook […] failed: Hook cancelled` on every `-p` run | The host cancels SessionEnd ~1 s in under `--print`. No reflect, no end-of-session drain. Test lessons interactively |
+| `SessionEnd hook […] failed: Hook cancelled` on every `-p` run | The host cancels SessionEnd ~1 s in under `--print`. The flush is handed to a detached child before that, so it still lands — a few seconds after the CLI returns |
 | `empty_reason: policy_denied` with a healthy `● ready` line | A cached 24 h denial (§3). The status line cannot show it; `dry_streak` is what makes it visible |
 | PostCompact says nothing | Fixed in 0.10.0 — the host rejected the old shape and discarded every message |
 | The shipped `statusLine` does nothing | Plugins cannot register one (§10) |

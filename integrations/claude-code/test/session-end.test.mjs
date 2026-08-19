@@ -42,7 +42,16 @@ function env(dataDir, endpoint, extra = {}) {
     dataDir,
     endpoint,
     projectDir: PROJECT_DIR,
-    extra: { MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: RUN_ID, ...extra },
+    extra: {
+      MUBIT_CC_RUN_STRATEGY: 'static',
+      MUBIT_CC_RUN_ID: RUN_ID,
+      // Every assertion in this file is about the BODY — what it sends, in what order, and
+      // what it writes. Since MUB-10 that body runs in a detached child by default, so this
+      // switch keeps it here where the assertions can see it. The hand-off itself, and the
+      // fact the body survives the hook being killed, are `session-end-detach.test.mjs`.
+      MUBIT_CC_SESSION_END_DETACH: '0',
+      ...extra,
+    },
   });
 }
 

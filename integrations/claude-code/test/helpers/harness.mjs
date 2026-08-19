@@ -549,12 +549,17 @@ export function assertHookContract(r) {
  * is returned rather than thrown: `tools/call` failing is a result some tests assert on,
  * and only the caller knows which.
  *
+ * `init` is the whole `initialize` result, not just `serverInfo`: `instructions` rides in
+ * the same object and is the only Mubit context a subagent or a tool-search session gets,
+ * so `test/mcp-instructions.test.mjs` reads it from here (`mcpListTools` narrows to the
+ * server identity and would drop it).
+ *
  * @param {{extra?: Record<string,string>, endpoint?: string, dataDir?: string,
  *          runId?: string, steps?: Array<{method: string, params?: any}>,
  *          timeoutMs?: number}} [opts]
  * @returns {Promise<{init: any, results: Array<{result?: any, error?: any}>, stderr: string}>}
  */
-async function mcpDrive(opts = {}) {
+export async function mcpDrive(opts = {}) {
   const entry = join(PLUGIN_ROOT, 'mcp', 'dist', 'index.js');
   if (!existsSync(entry)) {
     throw new Error(`mcp/dist/index.js does not exist yet: ${entry}\n  Run \`npm run build\`.`);

@@ -276,6 +276,7 @@ that cache, and writing credentials invalidates it immediately rather than after
 | `outcomeMode` | `implicit` | `MUBIT_CC_OUTCOME_MODE` | `implicit`: a turn whose reply carried the recalled memory's own vocabulary is attributed to those memories; a turn that carried none of it is recorded as `neutral` against the run and attributed to no entry, so an injection nobody used is counted rather than being invisible. `explicit`: only the model's own `mubit_outcome` calls count. `off`: no attribution, and no measurement of it either. |
 | `statusLine` | `true` | `MUBIT_CC_STATUSLINE` | Render the status line. When false it prints an empty line and exits 0 rather than erroring per frame. |
 | `mcpTools` | `""` (the curated ten) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
+| `mcpLessonScope` | `run` | `MUBIT_MCP_LESSON_SCOPE` | The widest scope a lesson written by an MCP tool may claim: `run`, `session` or `global`. Anything above `run` is read back by unrelated runs, so the default keeps an agent-written lesson in the run that wrote it — with `runStrategy: per-directory`, that is the project it was written in. Raise it if you want agent-written rules to follow you between projects; reflection promotes a lesson beyond its run either way. |
 
 ### Environment-only settings
 
@@ -406,7 +407,7 @@ of three escalates, and only ever to `not_responding` — never to `unreachable`
 | Status line shows a glyph but no counters | No hook has written the marker for this run yet | Normal for the first few seconds of a session |
 | Status line never appears at all | A plugin cannot register `statusLine`; the shipped entry is inert | Add it to your own `~/.claude/settings.json` — see [A status line](#a-status-line) |
 | `/mcp` lists 21 tools instead of ten | You are on 0.9.1 or older, whose bundled MCP server predates the allowlist patch and registers everything | Upgrade. On an older version it is not cosmetic: every session pays for all 21 tool schemas |
-| A saved lesson never becomes visible in a later session | `mubit_learned` writes every entry as `success` / `session`; only the explicit reflect path widens scope, over several sessions | Keep `reflectOnEnd` on, and run `/mubit-memory:reflect` at meaningful checkpoints |
+| A saved lesson never becomes visible in another project | `mubit_learned` writes every entry as `success` at `run` scope; only the explicit reflect path widens it | Keep `reflectOnEnd` on and run `/mubit-memory:reflect` at meaningful checkpoints, or raise `mcpLessonScope` |
 | A just-saved memory is not findable a second later | `mubit_learned` returns when the write is **queued**, not stored. Embedding and indexing happen after the call returns | Wait. Reflecting or searching immediately honestly returns nothing, and that is not a fault |
 | Hook captures and `/mubit-memory:remember` writes land in different runs | `runStrategy: per-conversation` | Use `per-directory` |
 | `Config error: MUBIT_CC_RUN_STRATEGY=static requires MUBIT_CC_RUN_ID` | `static` with no pin | Set `MUBIT_CC_RUN_ID`, or pick another strategy |

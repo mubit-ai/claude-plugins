@@ -497,14 +497,20 @@ done
 
 ```
 global   0
-session  1
-run      0
+session  0
+run      1
 ```
 
-> **A remembered lesson never reaches `global` scope, whatever you type.** The remember skill's
-> only write tool is `mubit_learned`, which hardcodes `lesson_scope: "session"`. So the lesson
-> follows this project and does not follow you to another repo. Reflection is the only path that
-> widens scope. This is a known limitation, not a misuse of the skill.
+> **A remembered lesson lands at `run` scope, whatever you type.** The remember skill's only
+> write tool is `mubit_learned`, and the bundled SDK hardcodes `lesson_scope: "session"` on it —
+> a scope the control plane reads back across *unrelated* runs, which is why the launcher's
+> egress guard (`mcp/src/egress.mjs`) clamps it to `run` before it leaves the machine. The
+> lesson still follows this project: with the default `runStrategy: per-directory` the run id is
+> stable per directory, so it recalls here tomorrow. It does not follow you to another repo.
+> Reflection is the path that widens scope; `mcpLessonScope` (`MUBIT_MCP_LESSON_SCOPE`) raises
+> the ceiling if you want agent-written lessons to travel. Expect the tool result to carry a
+> `mubit_scope_guard` note saying so — the bundled tool description still promises "this
+> session" and cannot be edited from this repo.
 
 ### 2. It comes back on its own
 
@@ -1018,7 +1024,7 @@ grep -ao 'mubit: [0-9][^"\\]*' /tmp/cc-recall.log
 | A hand-driven hook leaves only `config.json` | The prompt was under 8 characters. `MIN_PROMPT_CHARS = 8` returns before any network, marker or breaker write (§9) |
 | `captured.tools` / `turns` sit at 0 while `ingested` climbs | They are live gauges cleared by each drain, not lifetime counters (§5) |
 | `forget` asks before deleting | Deliberate — deletion has no undo. Confirm explicitly (§6) |
-| A remembered lesson never reaches `global` scope | `mubit_learned` hardcodes `session` scope. Only reflection widens it (§6) |
+| A remembered lesson lands at `run` scope | The SDK hardcodes `session`; the egress guard clamps it to `run` and says so in the tool result. Reflection widens it, or raise `mcpLessonScope` (§6) |
 | Recall injects something irrelevant on a sparse run | There is no relevance floor — the top semantic hit is returned whatever its score. The used-signal will score it 0 and post `neutral` (§7) |
 | `docs/user-guide.md` says `mcpTools` has no effect | Stale as of 0.10.0 — the allowlist **is** honoured now, which is exactly why `contextCost` fell 5382 → 3316 |
 

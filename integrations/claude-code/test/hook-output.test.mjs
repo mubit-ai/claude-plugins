@@ -193,6 +193,15 @@ const CASES = {
   'Stop capture --stop': {
     payload: () => fx.stop({ cwd: PROJECT_DIR }),
   },
+  // `StopFailure` is NOT in `ACCEPTED_HOOK_EVENT_NAMES` above, so this registration has no
+  // `hookSpecificOutput` channel at all — not under its own name (rule 1) and not under a
+  // borrowed one (rule 2). The host says the same thing from the other direction: the
+  // registry describes it as "Fire-and-forget — hook output and exit codes are ignored". So
+  // the only correct stdout is `{"suppressOutput": true}` and nothing else, which the
+  // dedicated test below pins exactly rather than merely allowing.
+  'StopFailure capture --stop-failure': {
+    payload: () => fx.stopFailure({ cwd: PROJECT_DIR }),
+  },
   'SubagentStop capture --subagent': {
     payload: () => fx.subagentStop({ cwd: PROJECT_DIR }),
   },
@@ -315,3 +324,42 @@ for (const reg of registrations()) {
     assertHostContract(r.json ?? {}, reg.event, label);
   });
 }
+
+// ---------------------------------------------------------------------------
+// The registration with no channel at all
+// ---------------------------------------------------------------------------
+
+/**
+ * `StopFailure` is the first registration this plugin has on an event outside
+ * `ACCEPTED_HOOK_EVENT_NAMES`, so it is the first one for which "say nothing" is not a choice
+ * the hook makes but the only thing that exists.
+ *
+ * The gate above would pass a `StopFailure` hook that emitted `systemMessage` — it is a legal
+ * top-level key. This pins the stronger property, because the host's registry entry for the
+ * event says the output is not read at all:
+ *
+ *     "Fires instead of Stop when an API error (rate limit, auth failure, etc.) ended the
+ *      turn. Fire-and-forget — hook output and exit codes are ignored."
+ *
+ * Anything beyond `suppressOutput` would therefore be a field written for a reader that does
+ * not exist — the quietest kind of dead code, and the kind this file was written after
+ * `checkpoint --post` shipped a year of it.
+ */
+test('StopFailure capture --stop-failure emits suppressOutput and nothing else', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('capture', fx.stopFailure({ cwd: PROJECT_DIR }), {
+    env: env(dataDir, server.url),
+    args: ['--stop-failure'],
+  });
+
+  assertHookContract(r);
+  assert.deepEqual(r.json, { suppressOutput: true },
+    `StopFailure has no hookSpecificOutput channel (it is absent from the host's `
+    + `hookEventName union) and the host ignores this hook's output entirely, so anything `
+    + `beyond suppressOutput is written for nobody: ${r.stdout}`);
+  assert.ok(!('hookSpecificOutput' in (r.json ?? {})),
+    'a hookSpecificOutput here fails the host schema and would discard the WHOLE object');
+});

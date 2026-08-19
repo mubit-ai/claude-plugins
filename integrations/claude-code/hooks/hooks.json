@@ -26,6 +26,10 @@
       { "hooks": [ { "type": "command", "command": "node", "timeout": 5,
         "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/capture.mjs", "--stop"] } ] }
     ],
+    "StopFailure": [
+      { "hooks": [ { "type": "command", "command": "node", "timeout": 3,
+        "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/capture.mjs", "--stop-failure"] } ] }
+    ],
     "SubagentStop": [
       { "hooks": [ { "type": "command", "command": "node", "timeout": 3,
         "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/dist/capture.mjs", "--subagent"] } ] }

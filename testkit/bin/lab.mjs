@@ -18,7 +18,7 @@
  * `degraded: true`, which `compare` then refuses to place beside a trusted run.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureDir, pluginManifest, resolvePluginDir, resultsRoot, stampName, KIT_ROOT } from '../lib/paths.mjs';
 import { armsHash, ambientPlugins } from '../lib/arms.mjs';
@@ -129,10 +129,13 @@ async function cmdAb(args) {
   const rawDir = ensureDir(join(dir, 'raw'));
 
   const pre = await gate(pluginDir, args);
-  writeFileSync(join(dir, 'preflight.json'), `${JSON.stringify({ ...pre, at: Date.now() }, null, 2)}\n`);
   if (!pre.ok && !args.force) {
+    // "Nothing recorded" has to mean nothing: a half-written stamp directory left behind by a
+    // refused run is exactly the thing someone finds later and mistakes for a result.
+    rmSync(dir, { recursive: true, force: true });
     die('preflight failed — nothing recorded. Fix the failures above, or pass --force to record a run stamped degraded:true.');
   }
+  writeFileSync(join(dir, 'preflight.json'), `${JSON.stringify({ ...pre, at: Date.now() }, null, 2)}\n`);
 
   // Every prompt is answered in the same generated repo unless the operator names another.
   // A sweep run in a live project is not reproducible across versions: the project moves.
@@ -342,8 +345,11 @@ async function cmdEval(args) {
   say(`cases: ${cases.join(', ') || '(none)'}`);
 
   const pre = await gate(pluginDir, args);
+  if (!pre.ok && !args.force) {
+    rmSync(dir, { recursive: true, force: true });
+    die('preflight failed — nothing recorded (--force to override)');
+  }
   writeFileSync(join(dir, 'preflight.json'), `${JSON.stringify({ ...pre, at: Date.now() }, null, 2)}\n`);
-  if (!pre.ok && !args.force) die('preflight failed — nothing recorded (--force to override)');
 
   const installed = evals.install(pluginDir);
   say(`evals: ${installed.action} → ${installed.link}`);
@@ -366,6 +372,22 @@ async function cmdEval(args) {
       process.exit(1);
     }
     say(`aggregate → ${r.jsonPath}`);
+    // `compare` and `history` read summary.json, so an eval run without one is recorded and
+    // then invisible — which defeats the point of recording it.
+    writeFileSync(join(dir, 'summary.json'), `${JSON.stringify({
+      schema: 'mubit-testkit/summary/v1',
+      kind: 'eval',
+      stamp: stampObj,
+      cases,
+      degraded: !pre.ok,
+      sound: agg.detectedPlugin !== false,
+      aggregates: agg.aggregates,
+      indicators: agg.indicators,
+      indicatorsPassed: agg.indicatorsPassed,
+      detectedPlugin: agg.detectedPlugin,
+      costUsd: agg.costUsd,
+      partial: agg.partial,
+    }, null, 2)}\n`);
     if (agg.aggregates) {
       say(`  score ${agg.aggregates.overallScore ?? '—'} · pass rate ${agg.aggregates.overallPassRate ?? '—'} · meanDelta ${agg.aggregates.meanDelta ?? '—'} · $${agg.costUsd.toFixed(4)}${agg.partial ? ' · PARTIAL (cost ceiling hit)' : ''}`);
     }
@@ -545,6 +567,9 @@ function cmdCompare(args) {
   if (ra && rb && ra !== rb) say(`  WARN  the pinned model is the same string but resolved differently: ${ra} vs ${rb}`);
   say();
 
+  for (const [name, run] of [[a, A], [b, B]]) {
+    if (!run.ab) say(`  NOTE  ${name} is a ${run.kind || '?'} run and has no A/B table; only its stamp is comparable`);
+  }
   const byMetric = (s) => new Map((s.ab || []).map((r) => [r.metric, r]));
   const ma = byMetric(A);
   const mb = byMetric(B);
@@ -556,8 +581,11 @@ function cmdCompare(args) {
   }));
   say(table([
     { key: 'metric', label: 'metric' },
-    { key: 'a', label: `${A.stamp.pluginVersion}-${A.stamp.pluginSha} Δ`, align: 'r' },
-    { key: 'b', label: `${B.stamp.pluginVersion}-${B.stamp.pluginSha} Δ`, align: 'r' },
+    // Includes the stamp's timestamp: two sweeps of the SAME version is the common case when
+    // you are checking whether a result reproduces, and identical column headers make that
+    // table unreadable.
+    { key: 'a', label: `${A.stamp.pluginVersion}-${A.stamp.pluginSha} Δ (${a.slice(-16, -1)})`, align: 'r' },
+    { key: 'b', label: `${B.stamp.pluginVersion}-${B.stamp.pluginSha} Δ (${b.slice(-16, -1)})`, align: 'r' },
     { key: 'note', label: '' },
   ], rows).map((l) => `  ${l}`).join('\n'));
 }

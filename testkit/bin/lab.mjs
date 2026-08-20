@@ -205,6 +205,17 @@ async function cmdAb(args) {
   if (noise) {
     const floor = noiseFloor(scored);
     summary.noiseFloor = floor;
+    // Written where every later sweep looks for it. Telling the operator to copy a JSON
+    // fragment by hand is how a kit ends up with an uncalibrated floor forever.
+    const floorPath = join(ensureDir(resultsRoot()), 'noise-floor.json');
+    writeFileSync(floorPath, `${JSON.stringify({
+      recordedAt: new Date().toISOString(),
+      stamp: stampObj,
+      pairs: Object.values(floor)[0]?.pairs ?? 0,
+      floor,
+    }, null, 2)}\n`);
+    say(`floor → ${floorPath}`);
+    say();
     say('noise floor (A/A — both arms are controls; a real effect must exceed this)');
     say(table(
       [{ key: 'metric', label: 'metric' }, { key: 'delta', label: 'Δ median', align: 'r' }, { key: 'iqr', label: 'Δ IQR', align: 'r' }, { key: 'n', label: 'pairs', align: 'r' }],

@@ -85,6 +85,10 @@ proposition.
 An A/B run in this state produces clean, plausible, reproducible numbers showing the plugin
 does nothing, and nothing in the output would say why.
 
+**[`docs/SCOPE.md`](docs/SCOPE.md) traces this end to end and gives the fix** — it is a
+one-line per-instance config change (`MUBIT_CONTROL_LESSON_PROMOTION_THRESHOLD`, already
+allowlisted in the instance CRD), not a code change.
+
 That is what the gate is for, and it is why the canary dials the real recall ladder through
 the plugin's own `lib/recall.mjs` rather than pinging health. The five checks:
 

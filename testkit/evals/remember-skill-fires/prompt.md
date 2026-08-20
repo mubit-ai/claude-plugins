@@ -1,6 +1,6 @@
 ---
 name: remember-skill-fires
-description: An explicit standing preference routes to the plugin's remember skill
+description: An explicit standing preference is stored — via the remember skill or mubit_learned
 tags: [m4, skills]
 runs: 3
 max_turns: 6

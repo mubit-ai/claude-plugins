@@ -349,13 +349,14 @@ test('an unwritable tmp/ falls back to the inline body rather than dropping the 
 /**
  * | status                | written by                    | means                                   |
  * | --------------------- | ----------------------------- | --------------------------------------- |
- * | `""`                  | `lib/markers.mjs` default     | session-end never reached the hand-off  |
+ * | `""`                  | `lib/markers.mjs` default     | session-end never ran at all            |
+ * | `"handoff"`           | the parent, before any work   | started, then killed mid-hand-off       |
  * | `"detached"`          | the parent, before spawning   | handed over; no child has reported yet  |
  * | `ok` / `failed` / `skipped:*` | whichever process ran the body | terminal                        |
  *
- * The parent never writes a terminal status and the child never writes `detached`, which is
- * what makes a marker stuck on `detached` a *specific* failure — the child was reaped —
- * rather than one more indistinguishable blank.
+ * The parent never writes a terminal status and the child writes neither of the parent's two,
+ * which is what makes a marker stuck on either a *specific* failure — killed in the host's
+ * ~1 s window, or a child that was reaped — rather than one more indistinguishable blank.
  */
 
 // Row 1. The default, and the only thing it may ever mean.
@@ -365,6 +366,55 @@ test('reflect.status "" is the untouched default, written by nobody', async () =
   assert.equal(markers.readMarker({ dataDir: fresh }, RUN_ID).reflect.status, '',
     'a run nothing has flushed reads blank — after this change that means exactly one thing');
   assert.ok(!existsSync(markerPath(fresh)), 'and nothing was written to disk to say so');
+});
+
+// Row 1b. The parent's *first* write, and the one that makes Row 1 mean anything.
+//
+// `stashPayload` runs inside the host's ~1 s kill window, so a parent killed there used to
+// leave `reflect: {at: 0, status: ""}` — byte-identical to a session where SessionEnd never
+// fired at all. Two very different failures, one indistinguishable marker, and the docblock
+// on `maybeReflect` claiming a blank status means exactly one thing.
+//
+// So the stamp goes down before the first byte of work. The unwritable `tmp/` fixture is what
+// makes it observable: the hand-off fails, the body falls back to running inline, and while
+// that inline body is still in its drain the marker already says who is doing the work.
+test('reflect.status "handoff" is stamped before the parent does anything that can fail', async (t) => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    t.skip('runs as root: mode bits do not deny root, so the hand-off cannot be made to fail');
+    return;
+  }
+  const server = await fakeMubit({
+    'POST /v2/control/ingest': { delayMs: INGEST_DELAY_MS, json: INGEST_OK },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 1);
+
+  const tmp = join(dataDir, 'tmp');
+  chmodSync(tmp, 0o500);
+  t.after(() => { try { chmodSync(tmp, 0o700); } catch { /* already gone */ } });
+
+  // Not awaited yet: the assertion is about what the marker says *while* the body is running.
+  const running = runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  // Deliberately not `waitForStatus`: that reports a timeout, which would hide the difference
+  // between "blank" and "no marker on disk at all" — and the whole point of this row is that
+  // those two were once the same observation.
+  const seen = await waitFor(() => {
+    const m = markerOrNull(dataDir);
+    return m && m.reflect && m.reflect.status ? m.reflect.status : null;
+  }, INGEST_DELAY_MS - 500).catch(
+    () => markerOrNull(dataDir)?.reflect?.status ?? '<no marker on disk>',
+  );
+  assert.equal(seen, 'handoff',
+    'a parent killed mid-hand-off must be distinguishable from one that never ran');
+
+  assertHookContract(await running);
+  // ...and it is a transition, not a resting place: the fallback body still finishes the flush.
+  const done = await waitForStatus(dataDir, 'ok');
+  assert.equal(done.reflect.lessons_stored, 1);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0);
 });
 
 // Row 2. The parent's only marker write, and it is not terminal.
@@ -430,3 +480,45 @@ for (const row of TERMINAL_ROWS) {
     assert.ok(marker.reflect.at > 0, 'every terminal status carries the time it was reached');
   });
 }
+
+// ---------------------------------------------------------------------------
+// 8. The reflect's *effective* budget, once the drain ahead of it has been paid
+// ---------------------------------------------------------------------------
+
+/**
+ * §5.7's three budgets compose, and the innermost one binds. What reflect actually gets is
+ * `min(REFLECT_MS, BUDGET_MS − elapsed − HEARTBEAT_MS)` (`session-end.mjs:192`), measured
+ * after a drain that may itself have spent `DRAIN_MS`. So a test that reads a constant proves
+ * nothing: the constant is not the budget. This one makes the drain spend real time and then
+ * requires the reflect to outlast a real LLM tail.
+ *
+ * 9000 ms is drawn from the Terminal-Bench sweep that produced this test — its slowest
+ * *successful* reflect against a hosted instance took 9626 ms, against a detached slice of
+ * 8000 ms. Every other test in this file asserts request counts, which is precisely why the
+ * composition could be wrong without anything here going red.
+ */
+const LLM_TAIL_MS = 9000;
+
+/** Enough of a stall that the drain provably spends budget before reflect is even reached. */
+const SLOW_INGEST_MS = 1000;
+
+test('reflect outlasts a 9 s LLM tail, after the drain has already spent its share', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/ingest': { delayMs: SLOW_INGEST_MS, json: INGEST_OK },
+    'POST /v2/control/reflect': {
+      delayMs: LLM_TAIL_MS,
+      json: { lessons: [], summary: 'ok', confidence: 0.7, degraded: false, lessons_stored: 2 },
+    },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 1);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const marker = await waitForStatus(dataDir, 'ok', 40_000);
+  assert.equal(marker.reflect.lessons_stored, 2,
+    'a reflect that answers inside its budget reports what it stored');
+});

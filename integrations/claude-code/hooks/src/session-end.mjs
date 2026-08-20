@@ -48,9 +48,9 @@
  * could say so.
  *
  * So the ordered body above lives in a **detached child** (§4.9's `spawnDetached`, the same
- * mechanism `drain.mjs` already uses), and this process does exactly three things: stash the
- * payload, stamp the marker `detached`, spawn. The child is not on the host's 8 s clock,
- * because nothing is waiting on it.
+ * mechanism `drain.mjs` already uses), and this process does exactly four things: stamp the
+ * marker `handoff`, stash the payload, stamp it `detached`, spawn. The child is not on the
+ * host's 8 s clock, because nothing is waiting on it.
  *
  * Two details are load-bearing:
  *
@@ -58,10 +58,12 @@
  *     failed to spawn — or spawned a child that was reaped — would have burned the claim and
  *     taken the session's whole flush with it.
  *   - **The marker is stamped before the spawn**, so a fast child can only overwrite that
- *     stamp, never lose a race to it. The parent never writes a terminal status and the child
- *     never writes `detached`, which is what makes a marker left on `detached` a specific,
- *     reportable failure — the child was reaped — rather than one more indistinguishable
- *     blank.
+ *     stamp, never lose a race to it. The parent writes two non-terminal statuses and the
+ *     child never writes either, which is what makes a marker left on one of them a specific,
+ *     reportable failure rather than one more indistinguishable blank: `handoff` means the
+ *     parent was killed before it could hand over or fall back — it dies inside the host's
+ *     ~1 s window, so this is the common one — and `detached` means the hand-off completed
+ *     and the child was reaped.
  *
  * `MUBIT_CC_SESSION_END_DETACH=0` runs the body here instead, for an environment that forbids
  * background processes; so does a hand-off that cannot be written. Neither drops the flush.
@@ -104,10 +106,15 @@ import {
  * inside that with room to still emit stdout and exit 0 — though the hand-off spends
  * milliseconds of it. In the detached child the ceiling stops applying the moment nothing is
  * waiting on us, so the body gets `drain.mjs`-class headroom for an LLM-backed reflect.
+ *
+ * The detached numbers are sized for the reflect below rather than for tidiness: they have to
+ * leave `REFLECT_MS` intact *after* a full `DRAIN_MS` and the heartbeat reserve, because these
+ * three compose and the innermost one binds. `hooks.json`'s `SessionEnd.timeout: 8` is
+ * unaffected — it binds the parent, and the parent is gone within milliseconds.
  */
 const DETACHED = process.env.MUBIT_CC_DETACHED === '1';
-const HARNESS_BUDGET_MS = DETACHED ? 12_000 : 7200;
-const BUDGET_MS = DETACHED ? 11_500 : 6800;
+const HARNESS_BUDGET_MS = DETACHED ? 58_000 : 7200;
+const BUDGET_MS = DETACHED ? 55_000 : 6800;
 
 /** §5.7 step 2: "until empty or 3500 ms elapse". */
 const DRAIN_MS = 3500;
@@ -117,8 +124,13 @@ const DRAIN_MS = 3500;
  * hosted instance, 4000 ms is simply not enough: the first `--print` session ever to reach
  * this call recorded `POST /v2/control/reflect: aborted after 4000ms`. The inline value is
  * left exactly where it was, because there the host's 8 s ceiling still decides.
+ *
+ * 8000 ms was not enough either, and for the same reason one step out: a Terminal-Bench sweep
+ * put the *successful* hosted tail at 9626 ms, so the detached child was aborting calls the
+ * server was still answering. It now dials wide enough that the LLM, not the client, decides
+ * when to give up — which is also why this call opts out of the breaker (see the call site).
  */
-const REFLECT_MS = DETACHED ? 8000 : 4000;
+const REFLECT_MS = DETACHED ? 45_000 : 4000;
 const OUTCOME_MS = 1500;
 const HEARTBEAT_MS = 1000;
 
@@ -253,6 +265,13 @@ await runHook('session-end', {
  * @returns {boolean} true when the child owns the flush and this process is done
  */
 function handOff(cfg, payload, runId) {
+  // Before the first byte of work, so a blank status keeps meaning exactly one thing. The
+  // stash below runs inside the host's ~1 s kill window: a parent killed there would otherwise
+  // leave the marker at its creation default, indistinguishable from a session where this hook
+  // never fired at all. A fallback to the inline body leaves this standing until the body
+  // writes a terminal status, which is correct — that run is not detached.
+  updateMarker(cfg, runId, { reflect: { at: 0, lessons_stored: 0, status: 'handoff' } });
+
   const path = stashPayload(cfg, payload);
   if (!path) {
     log(cfg, 'info', 'session-end: no handoff file could be written; flushing inline instead',
@@ -261,8 +280,8 @@ function handOff(cfg, payload, runId) {
   }
 
   // Stamped BEFORE the spawn, so a fast child can only overwrite this, never lose to it.
-  // `detached` is the parent's only marker write and is never terminal: a marker still
-  // reading it later means the child never reported.
+  // The second and last of the parent's writes, and like `handoff` above it is never
+  // terminal: a marker still reading it later means the child never reported.
   updateMarker(cfg, runId, { reflect: { at: 0, lessons_stored: 0, status: 'detached' } });
 
   const child = spawnDetached(cfg, 'session-end', [], path);
@@ -551,7 +570,18 @@ async function maybeReflect(cfg, o) {
     // (`control.proto`) — the NEGATIVE ones produce the highest-value lessons.
     include_step_outcomes: true,
     last_n_items: REFLECT_LAST_N,
-  }, { timeoutMs: o.budget });
+    // `record: false`, because a deadline this client chose is not evidence about the server.
+    // `lib/http.mjs` already exempts callers who dial *tighter* than the configured default;
+    // this one is the mirror image and the exemption misses it — the reflect is LLM-backed
+    // and dials deliberately wide, so its abort would be filed as `not_responding` against an
+    // instance that was still composing an answer. Five of those inside the window open the
+    // breaker, and the breaker gates the ingest *drain*: a merely slow reflection would
+    // escalate into capture stopping altogether. Opting out here rather than widening the
+    // exemption in `http.mjs` keeps it to the one caller that has earned it — a future
+    // wide-dialing caller should have to say so itself. The cost is that a *successful*
+    // reflect no longer records one either; the drain above and the idle heartbeat below
+    // still give the breaker real transport verdicts on every session end.
+  }, { timeoutMs: o.budget, record: false });
 
   if (!res.ok) {
     log(cfg, 'warn', `session-end: reflect failed (${res.state}); this session's lessons stay at run scope`, {

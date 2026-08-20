@@ -18,10 +18,24 @@ import { fileURLToPath } from 'node:url';
 export const KIT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const LAB_ROOT = resolve(KIT_ROOT, '..');
 
-/** @returns {string} the results root — `MUBIT_LAB_RESULTS` if set, else `<kit>/results`. */
+/**
+ * Where recorded runs go, most specific first: `MUBIT_LAB_RESULTS`, then `kit.json`'s
+ * `resultsDir`, then `<kit>/results`.
+ *
+ * The last of those is a fallback, not a default anyone should rely on: this repo is a
+ * generated mirror and its next publish deletes everything in it, so results kept inside the
+ * kit are results that vanish exactly when a second version arrives to compare against.
+ *
+ * @returns {string}
+ */
 export function resultsRoot() {
   const pin = process.env.MUBIT_LAB_RESULTS;
-  return pin ? resolve(pin) : join(KIT_ROOT, 'results');
+  if (pin) return resolve(pin);
+  try {
+    const cfg = JSON.parse(readFileSync(join(KIT_ROOT, 'kit.json'), 'utf8'));
+    if (cfg.resultsDir) return resolve(cfg.resultsDir);
+  } catch { /* fall through to the in-repo fallback */ }
+  return join(KIT_ROOT, 'results');
 }
 
 /**

@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -283,4 +283,23 @@ test('every tool an eval case declares is one the plugin actually exposes', asyn
       assert.ok(real.has(t), `${c}: declares "${t}", which this plugin version does not expose`);
     }
   }
+});
+
+test('the eval launcher never pins a static run strategy without an id', async () => {
+  const { run } = await import('../lib/evals.mjs');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const out = mkdtempSync(join(tmpdir(), 'tk-evalenv-'));
+  try {
+    // `MUBIT_CC_RUN_STRATEGY=static` with no `MUBIT_CC_RUN_ID` makes the MCP server exit
+    // before it serves a single tool. `system/init` reports only `status: "failed"`, the
+    // model gets 0 of 10 tools, and the ablation reads as "the plugin does nothing".
+    // Asserted on the built argv/env rather than by launching: this must be impossible to
+    // reintroduce, and it must cost nothing to check.
+    const src = readFileSync(new URL('../lib/evals.mjs', import.meta.url), 'utf8');
+    assert.match(src, /refusing to launch: MUBIT_CC_RUN_STRATEGY=static without MUBIT_CC_RUN_ID/,
+      'the guard against a dead MCP server must stay in place');
+    assert.ok(!/MUBIT_CC_RUN_STRATEGY: 'static',\n\s+MUBIT_CC_LOG_LEVEL/.test(src),
+      'static must never be set unconditionally');
+  } finally { rmSync(out, { recursive: true, force: true }); }
 });

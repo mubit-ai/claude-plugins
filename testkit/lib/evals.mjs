@@ -196,9 +196,11 @@ export function listCases() {
  * @param {number} [o.runs] @param {number} [o.maxCostUsd] @param {string} [o.caseGlob]
  * @param {string} [o.dataDir] a seeded data dir, exported so the sandbox plugin can find it
  * @param {boolean} [o.keepTemp] keep the scaffold dirs, so `tracePath` survives the run
+ * @param {string} [o.runId] pin every case run to one run id — required if you seed a dataDir,
+ *                           and omitted otherwise so the plugin derives per-directory
  * @returns {Promise<{code: number|null, stdout: string, stderr: string, jsonPath: string, argv: string[]}>}
  */
-export function run({ pluginDir, outDir, model, runs = 3, maxCostUsd = 5, caseGlob, dataDir, keepTemp }) {
+export function run({ pluginDir, outDir, model, runs = 3, maxCostUsd = 5, caseGlob, dataDir, keepTemp, runId }) {
   mkdirSync(outDir, { recursive: true });
   const jsonPath = join(outDir, 'aggregate-result.json');
   const creds = resolveCredentials();
@@ -225,12 +227,13 @@ export function run({ pluginDir, outDir, model, runs = 3, maxCostUsd = 5, caseGl
     '--threshold', '0',
   ];
   if (caseGlob) argv.push('--case', caseGlob);
-  // Without these a failing case is undiagnosable after the fact: `tracePath` in the
-  // aggregate points into a temp dir the harness deletes on exit, and `--verbose` writes its
-  // per-message trace only to a debug file. A silent with-only indicator is exactly the
-  // situation where you need both, so the wrapper always keeps the debug log and takes
-  // --keep-temp on request.
-  argv.push('--verbose', '--debug-file', join(outDir, 'eval-debug.log'));
+  // `--keep-temp` is the only way to read a case after the fact: `tracePath` in the aggregate
+  // points into a scaffold dir the harness deletes on exit, and a silent with-only indicator
+  // is undiagnosable without that trace.
+  //
+  // NOT `--debug-file`: it is a top-level `claude` flag, and `plugin eval` rejects it with
+  // "unknown option". `--verbose` is skipped for the same reason it would be useless — it
+  // writes to the debug log that flag would have opened.
   if (keepTemp) argv.push('--keep-temp');
 
   /** @type {Record<string,string>} */
@@ -240,10 +243,27 @@ export function run({ pluginDir, outDir, model, runs = 3, maxCostUsd = 5, caseGl
     // only channel left open to us: `execution.env` refuses non-EVAL_* keys by design.
     MUBIT_ENDPOINT: creds.endpoint,
     MUBIT_API_KEY: creds.apiKey,
-    MUBIT_CC_RUN_STRATEGY: 'static',
     MUBIT_CC_LOG_LEVEL: 'debug',
     ...(dataDir ? { MUBIT_CC_DATA_DIR: dataDir } : {}),
+    // `static` WITHOUT a run id kills the MCP server outright:
+    //
+    //   mubit: MCP server not started — could not derive a run id:
+    //   MUBIT_CC_RUN_STRATEGY=static requires MUBIT_CC_RUN_ID to name the pinned run.
+    //
+    // The plugin is right to refuse rather than silently pick another strategy, and the
+    // failure is loud in the MCP log — but `system/init` only reports `status: "failed"`, the
+    // model is handed 0 of the 10 tools, and every with-only indicator goes silent. The whole
+    // ablation then reads as "the plugin does nothing".
+    //
+    // So the strategy is pinned only when there is an id to pin it to. Otherwise it is left
+    // unset and the plugin derives per-directory, which is exactly right here: every case run
+    // gets its own sandbox cwd, so per-directory already yields one run per run.
+    ...(runId ? { MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: runId } : {}),
   };
+
+  if (env.MUBIT_CC_RUN_STRATEGY === 'static' && !env.MUBIT_CC_RUN_ID) {
+    throw new Error('refusing to launch: MUBIT_CC_RUN_STRATEGY=static without MUBIT_CC_RUN_ID kills the MCP server');
+  }
 
   return new Promise((resolve) => {
     const child = spawn('claude', argv, { cwd: pluginDir, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -253,7 +273,12 @@ export function run({ pluginDir, outDir, model, runs = 3, maxCostUsd = 5, caseGl
     child.stdout.on('data', (c) => { stdout += c; process.stdout.write(c); });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (c) => { stderr += c; });
-    child.on('close', (code) => resolve({ code, stdout, stderr, jsonPath, argv }));
+    child.on('close', (code) => {
+      // A non-zero exit with nothing on stdout means the harness rejected the invocation
+      // itself. Swallowing stderr there costs a whole debugging round trip.
+      if (code !== 0 && stderr.trim()) process.stderr.write(stderr.trim().split('\n').slice(-8).map((l) => `  claude: ${l}\n`).join(''));
+      resolve({ code, stdout, stderr, jsonPath, argv });
+    });
     child.on('error', (err) => resolve({ code: null, stdout, stderr: String(err.message), jsonPath, argv }));
   });
 }

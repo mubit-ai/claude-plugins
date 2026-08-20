@@ -35,6 +35,7 @@ one before it, and the cheap steps answer most questions.
    | `reflect.status` | Written by | What it means |
    | --- | --- | --- |
    | `""` | nobody — the marker's own default | session-end never got as far as handing the flush over. The hook did not run, or was killed before its first act. |
+   | `handoff` | the session-end hook, before it does any work | The hook started and was killed before it could either hand the flush over or fall back to running it inline. This is the value to expect when the host cancels SessionEnd inside its ~1 s window, and it is what keeps `""` above meaning only "never ran". Still reading this minutes later means that session's flush was lost — the next session's first drain picks the captures back up, but its reflection is gone. |
    | `detached` | the session-end hook, just before it spawns | The flush was handed to a background process and no child has reported since. Momentary at the end of a session; still reading this minutes later means the child was reaped before it finished — the container exited with it, or the machine went to sleep. |
    | `ok` | whichever process ran the flush | Reflection ran. `lessons_stored` is what it stored, and it can legitimately be `0` when the server has not finished indexing the session's evidence. |
    | `failed` | " | Reflection was attempted and did not answer. `last_error` carries the reason; this session's lessons stay at `run` scope. |

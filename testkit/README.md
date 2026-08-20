@@ -70,17 +70,20 @@ The backend can be **healthy and useless at the same time**, and it currently is
 while this kit was being written:
 
 ```
-PASS  backend health                  109ms ok
-FAIL  recall canary returns evidence  no_evidence after 990ms (rung 1); 10 lessons are
-                                      stored and a query quoting one of them verbatim also
-                                      returns nothing
-      ↳ retrieval is degraded: the store has content and cannot find its own content.
+PASS  backend health   218ms ok
+FAIL  recall canary    scope, not retrieval: 0 sources in a fresh run, 3 for the SAME
+                       query pinned to run "…tb-full30-a-openssl-selfsigned-cert"
 ```
 
-`/v2/core/health` answers in 109 ms. `/v2/control/context` aborts at 4 s. Rung 1 returns
-`no_evidence` for a query lifted **verbatim from a stored lesson** — which cannot be an
-empty-account result. An A/B run in this state produces clean, plausible, reproducible
-numbers showing the plugin does nothing, and nothing in the output would say why.
+The search index is fine. `POST /v2/control/query` returns HTTP 200, `degraded: false`, and
+`evidence: []` — and `consulted_runs` echoes exactly one run: the one the caller named. Every
+lesson on this instance is stored at `scope: "run"`, bound to the `source_run_id` of the
+session that produced it. So a lesson is retrievable only by the session that wrote it, and
+**cross-session recall cannot work by construction** — which is the plugin's entire value
+proposition.
+
+An A/B run in this state produces clean, plausible, reproducible numbers showing the plugin
+does nothing, and nothing in the output would say why.
 
 That is what the gate is for, and it is why the canary dials the real recall ladder through
 the plugin's own `lib/recall.mjs` rather than pinging health. The five checks:

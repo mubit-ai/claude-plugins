@@ -274,7 +274,15 @@ export async function checkRecallCanary({ pluginDir, query, budgetMs, creds }) {
       return checks;
     }
 
-    const seedText = String(lessons[0]?.text || lessons[0]?.content || '').split(/\s+/).slice(0, 10).join(' ');
+    const lesson = lessons[0] || {};
+    const seedText = String(lesson.content || lesson.text || '').split(/\s+/).slice(0, 12).join(' ');
+    if (!seedText) {
+      checks.push(check('recall-canary', 'recall canary returns evidence', false,
+        `no_evidence after ${ms}ms; ${lessons.length} lessons are stored but none carries readable text`,
+        'the lesson objects have no `content`. The canary cannot form a self-echo query, so it is declining to diagnose rather than guessing.'));
+      return checks;
+    }
+
     const echo = await recallMod.recallBlock(cfg, {
       runId: 'tk-preflight-canary',
       agentId: 'tk-preflight',
@@ -283,13 +291,40 @@ export async function checkRecallCanary({ pluginDir, query, budgetMs, creds }) {
       projectDir: process.cwd(),
     });
 
-    checks.push(check('recall-canary', 'recall canary returns evidence', echo.sources > 0,
-      echo.sources > 0
-        ? `generic query drew a blank, but the self-echo query found ${echo.sources} sources`
-        : `no_evidence after ${ms}ms (rung ${outcome.rung}); ${lessons.length} lessons are stored and a query quoting one of them verbatim also returns nothing`,
-      echo.sources > 0
-        ? undefined
-        : 'retrieval is degraded: the store has content and cannot find its own content. Health can be green throughout — that is exactly what this gate is for. Nothing recorded from here means anything.'));
+    if (echo.sources > 0) {
+      checks.push(check('recall-canary', 'recall canary returns evidence', true,
+        `the generic query drew a blank, but the self-echo query found ${echo.sources} sources`));
+      return checks;
+    }
+
+    // Same query, same mode, same everything — except the run it is asked in. If pinning the
+    // query to the run that OWNS the lesson finds it, retrieval is working perfectly and the
+    // problem is scope: every query is answered only from the run it names, so a lesson is
+    // reachable only by the session that wrote it. That is a completely different bug from
+    // "retrieval is down", it needs a completely different fix, and reporting the wrong one
+    // sends whoever reads this to go and look at a vector index that is fine.
+    const owningRun = String(lesson.source_run_id || '');
+    let scoped = null;
+    if (owningRun) {
+      scoped = await recallMod.recallBlock(cfg, {
+        runId: owningRun,
+        agentId: 'tk-preflight',
+        query: seedText,
+        deadline: Date.now() + Math.max(budgetMs, 5000),
+        projectDir: process.cwd(),
+      });
+    }
+
+    if (scoped && scoped.sources > 0) {
+      checks.push(check('recall-canary', 'recall canary returns evidence', false,
+        `scope, not retrieval: 0 sources in a fresh run, ${scoped.sources} for the SAME query pinned to run "${owningRun.slice(-40)}"`,
+        'the search index is healthy. Every lesson here is stored at scope "run" and every query is answered only from the run it names, so a lesson is reachable only by the session that created it — cross-session recall cannot work by construction. Fix the scope lessons are promoted to, not the retrieval path.'));
+      return checks;
+    }
+
+    checks.push(check('recall-canary', 'recall canary returns evidence', false,
+      `no_evidence after ${ms}ms (rung ${outcome.rung}); ${lessons.length} lessons stored, and a query quoting one verbatim finds nothing even when pinned to its own run`,
+      'the store has content and cannot find it from any scope. This one really is the retrieval path.'));
     return checks;
   } catch (err) {
     return [check('recall-canary', 'recall canary returns evidence', false, 'canary threw',

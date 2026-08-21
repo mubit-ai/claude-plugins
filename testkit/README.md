@@ -78,16 +78,21 @@ FAIL  recall canary    scope, not retrieval: 0 sources in a fresh run, 3 for the
 The search index is fine. `POST /v2/control/query` returns HTTP 200, `degraded: false`, and
 `evidence: []` — and `consulted_runs` echoes exactly one run: the one the caller named. Every
 lesson on this instance is stored at `scope: "run"`, bound to the `source_run_id` of the
-session that produced it. So a lesson is retrievable only by the session that wrote it, and
-**cross-session recall cannot work by construction** — which is the plugin's entire value
-proposition.
+session that produced it.
 
-An A/B run in this state produces clean, plausible, reproducible numbers showing the plugin
-does nothing, and nothing in the output would say why.
+**What that does and does not prove has been re-derived — see
+[`docs/SCOPE.md`](docs/SCOPE.md).** The canary dials a synthetic `tk-preflight-canary` run
+that has never written anything, so what it measures is *cross-project* recall, which this
+plugin deliberately keeps off (`mcpLessonScope` defaults to `run`). Cross-session recall
+*within* a project rides the same `run_id` — `runStrategy: per-directory` derives it from the
+git toplevel — and does not depend on any of this. Every W2 scenario pins its run id and
+therefore tests that path, so a red canary is **not** a reason to expect them to fail.
 
-**[`docs/SCOPE.md`](docs/SCOPE.md) traces this end to end and gives the fix** — it is a
-one-line per-instance config change (`MUBIT_CONTROL_LESSON_PROMOTION_THRESHOLD`, already
-allowlisted in the instance CRD), not a code change.
+The gate still earns its place: an A/B run against a genuinely broken retrieval path produces
+clean, plausible, reproducible numbers showing the plugin does nothing, and nothing in the
+output would say why. But the canary is currently testing the wrong one of the three states
+it can be in, and `docs/SCOPE.md` §8 specifies the split — same-run sentinel blocks a sweep,
+cross-run overlay merely reports.
 
 That is what the gate is for, and it is why the canary dials the real recall ladder through
 the plugin's own `lib/recall.mjs` rather than pinging health. The five checks:

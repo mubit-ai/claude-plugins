@@ -404,6 +404,33 @@ test('N3j — an instance with no ingest-job route is still judged on the read-b
   } finally { await server.close(); }
 });
 
+// §8.1: "ingest lag" is a claim about the write still being in flight, and it may only be
+// made on positive evidence. `done: true` is that evidence whatever the status string spells,
+// and a backend that has no jobs route gives no evidence either way — in which case the
+// read-back is all there is to go on and it is the read-back that must be reported.
+test('N3k — a finished job is finished however it spells its status', async () => {
+  const server = await loopbackInstance({
+    'POST /v2/control/ingest': { json: { accepted: true, job_id: 'job_test_1', status: 'queued' } },
+    'GET /v2/control/ingest/jobs/job_test_1': { json: { job_id: 'job_test_1', status: 'processed', done: true, error: '' } },
+    'POST /v2/control/query': { json: { evidence: [] } },
+  });
+  try {
+    const checks = await checkRecallCanary({
+      pluginDir: PLUGIN,
+      query: 'anything',
+      budgetMs: 1000,
+      landingMs: 600,
+      creds: { endpoint: server.url, apiKey: 'tk-fake-key' },
+    });
+    const canary = checks.find((c) => c.id === 'recall-canary');
+    assert.equal(canary?.ok, false, 'the sentinel never came back, whatever the job called itself');
+    assert.ok(!/ingest lag/.test(canary?.measured ?? ''),
+      `the store said the write was done and then could not return it, which is the retrieval verdict; blaming ingest sends the operator to wait out a queue that is already empty: ${canary?.measured}`);
+    assert.match(canary?.measured ?? '', /sentinel/,
+      'the row still has to name what was asked for, or "0 sources" is unreadable');
+  } finally { await server.close(); }
+});
+
 /* -------------------------------------------------------------------------- */
 /* what a recorded run gets stamped with (SCOPE.md §8.3)                       */
 /* -------------------------------------------------------------------------- */

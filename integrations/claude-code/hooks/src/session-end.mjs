@@ -32,9 +32,41 @@
  * accepted. Outcomes go out before reflect for the opposite reason: `include_step_outcomes`
  * folds those signals into the evidence, and the negative ones produce the best lessons.
  *
- * The drain runs **inline, not detached**: the process is going away and a detached child
- * may be reaped before it finishes. It ignores the batch-size trigger — there is no "next
- * prompt" left to flush on.
+ * The drain runs **inline within this body**, not as a further `spawnDetached('drain')`: one
+ * hand-off is enough, and a second child would only race the first for the drain lock. It
+ * ignores the batch-size trigger — there is no "next prompt" left to flush on.
+ *
+ * ---------------------------------------------------------------------------
+ * ...and none of it runs in the process the host started
+ * ---------------------------------------------------------------------------
+ * The host does not promise this hook a chance to finish. Under `--print` Claude Code emits
+ * its final result and tears the session down about a second in — a **cancellation**, not a
+ * timeout, so no ceiling on either side of the boundary helps: a trial with
+ * `SessionEnd.timeout: 30` was cancelled at the same ~1 s, four times out of four. Interactive
+ * sessions are cancelled too, which is why runs that demonstrably stored lessons still read
+ * `reflect: {at: 0, status: ""}` — the request went out and the hook was killed before it
+ * could say so.
+ *
+ * So the ordered body above lives in a **detached child** (§4.9's `spawnDetached`, the same
+ * mechanism `drain.mjs` already uses), and this process does exactly four things: stamp the
+ * marker `handoff`, stash the payload, stamp it `detached`, spawn. The child is not on the
+ * host's 8 s clock, because nothing is waiting on it.
+ *
+ * Two details are load-bearing:
+ *
+ *   - **The claim stays in the body, not in the parent.** A parent that claimed and then
+ *     failed to spawn — or spawned a child that was reaped — would have burned the claim and
+ *     taken the session's whole flush with it.
+ *   - **The marker is stamped before the spawn**, so a fast child can only overwrite that
+ *     stamp, never lose a race to it. The parent writes two non-terminal statuses and the
+ *     child never writes either, which is what makes a marker left on one of them a specific,
+ *     reportable failure rather than one more indistinguishable blank: `handoff` means the
+ *     parent was killed before it could hand over or fall back — it dies inside the host's
+ *     ~1 s window, so this is the common one — and `detached` means the hand-off completed
+ *     and the child was reaped.
+ *
+ * `MUBIT_CC_SESSION_END_DETACH=0` runs the body here instead, for an environment that forbids
+ * background processes; so does a hand-off that cannot be written. Neither drops the flush.
  *
  * `claimOnce` guards the whole thing: SessionEnd can fire more than once (a `reason=exit`
  * after a `reason=clear`, a wrapper re-running the hook), and a double flush is a double
@@ -48,15 +80,16 @@
  * crashed session's captures survive.
  */
 
-import { readdirSync } from 'node:fs';
+import { readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { readBreaker } from '../../lib/breaker.mjs';
 import { loadConfig } from '../../lib/config.mjs';
 import { ROUTES, heartbeat, postIngest, postOutcome, request } from '../../lib/http.mjs';
-import { runHook } from '../../lib/hook.mjs';
+import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
+import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import {
   acquireDrainLock, batchIdempotencyKey, claimOnce, commitBatch, readBatch, releaseDrainLock,
@@ -67,16 +100,37 @@ import {
 } from '../../lib/state.mjs';
 
 /**
- * §5.7 budgets. `hooks.json` allows this hook 8 s, so the internal deadline sits inside that
- * with room for the harness to still emit stdout and exit 0.
+ * §5.7 budgets, in the two lifetimes this hook has.
+ *
+ * In the process the host started, `hooks.json` allows 8 s and the internal deadline sits
+ * inside that with room to still emit stdout and exit 0 — though the hand-off spends
+ * milliseconds of it. In the detached child the ceiling stops applying the moment nothing is
+ * waiting on us, so the body gets `drain.mjs`-class headroom for an LLM-backed reflect.
+ *
+ * The detached numbers are sized for the reflect below rather than for tidiness: they have to
+ * leave `REFLECT_MS` intact *after* a full `DRAIN_MS` and the heartbeat reserve, because these
+ * three compose and the innermost one binds. `hooks.json`'s `SessionEnd.timeout: 8` is
+ * unaffected — it binds the parent, and the parent is gone within milliseconds.
  */
-const HARNESS_BUDGET_MS = 7200;
-const BUDGET_MS = 6800;
+const DETACHED = process.env.MUBIT_CC_DETACHED === '1';
+const HARNESS_BUDGET_MS = DETACHED ? 58_000 : 7200;
+const BUDGET_MS = DETACHED ? 55_000 : 6800;
 
 /** §5.7 step 2: "until empty or 3500 ms elapse". */
 const DRAIN_MS = 3500;
-/** §5.7 step 4: the reflect is LLM-backed, so it gets the largest single slice. */
-const REFLECT_MS = 4000;
+/**
+ * §5.7 step 4: the reflect is LLM-backed, so it gets the largest single slice — and inside a
+ * detached child that slice is what the extra headroom above is *for*. Measured against a
+ * hosted instance, 4000 ms is simply not enough: the first `--print` session ever to reach
+ * this call recorded `POST /v2/control/reflect: aborted after 4000ms`. The inline value is
+ * left exactly where it was, because there the host's 8 s ceiling still decides.
+ *
+ * 8000 ms was not enough either, and for the same reason one step out: a Terminal-Bench sweep
+ * put the *successful* hosted tail at 9626 ms, so the detached child was aborting calls the
+ * server was still answering. It now dials wide enough that the LLM, not the client, decides
+ * when to give up — which is also why this call opts out of the breaker (see the call site).
+ */
+const REFLECT_MS = DETACHED ? 45_000 : 4000;
 const OUTCOME_MS = 1500;
 const HEARTBEAT_MS = 1000;
 
@@ -85,16 +139,6 @@ const REFLECT_LAST_N = 200;
 
 /** §7: `runs/<run_id>/jobs.json` keeps the last 20, for the doctor skill. */
 const JOBS_KEEP = 20;
-
-/** §5.5: the implicit signal is deliberately weak — a turn ending is not proof it helped. */
-const SIGNAL_SUCCESS = 0.2;
-const SIGNAL_FAILURE = -0.3;
-
-/** The drain's bound, applied here too — this flush is the third sender of the same post. */
-const MAX_OUTCOME_ATTEMPTS = 3;
-
-/** §1.3: `reference_id` must be non-empty; the real attribution rides in `entry_ids[]`. */
-const RUN_LEVEL_REFERENCE = 'global';
 
 /** A dead session is not worth an unbounded scan of a six-hour turn directory. */
 const MAX_TURN_FLUSH = 10;
@@ -120,6 +164,12 @@ await runHook('session-end', {
       // `static` with no pin, or a derivation that could only have answered "default" (§4.3).
       // The spool waits for a run id worth writing to; nothing here is lost.
       log(cfg, 'warn', `session-end: no usable run id (${messageOf(err)})`);
+      return SUPPRESS;
+    }
+
+    // Before anything else, and before the claim: hand the whole body to a process the host
+    // does not own. Everything below this line is what the child then runs, unchanged.
+    if (!ctx?.detached && cfg.sessionEndDetach !== false && handOff(cfg, payload, runId)) {
       return SUPPRESS;
     }
 
@@ -193,13 +243,67 @@ await runHook('session-end', {
 });
 
 // ---------------------------------------------------------------------------
+// The hand-off
+// ---------------------------------------------------------------------------
+
+/**
+ * Stash the payload, stamp the marker, spawn, and report whether the child owns the flush.
+ *
+ * `spawnDetached` (§4.9) is re-used rather than reinvented: `detached: true`, `stdio:
+ * 'ignore'`, `unref()`, and the payload handed over by file because a detached child's
+ * inherited stdin is not reliably readable once the parent exits — and the parent exits
+ * within milliseconds, which is the entire point. `'session-end'` resolves as a sibling of
+ * `argv[1]` first, so the same call works from `hooks/src` and from the shipped `hooks/dist`.
+ *
+ * **Every failure here returns `false`, and false means "run the body yourself".** Losing a
+ * session's flush is the failure this whole path exists to stop; an unwritable `tmp/` is not
+ * a reason to reintroduce it.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} payload
+ * @param {string} runId
+ * @returns {boolean} true when the child owns the flush and this process is done
+ */
+function handOff(cfg, payload, runId) {
+  // Before the first byte of work, so a blank status keeps meaning exactly one thing. The
+  // stash below runs inside the host's ~1 s kill window: a parent killed there would otherwise
+  // leave the marker at its creation default, indistinguishable from a session where this hook
+  // never fired at all. A fallback to the inline body leaves this standing until the body
+  // writes a terminal status, which is correct — that run is not detached.
+  updateMarker(cfg, runId, { reflect: { at: 0, lessons_stored: 0, status: 'handoff' } });
+
+  const path = stashPayload(cfg, payload);
+  if (!path) {
+    log(cfg, 'info', 'session-end: no handoff file could be written; flushing inline instead',
+      { run_id: runId });
+    return false;
+  }
+
+  // Stamped BEFORE the spawn, so a fast child can only overwrite this, never lose to it.
+  // The second and last of the parent's writes, and like `handoff` above it is never
+  // terminal: a marker still reading it later means the child never reported.
+  updateMarker(cfg, runId, { reflect: { at: 0, lessons_stored: 0, status: 'detached' } });
+
+  const child = spawnDetached(cfg, 'session-end', [], path);
+  if (!child) {
+    try { unlinkSync(path); } catch { /* §7's tmp sweep gets it */ }
+    log(cfg, 'info', 'session-end: could not spawn the flush; running it inline instead',
+      { run_id: runId });
+    return false;
+  }
+
+  log(cfg, 'debug', 'session-end: flushing in a detached child', { run_id: runId, pid: child.pid });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // §5.7 step 2 — the inline drain
 // ---------------------------------------------------------------------------
 
 /**
  * One drainer at a time, one request per batch, and files unlinked only after a 2xx —
- * the same contract as `drain.mjs`, run in this process because a detached child may be
- * reaped when the session ends.
+ * the same contract as `drain.mjs`, run in this body rather than handed to yet another
+ * child: the body is already in one, and a second would only race the first for the lock.
  *
  * A failure stops the loop and leaves every spool file exactly where it is. Quarantine of a
  * genuinely bad payload is deliberately NOT duplicated here: `drain.mjs` owns the three-way
@@ -331,19 +435,28 @@ function recordJob(cfg, runId, body, n) {
  * A turn that `capture --stop` marked `outcome_pending` but whose drain never got to
  * attribute it — the drainer stood down, the endpoint was down, the session ended first.
  *
- * Never sent with an empty `entry_ids[]`: an outcome attributed to nothing is a wasted round
- * trip that also pollutes the run-level signal history the reflect path is about to read.
- * `outcomeMode: "off"` disables implicit attribution entirely, and `"explicit"` hands the
- * call to the model through `mubit_outcome` — firing one here as well would dilute the
- * model's deliberate judgement with an automatic 0.2.
+ * **The rule is `lib/outcome.mjs`'s, not this hook's.** `drain.mjs` (§5.5 step 7) is its other
+ * caller, and because the two hooks never fire for the same turn, a disagreement between them
+ * is invisible: it shows up only as a run whose outcome series mixes two definitions of the
+ * same measurement. That is exactly what happened while this function kept its own copy — it
+ * posted `success`/+0.2 with `entry_ids` for every pending turn, including the ones the drain
+ * had learned to record as `neutral` with none.
+ *
+ * So `decideOutcome` answers what to post (including "nothing", for a turn that recalled
+ * nothing — an outcome attributed to nothing is a wasted round trip that also pollutes the
+ * run-level signal history the reflect path is about to read), `outcomeRequest` addresses it,
+ * and what stays here is what a SessionEnd flush owns: which files to consider, the budget,
+ * and leaving a failure pending.
  *
  * @param {Record<string, any>} cfg
  * @param {{runId: string, agentId: string, budget: () => number}} o
  * @returns {Promise<number>} how many outcomes were accepted
  */
 async function flushOutcomes(cfg, o) {
-  const mode = str(cfg.outcomeMode) || 'implicit';
-  if (mode !== 'implicit') return 0;
+  // §6.1: "off" disables implicit attribution entirely, and "explicit" hands the call to the
+  // model through `mubit_outcome` — firing one here as well would dilute the model's
+  // deliberate judgement with an automatic 0.2.
+  if (!implicitOutcomesEnabled(cfg)) return 0;
 
   let flushed = 0;
   try {
@@ -358,45 +471,30 @@ async function flushOutcomes(cfg, o) {
 
       const p = join(dir, name);
       const turn = readJson(p, null);
-      if (!isObject(turn)) continue;
-      if (turn.outcome_pending !== true) continue;
-      if (numOr(turn.outcome_sent_at, 0) > 0) continue;
+      // This hook sweeps a directory rather than being handed one turn, so `outcome_pending`
+      // is the filter that says which files are even candidates: a turn `capture --stop` has
+      // not closed yet is still being written.
+      if (!isObject(turn) || turn.outcome_pending !== true) continue;
 
-      const entryIds = Array.isArray(turn.recalled)
-        ? turn.recalled.filter((v) => typeof v === 'string' && v.trim())
-        : [];
-      if (entryIds.length === 0) continue;
+      const decision = decideOutcome(turn);
+      if (!decision.post) {
+        // Nothing is going to send this one; stop claiming it is pending.
+        if (decision.reason === 'attempts_exhausted') {
+          writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
+        }
+        continue;
+      }
 
       const promptId = str(turn.prompt_id) || name.replace(/\.json$/, '');
 
-      // Same bound the drain applies, for the same reason: a post the server accepted but
-      // answered too late leaves the turn pending, and this flush is the third place that
-      // would send it again. Counted in the file, before dialling.
+      // The same bound the drain applies, for the same reason: this flush is the third place
+      // that would send the same post. Counted before dialling, in the file.
       const attempts = numOr(turn.outcome_attempts, 0);
-      if (attempts >= MAX_OUTCOME_ATTEMPTS) {
-        writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
-        log(cfg, 'info', `session-end: outcome abandoned after ${attempts} attempts`,
-          { run_id: o.runId, prompt_id: promptId });
-        continue;
-      }
       writeJsonAtomic(p, { ...turn, outcome_attempts: attempts + 1 });
 
-      const failed = str(turn.outcome).toLowerCase() === 'failure';
-
-      const res = await postOutcome(cfg, {
-        run_id: o.runId,
-        reference_id: RUN_LEVEL_REFERENCE,
-        outcome: failed ? 'failure' : 'success',
-        signal: failed ? SIGNAL_FAILURE : SIGNAL_SUCCESS,
-        rationale: failed
-          ? 'Claude Code turn ended in failure after these memories were injected.'
-          : 'Claude Code turn completed after these memories were injected.',
-        agent_id: o.agentId,
-        entry_ids: entryIds,
-        // Derived from (run_id, prompt_id) and never random, so this and a concurrent drain
-        // post the same key: the server's outcome ledger then makes the second one a no-op.
-        idempotency_key: `cc-outcome-${o.runId}-${promptId}`,
-      }, { timeoutMs: budget });
+      const res = await postOutcome(cfg,
+        outcomeRequest({ runId: o.runId, agentId: o.agentId, promptId, decision }),
+        { timeoutMs: budget });
 
       if (res.ok) {
         flushed++;
@@ -472,7 +570,18 @@ async function maybeReflect(cfg, o) {
     // (`control.proto`) — the NEGATIVE ones produce the highest-value lessons.
     include_step_outcomes: true,
     last_n_items: REFLECT_LAST_N,
-  }, { timeoutMs: o.budget });
+    // `record: false`, because a deadline this client chose is not evidence about the server.
+    // `lib/http.mjs` already exempts callers who dial *tighter* than the configured default;
+    // this one is the mirror image and the exemption misses it — the reflect is LLM-backed
+    // and dials deliberately wide, so its abort would be filed as `not_responding` against an
+    // instance that was still composing an answer. Five of those inside the window open the
+    // breaker, and the breaker gates the ingest *drain*: a merely slow reflection would
+    // escalate into capture stopping altogether. Opting out here rather than widening the
+    // exemption in `http.mjs` keeps it to the one caller that has earned it — a future
+    // wide-dialing caller should have to say so itself. The cost is that a *successful*
+    // reflect no longer records one either; the drain above and the idle heartbeat below
+    // still give the breaker real transport verdicts on every session end.
+  }, { timeoutMs: o.budget, record: false });
 
   if (!res.ok) {
     log(cfg, 'warn', `session-end: reflect failed (${res.state}); this session's lessons stay at run scope`, {

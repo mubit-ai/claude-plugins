@@ -204,6 +204,10 @@ export function pruneStale(cfg = {}) {
       for (const name of jsonFiles(join(rd, 'turns'))) {
         expire(join(rd, 'turns', name), 6 * HOUR);
       }
+      // runs/<run_id>/seen.json — 6 h, the same window as the turns it aggregates
+      // (`lib/seen.mjs`). It also expires entry by entry on every read; this is the sweep
+      // for a run nobody comes back to, whose whole file would otherwise outlive its turns.
+      expire(join(rd, 'seen.json'), 6 * HOUR);
       // runs/<run_id>/drain.lock — 60 s, stolen after
       expire(join(rd, 'drain.lock'), 60 * SEC);
       // runs/<run_id>/checkpoints.json — 30 d; jobs.json — 24 h

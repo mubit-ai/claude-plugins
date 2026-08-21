@@ -254,9 +254,15 @@ test('--pre failure emits the exact checkpoint-failed systemMessage and exits 0'
 // --post
 // ---------------------------------------------------------------------------
 
-// §5.6 — PostCompact re-anchors the freshly compacted context to the stored id.
-// It reads `checkpoints.json` and dials nothing; 800 ms is not a network budget.
-test('--post references the stored checkpoint_id with no network call', async (t) => {
+// §5.6 — `--post` reads `checkpoints.json` and dials nothing; 800 ms is not a network budget.
+//
+// It also injects NOTHING, and that is the fix rather than a regression: `PostCompact` is not
+// a `hookSpecificOutput.hookEventName` Claude Code accepts, so the re-anchor this hook used to
+// emit failed validation and was discarded whole — silently, on every compaction, since the
+// first release. `test/hook-output.test.mjs` holds the accepted set and the evidence. The
+// re-anchor now ships from `session-start.mjs` on `source === "compact"`, which is the only
+// hook that runs after a compaction AND has an event name the host will take.
+test('--post reads the stored checkpoint, dials nothing, and injects nothing', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -269,15 +275,16 @@ test('--post references the stored checkpoint_id with no network call', async (t
   assert.equal(server.requests.length, 0,
     `--post must not dial: ${server.requests.map((q) => `${q.method} ${q.path}`).join(', ')}`);
 
-  const out = r.json.hookSpecificOutput;
-  assert.equal(out.hookEventName, 'PostCompact');
-  assert.ok(out.additionalContext.includes('ckpt_seeded_9'),
-    `additionalContext must name the stored checkpoint, got:\n${out.additionalContext}`);
-  assert.ok(out.additionalContext.includes(RUN_ID), 'and the run it belongs to');
+  assert.equal(r.json?.hookSpecificOutput, undefined,
+    'a PostCompact hookSpecificOutput is rejected by the host and takes the whole output with '
+    + `it; got:\n${JSON.stringify(r.json)}`);
+  assert.equal(r.json?.suppressOutput, true,
+    `--post has nothing the host will accept, so it says nothing; got:\n${JSON.stringify(r.json)}`);
 });
 
-// §5.6 — with nothing stored there is nothing to anchor to. Degrade quietly rather than
-// injecting "checkpoint undefined holds your context", which is worse than silence.
+// §5.6 — with nothing stored there is nothing to anchor to, and the answer is the same
+// suppression rather than a second shape. "checkpoint undefined holds your context" is worse
+// than silence, and so is a payload the host throws away.
 test('--post with no stored checkpoint degrades quietly', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
@@ -288,10 +295,8 @@ test('--post with no stored checkpoint degrades quietly', async (t) => {
 
   assertHookContract(r);
   assert.equal(server.requests.length, 0);
-  const ctx = r.json?.hookSpecificOutput?.additionalContext;
-  if (ctx !== undefined) {
-    assert.ok(!/undefined|null/.test(ctx), `emitted a placeholder id: ${ctx}`);
-  }
+  assert.equal(r.json?.hookSpecificOutput, undefined);
+  assert.equal(r.json?.suppressOutput, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -325,4 +330,86 @@ test('--pre with an unreadable transcript_path exits 0 without crashing', async 
 
   assertHookContract(r);
   assert.equal(r.code, 0);
+});
+
+// ---------------------------------------------------------------------------
+// --post clears the cross-turn seen-set — §5.2 / `lib/seen.mjs`
+// ---------------------------------------------------------------------------
+
+/*
+ * Compaction resets the model's window, not the file.
+ *
+ * `hooks/src/prompt-recall.mjs` degrades a memory it has already injected into a one-line
+ * pointer, on the strength of `runs/<run_id>/seen.json` saying the model has it. After a
+ * compaction that is no longer true of anything: the transcript the entries were injected
+ * into is gone. A pointer surviving a compaction names a memory that exists nowhere in the
+ * conversation — strictly worse than paying full price, because the model is told a memory
+ * applies and is given no way to read it.
+ *
+ * `--post` already runs on exactly that event, reads one file and dials nothing, so it is
+ * where the reset belongs.
+ */
+
+const seenPath = (dataDir) => join(runDir(dataDir), 'seen.json');
+
+function seedSeen(dataDir, refs = ['ref_rule_1', 'ref_lesson_1']) {
+  mkdirSync(runDir(dataDir), { recursive: true });
+  const now = Date.now();
+  const entries = {};
+  for (const id of refs) entries[id] = { first: now, last: now, count: 3 };
+  writeFileSync(seenPath(dataDir), JSON.stringify({ run_id: RUN_ID, updated_at: now, refs: entries }));
+}
+
+test('--post clears the seen-set, so the next prompt re-expands every memory in full', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedCheckpoints(dataDir, [{ checkpoint_id: 'ckpt_prior', token_estimate: 3400, at: Date.now() }]);
+  seedSeen(dataDir);
+
+  const r = await runHook('checkpoint', fx.postCompact(), {
+    env: env(dataDir, server.url), args: ['--post'],
+  });
+
+  assertHookContract(r);
+  assert.equal(existsSync(seenPath(dataDir)), false,
+    'a pointer that outlives the transcript it points into names a memory the model cannot read');
+  assert.equal(server.requests.length, 0, '--post still dials nothing (§5.6)');
+});
+
+// The clear cannot be gated on the checkpoint call having worked. A compaction with no
+// stored anchor still emptied the model's window, and that is the fact the seen-set tracks.
+test('--post clears the seen-set even when there is no checkpoint to re-anchor to', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSeen(dataDir);
+
+  const r = await runHook('checkpoint', fx.postCompact(), {
+    env: env(dataDir, server.url), args: ['--post'],
+  });
+
+  assertHookContract(r);
+  assert.equal(existsSync(seenPath(dataDir)), false,
+    'the reset follows the compaction, not the anchor — `--pre` failing does not un-compact '
+    + 'the transcript');
+});
+
+// §5.6: `--pre` runs before the compaction, while the model still has everything. Clearing
+// there would re-expand one block for no reason, and would leave the set live across the
+// compaction if `--post` never fired.
+test('--pre leaves the seen-set alone', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const transcript = writeTranscript(dataDir, { bytes: 32 * 1024 });
+  seedSeen(dataDir);
+
+  const r = await runHook('checkpoint', preCompactPayload(transcript), {
+    env: env(dataDir, server.url), args: ['--pre'],
+  });
+
+  assertHookContract(r);
+  assert.equal(existsSync(seenPath(dataDir)), true,
+    'the model still has the whole transcript when --pre runs');
 });

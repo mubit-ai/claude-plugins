@@ -128,15 +128,15 @@ claude plugin details mubit-memory
 Component inventory
   Skills (7)  auth, doctor, forget, recall, reflect, remember, setup
   Agents (1)  mubit-recall
-  Hooks (9)  SessionStart, UserPromptSubmit, PostToolUse, PostToolUseFailure, Stop,
-             SubagentStop, PreCompact, PostCompact, SessionEnd  (harness-only — no model context cost)
+  Hooks (10)  SessionStart, CwdChanged, UserPromptSubmit, PostToolUse, PostToolUseFailure,
+             Stop, SubagentStop, PreCompact, PostCompact, SessionEnd  (harness-only — no model context cost)
   MCP servers (1)  mubit  (tool schemas resolved at runtime; not counted)
 
 Projected token cost
   Always-on:   ~452 tok   added to every session
 ```
 
-Seven skills, one agent, nine hook events. That number is what the skill descriptions and the
+Seven skills, one agent, ten hook events. That number is what the skill descriptions and the
 agent cost you in every session; hooks cost nothing in context because they run in the harness,
 not the model.
 
@@ -239,6 +239,7 @@ What happens on its own:
 | When | What the plugin does |
 | --- | --- |
 | Session starts | Derives a run id from your directory, registers the agent, pulls up to 5 global lessons, and tells the model memory is active |
+| You `cd` into another repo | Moves the session to that repo's run, and flushes what the run you left had spooled. A `cd` inside one repo changes nothing |
 | Every prompt you send | Queries memory and injects what is relevant, within a 1500 ms budget and a 1500-token cap. **Zero LLM calls** — assembly is local |
 | Every tool call | Redacts and spools it. Zero network on the hot path |
 | Every tool failure | Captured — these produce the most useful lessons |
@@ -402,6 +403,16 @@ Everything below is in `/plugin` → Mubit Memory → configure.
 
 `/clear` starts a fresh run (`-c1`, `-c2` …). Resume, compact and fork reuse the same one.
 
+A `cd` into a different repo moves the session onto that repo's run under `per-directory` and
+`git-branch`, and drains whatever the run you left still had spooled. `per-conversation` and
+`static` are not derived from a directory, so they do not move. A `cd` *within* one repo never
+moves anything — the id resolves through `git rev-parse --show-toplevel`.
+
+> The MCP server does not follow. It derives its run once, when the session starts it, and
+> pins every write to that value; moving it would need a server restart the plugin cannot ask
+> for. After a `cd`, what the hooks capture lands in the new repo's run while what
+> `/mubit-memory:remember` writes lands in the one you started in.
+
 ### How much context memory is allowed to spend
 
 `recallTokenBudget`, default `1500`. Raise it if recall keeps getting trimmed; lower it if you
@@ -412,11 +423,55 @@ want the context back.
 `reflectOnEnd`, default `true`. It is the only path that promotes a lesson beyond its own run.
 Turning it off to save a few seconds at exit trades away cross-session memory entirely.
 
+### A reminder before a dangerous command — off by default
+
+`preToolWarnings`, default **`false`**.
+
+Turn it on and, just before Claude runs an `rm` or a `git push`, the plugin checks the `rule`
+memories this run has already recalled. If one mentions the command, it is shown to Claude —
+and nothing else happens. Try it for a session:
+
+```bash
+MUBIT_CC_PRE_TOOL_WARNINGS=1 claude
+```
+
+Two things about it are worth understanding before you rely on it, because both are easy to
+assume the other way round.
+
+**It warns. It cannot stop anything.** Claude Code gives a pre-tool hook four decisions —
+allow, deny, ask, defer — and a fifth power that rewrites the command's arguments outright.
+This plugin uses none of them, on any code path, and its tests assert that absence across
+every branch and the shipped bundle rather than trusting it. What Claude sees is a note; it
+decides what to do with it, exactly as it does with any other recalled memory. A rule that
+says "never force-push to main" does not become a lock on force-pushing to main.
+
+**And it does not see every command.** The hook is registered with a filter so it is not a
+process spawn in front of every tool call in your session — Claude Code's own description of
+that field is *"Only runs if the tool call matches the pattern. Avoids spawning hooks for
+non-matching commands."* The docs also say the filter is best-effort and **fails open**:
+
+> The filter also fails open, running your hook regardless of pattern, when the Bash command
+> can't be parsed. Because the filter is best-effort, use the permission system rather than a
+> hook to enforce a hard allow or deny.
+
+Read that last sentence as written. **This is a memory-informed guardrail, not a security
+boundary.** If a command must never run, that belongs in `permissions.deny` in your
+`settings.json`, where the host enforces it — not in a Mubit rule, and not here. What this
+setting buys is that a lesson you already paid to learn shows up at the moment it applies
+instead of scrolling past twenty prompts earlier.
+
+One small thing that is *not* documented anywhere, so do not assume it: what Claude Code does
+with a pre-tool hook that times out. The published reference does not say. Nothing here rests
+on it — the plugin denies nothing at any exit it controls, and it exits 0 on every path,
+including the path where its own internal deadline fires — but if you write your own pre-tool
+hook, do not carry the assumption forward.
+
 ### Quieting it temporarily
 
 ```bash
 MUBIT_CC_CAPTURE=0 claude    # stop capturing, keep recall
 MUBIT_CC_RECALL=0 claude     # stop injecting, keep capturing
+MUBIT_CC_PRE_TOOL_WARNINGS=0 claude   # stop the pre-command reminders (already the default)
 ```
 
 ### Fewer MCP tools

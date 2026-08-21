@@ -4,7 +4,7 @@
  * `hooks/src/checkpoint.mjs` — PreCompact (`--pre`, blocking) / PostCompact (`--post`).
  *
  * One script, two modes by argv, and they have almost nothing in common: `--pre` is the only
- * blocking network call in the plugin, `--post` is a file read and a sentence.
+ * blocking network call in the plugin, `--post` is a file read and a log line.
  *
  * ---------------------------------------------------------------------------
  * Why blocking is justified here and nowhere else
@@ -43,21 +43,45 @@
  * it is put in a request body, before it is put in a spool file, and before it is put in a
  * log line — and a scrub that throws drops the snapshot entirely rather than sending it raw.
  *
- * `--post` (§5.6, 800 ms, **zero network**) reads `checkpoints.json` and tells the model what
- * the anchor is and how to ask for it. With nothing stored it says nothing at all: "checkpoint
- * undefined holds your context" is strictly worse than silence.
+ * ---------------------------------------------------------------------------
+ * `--post` injects nothing, and the re-anchor ships from SessionStart instead
+ * ---------------------------------------------------------------------------
+ * §5.6 gives `--post` (800 ms, **zero network**) the job of telling the model what the anchor
+ * is and how to ask for it. It cannot do that job, and it never could: Claude Code validates
+ * `hookSpecificOutput` against a closed set of `hookEventName` values, `PostCompact` is not
+ * one of them, and a name outside the set fails the **whole** output —
+ *
+ *     PostCompact [node …/hooks/dist/checkpoint.mjs --post] failed:
+ *     Hook JSON output validation failed — (root): Invalid input
+ *
+ * — so every re-anchor this hook emitted was discarded, silently, on every compaction since
+ * the first release. `--pre` was never affected because `systemMessage` is a top-level field
+ * and never reaches that union. `test/hook-output.test.mjs` holds the accepted set, the
+ * command that re-derives it from the host binary, and the gate that now covers every hook.
+ *
+ * So the re-anchor moved to `hooks/src/session-start.mjs`, which fires with
+ * `source === "compact"` after a compaction and whose `SessionStart` name **is** accepted. It
+ * reads the same `checkpoints.json` this hook writes, so nothing new is stored to carry it.
+ *
+ * What is left here is a log line naming the anchor a compaction happened against — cheap,
+ * useful when a user asks why nothing was re-anchored, and the honest amount of work for a
+ * hook with no channel to speak on. With nothing stored it says nothing at all: "checkpoint
+ * undefined holds your context" is strictly worse than silence, and so is a payload the host
+ * throws away.
  */
 
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { clearCarry } from '../../lib/carry.mjs';
 import { classifyTurn } from '../../lib/classify.mjs';
 import { envTags } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { postCheckpoint } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
+import { clearSeen } from '../../lib/seen.mjs';
 import { appendItem } from '../../lib/spool.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -234,9 +258,30 @@ async function precompact(payload, cfg, ctx) {
 // ---------------------------------------------------------------------------
 
 /**
- * §5.6: re-anchor the freshly compacted session to the id `--pre` stored. Reads one file and
- * dials nothing — 800 ms is not a network budget, and a PostCompact that waited on a socket
- * would be a stall on the first turn after every compaction.
+ * §5.6: note which anchor the freshly compacted session belongs to, and reset the cross-turn
+ * seen-set. Reads one file, unlinks one, and dials nothing — 800 ms is not a network budget,
+ * and a PostCompact that waited on a socket would be a stall on the first turn after every
+ * compaction.
+ *
+ * ---------------------------------------------------------------------------
+ * Why the seen-set is cleared here
+ * ---------------------------------------------------------------------------
+ * `hooks/src/prompt-recall.mjs` degrades a memory it has already injected into a one-line
+ * pointer, on the strength of `runs/<run_id>/seen.json` saying the model has it
+ * (`lib/seen.mjs`). **Compaction resets the model's window, not the file.** After this event
+ * the transcript those entries were injected into is gone, so a surviving pointer names a
+ * memory that exists nowhere in the conversation — the model is told a memory applies and is
+ * given no way to read it, which is strictly worse than having paid full price for it.
+ *
+ * The clear runs before every other decision in this function on purpose. A compaction with
+ * no stored anchor still emptied the window; gating the reset on `--pre` having succeeded
+ * would leave stale pointers behind on exactly the runs that already lost their checkpoint.
+ *
+ * Emits `{"suppressOutput": true}` on every path, including the one that found an anchor. See
+ * the header: `PostCompact` has no `hookSpecificOutput` channel, so the only shapes available
+ * here are a top-level field or silence — and `systemMessage` is reserved (§5.6) for the one
+ * failure that loses data, not for a routine note after every compaction. The model gets the
+ * re-anchor from `session-start.mjs` on the `compact` source instead.
  *
  * @param {Record<string, any>} payload
  * @param {Record<string, any>} cfg
@@ -251,24 +296,31 @@ function postcompact(payload, cfg) {
     return SUPPRESS;
   }
 
+  // The seen-set reset, ahead of every other decision here — see the header above.
+  clearSeen(cfg, runId);
+  // …and the block `recallAsync` left for the next prompt, for the same reason and no other.
+  // A carried block was assembled against the pre-compaction seen-set, so its pointer lines
+  // are already baked in — clearing the set alone would leave a block promising that the full
+  // entries are earlier in a transcript that no longer exists.
+  clearCarry(cfg, runId);
+
   const latest = readHistory(cfg, runId).at(-1);
   const checkpointId = str(latest?.checkpoint_id);
   if (!checkpointId) {
     // Nothing stored: `--pre` never ran for this run, its call failed, or §7's 30-day sweep
-    // took the file. Say nothing. Injecting "checkpoint undefined holds your context" spends
-    // the model's attention on a lie.
+    // took the file. The next SessionStart will find the same nothing and steer without an
+    // anchor paragraph, which is the correct outcome — "checkpoint undefined holds your
+    // context" spends the model's attention on a lie.
     log(cfg, 'debug', 'checkpoint: no stored checkpoint to re-anchor to', { run_id: runId });
     return SUPPRESS;
   }
 
-  return {
-    hookSpecificOutput: {
-      hookEventName: 'PostCompact',
-      additionalContext:
-        `Mubit checkpoint ${clamp(checkpointId, MAX_ID_CHARS)} holds the pre-compaction context `
-        + `for run ${runId}. Ask /mubit-memory:recall if you need detail that was compacted away.`,
-    },
-  };
+  // The other lasting effect of this hook. It is what answers "why was nothing re-anchored?"
+  // when the SessionStart that follows a compaction turns out to have read a different run.
+  log(cfg, 'info', `checkpoint: compaction re-anchors to ${clamp(checkpointId, MAX_ID_CHARS)}`, {
+    run_id: runId, trigger: str(payload.trigger),
+  });
+  return SUPPRESS;
 }
 
 // ---------------------------------------------------------------------------
@@ -510,7 +562,11 @@ function spoolSummary(cfg, runId, payload, snap, label) {
     source: 'agent',
     // Unix SECONDS (`control.proto`); milliseconds here dates every memory to the year 57000.
     occurrence_time: Math.floor(Date.now() / 1000),
-    env_tags: attempt(() => envTags(cfg, str(cfg?.projectDir)), ['tool:claude-code']),
+    // From the payload's directory, not the launch one: after a mid-session `cd` the run id
+    // follows the new repo, and `repo:`/`branch:` have to follow it or the item lands in the
+    // right run wearing the wrong labels.
+    env_tags: attempt(
+      () => envTags(cfg, resolveProjectDir(cfg, payload)), ['tool:claude-code']),
     metadata_json: safeJson({
       hook_event: str(payload.hook_event_name) || 'PreCompact',
       source: 'PreCompact',

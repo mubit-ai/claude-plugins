@@ -151,18 +151,40 @@ if (hooks) {
       `${where}: ${script} does not exist → ${abs}\n    Build it: npm --prefix integrations/claude-code run build (§11.2)`);
   }
 
-  const expectedEvents = ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
-    'Stop', 'SubagentStop', 'PreCompact', 'PostCompact', 'SessionEnd'];
+  const expectedEvents = ['SessionStart', 'CwdChanged', 'UserPromptSubmit', 'PreToolUse',
+    'SubagentStart', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'SubagentStop',
+    'PreCompact', 'PostCompact', 'SessionEnd'];
   const events = Object.keys(hooks.hooks ?? {});
   const missing = expectedEvents.filter((e) => !events.includes(e));
   const extra = events.filter((e) => !expectedEvents.includes(e));
   ok(missing.length === 0 && extra.length === 0,
-    `hooks.json must register exactly the nine events in §3.2; missing [${missing}], unexpected [${extra}]`);
+    `hooks.json must register exactly the ten events in §3.2; missing [${missing}], unexpected [${extra}]`);
 
-  ok(hooks.hooks?.SessionStart?.[0]?.matcher === 'startup|resume|clear|compact',
-    'SessionStart matcher must be "startup|resume|clear|compact" (§3.2)');
-  ok((hooks.hooks?.PostToolUse ?? []).length === 2,
-    'PostToolUse must declare exactly two matcher groups: the built-in tool regex, then ^mcp__.* (§3.2)');
+  // StopFailure's matcher filters on the payload's `error`, and that taxonomy is not a fixed
+  // list: Claude Code 2.1.235 publishes ten values plus a feature-flagged eleventh
+  // (`account_on_hold`), so an enumerated matcher is right on some accounts and short on
+  // others. The turns it would drop are the ones the hook exists to catch.
+  const stopFailure = hooks.hooks?.StopFailure ?? [];
+  ok(stopFailure.length === 1,
+    `StopFailure must declare exactly one group (§3.2); found ${stopFailure.length}`);
+  ok(['', '*', '.*', undefined].includes(stopFailure[0]?.matcher),
+    'StopFailure must carry no matcher — the error taxonomy is feature-flagged, so an '
+    + `enumerated list is wrong on some accounts; found ${JSON.stringify(stopFailure[0]?.matcher)}`);
+
+  ok(hooks.hooks?.SessionStart?.[0]?.matcher === 'startup|resume|clear|compact|fork',
+    'SessionStart matcher must be "startup|resume|clear|compact|fork" (§3.2) — without '
+    + '"fork" the hook never runs for /fork, /branch or --fork-session');
+  // Exactly ONE group, matching everything. Two groups was the old shape — a built-in tool
+  // alternation plus `^mcp__.*` — and it dropped every tool the alternation had not been
+  // updated for. It is one group now rather than two match-all ones because a second group
+  // would fire capture.mjs twice for every tool call. What to capture is decided in
+  // capture.mjs, where the tool table already lives (§3.2, audit F2).
+  const postToolUse = hooks.hooks?.PostToolUse ?? [];
+  ok(postToolUse.length === 1,
+    `PostToolUse must declare exactly one match-all group (§3.2); found ${postToolUse.length}`);
+  ok(['*', '', '.*'].includes(String(postToolUse[0]?.matcher ?? '')),
+    'the PostToolUse matcher must match every tool — the host reads "", "*" and ".*" as '
+    + `match-all; found ${JSON.stringify(postToolUse[0]?.matcher)} (§3.2)`);
 }
 
 // --- .mcp.json and settings.json (§3.3, §3.4) ------------------------------

@@ -489,10 +489,23 @@ const USER_CONFIG_ROWS = [
   { key: 'redact', env: 'MUBIT_CC_REDACT', field: 'redact', raw: '0', optRaw: 'false', want: false },
   { key: 'recallTokenBudget', env: 'MUBIT_CC_RECALL_TOKENS', field: 'recallTokenBudget', raw: '900', want: 900 },
   { key: 'recallAssemble', env: 'MUBIT_CC_RECALL_ASSEMBLE', field: 'recallAssemble', raw: 'server', want: 'server' },
+  { key: 'recallRepeatMode', env: 'MUBIT_CC_RECALL_REPEAT_MODE', field: 'recallRepeatMode', raw: 'full', want: 'full' },
+  // Asserted ON rather than off: the default is already false, so a row that set it to false
+  // would pass just as well against a key `loadConfig` never reads.
+  { key: 'recallAsync', env: 'MUBIT_CC_RECALL_ASYNC', field: 'recallAsync', raw: '1', optRaw: 'true', want: true },
   { key: 'reflectOnEnd', env: 'MUBIT_CC_REFLECT_ON_END', field: 'reflectOnEnd', raw: '0', optRaw: 'false', want: false },
+  // The escape hatch for an environment that forbids background processes. Asserted off,
+  // because on is the default and a row that set it to true would pass just as well against
+  // a key `loadConfig` never reads.
+  { key: 'sessionEndDetach', env: 'MUBIT_CC_SESSION_END_DETACH', field: 'sessionEndDetach', raw: '0', optRaw: 'false', want: false },
   { key: 'outcomeMode', env: 'MUBIT_CC_OUTCOME_MODE', field: 'outcomeMode', raw: 'explicit', want: 'explicit' },
   { key: 'statusLine', env: 'MUBIT_CC_STATUSLINE', field: 'statusLine', raw: '0', optRaw: 'false', want: false },
   { key: 'mcpTools', env: 'MUBIT_MCP_TOOLS', field: 'mcpTools', raw: 'mubit_recall,mubit_remember', want: ['mubit_recall', 'mubit_remember'] },
+  { key: 'mcpLessonScope', env: 'MUBIT_MCP_LESSON_SCOPE', field: 'mcpLessonScope', raw: 'global', want: 'global' },
+  // The only row that defaults to `false`, so it is the opt-*in* direction that has to be
+  // proven here. Its default is asserted separately below, and again in `pre-tool.test.mjs`
+  // against the running hook — this is the stage that can put text in front of a tool call.
+  { key: 'preToolWarnings', env: 'MUBIT_CC_PRE_TOOL_WARNINGS', field: 'preToolWarnings', raw: '1', optRaw: 'true', want: true },
 ];
 
 for (const row of USER_CONFIG_ROWS) {
@@ -535,9 +548,23 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.recallBudgetMs, 1500);
   assert.equal(cfg.recallTokenBudget, 1500);
   assert.equal(cfg.recallAssemble, 'client');
+  // §5.2: a memory already injected this run is repeated as a one-line pointer rather than
+  // in full. `full` is the pre-seen-set behaviour and costs up to 1500 tokens every prompt.
+  assert.equal(cfg.recallRepeatMode, 'pointer');
+  // Carry-forward recall is opt-in. Default-on would hand every install a first prompt with
+  // no memory and a turn of staleness on every prompt after it, in exchange for latency
+  // most instances do not have a problem with.
+  assert.equal(cfg.recallAsync, false);
   assert.equal(cfg.outcomeMode, 'implicit');
   assert.equal(cfg.reflectOnEnd, true);
+  // On, because the hook it governs is cancelled by the host on the way out and everything
+  // left inside it — the last drain and the only call that promotes a lesson — dies there.
+  assert.equal(cfg.sessionEndDetach, true);
   assert.equal(cfg.statusLine, true);
+  // Off. This is the one setting that can put text in front of a tool call, so nothing
+  // changes for an existing user until they ask for it — which is also what makes "measure
+  // how often it fires" a safe thing to run.
+  assert.equal(cfg.preToolWarnings, false);
   assert.equal(cfg.maxParamBytes, 4096);
   assert.equal(cfg.maxOutputBytes, 8192);
   assert.equal(cfg.batchMaxItems, 32);
@@ -550,6 +577,9 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.projectDir, projectDir);
   assert.ok(Array.isArray(cfg.mcpTools), 'mcpTools must be an array');
   assert.ok(cfg.mcpTools.length > 0, 'a blank MUBIT_MCP_TOOLS means the curated set, not none');
+  assert.equal(cfg.mcpLessonScope, 'run',
+    'the ceiling on an agent-written lesson defaults to the run it was written in — a wider\n'
+    + 'default is the cross-run leak the MCP egress guard exists to close');
   assert.ok(Array.isArray(cfg.denyGlobs), 'denyGlobs must be an array');
 });
 
@@ -663,4 +693,39 @@ test('loadConfig(): a corrupt config.json is ignored', async () => {
     MUBIT_ENDPOINT: 'https://mubit.example.com',
   }));
   assert.equal(cfg.endpoint, 'https://mubit.example.com');
+});
+
+// ===========================================================================
+// §8.2 mcpLessonScope — the ceiling on what an MCP write may claim
+// ===========================================================================
+
+// `run` is the only safe fallback. The value this setting overrides is the bundled SDK's
+// hard-coded `session`, which the control plane reads across runs — so "unparseable, keep
+// what the SDK sent" would let a typo silently reinstate the leak.
+test('loadConfig(): an unrecognised mcpLessonScope falls back to run', async () => {
+  const config = await lib('config.mjs');
+  const projectDir = makeProjectDir();
+
+  for (const bad of ['', '   ', 'banana', 'org', 'RUN?', 'session,global']) {
+    const cfg = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: bad }));
+    assert.equal(cfg.mcpLessonScope, 'run',
+      `${JSON.stringify(bad)} resolved to ${JSON.stringify(cfg.mcpLessonScope)} — the fallback `
+      + 'must be the narrowest scope, never the widest and never the SDK default');
+  }
+});
+
+// The three the control plane accepts from a client. `org` is promotion-only (§1.6) and is
+// deliberately absent: a client that could name it could write a tenant-wide rule.
+test('loadConfig(): mcpLessonScope accepts run, session and global — and nothing else', async () => {
+  const config = await lib('config.mjs');
+  const projectDir = makeProjectDir();
+
+  for (const good of ['run', 'session', 'global']) {
+    const cfg = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: good }));
+    assert.equal(cfg.mcpLessonScope, good);
+  }
+
+  const org = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: 'org' }));
+  assert.equal(org.mcpLessonScope, 'run',
+    'org is promotion-only and must never be client-written (§1.6)');
 });

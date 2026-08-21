@@ -2,12 +2,17 @@
 /**
  * `hooks/src/session-start.mjs` — SessionStart (blocking, injection only). Build-guide §5.1.
  *
- * Matchers `startup|resume|clear|compact`. **Budget 2500 ms internal against a 5 s hook
- * timeout**, with three sub-budgets: health 400 ms, register 600 ms, lessons 900 ms.
- * Missing a sub-budget degrades *that section only* — a slow lesson list costs the lesson
- * list, not the steer block. The one thing this hook may never do is fail to speak: Claude
- * Code waits for it, and a session that starts with nothing injected is a session where the
- * model has no idea memory exists.
+ * Matchers `startup|resume|clear|compact|fork`. **Budget 2500 ms internal against a 5 s hook
+ * timeout**, with three sub-budgets: health half the envelope, register 600 ms, lessons
+ * 900 ms. Missing a sub-budget degrades *that section only* — a slow lesson list costs the
+ * lesson list, not the steer block. The one thing this hook may never do is fail to speak:
+ * Claude Code waits for it, and a session that starts with nothing injected is a session where
+ * the model has no idea memory exists.
+ *
+ * On `source === "compact"` it also carries the post-compaction re-anchor. That belongs to
+ * §5.6 and used to ship from `checkpoint --post`, where the host discarded it on every
+ * compaction: `PostCompact` is not a `hookSpecificOutput.hookEventName` Claude Code accepts,
+ * and `SessionStart` is. See `hooks/src/checkpoint.mjs` and `test/hook-output.test.mjs`.
  *
  * The flow is §5.1 verbatim:
  *
@@ -17,19 +22,25 @@
  *      including `/clear`'s counter and the session-map write).
  *   3. `marker.cold_start_until = now + coldStartGraceMs` (§4.7) — the grace window starts
  *      here, so a server still starting up does not read as "memory broken".
- *   4. `GET /v2/core/health` @400 ms. Not ok → skip 5-6 but **still steer**, saying memory is
- *      offline. Without that the model invents recall or apologises for its absence.
- *   5. `POST /v2/control/agents/register` @600 ms — or `/heartbeat` when `source === "resume"`,
+ *   4. `GET /v2/core/health` @`HEALTH_MS`. Not ok → skip 5-6 but **still steer**, saying memory
+ *      is offline. Without that the model invents recall or apologises for its absence.
+ *   5. `POST /v2/control/agents/register` @600 ms — or `/heartbeat` on `resume` and `fork`,
  *      because re-registering an agent that never left is noise the control plane reconciles.
  *   6. `POST /v2/control/lessons {scope:"global", limit:5}` @900 ms. **No `run_id`**:
  *      `ListLessonsRequest.run_id` is optional and empty means all runs, which is exactly what
  *      "global lessons" wants — scoping it to this run returns nothing on a brand-new one.
  *   7. Assemble `additionalContext`, update the marker, emit.
  *
- * The steer block does two jobs. It names the run and the mode, and it tells the model
- * **not to search for memory preemptively**, because recall is injected before every turn.
- * Without that second sentence the model helpfully calls the recall tool on turn one, every
- * time, and pays for it every time.
+ * The steer block does two jobs. It names the run and the mode, and it tells the model **when
+ * to search and when not to**: recall is injected before every turn, so opening turn one with
+ * a recall call is pure cost — but when the injected block falls short, searching is the right
+ * move and the block names which tool for which shape of question.
+ *
+ * That balance is the fix for a defect this block used to carry on its own. It said only "do
+ * not search for it preemptively" — a negative with no positive beside it — while the MCP tool
+ * descriptions said nothing about when to use them either (audit C1). Between them the trained
+ * behaviour was to never call any memory tool at all, which made every measurement of those
+ * tools a measurement of this paragraph. Change the two together or neither.
  */
 
 import { join } from 'node:path';
@@ -40,8 +51,9 @@ import { runHook } from '../../lib/hook.mjs';
 import { health, heartbeat, postLessons, registerAgent } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
+import { recordRules } from '../../lib/rules.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
-import { dataDir, readJson, writeJsonAtomic } from '../../lib/state.mjs';
+import { dataDir, readJson, resolveDataDir, writeJsonAtomic } from '../../lib/state.mjs';
 
 /** §5.1: 2500 ms internal. The harness gets a slightly looser leash so the internal
  *  deadline — which still returns a steer block — is always the one that fires first. */
@@ -49,15 +61,23 @@ const BUDGET_MS = 2500;
 const HARNESS_BUDGET_MS = 3200;
 
 /**
- * §5.1 sub-budgets. Each is clamped to whatever is left of BUDGET_MS.
+ * §5.1 sub-budgets. Each is a CEILING clamped by `budgetFor()` to whatever is left of
+ * `BUDGET_MS` — not a reservation, and not time anything is made to wait.
  *
- * `HEALTH_MS` is derived from the envelope rather than pinned at a number, because the number
- * was wrong and silently so. At 400 ms inside a 2500 ms budget, a healthy instance answering
- * in 700 ms read as `not_responding`: the session opened by telling the model memory was
- * offline and recall was unavailable, and then skipped the global-lessons fetch — whose own
- * budget is 900 ms and which answers in ~140 ms. Every fresh container pays a cold TLS
- * handshake, so the overrun was routine rather than exceptional. Half the envelope is the
- * honest share for the one probe whose failure suppresses everything after it.
+ * Health is derived from the envelope rather than pinned, and it gets the largest slice,
+ * because it is the **gate**: steps 5-6 do not run at all unless it passes, so holding time
+ * back from health to protect the steps it gates cannot help them and can only mislabel a
+ * working instance. The previous 400 ms was below a realistic cold answer, and the cost was
+ * not a missing section — it was the whole feature. A loaded instance answering correctly in
+ * 700 ms read as `not_responding`; measured end to end on the same deployment, a healthy
+ * recall round trip took 1091 ms. Every session opened by telling the model memory was offline
+ * and recall unavailable, while recall itself worked normally, so the injected steer argued
+ * against the very thing that was working.
+ *
+ * Half the envelope clears both marks with margin (1.8x the 700 ms case, 1.15x the observed
+ * 1091 ms) and still leaves the hook comfortably inside `HARNESS_BUDGET_MS`. Raising a ceiling
+ * costs a healthy instance nothing: a server that answers in 30 ms still answers in 30 ms.
+ * It only buys time on the slow path — which is the one path that was being misread.
  */
 const HEALTH_MS = Math.round(BUDGET_MS * 0.5);
 const REGISTER_MS = 600;
@@ -72,6 +92,9 @@ const DOT = ' · ';
 
 /** §16.2 step 2 — the marker `bin/statusline.mjs` stamps and this hook reads. */
 const LIVENESS_FILE = 'statusline-installed.json';
+
+/** A checkpoint id is quoted into the injected block; keep it boring, as `checkpoint.mjs` does. */
+const MAX_ID_CHARS = 160;
 
 /**
  * §16.2 step 3: "after two consecutive sessions with no status-line invocation".
@@ -178,7 +201,19 @@ await runHook('session-start', {
     // A failure here that names the credential is therefore not just logged: it decides
     // which block the model gets.
     let authError = '';
-    const resuming = sourceOf(payload) === 'resume';
+    // `fork` sits on this side of the line with `resume`, and this is the only place in the
+    // hook where the source distinction is load-bearing at all. `--fork-session`, `/fork` and
+    // `/branch` continue a conversation that is already running under an agent this plugin
+    // already announced — `deriveAgentId` returns the bare role for a parent session
+    // (`lib/runid.mjs:287`), so the fork IS that agent. Re-announcing it is the same
+    // reconciliation noise the `resume` case exists to avoid, and it would do it on a run the
+    // fork inherited rather than one it opened.
+    //
+    // `compact` deliberately stays on the register side. That behaviour predates this change
+    // and nothing measured says it is wrong, so moving it too would be a second, untested
+    // decision riding along with this one.
+    const src = sourceOf(payload);
+    const resuming = src === 'resume' || src === 'fork';
     const identity = { run_id: runId, agent_id: agentId };
     const regBudget = budgetFor(REGISTER_MS);
     if (regBudget > 0) {
@@ -205,8 +240,19 @@ await runHook('session-start', {
     if (lessonBudget > 0) {
       const lres = await postLessons(cfg, { scope: 'global', limit: LESSON_LIMIT },
         { timeoutMs: lessonBudget });
-      if (lres.ok) lessons = readLessons(lres.body);
-      else {
+      if (lres.ok) {
+        lessons = readLessons(lres.body);
+        // HS-7 — the `rule`-typed ones also go to `runs/<run_id>/rules.json`, for
+        // `pre-tool.mjs` to read in front of a matching tool call. That hook may not dial, so
+        // its only supply is a hook that has already paid for a round trip; this is one of
+        // the two, and it is a pure side effect of a call that was made anyway. `recordRules`
+        // never throws and never blocks (`lib/rules.mjs`).
+        //
+        // The RAW array, not `lessons` above: `readLessons` renames `lesson_type` to `type`
+        // on the way through, and the store reads the wire names so that one normaliser can
+        // serve both producers.
+        recordRules(cfg, runId, Array.isArray(lres.body?.lessons) ? lres.body.lessons : []);
+      } else {
         log(cfg, 'info', `session-start: global lessons unavailable (${lres.error})`, { run_id: runId });
         if (!authError && connState(lres.state) === 'auth_failed') authError = String(lres.error ?? '');
       }
@@ -250,13 +296,20 @@ await runHook('session-start', {
       },
     });
 
+    // §5.6 — the post-compaction re-anchor, on the one source that means "the host just
+    // compacted this conversation". A local read of the file `checkpoint --pre` already wrote,
+    // so it costs no budget and needs no round trip. It sits below the offline branch on
+    // purpose rather than beside it: the anchor's only use is asking the server for detail
+    // that was compacted away, and the offline block has just told the model not to try.
+    const anchor = src === 'compact' ? latestCheckpointId(cfg, runId) : '';
+
     const summary = `mubit: ${cfg.mode}${DOT}run ${runId}${DOT}`
       + `${lessons.length} global lesson${lessons.length === 1 ? '' : 's'}`;
 
     return {
       hookSpecificOutput: {
         hookEventName: 'SessionStart',
-        additionalContext: steerBlock(cfg, runId, lessons),
+        additionalContext: steerBlock(cfg, runId, lessons, anchor),
       },
       // §16.2's hint fires once, ever, per install, so on that one session it *takes* the
       // line rather than being appended to it: `systemMessage` is one line by contract, and
@@ -274,21 +327,33 @@ await runHook('session-start', {
  * §5.1 stdout. Two loads are carried here and nothing else: which run this session writes
  * to, and the instruction not to go looking for memory that arrives on its own.
  *
+ * §5.6 adds a third on one source only. `anchor` is empty except immediately after a
+ * compaction, and an empty one renders nothing — a session that never compacted has no
+ * pre-compaction context, and claiming otherwise is a sentence the model would act on.
+ *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {{id: string, type: string, content: string}[]} lessons
+ * @param {string} [anchor]  §5.6 checkpoint id, or '' when there is nothing to re-anchor to
  * @returns {string}
  */
-function steerBlock(cfg, runId, lessons) {
+function steerBlock(cfg, runId, lessons, anchor = '') {
   const lines = [
     '# Mubit memory is active',
     '',
     `Run: ${runId} (${cfg.mode})`,
-    'Relevant memory is injected automatically before each of your turns — do not search for '
-      + 'it preemptively.',
-    'Use /mubit-memory:remember to save a durable lesson, /mubit-memory:recall for a targeted '
-      + 'search.',
+    'Relevant memory is injected automatically before each of your turns — no need to open a '
+      + 'turn by searching for it.',
+    'Do search when the injected memory falls short: mubit_recall for a topic, mubit_diagnose '
+      + 'when a command has failed, mubit_dereference for a reference_id you already hold.',
+    'Save what you learn with mubit_learned, and credit what helped with mubit_outcome. '
+      + '/mubit-memory:remember and /mubit-memory:recall are the explicit forms.',
   ];
+  if (anchor) {
+    lines.push('', '## Compacted context',
+      `Mubit checkpoint ${anchor} holds this run's context from before the compaction that `
+      + 'just happened. Ask /mubit-memory:recall if you need detail that was compacted away.');
+  }
   if (lessons.length) {
     lines.push('', '## Standing lessons (global)');
     // Same qualifier the per-turn injection carries. These were learned in other sessions,
@@ -412,6 +477,51 @@ function armColdStart(cfg) {
   } catch {
     return 0;
   }
+}
+
+// ---------------------------------------------------------------------------
+// §5.6 — the anchor `checkpoint --pre` left behind
+// ---------------------------------------------------------------------------
+
+/**
+ * §7: the newest `checkpoint_id` in `runs/<run_id>/checkpoints.json`, or `''`.
+ *
+ * Read with the same tolerance `hooks/src/checkpoint.mjs` reads it with, and for the same
+ * reason: a missing, empty or corrupt file is the normal state of a run that has never
+ * compacted, not an error — and this one is on the path of every session that follows one.
+ * The list is oldest-first, so the anchor is the last entry.
+ *
+ * `safeSegment` mirrors `lib/spool.mjs`'s flattening so `runs/<run_id>/` names one directory
+ * to every module. A run id can come from a hand-written `.mubit-cc.json`, which makes it
+ * untrusted input to a path.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @returns {string}
+ */
+function latestCheckpointId(cfg, runId) {
+  try {
+    const path = join(resolveDataDir(cfg), 'runs', safeSegment(runId), 'checkpoints.json');
+    const stored = readJson(path, []);
+    const list = Array.isArray(stored)
+      ? stored
+      : (Array.isArray(stored?.checkpoints) ? stored.checkpoints : stored?.items);
+    if (!Array.isArray(list)) return '';
+    const id = list.at(-1)?.checkpoint_id;
+    if (typeof id !== 'string') return '';
+    // The id is quoted into a paragraph of `additionalContext`. A control character in a
+    // server-assigned id would break out of that sentence, so it never gets the chance.
+    return id.trim().replace(/[\u0000-\u001F\u007F]/g, '').slice(0, MAX_ID_CHARS);
+  } catch {
+    return '';
+  }
+}
+
+/** @param {any} v @returns {string} */
+function safeSegment(v) {
+  const s = String(v ?? '').trim();
+  if (!s) return '';
+  return s.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
 }
 
 // ---------------------------------------------------------------------------

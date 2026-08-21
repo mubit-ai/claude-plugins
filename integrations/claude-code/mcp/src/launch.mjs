@@ -13,6 +13,11 @@
  * indistinguishable from not setting them at all, because the constants have already been
  * captured. That is why there is a launcher at all rather than a richer `.mcp.json`.
  *
+ * The same rule governs the two things here that are not environment variables. The egress
+ * guard wraps `globalThis.fetch` and the instructions guard wraps `process.stdout.write`;
+ * the server captures both handles as it starts, so either one installed after the import
+ * would sit on a handle nobody is holding.
+ *
  * **The literal `"default"` is the bug being fixed.** The facade maps `session_id` onto
  * the control-plane `run_id`, so today every MCP user writes every project on every machine
  * into one shared run. This launcher derives the run id with **the same strategy the hooks
@@ -32,6 +37,8 @@ import { loadConfig } from '../../lib/config.mjs';
 import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
 import { deriveRunId } from '../../lib/runid.mjs';
+import { installFetchGuard, resolveCeiling } from './egress.mjs';
+import { INSTRUCTIONS, installInstructionsGuard } from './instructions.mjs';
 
 /**
  * §8.2 — ten of the server's twenty-one tools, in the guide's order.
@@ -65,6 +72,24 @@ const BRIDGED = [
 
 /** A `.mcp.json` value the host never expanded, e.g. the literal `${MUBIT_ENDPOINT}`. */
 const UNEXPANDED = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
+
+/**
+ * The bundled server's own version, inlined from the `@mubit-ai/mcp` manifest at build time
+ * (`esbuild.config.mjs` defines `__MUBIT_MCP_VERSION__`).
+ *
+ * The server reads its version with `require("../package.json")`, which resolves inside its
+ * own package and not inside ours: bundled to `mcp/dist/server.js`, `../package.json` is a
+ * file that does not exist, and the require throws at module scope before any tool
+ * registers. Reading the file here at runtime would only move the same guess; the build
+ * knows the answer exactly, because it is the package it just bundled.
+ *
+ * Empty when this file is run unbundled — the launch tests import the source directly, and
+ * the server's own in-package read is correct there anyway.
+ */
+// @ts-ignore — the name is not declared anywhere: esbuild substitutes a string literal for
+// it at build time, and `typeof` is the one operator that is safe on a name that genuinely
+// is not there when this file runs as source.
+const SERVER_VERSION = typeof __MUBIT_MCP_VERSION__ === 'string' ? __MUBIT_MCP_VERSION__ : '';
 
 if (prepare(process.env)) {
   // §8.3 step 4. Every module-scope read the server makes now sees a resolved value.
@@ -117,9 +142,33 @@ function prepare(env) {
   env.MUBIT_DEFAULT_SESSION_ID = runId;
   env.MUBIT_DEFAULT_USER_ID = String(cfg.userId ?? '');
   env.MUBIT_MCP_TOOLS = tools.join(',');
+  if (SERVER_VERSION) env.MUBIT_MCP_VERSION = SERVER_VERSION;
+
+  // The sixth thing that has to be in place before the import, and the only one that is not
+  // an environment variable. The bundled server dials the endpoint itself with global
+  // `fetch` and captures its transport at module scope, so this is subject to exactly the
+  // ordering rule above: installed afterwards, it would never see a request.
+  //
+  // `pinRun: true` because this server was launched by the plugin, which already derived
+  // the run — the same `runId` published on the line above, so the guard and the server
+  // cannot disagree about which run this session writes into. A caller-supplied
+  // `session_id` would otherwise move an agent's write into any run it could name.
+  const ceiling = resolveCeiling(cfg.mcpLessonScope);
+  installFetchGuard({ ceiling, runId, pinRun: true });
+
+  // And the seventh. Under tool search the host loads only tool *names* and the server's
+  // `instructions` field at session start, and a subagent sees neither the SessionStart
+  // steer block nor per-turn recall — so for both, this string is the only statement of when
+  // Mubit is worth reaching for. The bundled server cannot supply it (`createServer()` is
+  // `new McpServer({name, version})` with no options object, and no env var feeds the
+  // field), so the launcher fills it into the outbound `initialize` frame. Same ordering
+  // rule as the guard above, and for the same reason: `StdioServerTransport` takes
+  // `process.stdout` as a constructor default and holds it from then on.
+  installInstructionsGuard({ instructions: INSTRUCTIONS });
 
   log(cfg, 'info', 'mcp: starting server', {
     run_id: runId, endpoint: cfg.endpoint, mode: cfg.mode, tools: tools.length,
+    lesson_scope: ceiling, pin_run: true, instruction_chars: INSTRUCTIONS.length,
   });
   return true;
 }

@@ -23,16 +23,20 @@ import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import {
-  runHook, assertHookContract, fakeMubit, baseEnv, lib, makeDataDir, readJsonFile, tempDir,
+  runHook, assertHookContract, assertWithinBudget, fakeMubit, baseEnv, lib, makeDataDir,
+  readJsonFile, tempDir,
 } from './helpers/harness.mjs';
 import { userPromptSubmit, spoolItem, PROMPT_ID, SESSION_ID } from './helpers/fixtures.mjs';
 
 const RUN_ID = 'cc-test-0000';
 const PROMPT = 'why is the ingest job stuck in queued?';
 
-// Wall-clock ceiling. Real target is <25ms; this is a guard-rail against a network call
-// sneaking onto the fast path, not a stopwatch.
-const BUDGET_MS = 400;
+// What `stage-prompt` may cost on top of starting node — `assertWithinBudget` measures that
+// floor rather than assuming it. The §5.3 target is 25 ms of work; 800 is set from the other
+// end, above the 449 ms seen with four suites running at once (see `capture.test.mjs` for the
+// full reasoning). A guard-rail against a gross regression, not a stopwatch: a network call
+// sneaking onto the fast path is caught exactly, by the zero-request assertion below.
+const BUDGET_MS = 800;
 
 // ---------------------------------------------------------------------------
 
@@ -133,7 +137,10 @@ test('stage-prompt: writes turns/<prompt_id>.json and issues zero HTTP', async (
   assert.deepEqual(r.json, { suppressOutput: true });
   assert.equal(server.requests.length, 0,
     `stage-prompt is the zero-network fast path; saw: ${server.summary()}`);
-  assert.ok(r.ms < BUDGET_MS, `stage-prompt took ${r.ms}ms; budget is <25ms (§5.3)`);
+  await assertWithinBudget('stage-prompt', BUDGET_MS, r.ms, async () => (await runHook(
+    'stage-prompt', userPromptSubmit({ prompt: PROMPT }),
+    { env: staticEnv(makeDataDir(), server) },
+  )).ms);
 
   const turn = readJsonFile(turnPath(dataDir));
   assert.equal(turn.prompt, PROMPT);

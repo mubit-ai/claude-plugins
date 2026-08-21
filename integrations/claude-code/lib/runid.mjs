@@ -26,11 +26,21 @@
  * `deriveRunId` is deliberately **not pure**: `SessionStart.source === "clear"`
  * has to remember how many times a session was cleared, so it persists
  * `clear_count` back to the session map on its way out.
+ *
+ * **The directory is the payload's to name, not the environment's.** Every hook
+ * payload carries `cwd`, and `CLAUDE_PROJECT_DIR` — which `cfg.projectDir`
+ * resolves from — is the session's *launch* root, fixed for the life of the
+ * process. Reading only the environment meant a `cd` into another repo kept
+ * writing the first repo's run for the rest of the session: work in B captured,
+ * recalled and attributed under A. So `payload.cwd` wins when it names a real
+ * directory, and the reuse branch validates the directory as well as the
+ * strategy. A payload with no `cwd` — `deriveRunId(cfg, {})`, which the MCP
+ * launcher and the status line pass deliberately — is unaffected.
  */
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
 import { dataDir, readJson, writeJsonAtomic } from './state.mjs';
@@ -154,7 +164,7 @@ function resolveRunId(cfg, payload) {
     runId = deriveFresh(cfg, payload, strategy);
   } else {
     // resume / compact / fork / unknown / absent.
-    runId = reusableRun(prev, strategy) || deriveFresh(cfg, payload, strategy);
+    runId = reusableRun(cfg, payload, prev, strategy) || deriveFresh(cfg, payload, strategy);
   }
 
   rememberRun(cfg, payload, sessionId, prev, {
@@ -181,7 +191,7 @@ function deriveFresh(cfg, payload, strategy) {
     // A conversation with no identity still has a directory. Falling back beats
     // answering `cc-` — and beats throwing on an event the user cannot fix.
   }
-  return directoryRunId(cfg, strategy === 'git-branch');
+  return directoryRunId(cfg, payload, strategy === 'git-branch');
 }
 
 /**
@@ -218,16 +228,18 @@ function staticRunId(cfg) {
 
 /**
  * `cc-<slug>-<hash8>`, or `cc-<slug>-<branch>-<hash8>` when the branch is part
- * of the identity. The hash covers the git toplevel (falling back to
- * `CLAUDE_PROJECT_DIR`), so two terminals in one repo share a run and two repos
- * with the same directory name do not.
+ * of the identity. The hash covers the git toplevel of wherever the payload says
+ * this hook is running (falling back to `CLAUDE_PROJECT_DIR`), so two terminals
+ * in one repo share a run, two repos with the same directory name do not, and a
+ * `cd` within one repo moves nothing.
  * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} payload
  * @param {boolean} withBranch
  * @returns {string}
  */
-function directoryRunId(cfg, withBranch) {
-  const dir = projectDirOf(cfg);
-  const root = gitToplevel(dir) || dir;
+function directoryRunId(cfg, payload, withBranch) {
+  const dir = projectDirOf(cfg, payload);
+  const root = projectRootOf(dir);
   const slug = sanitiseSegment(basename(stripTrailingSep(root)), MAX_SLUG) || 'workspace';
   const branch = withBranch
     ? (sanitiseSegment(gitBranch(dir), MAX_BRANCH) || 'nobranch')
@@ -241,18 +253,55 @@ function directoryRunId(cfg, withBranch) {
 /**
  * The mapped run, when it is safe to keep using it. A record written under a
  * different strategy is stale by definition; a record carrying a poisoned or
- * empty run is not a record at all.
+ * empty run is not a record at all; and a record written in another repo is
+ * stale for the same reason the strategy one is — it describes work that is not
+ * this work.
+ *
+ * This branch is where the mid-session `cd` used to be invisible. Every hook
+ * after SessionStart arrives with no `source`, so every one of them came through
+ * here, and until now the only thing checked was the strategy.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} payload
  * @param {Record<string, any>|null} prev
  * @param {string} strategy
  * @returns {string}
  */
-function reusableRun(prev, strategy) {
+function reusableRun(cfg, payload, prev, strategy) {
   if (!isObject(prev)) return '';
   const id = typeof prev.run_id === 'string' ? prev.run_id.trim() : '';
   if (!id || FORBIDDEN_RUN_IDS.has(id.toLowerCase())) return '';
   const recorded = typeof prev.strategy === 'string' ? prev.strategy.trim() : '';
   if (recorded && normaliseStrategy(recorded) !== strategy) return '';
+  if (!sameProject(cfg, payload, prev)) return '';
   return id;
+}
+
+/**
+ * Is the mapped record about the directory this hook is running in?
+ *
+ * Compared against `project_root` — the resolved git toplevel — rather than the
+ * raw `project_dir`, because a record whose `project_dir` is a subdirectory of
+ * the repo root would otherwise read as a move on every `cd src/`. **An absent
+ * `project_root` means "unknown" and still reuses:** every record written before
+ * the field existed says nothing about where it was written, and installing this
+ * version must not move every live session to a new run.
+ *
+ * The cheap comparison comes first. `dir === prev.project_dir` holds on every
+ * hook of a session that never changed directory, which is nearly all of them,
+ * and it answers without the `git rev-parse` spawn that resolving a root costs.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} payload
+ * @param {Record<string, any>} prev
+ * @returns {boolean}
+ */
+function sameProject(cfg, payload, prev) {
+  const recordedRoot = firstString(prev.project_root);
+  if (!recordedRoot) return true;
+  const dir = projectDirOf(cfg, payload);
+  if (dir === firstString(prev.project_dir)) return true;
+  return projectRootOf(dir) === recordedRoot;
 }
 
 /**
@@ -290,6 +339,56 @@ export function deriveAgentId(payload = {}) {
   return sub ? `${AGENT_ROLE}-sub-${sub}` : AGENT_ROLE;
 }
 
+// ---------------------------------------------------------------------------
+// deriveSubRunId
+// ---------------------------------------------------------------------------
+
+/**
+ * §4.3: the sub-run form — `<parent_run_id>-sub-<agentShort>`, the same suffix
+ * `deriveAgentId` puts on the role, applied to the run instead.
+ *
+ * ---------------------------------------------------------------------------
+ * The collapse this exists to undo, measured
+ * ---------------------------------------------------------------------------
+ * A live fan-out of two subagents on Claude Code 2.1.235 produced two `SubagentStart`s and
+ * two `SubagentStop`s carrying the parent's `session_id` **and** the parent's `prompt_id`.
+ * They differed in exactly one field: `agent_id`. Every coordinate this plugin keys state on
+ * is therefore identical across siblings — `runs/<run_id>/turns/<prompt_id>.json` is one
+ * file that six parallel subagents would all read as "their" turn — so `agent_id` is the
+ * only thing that can separate them, and this is its run-scoped form.
+ *
+ * ---------------------------------------------------------------------------
+ * What it is NOT for
+ * ---------------------------------------------------------------------------
+ * **Never query against it.** A sub-run id has no memory stored under it: the store knows
+ * the parent run, so asking about `cc-x-1-sub-ab55bb82d198` would return nothing for every
+ * subagent, forever. It is a *local* lane — a name for one subagent's own record — until
+ * there is a route that can join it back up. There is not one today: `lib/http.mjs`'s
+ * `ROUTES` has no `link_run`, so nothing on the wire relates a sub-run to its parent, and
+ * the parent id is carried alongside the record instead.
+ *
+ * A payload with no subagent identity answers with the parent unchanged. Minting a suffix
+ * out of nothing would open a lane that `SubagentStop` — deriving from the same missing
+ * field — could never find again, which is worse than the collapse it was meant to fix.
+ *
+ * @param {string} runId    the parent run, already derived
+ * @param {Record<string, any>} [payload] a `SubagentStart` / `SubagentStop` payload
+ * @returns {string}
+ * @throws {Error} when the parent run id is one `deriveRunId` would have refused to emit.
+ *   A sub-run id names a directory exactly as a run id does, so it inherits every rule —
+ *   including the one about `"default"` — rather than laundering a poisoned parent by
+ *   appending a suffix to it.
+ */
+export function deriveSubRunId(runId, payload = {}) {
+  const parent = assertUsableRunId(runId);
+  const short = subagentShort(isObject(payload) ? payload : {});
+  if (!short) return parent;
+  const suffix = `-sub-${short}`;
+  // Idempotent: a caller holding an already-derived sub-run id is ordinary once more than
+  // one hook derives one, and `…-sub-ab-sub-ab` would be a second lane for one subagent.
+  return parent.endsWith(suffix) ? parent : assertUsableRunId(`${parent}${suffix}`);
+}
+
 /**
  * @param {Record<string, any>} payload
  * @returns {string}
@@ -317,6 +416,10 @@ function subagentShort(payload) {
  * @property {string} agent_id
  * @property {string} strategy
  * @property {string} project_dir
+ * @property {string} project_root  the resolved git toplevel of `project_dir`; what the
+ *   `per-directory`/`git-branch` id is actually hashed from, and what a later hook compares
+ *   against to notice a mid-session `cd`. Absent on records written before it existed, which
+ *   reads as "unknown" and never as "moved".
  * @property {number} created_at
  * @property {number} last_seen_at
  * @property {string} mode
@@ -386,6 +489,7 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
   if (!moved && !isSessionStart && now - lastSeen < TOUCH_INTERVAL_MS) return;
 
   const inherited = isObject(prev) ? prev : {};
+  const dir = projectDirOf(cfg, payload);
   saveSessionMap(sessionId, {
     ...inherited,
     run_id: next.run_id,
@@ -393,7 +497,10 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
     // happened to trigger this derivation.
     agent_id: AGENT_ROLE,
     strategy: next.strategy,
-    project_dir: projectDirOf(cfg),
+    project_dir: dir,
+    // Resolved here rather than left for a reader to work out: `sameProject` has to be able
+    // to answer without re-deriving, and the root is what the id was hashed from anyway.
+    project_root: projectRootOf(dir),
     created_at: numberOr(inherited.created_at, now),
     last_seen_at: now,
     mode: firstString(cfg.mode) || 'local',
@@ -416,6 +523,7 @@ function normaliseRecord(record) {
     agent_id: '',
     strategy: DEFAULT_STRATEGY,
     project_dir: '',
+    project_root: '',
     created_at: now,
     last_seen_at: now,
     mode: 'local',
@@ -453,14 +561,58 @@ function sessionFileName(sessionId) {
 // ---------------------------------------------------------------------------
 
 /**
- * The directory the run is about. `cfg.projectDir` is what `loadConfig` resolved
- * from `CLAUDE_PROJECT_DIR`; the environment and the cwd are the fallbacks for a
- * caller holding a partial config.
+ * The directory the run is about.
+ *
+ * `payload.cwd` first, because it is the only input that tracks a mid-session
+ * `cd`: `cfg.projectDir` is `CLAUDE_PROJECT_DIR`, which the host sets once at
+ * launch and never revises, and the config cache is keyed on it, so a `cd`
+ * invalidates nothing either.
+ *
+ * "Usable" means it exists and is a directory. That test is what keeps the
+ * preference safe: a payload naming a directory this machine does not have is
+ * not evidence about where the work is happening, and hashing it would mint a
+ * run id out of a path nobody can act on.
+ *
  * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} [payload]
  * @returns {string}
  */
-function projectDirOf(cfg) {
-  return firstString(cfg.projectDir, process.env.CLAUDE_PROJECT_DIR) || safeCwd();
+function projectDirOf(cfg, payload = {}) {
+  return usableDir(isObject(payload) ? payload.cwd : '')
+    || firstString(cfg.projectDir, process.env.CLAUDE_PROJECT_DIR)
+    || safeCwd();
+}
+
+/**
+ * The same answer, for callers outside this module that must not disagree with
+ * it. `lib/config.mjs`'s `envTags` derives `repo:` and `branch:` by shelling out
+ * in a directory, and those tags ride on every ingested item: tagging from one
+ * directory while the run id was hashed from another is the same bug wearing
+ * different clothes.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} [payload]
+ * @returns {string}
+ */
+export function resolveProjectDir(cfg, payload = {}) {
+  return projectDirOf(isObject(cfg) ? cfg : {}, payload);
+}
+
+/** The repo a directory belongs to, or the directory itself. @param {string} dir */
+function projectRootOf(dir) {
+  return gitToplevel(dir) || dir;
+}
+
+/** @param {any} v @returns {string} */
+function usableDir(v) {
+  const s = typeof v === 'string' ? v.trim() : '';
+  if (!s) return '';
+  try {
+    return statSync(s).isDirectory() ? s : '';
+  } catch {
+    // Absent, unreadable, or not a path at all — all "no answer", never a throw.
+    return '';
+  }
 }
 
 /** @param {string} dir @returns {string} */

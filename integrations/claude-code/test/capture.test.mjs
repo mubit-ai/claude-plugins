@@ -1,8 +1,10 @@
 // @ts-check
 /**
- * `hooks/src/capture.mjs` — PostToolUse / PostToolUseFailure / Stop / SubagentStop (§5.4).
+ * `hooks/src/capture.mjs` — PostToolUse / PostToolUseFailure / Stop / StopFailure /
+ * SubagentStop (§5.4).
  *
- * One script, four modes by argv: none, `--failure`, `--stop`, `--subagent`.
+ * One script, five modes by argv: none, `--failure`, `--stop`, `--stop-failure`,
+ * `--subagent`.
  *
  * Two properties dominate this file:
  *
@@ -25,12 +27,12 @@ import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import {
-  runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir, makeProjectDir,
-  spoolFiles, soleRunId, readJsonFile, tempDir,
+  runHook, assertHookContract, assertWithinBudget, fakeMubit, baseEnv, makeDataDir,
+  makeProjectDir, spoolFiles, soleRunId, readJsonFile, tempDir,
 } from './helpers/harness.mjs';
 import {
-  postToolUse, postToolUseFailure, stop, subagentStop,
-  PROMPT_ID, SESSION_ID, TOOL_USE_ID, SECRETS,
+  postToolUse, postToolUseFailure, postToolUseLegacyOutput, stop, stopFailure, subagentStop,
+  PROMPT_ID, SESSION_ID, TOOL_USE_ID, SECRETS, RECORDED_RESPONSES,
 } from './helpers/fixtures.mjs';
 
 const RUN_ID = 'cc-test-0000';
@@ -143,9 +145,32 @@ function assertRequiredItemFields(item) {
     `occurrence_time ${item.occurrence_time} is not a recent unix timestamp in seconds`);
 }
 
-// Wall-clock ceiling. Real target is <40ms (~30ms of which is node startup); this is a
-// guard-rail against something dialing the network, not a stopwatch.
-const BUDGET_MS = 400;
+/**
+ * The standing guard for defect F1.
+ *
+ * A tool item is `"<tool>(<params>) -> <output>"`. For a year every shipped item ended at
+ * the arrow, because capture read `payload.tool_output` and the host sends `tool_response`:
+ * the plugin recorded that a file had been read and never what was in it. Nothing caught it,
+ * because the only payload the tests had ever seen was one the tests wrote themselves.
+ *
+ * So: any item whose text reaches the arrow must carry something after it. Call this
+ * wherever a fixture supplies a tool result — an empty tail there is F1, returned.
+ */
+function assertNonEmptyTail(item) {
+  assert.ok(!/->\s*$/.test(item.text),
+    `captured item ends at the arrow with no tool output — that is defect F1: ${JSON.stringify(item.text)}`);
+}
+
+// What `capture` may cost on top of starting node — `assertWithinBudget` measures that floor
+// rather than assuming it.
+//
+// The §5.4 target is 40 ms of work and the idle measurement is ~53 ms, so 800 is fifteen times
+// the real cost. It is set from the other end: with four suites running at once the figure was
+// seen at 456 ms, because parsing a bundle contends for CPU in a way subtracting the spawn
+// floor cannot fully remove. A budget under that measures the machine. This is a guard-rail
+// against a gross regression — a sleep, a retry loop, a directory walk — and not a stopwatch;
+// the zero-network claim is asserted exactly, by request count, and does not lean on it.
+const BUDGET_MS = 800;
 
 /**
  * A fake Mubit whose listening socket is closed even when the test fails — otherwise an
@@ -173,7 +198,10 @@ test('capture: PostToolUse writes exactly one correctly shaped spool item and is
   assert.deepEqual(r.json, { suppressOutput: true }, 'stdout is {"suppressOutput":true} in every mode');
   assert.equal(server.requests.length, 0,
     `capture must issue ZERO HTTP requests; saw: ${server.summary()}`);
-  assert.ok(r.ms < BUDGET_MS, `capture took ${r.ms}ms; budget is <40ms wall (§5.4)`);
+  await assertWithinBudget('capture', BUDGET_MS, r.ms, async () => (await runHook(
+    'capture', postToolUse(),
+    { env: baseEnv({ dataDir: makeDataDir(), endpoint: server.url, projectDir }) },
+  )).ms);
 
   const item = soleItem(dataDir, soleRunId(dataDir));
   assertRequiredItemFields(item);
@@ -182,11 +210,71 @@ test('capture: PostToolUse writes exactly one correctly shaped spool item and is
   assert.ok(item.text.includes(') -> '), `text must be "<tool>(<params>) -> <output>": ${item.text}`);
   assert.ok(item.text.includes('lib.rs'), 'params must be rendered into the text');
   assert.ok(item.text.includes('Applied 1 edit to src/lib.rs'), 'tool output must be rendered');
+  assertNonEmptyTail(item);
   assert.ok(item.env_tags.includes('tool:claude-code'));
 
   const meta = JSON.parse(item.metadata_json);
   assert.equal(meta.tool, 'Edit');
   assert.equal(meta.tool_use_id, TOOL_USE_ID);
+  // The host calls it `duration_ms`; `execution_time_ms` is the older name and the one the
+  // wire metadata keeps. Reading only the old one dated every capture at 0ms.
+  assert.equal(meta.execution_time_ms, 42, 'the host sends duration_ms, not execution_time_ms');
+});
+
+// F1 — the host's field is `tool_response`. Every shipped memory read
+// `Read(file_path=X) -> ` because capture read a name nothing ever sends.
+test('capture: the tool result arrives as tool_response and lands in the item text', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const r = await runHook('capture', postToolUse(), { env: staticEnv(dataDir, server) });
+
+  assertHookContract(r);
+  const item = soleItem(dataDir, RUN_ID);
+  assertRequiredItemFields(item);
+  assertNonEmptyTail(item);
+  assert.ok(item.text.includes('Applied 1 edit to src/lib.rs'),
+    `tool_response must be rendered after the arrow: ${JSON.stringify(item.text)}`);
+});
+
+// F1 — `tool_output` is the older host's name for the same thing. Keeping it as a fallback
+// costs one `??`, and nothing is gained by making an old payload shape fail.
+test('capture: the legacy tool_output field is still read as a fallback', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const payload = postToolUseLegacyOutput();
+  assert.equal(payload.tool_response, undefined, 'the legacy fixture must not also carry tool_response');
+
+  const r = await runHook('capture', payload, { env: staticEnv(dataDir, server) });
+
+  assertHookContract(r);
+  const item = soleItem(dataDir, RUN_ID);
+  assertRequiredItemFields(item);
+  assertNonEmptyTail(item);
+  assert.ok(item.text.includes('Applied 1 edit to src/lib.rs'),
+    `tool_output must still be rendered after the arrow: ${JSON.stringify(item.text)}`);
+});
+
+// F1, standing regression — the six `tool_response` shapes taken off real transcripts. No
+// two of them look alike, and the renderer has to find the payload in all of them.
+test('capture: every recorded tool_response shape renders something after the arrow', async (t) => {
+  const server = await mubit(t);
+
+  for (const [tool, rec] of Object.entries(RECORDED_RESPONSES)) {
+    const dataDir = makeDataDir();
+    const r = await runHook('capture', postToolUse({
+      tool_name: tool,
+      tool_input: rec.tool_input,
+      tool_response: rec.tool_response,
+      tool_use_id: `toolu_01RECORDED${tool}`,
+    }), { env: staticEnv(dataDir, server) });
+
+    assertHookContract(r);
+    const item = soleItem(dataDir, RUN_ID);
+    assertRequiredItemFields(item);
+    assertNonEmptyTail(item);
+    assert.ok(item.text.includes(rec.expect),
+      `${tool}: the recorded response's payload is missing from the item: ${JSON.stringify(item.text)}`);
+  }
 });
 
 // §5.4 — "item_id is stable per tool call so a retried drain deduplicates."
@@ -245,7 +333,13 @@ test('capture --stop: task_result carrying both the staged prompt and the assist
 
   assertHookContract(r);
   assert.deepEqual(r.json, { suppressOutput: true });
-  assert.ok(r.ms < BUDGET_MS, `capture --stop took ${r.ms}ms; budget is <40ms wall (§5.4)`);
+  await assertWithinBudget('capture --stop', BUDGET_MS, r.ms, async () => {
+    const d = makeDataDir();
+    holdDrainLock(d);
+    seedTurn(d);
+    return (await runHook('capture', stop(),
+      { env: withSpy(staticEnv(d, server)).env, args: ['--stop'] })).ms;
+  });
 
   const item = soleItem(dataDir, RUN_ID);
   assertRequiredItemFields(item);
@@ -266,6 +360,103 @@ test('capture --stop: task_result carrying both the staged prompt and the assist
   assert.deepEqual(turn.recalled, ['ref_rule_1'], 'capture must not clobber the recalled ids');
 });
 
+// ---------------------------------------------------------------------------
+// The used-signal (§5.5) — the half of precision nothing measured
+// ---------------------------------------------------------------------------
+
+/** A turn as `prompt-recall` leaves it: ids to attribute, and the terms it injected. */
+function seedRecalledTurn(dataDir, terms, over = {}) {
+  return seedTurn(dataDir, {
+    recalled: ['ref_rule_1'],
+    recall: {
+      at: Date.now() - 3000, rung: 1, sources: 1, tokens: 40, chars: 160,
+      dropped: 0, empty_reason: '', terms,
+    },
+    ...over,
+  });
+}
+
+// §5.5: the plugin cannot see whether the model READ the injected block — only whether the
+// reply carries the memory's own vocabulary. So Stop records the evidence it found, not a
+// verdict: the matched terms, the size of the set it searched, and the method that produced
+// them, so a later reader knows what the number meant.
+test('capture --stop: records which injected memory terms the reply echoed', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  const turnPath = seedRecalledTurn(dataDir, ['idempotency', 'quarantine', 'hamming']);
+  const { env } = withSpy(staticEnv(dataDir, server));
+
+  const r = await runHook('capture', stop({
+    last_assistant_message:
+      'The batch is deduplicated server-side because the idempotency key is stable, '
+      + 'so the retry is a no-op rather than a second quarantine.',
+  }), { env, args: ['--stop'] });
+
+  assertHookContract(r);
+  const ev = readJsonFile(turnPath).used_evidence;
+  assert.ok(ev && typeof ev === 'object', `no used-signal was recorded: ${JSON.stringify(readJsonFile(turnPath))}`);
+  assert.equal(ev.used, true);
+  assert.ok(typeof ev.method === 'string' && ev.method.length > 0,
+    'the method has to be named on the record — a bare 1 or 0 is unreadable a version later');
+  assert.deepEqual(ev.terms.sort(), ['idempotency', 'quarantine'],
+    'the evidence is the terms that matched, not just how many');
+  assert.equal(ev.matched, 2);
+  assert.equal(ev.candidates, 3, 'the denominator is on the record too');
+  assert.equal(typeof ev.at, 'number');
+});
+
+// §5.5: "injected and ignored" is the case the whole finding is about, so it is recorded
+// positively rather than by absence. §4.4: it is recorded WITHOUT the reply — the turn file
+// holds only terms that recall already staged and scrubbed, so nothing the assistant said
+// can land here.
+test('capture --stop: a reply that echoes nothing records the absence, and no fragment of the reply', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  const turnPath = seedRecalledTurn(dataDir, ['idempotency', 'quarantine']);
+  const { env } = withSpy(staticEnv(dataDir, server));
+
+  const r = await runHook('capture', stop({
+    last_assistant_message:
+      `I pushed the branch with ${SECRETS.githubToken} in the remote URL; the pipeline is green.`,
+  }), { env, args: ['--stop'] });
+
+  assertHookContract(r);
+  const staged = readJsonFile(turnPath);
+  assert.equal(staged.used_evidence.used, false,
+    'an ignored injection must be recorded, not left as silence');
+  assert.equal(staged.used_evidence.matched, 0);
+  assert.deepEqual(staged.used_evidence.terms, []);
+  assert.equal(staged.used_evidence.candidates, 2);
+
+  const raw = readFileSync(turnPath, 'utf8');
+  assert.ok(!raw.includes(SECRETS.githubToken),
+    `the turn file carries a credential from the reply:\n${raw}`);
+  assert.ok(!raw.includes('pipeline'),
+    'the used-signal must record what it looked FOR, never what the assistant said');
+});
+
+// A turn staged before this existed, or one where recall was off: there is no term set, so
+// there is no signal. Recording `used: false` here would be a measurement of nothing, and
+// the drain would read it as "the memory was ignored".
+test('capture --stop: a turn with no staged recall record gets no used-signal at all', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  const turnPath = seedTurn(dataDir);            // no `recall` key at all
+  const { env } = withSpy(staticEnv(dataDir, server));
+
+  const r = await runHook('capture', stop(), { env, args: ['--stop'] });
+
+  assertHookContract(r);
+  const staged = readJsonFile(turnPath);
+  assert.equal(staged.used_evidence, undefined,
+    `an unmeasurable turn must stay unmeasured: ${JSON.stringify(staged.used_evidence)}`);
+  assert.equal(typeof staged.ended_at, 'number', 'the end markers are written either way');
+  assert.equal(staged.outcome_pending, true);
+});
+
 // §5.4 step 8 — `--stop` ALWAYS spawns a drain, and always with `--with-outcome <prompt_id>`:
 // the turn is over, so this is the moment its attribution can be recorded.
 test('capture --stop: always spawns a drain with --with-outcome <prompt_id>', async (t) => {
@@ -283,6 +474,175 @@ test('capture --stop: always spawns a drain with --with-outcome <prompt_id>', as
   assert.ok(spawns[0].argv.includes('--with-outcome'), `drain argv: ${JSON.stringify(spawns[0].argv)}`);
   assert.equal(spawns[0].argv[spawns[0].argv.indexOf('--with-outcome') + 1], PROMPT_ID);
   assert.equal(spawns[0].detached, '1');
+});
+
+// ---------------------------------------------------------------------------
+// `--stop-failure` — the turn the API killed
+// ---------------------------------------------------------------------------
+
+/**
+ * The fifth mode, and the one whose whole job is to make a *later* decision possible.
+ *
+ * The host's own registry, read out of Claude Code 2.1.235 the way the constants in
+ * `hook-output.test.mjs` are:
+ *
+ *     StopFailure: {summary: "When the turn ends due to an API error",
+ *       description: "Fires **instead of Stop** when an API error (rate limit, auth failure,
+ *       etc.) ended the turn. Fire-and-forget — hook output and exit codes are ignored."}
+ *
+ * "Instead of Stop" is the fact the whole ticket turns on. `capture --stop` is the only thing
+ * in this plugin that ever writes `ended_at` / `outcome_pending`, so on a rate-limited turn
+ * nothing closed the turn file at all: it sat there holding `recalled` ids, half-written,
+ * with no record anywhere that the turn had died or why. `--stop-failure` closes it and
+ * stamps `api_error` — and `lib/outcome.mjs` reads that stamp and posts nothing.
+ *
+ * The mark has to be a key of its own rather than `outcome: "failure"`, which is what the
+ * build guide's §5.5 originally called for ("On a StopFailure turn: outcome 'failure',
+ * signal -0.3"). That row is exactly the one this ticket overturns: -0.3 against the
+ * recalled ids says the *memory* was wrong, and a rate limit is not evidence about memory.
+ */
+
+/** A turn as `stage-prompt` + `prompt-recall` leave it, with terms staged to match against. */
+const seedTermedTurn = (dataDir, over = {}) => seedTurn(dataDir, {
+  recall: {
+    at: Date.now() - 3000, rung: 1, sources: 1, tokens: 40, chars: 160,
+    dropped: 0, empty_reason: '', terms: ['indexing', 'queued'],
+  },
+  ...over,
+});
+
+// THE test for this ticket, on capture's side of the wire: the turn is closed, the error is
+// on the record, and nothing that could attribute it was started.
+test('capture --stop-failure: closes the turn, stamps the API error, and starts no attribution', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  const turnPath = seedTurn(dataDir);
+  const { env, file } = withSpy(staticEnv(dataDir, server));
+
+  const r = await runHook('capture', stopFailure(), { env, args: ['--stop-failure'] });
+
+  assertHookContract(r);
+  // "Fire-and-forget — hook output and exit codes are ignored", and `StopFailure` is absent
+  // from the host's `hookEventName` union, so there is no channel to say anything on even if
+  // there were something to say. `hook-output.test.mjs` pins the same shape against the host.
+  assert.deepEqual(r.json, { suppressOutput: true });
+  await assertWithinBudget('capture --stop-failure', BUDGET_MS, r.ms, async () => {
+    const d = makeDataDir();
+    holdDrainLock(d);
+    seedTurn(d);
+    return (await runHook('capture', stopFailure(),
+      { env: withSpy(staticEnv(d, server)).env, args: ['--stop-failure'] })).ms;
+  });
+
+  const turn = readJsonFile(turnPath);
+  assert.equal(turn.api_error, 'rate_limit',
+    'without the stamp nothing downstream can tell a rate-limited turn from a completed one');
+  assert.equal(typeof turn.ended_at, 'number',
+    'Stop does not fire on this turn, so if --stop-failure does not close it nothing ever will');
+  assert.equal(turn.outcome_pending, true,
+    'the turn is a candidate for the outcome decision like any other; suppression is the '
+    + 'decision\'s job, not a matter of hiding the turn from it');
+  assert.equal(turn.prompt, STAGED_PROMPT, 'the staged prompt must survive the close');
+  assert.deepEqual(turn.recalled, ['ref_rule_1'],
+    'the recalled ids must survive: they are what a LATER, real outcome would attribute');
+
+  // A turn that died on a rate limit produced no episode. "Q: fix the bug\n\nA: " is the
+  // half-a-conversation this suite already has a name for, and paying to store and recall it
+  // is worse than not having it.
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0,
+    'an API-killed turn is not a memory; spooling it bills for storing a truncated answer');
+
+  assert.equal(server.requests.length, 0, `capture must issue ZERO HTTP requests; saw: ${server.summary()}`);
+  await new Promise((res) => setTimeout(res, 250));
+  assert.deepEqual(drainSpawns(file), [],
+    'unlike --stop, this mode must NOT force a drain: the only reason --stop always drains '
+    + 'is to carry --with-outcome, and this turn has no outcome to carry');
+});
+
+// The mark is the host's value, copied through. The taxonomy is not a list this plugin can
+// keep: 2.1.235 ships ten values plus a feature-flagged eleventh (`account_on_hold`, behind
+// `fOr()`), so the same host is right about the list on one account and wrong on another.
+// That is why the registration carries no matcher — and why the mark is whatever arrived.
+test('capture --stop-failure: records the error value the host sent, in or out of the taxonomy', async (t) => {
+  const server = await mubit(t);
+
+  /** @type {Array<{name: string, over: Record<string, any>, expect: string}>} */
+  const rows = [
+    { name: 'the common one', over: { error: 'rate_limit' }, expect: 'rate_limit' },
+    { name: 'the taxonomy\'s own catch-all', over: { error: 'unknown' }, expect: 'unknown' },
+    // Present only where `fOr()` is on. A hard-coded matcher list would silently drop this
+    // turn on the accounts that have it.
+    { name: 'the feature-flagged eleventh', over: { error: 'account_on_hold' }, expect: 'account_on_hold' },
+    // The list the plugin was handed is a snapshot of one host build. A value it has never
+    // heard of must still close the turn and still suppress the outcome.
+    { name: 'a value added after this plugin shipped', over: { error: 'context_window_exceeded' }, expect: 'context_window_exceeded' },
+    // The host itself defaults a missing one on the way to the matcher (`e.error ?? "unknown"`),
+    // so an absent field is `unknown` here too rather than an empty mark that reads as "no
+    // API error at all" — which would put the turn straight back into the outcome path.
+    { name: 'no error field at all', over: { error: undefined }, expect: 'unknown' },
+  ];
+
+  for (const row of rows) {
+    const dataDir = makeDataDir();
+    holdDrainLock(dataDir);
+    const turnPath = seedTurn(dataDir);
+
+    const r = await runHook('capture', stopFailure(row.over), {
+      env: staticEnv(dataDir, server), args: ['--stop-failure'],
+    });
+
+    assertHookContract(r);
+    assert.equal(readJsonFile(turnPath).api_error, row.expect,
+      `${row.name}: the stamp must carry the host's value, or the outcome decision reads the wrong turn`);
+  }
+});
+
+// §5.5's used-signal measures whether the reply carried the injected memory's vocabulary.
+// A reply the API cut off mid-sentence has no denominator — `max_output_tokens` is literally
+// "the answer stopped early" — so measuring it would manufacture a `used: false` that
+// `decideOutcome` reads as "the model ignored the memory". Left unmeasured on purpose.
+test('capture --stop-failure: leaves the used-signal unmeasured even with terms staged', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  const turnPath = seedTermedTurn(dataDir);
+
+  const r = await runHook('capture', stopFailure({
+    error: 'max_output_tokens',
+    last_assistant_message: 'The indexing queue is still draining, so the job stays qu',
+  }), { env: staticEnv(dataDir, server), args: ['--stop-failure'] });
+
+  assertHookContract(r);
+  const turn = readJsonFile(turnPath);
+  assert.equal(turn.used_evidence, undefined,
+    'a truncated reply is unmeasurable, not unused — recording `used: false` here would '
+    + `report the memory as ignored: ${JSON.stringify(turn.used_evidence)}`);
+  assert.equal(turn.api_error, 'max_output_tokens');
+  assert.equal(turn.outcome_pending, true);
+});
+
+// The spool is still real work and still deserves to be sent — the model's API fell over,
+// not Mubit's. So the ordinary batch trigger still applies; what never happens is the
+// `--with-outcome` drain that only `--stop` fires.
+test('capture --stop-failure: a batch trigger still drains, but never with --with-outcome', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  seedTurn(dataDir);
+  // One captured tool call already in the spool, and a batch size of 1 so it is over the line.
+  const { env, file } = withSpy(staticEnv(dataDir, server, { MUBIT_CC_BATCH_MAX_ITEMS: '1' }));
+  assertHookContract(await runHook('capture', postToolUse(), { env }));
+
+  const r = await runHook('capture', stopFailure(), { env, args: ['--stop-failure'] });
+  assertHookContract(r);
+
+  const spawns = await waitForSpawn(file);
+  assert.ok(spawns.length >= 1, 'a full batch must still be drained; the API error is the model\'s, not Mubit\'s');
+  for (const s of spawns) {
+    assert.ok(!s.argv.includes('--with-outcome'),
+      `no drain from this path may carry attribution: ${JSON.stringify(s.argv)}`);
+  }
 });
 
 // §5.4 step 8 — plain PostToolUse spawns a drain ONLY when a trigger fires. Spawning one
@@ -344,6 +704,89 @@ test('capture --subagent: attributes the item to the subagent agent_id', async (
     `the subagent's own agent_id must appear on the item: ${item.metadata_json}`);
 });
 
+/**
+ * F2 — the tool set is the host's, not the plugin's.
+ *
+ * `hooks.json` now matches every tool, so what is worth remembering is decided here, in
+ * code, where it can be tested. `Agent` — a delegated investigation, among the highest-value
+ * episodes there is — was still reaching the old allowlist, but only because the host tests
+ * a matcher against a tool's former names too and so kept matching `Agent` against the
+ * long-dead `Task`. The plugin was relying on a compatibility table it does not own and
+ * cannot inspect. `TodoWrite` is the model rewriting its own checklist and carries no
+ * memory at all.
+ */
+test('capture: an Agent dispatch is captured and a TodoWrite is skipped', async (t) => {
+  const server = await mubit(t);
+
+  const kept = makeDataDir();
+  const a = await runHook('capture', postToolUse({
+    tool_name: 'Agent',
+    tool_input: { description: 'Explore the matcher', subagent_type: 'Explore' },
+    tool_response: { isAsync: true, status: 'async_launched', agentId: 'aa1ef5c824d2b98' },
+    tool_use_id: 'toolu_01AGENTDISPATCH000000000',
+  }), { env: staticEnv(kept, server) });
+  assertHookContract(a);
+  const item = soleItem(kept, RUN_ID);
+  assertRequiredItemFields(item);
+  assertNonEmptyTail(item);
+  assert.match(item.text, /^Agent\(/, 'a subagent dispatch is an episode worth keeping');
+
+  const dropped = makeDataDir();
+  const b = await runHook('capture', postToolUse({
+    tool_name: 'TodoWrite',
+    tool_input: { todos: [{ content: 'fix the matcher', status: 'in_progress' }] },
+    tool_response: { newTodos: [{ content: 'fix the matcher', status: 'in_progress' }] },
+    tool_use_id: 'toolu_01TODOWRITE00000000000A',
+  }), { env: staticEnv(dropped, server) });
+  assertHookContract(b);
+  assert.deepEqual(b.json, { suppressOutput: true }, 'a skipped tool is still silent to the host');
+  assert.equal(spoolFiles(dropped, RUN_ID).length, 0,
+    'TodoWrite carries no memory — it must be skipped in code now that the matcher lets it through');
+});
+
+// F2 — the whole skip list, each name and the reason it earns no memory. These arrive now
+// only because the matcher stopped filtering; every one of them is bookkeeping, or a
+// duplicate of something already captured. Anything NOT on this list is kept, including
+// tools that did not exist when it was written — that is the point of the inversion, so the
+// `kept` half below is the half that matters.
+test('capture: every tool on the skip list is dropped, and its neighbours are not', async (t) => {
+  const server = await mubit(t);
+
+  const skipped = ['TodoWrite', 'EnterPlanMode', 'ExitPlanMode', 'ToolSearch',
+    'ListAgents', 'TaskList', 'CronList', 'Monitor', 'ScheduleWakeup', 'StructuredOutput'];
+  for (const tool of skipped) {
+    const dataDir = makeDataDir();
+    const r = await runHook('capture', postToolUse({
+      tool_name: tool,
+      tool_input: { q: 'x' },
+      tool_response: { success: true },
+      tool_use_id: `toolu_01SKIP${tool}`,
+    }), { env: staticEnv(dataDir, server) });
+    assertHookContract(r);
+    assert.equal(spoolFiles(dataDir, RUN_ID).length, 0, `${tool} must be skipped`);
+  }
+
+  // `AskUserQuestion` is first on purpose: it is the closest call on the list and the one a
+  // future tidy-up will reach for. Its result carries what the human chose and what they
+  // turned down — §4.5's `feedback`, and the one fact no amount of reading the codebase
+  // reproduces.
+  const kept = ['AskUserQuestion', 'ReportFindings', 'CronCreate', 'CronDelete',
+    'EnterWorktree', 'ExitWorktree', 'LSP', 'Workflow',
+    'TaskCreate', 'TaskUpdate', 'TaskStop', 'Skill', 'SendMessage', 'Artifact',
+    'TaskOutput', 'mcp__github__create_issue'];
+  for (const tool of kept) {
+    const dataDir = makeDataDir();
+    const r = await runHook('capture', postToolUse({
+      tool_name: tool,
+      tool_input: { q: 'x' },
+      tool_response: { success: true },
+      tool_use_id: `toolu_01KEEP${tool}`,
+    }), { env: staticEnv(dataDir, server) });
+    assertHookContract(r);
+    assert.equal(spoolFiles(dataDir, RUN_ID).length, 1, `${tool} must be captured`);
+  }
+});
+
 // §4.4 — self-reference suppression. Without it the plugin records its own traffic,
 // recalls it, then records the recall.
 test('capture: a self-referential tool call drops silently', async (t) => {
@@ -370,6 +813,46 @@ test('capture: a self-referential tool call drops silently', async (t) => {
   assert.equal(server.requests.length, 0);
 });
 
+/**
+ * §4.4 — the same suppression for the tool that reads a background task's output.
+ *
+ * `isSelfReference` named `BashOutput` and then read `input.command`, which a `BashOutput`
+ * input has never carried: it identifies its subject by handle (`task_id`/`bash_id`), so the
+ * branch was dead for exactly the tool it named. What a background-task read CAN carry is
+ * whatever the model typed — the output `filter`, or the name it gave the task.
+ */
+test('capture: a self-referential BashOutput drops silently', async (t) => {
+  const server = await mubit(t);
+
+  for (const [why, tool_input] of [
+    ['a filter hunting our env vars', { bash_id: 'bash_1', filter: 'MUBIT_API_KEY' }],
+    ['a task named after us', { task_id: 'mubit-drain', block: false, timeout: 30000 }],
+  ]) {
+    const dataDir = makeDataDir();
+    const r = await runHook('capture', postToolUse({
+      tool_name: 'BashOutput',
+      tool_input,
+      tool_response: { stdout: 'ok', stderr: '', interrupted: false },
+      tool_use_id: 'toolu_01BASHOUTPUTSELFREF00000',
+    }), { env: staticEnv(dataDir, server) });
+    assertHookContract(r);
+    assert.deepEqual(r.json, { suppressOutput: true });
+    assert.equal(spoolFiles(dataDir, RUN_ID).length, 0, `BashOutput with ${why} must be dropped`);
+  }
+
+  // …and an ordinary background-task read is still kept. A handle is not a self-reference.
+  const kept = makeDataDir();
+  const ok = await runHook('capture', postToolUse({
+    tool_name: 'BashOutput',
+    tool_input: { bash_id: 'bash_12', filter: 'error' },
+    tool_response: { stdout: 'error: E0433', stderr: '', interrupted: false },
+    tool_use_id: 'toolu_01BASHOUTPUTKEEP00000000',
+  }), { env: staticEnv(kept, server) });
+  assertHookContract(ok);
+  assert.equal(spoolFiles(kept, RUN_ID).length, 1,
+    'a background-task read of an unrelated shell is ordinary tool output');
+});
+
 // §4.4 stage 2 — a denied path is dropped entirely, not scrubbed.
 test('capture: a denylisted path drops silently', async (t) => {
   const dataDir = makeDataDir();
@@ -378,7 +861,7 @@ test('capture: a denylisted path drops silently', async (t) => {
   const r = await runHook('capture', postToolUse({
     tool_name: 'Read',
     tool_input: { file_path: join(projectDir, '.env') },
-    tool_output: { type: 'text', text: `OPENAI_API_KEY=${SECRETS.openaiKey}` },
+    tool_response: { type: 'text', text: `OPENAI_API_KEY=${SECRETS.openaiKey}` },
   }), {
     env: baseEnv({
       dataDir, endpoint: server.url, projectDir,
@@ -439,7 +922,7 @@ test('capture: hostile tool_input drops the item rather than spooling it unredac
       flags: [true, false, 12, null, { nested: SECRETS.awsKey }],
       buf: { type: 'Buffer', data: Array.from({ length: 4096 }, (_, i) => i % 256) },
     },
-    tool_output: { type: 'text', text: `token=${SECRETS.mubitKey}` },
+    tool_response: { type: 'text', text: `token=${SECRETS.mubitKey}` },
     tool_use_id: 'toolu_01HOSTILE0000000000000A',
   });
 
@@ -461,4 +944,38 @@ test('capture: hostile tool_input drops the item rather than spooling it unredac
     }
     assertRequiredItemFields(JSON.parse(raw));
   }
+});
+
+// ---------------------------------------------------------------------------
+// §4.1 env_tags — the directory the work happened in
+// ---------------------------------------------------------------------------
+
+/*
+ * `repo:` and `branch:` come from shelling out in a directory, and that directory used to be
+ * `CLAUDE_PROJECT_DIR` — the session's launch root, which a mid-session `cd` cannot move. The
+ * tags ride on every ingested item and are permanent once ingested, so getting the run id to
+ * follow a `cd` while leaving these behind would have shipped half a fix: the memory lands in
+ * the right run wearing the wrong labels.
+ *
+ * The run is pinned here so the run id cannot be what makes this pass or fail. Only the tags
+ * are in question.
+ */
+test('capture: env_tags name the repo the tool call happened in, not the launch one', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const launchedIn = makeProjectDir({ git: true });
+  const workingIn = makeProjectDir({ git: true });
+  holdDrainLock(dataDir);
+
+  const r = await runHook('capture', postToolUse({ cwd: workingIn }), {
+    env: staticEnv(dataDir, server, { CLAUDE_PROJECT_DIR: launchedIn }),
+  });
+  assertHookContract(r);
+
+  const tags = soleItem(dataDir, RUN_ID).env_tags;
+  assert.ok(tags.includes(`repo:${basename(workingIn)}`),
+    `expected repo:${basename(workingIn)}; got ${JSON.stringify(tags)}`);
+  assert.ok(!tags.includes(`repo:${basename(launchedIn)}`),
+    'the launch repo is not where this tool call happened');
 });

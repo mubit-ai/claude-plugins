@@ -469,3 +469,40 @@ test('setup/SKILL.md sends the user to /mubit-memory:auth', () => {
   assert.match(body, /\/mubit-memory:auth/,
     'setup diagnoses; auth fixes. Setup must name it (§9.3)');
 });
+
+// §9.2 — what `mubit_learned` actually writes.
+//
+// This paragraph was true and is now false. The bundled SDK hard-codes
+// `lesson_scope: "session"`, and the control plane reads every scope but `run` across runs —
+// so the skill was telling the model that a saved lesson "stays with related sessions" while
+// it was in fact reaching every other run on the instance. The MCP egress guard clamps it to
+// `run`; the skill has to say the same thing, because this paragraph is the model's only
+// account of where its lesson went.
+//
+// Asserted on the paragraph rather than the file: the template table two sections up
+// legitimately contains the word `session` for DEBUG_SUCCESS and API_PATTERN.
+test('remember/SKILL.md states the scope mubit_learned actually writes', () => {
+  const { body } = loadSkill('remember');
+  const para = body
+    .split(/\n\s*\n/)
+    .find((p) => /mubit_learned/.test(p) && /\bwrit/i.test(p) && /\bscope\b|`run`|`session`/.test(p));
+
+  assert.ok(para,
+    'remember/SKILL.md no longer has a paragraph saying what scope mubit_learned writes at — '
+    + 'that sentence is the model\'s only account of where its lesson went (§9.2)');
+  assert.match(para, /\brun\b/,
+    `remember/SKILL.md must say mubit_learned writes at run scope. Paragraph:\n${para}`);
+  assert.doesNotMatch(para, /\bsession\b/,
+    'remember/SKILL.md still says mubit_learned writes at session scope. It does not: the '
+    + 'egress guard clamps it to run, and session is read across runs anyway, which is the '
+    + `leak that clamp exists to close. Paragraph:\n${para}`);
+});
+
+// A ceiling with no documented way to raise it reads as a limitation rather than a setting,
+// and the next person to want a cross-project rule reaches for `mubit_remember` instead —
+// which is exactly the tool that leaked in the first place.
+test('remember/SKILL.md names the setting that widens what an agent may write', () => {
+  const { body } = loadSkill('remember');
+  assert.match(body, /mcpLessonScope|MUBIT_MCP_LESSON_SCOPE/,
+    'remember/SKILL.md does not name the setting that raises the scope ceiling (§6.2)');
+});

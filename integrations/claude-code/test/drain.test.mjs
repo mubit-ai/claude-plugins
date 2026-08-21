@@ -21,7 +21,7 @@ import { join } from 'node:path';
 
 import {
   runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir,
-  readJsonFile, readJsonDir, spoolFiles,
+  readJsonFile, readJsonDir, spoolFiles, waitFor,
 } from './helpers/harness.mjs';
 import { stop, spoolItem, PROMPT_ID } from './helpers/fixtures.mjs';
 
@@ -231,9 +231,11 @@ test('drain and session-end send one batch under one idempotency_key', async (t)
   assertHookContract(await runHook('drain', stop(), { env }));
   assert.equal(spoolFiles(dataDir, RUN_ID).length, 4, 'a 5xx leaves the batch in place');
 
-  // The session ends, and the other drainer picks up exactly those files.
+  // The session ends, and the other drainer picks up exactly those files — in a detached
+  // child, since the host cancels the session-end hook on the way out.
   assertHookContract(await runHook('session-end',
     { hook_event_name: 'SessionEnd', reason: 'exit' }, { env }));
+  await waitFor(() => server.countOf('POST', '/v2/control/ingest') >= 2, 12_000);
 
   const calls = server.calls('POST', '/v2/control/ingest');
   assert.equal(calls.length, 2, 'both drainers sent the batch');
@@ -357,8 +359,11 @@ test('drain --with-outcome: posts one outcome carrying the turn\'s recalled entr
   assert.equal(body.signal, 0.2);
   assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
   assert.ok(typeof body.agent_id === 'string' && body.agent_id.length > 0);
-  assert.ok(typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0);
   assert.ok(typeof body.rationale === 'string' && body.rationale.length > 0);
+  // Derived from (run_id, prompt_id) and never random — and spelled the same way in
+  // `session-end`, since that is what makes a concurrent flush a server-side no-op rather
+  // than double reinforcement. `session-end.test.mjs` asserts the two agree end to end.
+  assert.equal(body.idempotency_key, `cc-outcome-${RUN_ID}-${PROMPT_ID}`);
 });
 
 // §5.5 — no recalled ids means there is nothing to reinforce; the call is skipped entirely
@@ -394,9 +399,22 @@ test('drain --with-outcome: skips the outcome call when outcomeMode is "off"', a
   server.assertNotCalled('POST', '/v2/control/outcome');
 });
 
-// §5.5 — "On a StopFailure turn: outcome: "failure", signal: -0.3." The turn file records
-// how the turn ended, so the drain never has to re-derive it.
-test('drain --with-outcome: a StopFailure turn posts outcome "failure" at signal -0.3', async (t) => {
+/**
+ * §5.5 — a turn whose file records `outcome: "failure"` posts `failure` / -0.3. The turn file
+ * records how the turn ended, so the drain never has to re-derive it.
+ *
+ * This used to be titled "a StopFailure turn", after §5.5's line *"On a StopFailure turn:
+ * outcome: 'failure', signal: -0.3."* It never was one. Nothing in the plugin has ever
+ * written `outcome` onto a turn file — the key exists only here and in the other tests that
+ * seed it — because `StopFailure` was not registered, and the host fires it **instead of**
+ * `Stop`, so the hook that would have written it never ran on those turns.
+ *
+ * Now that `StopFailure` IS registered, the guide's row is the one thing this ticket
+ * overturns: an API-failed turn posts nothing at all (see `api_error` below). The row this
+ * test covers is the different and still-real one — a turn the *file* records as having
+ * failed, whatever wrote that.
+ */
+test('drain --with-outcome: a turn recorded as failed posts outcome "failure" at signal -0.3', async (t) => {
   const dataDir = makeDataDir();
   const server = await mubit(t);
   seedSpool(dataDir, 1);
@@ -414,6 +432,163 @@ test('drain --with-outcome: a StopFailure turn posts outcome "failure" at signal
   assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
 });
 
+/**
+ * The `StopFailure` row, through the drain — one of the two hooks that share
+ * `lib/outcome.mjs`, and the one the ticket's claim is written against: *a turn that died on
+ * `rate_limit` never reaches `record_outcome`.*
+ *
+ * The drain reaches this turn only if something hands it `--with-outcome`, which
+ * `capture --stop-failure` deliberately does not do. That makes this the belt to
+ * `capture.mjs`'s braces: the ingest still goes out (those tool calls were real work), and
+ * the outcome does not, even when the argv says to attribute.
+ */
+test('drain --with-outcome: a turn the API killed ingests, and posts no outcome', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 2);
+  seedTurn(dataDir, { api_error: 'rate_limit' });
+
+  const r = await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--with-outcome', PROMPT_ID],
+  });
+  assertHookContract(r);
+
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  server.assertNotCalled('POST', '/v2/control/outcome');
+
+  // Not dialled, so not counted. `attempts` is a budget for posts that may have landed
+  // unanswered; spending it on a turn nothing will ever send would eventually mark a turn
+  // abandoned for a failure that never happened.
+  const turn = readJsonFile(join(runDir(dataDir), 'turns', `${PROMPT_ID}.json`));
+  assert.ok(!(Number(turn.outcome_attempts) > 0),
+    `a suppressed turn must not spend an attempt: ${JSON.stringify(turn.outcome_attempts)}`);
+  assert.ok(!turn.outcome_sent_at, 'nothing was sent, so nothing may claim it was');
+});
+
+// ---------------------------------------------------------------------------
+// §5.5 step 7, conditioned on evidence — "ignored" is not the same as "not injected"
+// ---------------------------------------------------------------------------
+
+/** A turn as `capture --stop` leaves it once it could compute the used-signal. */
+function seedMeasuredTurn(dataDir, used, over = {}) {
+  return seedTurn(dataDir, {
+    used_evidence: {
+      method: 'memory-term-echo/v1',
+      at: Date.now(),
+      candidates: 12,
+      matched: used ? 3 : 0,
+      terms: used ? ['indexing', 'queued', 'poll'] : [],
+      answer_chars: 180,
+      used,
+    },
+    ...over,
+  });
+}
+
+// THE test for this finding. Before it, a turn whose injected memory was plainly ignored
+// and a turn where nothing was injected at all were the same thing on the wire: silence.
+// Precision cannot be computed from a denominator that never leaves the machine.
+test('drain --with-outcome: an ignored injection is distinguishable from no injection', async (t) => {
+  const ignoredDir = makeDataDir();
+  const ignored = await mubit(t);
+  seedSpool(ignoredDir, 1);
+  seedMeasuredTurn(ignoredDir, false);
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(ignoredDir, ignored.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+
+  ignored.assertCalled('POST', '/v2/control/outcome', 1);
+  const body = ignored.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'neutral',
+    'the four accepted outcomes are success/failure/partial/neutral; anything else is a 400');
+  assert.equal(body.signal, 0,
+    'no evidence of use is not evidence of harm — a penalty here would punish memory for '
+    + 'a signal that is mostly false negatives');
+  assert.deepEqual(body.entry_ids, [],
+    'a neutral record must not name the entries: attributed reinforcement counts any signal '
+    + '>= 0 as one reinforcement, so naming them would credit exactly what was ignored');
+  assert.equal(body.reference_id, 'global');
+  assert.ok(typeof body.rationale === 'string' && body.rationale.length > 0,
+    'the rationale is the only field that can carry what was measured');
+
+  // The other half of the distinction: nothing injected is still silence.
+  const emptyDir = makeDataDir();
+  const empty = await mubit(t);
+  seedSpool(emptyDir, 1);
+  seedTurn(emptyDir, { recalled: [] });
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(emptyDir, empty.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+  empty.assertNotCalled('POST', '/v2/control/outcome');
+});
+
+// §5.5: the weak +0.2 was always defended as "a turn completing is weak positive evidence".
+// It now stands on something narrower and checkable — the reply carried the memory's own
+// vocabulary — and the record says which method decided that.
+test('drain --with-outcome: evidence of use keeps the +0.2 and the entry attribution', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+  seedMeasuredTurn(dataDir, true);
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'success');
+  assert.equal(body.signal, 0.2);
+  assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
+  assert.ok(body.rationale.includes('memory-term-echo/v1'),
+    `the rationale must name the method that decided this: ${body.rationale}`);
+});
+
+// A turn that failed is not proof the memory was wrong when nothing shows the memory was
+// used at all. -0.3 against an entry the model never touched is the same mistake as +0.2,
+// pointed the other way.
+test('drain --with-outcome: a failed turn with no evidence of use is not punished for it', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+  seedMeasuredTurn(dataDir, false, { outcome: 'failure' });
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'neutral');
+  assert.equal(body.signal, 0);
+  assert.deepEqual(body.entry_ids, []);
+});
+
+// §5.5/§6.1: the new record is still implicit attribution. "off" means the hook posts
+// nothing, and "explicit" means the model owns the call — a measurement that ignores either
+// is a measurement the user did not consent to.
+for (const mode of ['off', 'explicit']) {
+  test(`drain --with-outcome: outcomeMode "${mode}" silences the neutral record too`, async (t) => {
+    const dataDir = makeDataDir();
+    const server = await mubit(t);
+    seedSpool(dataDir, 1);
+    seedMeasuredTurn(dataDir, false);
+
+    assertHookContract(await runHook('drain', stop(), {
+      env: envFor(dataDir, server.url, { MUBIT_CC_OUTCOME_MODE: mode }),
+      args: ['--with-outcome', PROMPT_ID],
+    }));
+
+    server.assertCalled('POST', '/v2/control/ingest', 1);
+    server.assertNotCalled('POST', '/v2/control/outcome');
+  });
+}
+
 // §5.5 step 9 + §7 — the lock is released on every exit path, including after a throw.
 // A stuck lock silently stops all capture, which is worse than a rare double drain.
 test('drain: releases the lock even when a post-send step throws', async (t) => {
@@ -429,4 +604,63 @@ test('drain: releases the lock even when a post-send step throws', async (t) => 
   assert.equal(existsSync(lockPath(dataDir)), false,
     'a throw must not leave drain.lock behind — it would stop all capture for 60s');
   assert.ok(statSync(join(runDir(dataDir), 'jobs.json')).isDirectory());
+});
+
+// ---------------------------------------------------------------------------
+// --run — draining a run the session has already left
+// ---------------------------------------------------------------------------
+
+/*
+ * `cwd-changed` spawns this drain for the run a session is walking away from, and then
+ * rewrites `sessions/<host_session_id>.json` to name the new one. A detached child that
+ * re-derived would read whichever version of that file it happened to win the race against,
+ * so the run it must drain is passed on the argv instead of being worked out.
+ *
+ * The two runs here differ in every input the derivation has: the pin in the environment
+ * says one thing, the flag says another, and only the flag may be obeyed.
+ */
+test('drain --run: drains the named run and ignores the derivation', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const LEFT = 'cc-left-behind-0000';
+
+  // Two spools: the run this process would derive, and the run it is told to drain.
+  seedSpool(dataDir, 2);
+  const leftDir = join(dataDir, 'runs', LEFT, 'spool');
+  mkdirSync(leftDir, { recursive: true });
+  writeFileSync(join(leftDir, `${Date.now()}-000000.json`),
+    JSON.stringify(spoolItem({ item_id: 'cc-orphan-1', text: 'left behind by a cd' })));
+
+  const r = await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--run', LEFT],
+  });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  const body = server.lastCall('POST', '/v2/control/ingest').body;
+  assert.equal(body.run_id, LEFT,
+    'the batch must be attributed to the run named on the argv, not to MUBIT_CC_RUN_ID');
+  assert.deepEqual(body.items.map((i) => i.item_id), ['cc-orphan-1']);
+
+  assert.equal(spoolFiles(dataDir, LEFT).length, 0, 'the named run is drained');
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 2,
+    'the run this process would have derived is left alone entirely');
+});
+
+// A pin that could only name the poisoned shared run is refused, exactly as a derivation
+// that could only answer `"default"` is (§4.3). The spool waits for a run id worth writing to.
+test('drain --run: a "default" pin drains nothing', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--run', 'default'],
+  });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0, `saw unexpected HTTP: ${server.summary()}`);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 2);
 });

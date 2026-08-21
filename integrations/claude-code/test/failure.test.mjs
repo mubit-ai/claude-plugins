@@ -30,7 +30,7 @@ import {
 
 import {
   assertHookContract, baseEnv, fakeMubit, lib, makeDataDir, queryResponse,
-  readJsonDir, readJsonFile, runHook, spoolFiles,
+  readJsonDir, readJsonFile, runHook, spoolFiles, waitFor,
 } from './helpers/harness.mjs';
 import * as fx from './helpers/fixtures.mjs';
 
@@ -1077,14 +1077,64 @@ describe('session end', () => {
     const res = await runHook('session-end', fx.sessionEnd(), { env });
     assertHookContract(res);
 
+    // The body runs in a detached child by default — the host cancels this hook on the way
+    // out, so its work has to outlive it. What that work does on a failing reflect is
+    // unchanged, which is what the rest of this test asserts.
+    await waitFor(() => marker(dataDir)?.reflect?.status === 'failed', 12_000);
+
     srv.assertCalled('POST', '/v2/control/ingest', 1);
     assert.equal(spoolFiles(dataDir, RUN).length, 0,
-      'the inline drain must commit before reflect is even attempted — a failed reflect cannot cost captures');
+      'the drain must commit before reflect is even attempted — a failed reflect cannot cost captures');
     srv.assertCalled('POST', '/v2/control/reflect');
 
     const m = marker(dataDir);
     assert.ok(m, 'SessionEnd must leave a marker behind');
     assert.equal(m.reflect?.status, 'failed', 'the marker is where a failed reflect is reported (§4.8)');
     assert.ok(logLines(dataDir).length > 0, 'a failed reflect must be logged');
+  });
+
+  // §4.7's rule, applied to the one caller that dials *wider* than the configured default:
+  // "a timeout is not a verdict." `lib/http.mjs` exempts a caller who squeezed its deadline
+  // below `cfg.timeoutMs`, because a 400 ms slice learns nothing about a healthy server. The
+  // reflect is the mirror image — it is LLM-backed, so it dials wide on purpose — and the
+  // exemption does not cover it: inline it dials exactly the 4000 ms default, which is not
+  // *less than* the default, so its abort lands in `recordFailure(… 'not_responding')`.
+  //
+  // Five of those inside the window open the breaker for the cooldown, and the breaker gates
+  // the ingest drain. So a merely slow reflect escalates into captures stopping altogether —
+  // the client's own patience, laundered into a verdict about the server.
+  //
+  // Both routes below stall, which is what makes the failure window readable at all: §5.7's
+  // idle heartbeat runs *after* reflect, and `recordSuccess` empties `failures` outright — so
+  // against a server that answers the heartbeat, the buggy and the fixed tree leave byte-
+  // identical state and no assertion here could tell them apart. Stalling the heartbeat too
+  // does not merely hide it: the heartbeat dials 1000 ms, *tighter* than the 4000 ms default,
+  // so its own abort is already exempt and records nothing either way. What is left in the
+  // window is exactly the one call under test.
+  test('a reflect that outruns its own deadline is not evidence about the server', async (t) => {
+    const dataDir = makeDataDir();
+    const srv = await server(t, {
+      // Comfortably past the inline 4000 ms slice, so the client aborts rather than the server
+      // answering slowly — an abort is the only thing this test is about.
+      'POST /v2/control/reflect': { delayMs: 8000, json: { lessons: [], lessons_stored: 0 } },
+      'POST /v2/control/agents/heartbeat': { delayMs: 2000, json: { ok: true } },
+    });
+    // Inline, so the deadline under test is the 4000 ms one the host's ceiling still decides.
+    const env = hookEnv({
+      dataDir, endpoint: srv.url, extra: { MUBIT_CC_SESSION_END_DETACH: '0' },
+    });
+    seedSpool(dataDir, RUN, 1);
+
+    const res = await runHook('session-end', fx.sessionEnd(), { env });
+    assertHookContract(res);
+
+    const m = marker(dataDir);
+    assert.equal(m?.reflect?.status, 'failed',
+      'the marker still reports the failure — this is about the breaker, not about hiding it');
+
+    const { readBreaker } = await lib('breaker.mjs');
+    const cfg = await cfgFrom(env);
+    assert.deepEqual(readBreaker(cfg).failures, [],
+      'a deadline this client chose is not evidence about the server');
   });
 });

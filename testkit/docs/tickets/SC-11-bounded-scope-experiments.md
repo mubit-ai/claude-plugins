@@ -52,12 +52,19 @@ For a demo, **walk `testkit/ux/scenarios/W2-01` once to generate fresh content**
 rewriting the corpus in place. Rewriting ten records to make a demo work is the kind of thing
 that is still true six months later and nobody remembers doing.
 
-## The §5 open question
+## The §5 open question — answered ahead of time, from the source
 
-**Does `reflect` at `SessionEnd` see a linked run's evidence?** It runs against a single
-`run_id`. If it does not, linking improves recall but not lesson extraction — fine either way,
-but it must be known before it is promised.
+**Does `reflect` at `SessionEnd` see a linked run's evidence?** **Yes**, and SCOPE.md §5 now
+records the mechanism: `reflect()` has its own `include_linked_runs` branch (`lib.rs:10309`)
+that pulls **at most 3 linked runs × 20 echo traces**, traces only, at a flat score of 0.35 —
+and pushes them at the *end* of an evidence vector whose next operation keeps the **tail**
+(`last_n_items: 200`). So up to 60 of 200 reflection slots can be linked traces displacing
+the session's own oldest evidence.
 
-Measure it once SC-07 and SC-08 are merged, and **write the answer down** in this runbook and
-in SCOPE.md §5 where the question is posed. Do not assume either way; the point of the ticket
-is the measurement.
+This did not need a measurement — it needed reading `ricedb`, which is checked out at
+`/Users/eldaru/Mubit/ricedb`.
+
+**What is left for this runbook is confirming it end to end**, once SC-07 and SC-08 are
+merged: link two runs, end a session in one, and check that the reflected lessons show
+`[linked:…]` provenance. That is worth doing because §5's answer is a code reading, and a code
+reading can be wrong about which branch actually executes.

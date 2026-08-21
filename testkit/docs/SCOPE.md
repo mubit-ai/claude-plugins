@@ -445,9 +445,39 @@ both sides.**
    (`:3026` save, `:3179` restore) — the same caveat as I3's counter. Confirm checkpointing is
    on before treating a link as permanent.
 
-**Open question, unresolved:** whether `reflect` at `SessionEnd`, which runs against a single
-`run_id`, sees a linked run's evidence. If not, linking improves recall but not lesson
-extraction. Fine either way, but it should be known before it is promised.
+**Open question — RESOLVED 2026-08-21, from the source rather than by measurement.** `reflect`
+at `SessionEnd` *does* see a linked run's evidence: `reflect()` (`:10207`) has its own
+`include_linked_runs` branch at `:10309`. But the window is far narrower than `query`'s, and
+it carries a displacement hazard:
+
+```rust
+for linked_id in linked_ids.iter().take(3) {                 // at most THREE linked runs
+    if let Ok(traces) = self.echoes.list(linked_id.clone(), 20).await {   // 20 traces each
+        for t in traces {
+            evidence.push(ReflectionEvidence {
+                content: format!("[linked:{}] input={} outcome={}", linked_id, t.input, t.outcome),
+                entry_type: "trace".to_string(), score: 0.35,             // traces only, flat score
+            });
+```
+
+Three consequences, none of which were visible from the plugin side:
+
+1. **`query` and `reflect` do not agree about reach.** `query` extends `consulted_runs` with
+   *every* linked run (`:8709`) and runs the whole retrieval over them. `reflect` takes the
+   first three and reads only their echo traces. A mesh of four or more projects is fully
+   visible to recall and partly invisible to lesson extraction.
+2. **Linked evidence can crowd out the session's own.** The items are `push`ed at the *end*,
+   and the very next block is `if req.last_n_items > 0 { evidence.drain(..evidence.len() - n) }`
+   — which keeps the **tail**. The plugin sends `last_n_items: 200`
+   (`hooks/src/session-end.mjs:138`), so up to 60 of those 200 slots — 30% — can be linked
+   traces displacing this session's *oldest* own evidence. On a long session, the flag makes
+   reflect partly summarise other projects.
+3. **It is bounded, and that is why it is still worth turning on.** 60 items is the ceiling
+   regardless of how many runs are linked, and a session with fewer than 140 evidence items
+   loses nothing at all.
+
+So linking improves lesson extraction as well as recall, with a documented ceiling. SC-07
+sets the flag and records the caveat at the call site.
 
 ---
 

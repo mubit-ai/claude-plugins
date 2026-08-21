@@ -476,6 +476,43 @@ test('a cleared run offers the run it came from first, and links it with no argu
 
 // A session that was never cleared has no previous run, and bare `link` must say so rather than
 // pick the most recent project and connect it to something.
+// Found by running `link list` against a real session map, where `~/Mubit/pre-main` appeared
+// twice with identical labels. `before /clear` was only ever set for the CURRENT project's own
+// predecessor (`runId === current.previousRunId`), so a *different* project that had been
+// cleared listed both of its runs indistinguishably — same path, same annotation, different
+// memory behind each. Picking one is a coin flip, and the wrong one links a run the user
+// abandoned.
+test('another project that was cleared says which of its two rows is the pre-reset run', async () => {
+  const m = await machine();
+  // Not this project: a different directory, holding a base run and its -c1 descendant.
+  session(m.dataDir, 'sess-other-base', {
+    run_id: 'cc-warehouse-9f8e7d6c', project_dir: '/Users/x/code/warehouse',
+    last_seen_at: Date.now() - 7200_000,
+  });
+  session(m.dataDir, 'sess-other-cleared', {
+    run_id: 'cc-warehouse-9f8e7d6c-c1', project_dir: '/Users/x/code/warehouse',
+    last_seen_at: Date.now() - 60_000, clear_count: 1,
+    previous_run_id: 'cc-warehouse-9f8e7d6c',
+  });
+
+  const out = (await m.run(['list'])).out;
+  const rows = out.split('\n').filter((l) => l.includes('warehouse'));
+  assert.equal(rows.length, 2,
+    'both runs are real and both are linkable, so both must be listed — collapsing them would '
+    + `hide the pre-reset memory entirely. Got:\n${out}`);
+  assert.equal(rows.filter((l) => /before \/clear/.test(l)).length, 1,
+    'exactly one of the two is the pre-reset run and the picker must say which. Two identical '
+    + `paths with no way to tell them apart is a coin flip on which memory gets linked:\n${out}`);
+
+  const listed = (await m.run(['list', '--json'])).json();
+  const base = listed.projects.find((x) => x.runId === undefined && /warehouse/.test(x.path)
+    && x.beforeClear === true);
+  assert.ok(base, 'the JSON projection must carry the same fact the table renders, or a caller '
+    + 'reading --json cannot distinguish what a human can');
+
+  await m.server.close();
+});
+
 test('bare link in a session that was never cleared refuses instead of guessing', async () => {
   const m = await machine();
 

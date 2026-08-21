@@ -43,13 +43,20 @@ import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
+import { log } from './log.mjs';
 import { dataDir, readJson, writeJsonAtomic } from './state.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/** §4.3 strategies. Anything else resolves to the default rather than failing. */
+/**
+ * §4.3 strategies. Anything else resolves to the default rather than failing — but says so
+ * once, through `warnUnknownStrategy`. Falling back is the right behaviour (a typo must not
+ * take a live session's run id away mid-session); falling back *silently* is not, and a
+ * scenario in `testkit/ux/` spent its whole life configured with `repo` and running under
+ * `per-directory` because nothing on disk ever mentioned the substitution.
+ */
 const STRATEGIES = new Set(['per-directory', 'git-branch', 'per-conversation', 'static']);
 const DEFAULT_STRATEGY = 'per-directory';
 
@@ -105,7 +112,7 @@ const TOUCH_INTERVAL_MS = 60 * 1000;
  * | --- | --- |
  * | `startup` | derive fresh, overwriting any stale mapping |
  * | `resume` | reuse the mapped run; derive when nothing is mapped |
- * | `clear` | **new run** — the derived run plus an incrementing `-c<n>` |
+ * | `clear` | **new run** — the derived run plus an incrementing `-c<n>`, and the record's `previous_run_id` names the run it left |
  * | `compact`, `fork` | reuse the parent session record's run |
  * | absent / unknown | reuse the mapped run when there is one (a `PostToolUse` after a `/clear` belongs to the cleared run), else derive |
  *
@@ -133,6 +140,10 @@ export function deriveRunId(cfg, payload = {}) {
  */
 function resolveRunId(cfg, payload) {
   const strategy = normaliseStrategy(cfg.runStrategy);
+  // Here rather than inside `normaliseStrategy`, which stays pure and is also called on the
+  // strategy *recorded* in a session map — where an unrecognised value is an old record, not
+  // a misconfiguration, and warning about it would blame the user for an upgrade.
+  warnUnknownStrategy(cfg, cfg.runStrategy);
   const source = normaliseSource(payload.source);
   const sessionId = hostSessionId(payload);
 
@@ -154,7 +165,8 @@ function resolveRunId(cfg, payload) {
     runId = pinned;
   } else if (source === 'clear') {
     // `per-directory`/`git-branch` are stable per directory, so the counter is
-    // the only thing that can honour "forget the thread".
+    // the only thing that can honour "forget the thread". Where the memory went
+    // is not lost with it: `rememberRun` records `previous_run_id` from `prev`.
     clear = clearCount(prev) + 1;
     runId = `${deriveFresh(cfg, payload, strategy)}-c${clear}`;
   } else if (source === 'startup') {
@@ -360,12 +372,21 @@ export function deriveAgentId(payload = {}) {
  * ---------------------------------------------------------------------------
  * What it is NOT for
  * ---------------------------------------------------------------------------
- * **Never query against it.** A sub-run id has no memory stored under it: the store knows
- * the parent run, so asking about `cc-x-1-sub-ab55bb82d198` would return nothing for every
- * subagent, forever. It is a *local* lane — a name for one subagent's own record — until
- * there is a route that can join it back up. There is not one today: `lib/http.mjs`'s
- * `ROUTES` has no `link_run`, so nothing on the wire relates a sub-run to its parent, and
- * the parent id is carried alongside the record instead.
+ * **Never recall against it.** A sub-run holds one subagent's own evidence and nothing else,
+ * so querying it directly would hand that subagent a fraction of what the parent run already
+ * has. `hooks/src/subagent-start.mjs` recalls against the PARENT for exactly that reason and
+ * files its writes here: the read side and the write side point at different runs on purpose.
+ *
+ * That split is only safe because the two are joined. `lib/http.mjs`'s `ROUTES` carries
+ * `/v2/control/runs/link` now, and `subagent-start` calls it with `(parent, sub)` — so
+ * `include_linked_runs` on the parent's recall reaches every sub-run in one hop. A parent
+ * with N subagents is a star and every query originates at the hub, which is the topology
+ * the backend's one-hop limit fits natively (SCOPE.md §6 Tier 1).
+ *
+ * Until that call lands the id is still a purely local lane, and nothing on the wire relates
+ * it to its parent. That is why `hooks/src/capture.mjs` files a `SubagentStop` under it only
+ * when the join is on record in `lib/links.mjs`, and falls back to the parent otherwise:
+ * evidence under an id nothing can rejoin is not isolated, it is lost.
  *
  * A payload with no subagent identity answers with the parent unchanged. Minting a suffix
  * out of nothing would open a lane that `SubagentStop` — deriving from the same missing
@@ -424,6 +445,18 @@ function subagentShort(payload) {
  * @property {number} last_seen_at
  * @property {string} mode
  * @property {number} clear_count
+ * @property {string} previous_run_id  the run this session was in immediately before a
+ *   `/clear` moved it to `run_id`, and `''` on every other source. §4.3's `clear` row is the
+ *   only one that abandons a mapping, so it is the only one with a "before" worth naming —
+ *   without it the memory a `/clear` set aside is unreachable, because nothing on disk
+ *   relates the two runs. Absent on records written before it existed, which reads as
+ *   "unknown" and never as "not cleared", exactly as `project_root` does for itself.
+ * @property {string} git_remote  `remote.origin.url` for `project_root`, or `''` when the
+ *   directory is not a repository or has no origin. SCOPE.md §6 measured this as the signal
+ *   that partitions projects the way a human would, and §6 Tier 2 proposes a link the first
+ *   time a second run with a matching one appears. Stored for the same reason `project_root`
+ *   is — see `rememberRun`, which is also where the "or `''`" matters: a blank is a fact
+ *   about a directory with no origin, and two blanks are not a match.
  * @property {string} endpoint_hash
  */
 
@@ -490,6 +523,9 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
 
   const inherited = isObject(prev) ? prev : {};
   const dir = projectDirOf(cfg, payload);
+  // Resolved here rather than left for a reader to work out: `sameProject` has to be able
+  // to answer without re-deriving, and the root is what the id was hashed from anyway.
+  const root = projectRootOf(dir);
   saveSessionMap(sessionId, {
     ...inherited,
     run_id: next.run_id,
@@ -498,15 +534,87 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
     agent_id: AGENT_ROLE,
     strategy: next.strategy,
     project_dir: dir,
-    // Resolved here rather than left for a reader to work out: `sameProject` has to be able
-    // to answer without re-deriving, and the root is what the id was hashed from anyway.
-    project_root: projectRootOf(dir),
+    project_root: root,
+    git_remote: rememberedRemote(inherited, root) ?? gitOrigin(root),
     created_at: numberOr(inherited.created_at, now),
     last_seen_at: now,
     mode: firstString(cfg.mode) || 'local',
     clear_count: next.clear_count,
+    previous_run_id: previousRunId(prev, next),
     endpoint_hash: endpointHash(cfg.endpoint),
   });
+}
+
+/**
+ * I5: where a `/clear` put the memory it stopped using — or `''`, which means "this run was
+ * not arrived at by clearing".
+ *
+ * Written on every call rather than left to `...inherited`, and that is the whole design.
+ * `rememberRun` spreads the previous record forward, so a value written once would survive
+ * every later write for free; a `previous_run_id` that outlives the run it described is worse
+ * than no field at all, because `/mubit-memory:link` would then reconnect a session to a run
+ * it never came from. So the rule is: the pointer belongs to the run the record currently
+ * names, and it is recomputed whenever that run is.
+ *
+ *   - a clear, and the run really moved → `prev.run_id`, one step back. A second `/clear`
+ *     therefore names the `-c1` run, not the original, because that is where `-c2` came from.
+ *   - a clear under a `static` pin that the record already named → `''` by way of the
+ *     unchanged-run branch above. A pin is honoured on every source, so `runId` did not move
+ *     and nothing was set aside. If the pin was introduced *between* the two writes the run
+ *     did move, and the pointer names where the memory actually is — which is the useful
+ *     answer, not an exception to the rule.
+ *   - the run is unchanged → whatever the record already said, which still describes it.
+ *     This is what survives the `TOUCH_INTERVAL_MS` rewrite an ordinary `PostToolUse` makes
+ *     an hour into a cleared session.
+ *   - anything else — `startup`, a mid-session `cd`, a strategy change → `''`. The run moved
+ *     for a reason that is not a reset, so any stored pointer is now about some other run.
+ *
+ * @param {Record<string, any>|null} prev
+ * @param {{run_id: string, source: string}} next
+ * @returns {string}
+ */
+function previousRunId(prev, next) {
+  if (!isObject(prev)) return '';
+  const prevRun = firstString(prev.run_id);
+  if (prevRun === next.run_id) return firstString(prev.previous_run_id);
+  if (next.source !== 'clear') return '';
+  return prevRun;
+}
+
+/**
+ * §6 Tier 2: the origin this record already knows, or `null` for "ask git".
+ *
+ * The cache exists because of where its reader stands. `hooks/src/session-start.mjs` has to
+ * decide, inside §5.1's sub-budgets and on a cold FS, whether any other project on this
+ * machine shares this repository's origin — and the honest way to answer that per candidate
+ * is a process spawn per candidate. So the remote is resolved once, by the run it belongs to,
+ * and every later reader gets it for free from the map. That is the same argument
+ * `project_root` makes for itself one line above, made for a second field.
+ *
+ * Two rules, and they are the whole of the invalidation:
+ *
+ *   - **The cache belongs to a root, not to a session.** A mid-session `cd` into another repo
+ *     moves `project_root`, and carrying the first repo's origin into the second's record
+ *     would make two unrelated repositories look like one group — permanently, since nothing
+ *     would ever re-resolve it.
+ *   - **A stored `''` is an answer.** A directory that is not a repository, or one with no
+ *     `origin`, has no remote, and re-asking on every hook would spend a spawn to be told so
+ *     again. Absent is different: a record written before this field existed knows nothing,
+ *     and reading that as "no remote" would keep every pre-upgrade session out of the offer
+ *     for as long as it lives.
+ *
+ * The cost of the cache is one session's staleness: an `origin` added mid-session is picked
+ * up by the next record written for a different session id. That is the right trade for a
+ * value whose only consumer is a proposal a human confirms.
+ *
+ * @param {Record<string, any>} prev
+ * @param {string} root
+ * @returns {string|null}
+ */
+function rememberedRemote(prev, root) {
+  if (!isObject(prev) || typeof prev.git_remote !== 'string') return null;
+  if (firstString(prev.project_root) !== root) return null;
+  return prev.git_remote.trim();
 }
 
 /**
@@ -524,10 +632,12 @@ function normaliseRecord(record) {
     strategy: DEFAULT_STRATEGY,
     project_dir: '',
     project_root: '',
+    git_remote: '',
     created_at: now,
     last_seen_at: now,
     mode: 'local',
     clear_count: 0,
+    previous_run_id: '',
     endpoint_hash: '',
   };
   if (isObject(record)) {
@@ -620,6 +730,18 @@ function gitToplevel(dir) {
   return gitOutput(dir, ['rev-parse', '--show-toplevel']);
 }
 
+/**
+ * §6: `remote.origin.url`, which is what partitions projects into the groups a human would
+ * draw. `git config --get` rather than `git remote get-url`, because that is the form
+ * `bin/link.src.mjs` already reads it in: the offer and the picker must not be able to
+ * disagree about whether two projects share a remote, and two spellings of the question are
+ * two chances to.
+ * @param {string} dir @returns {string}
+ */
+function gitOrigin(dir) {
+  return gitOutput(dir, ['config', '--get', 'remote.origin.url']);
+}
+
 /** @param {string} dir @returns {string} */
 function gitBranch(dir) {
   const name = gitOutput(dir, ['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -703,6 +825,45 @@ function clearCount(rec) {
 function normaliseStrategy(v) {
   const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
   return STRATEGIES.has(s) ? s : DEFAULT_STRATEGY;
+}
+
+/**
+ * Whether this process has already reported that `cfg.runStrategy` is not a strategy.
+ *
+ * Once, not per call. `resolveRunId` is on the path of every `deriveRunId`, and `deriveRunId`
+ * runs in every hook, so a line per invocation would be a ring-log entry per tool call — noise
+ * that buries the one line worth reading and could itself rotate a 1 MiB log inside a hook's
+ * budget. A hook is one process, so once per process is exactly once per hook.
+ *
+ * @type {boolean}
+ */
+let warnedUnknownStrategy = false;
+
+/**
+ * §4.3/I6: say that a strategy was substituted, rather than substituting it silently.
+ *
+ * Deliberately not a throw. The run id is load-bearing for every hook, and there IS a
+ * documented default here — unlike `staticRunId`, where an unset pin has no honest answer and
+ * a config error is the only correct one. So the fallback stands and the warning is what makes
+ * it visible.
+ *
+ * Only a non-empty, unrecognised value qualifies. `lib/config.mjs` already resolves an unset
+ * `MUBIT_CC_RUN_STRATEGY` to `per-directory`, which is the ordinary case on nearly every
+ * install; warning on it every session is how a log trains its reader to ignore it.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {any} raw  `cfg.runStrategy` exactly as configuration produced it
+ * @returns {void}
+ */
+function warnUnknownStrategy(cfg, raw) {
+  if (warnedUnknownStrategy) return;
+  const s = typeof raw === 'string' ? raw.trim() : '';
+  if (!s || STRATEGIES.has(s.toLowerCase())) return;
+  warnedUnknownStrategy = true;
+  log(cfg, 'warn',
+    `run strategy ${JSON.stringify(s)} is not one of the four, so this session is using `
+    + `${DEFAULT_STRATEGY} instead. Set MUBIT_CC_RUN_STRATEGY (or "runStrategy" in `
+    + `.mubit-cc.json) to one of: ${[...STRATEGIES].join(', ')}.`);
 }
 
 /** An unrecognised `source` is "no source", which reuses rather than resets. */

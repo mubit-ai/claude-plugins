@@ -34,8 +34,9 @@ import { join } from 'node:path';
 import { envTags } from '../../lib/config.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { classifyTool, classifyTurn } from '../../lib/classify.mjs';
+import { linkDecision } from '../../lib/links.mjs';
 import { isDeniedPath, isSelfReference, redactParams, redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, deriveSubRunId, resolveProjectDir } from '../../lib/runid.mjs';
 import { appendItem, spoolStats } from '../../lib/spool.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -237,8 +238,15 @@ function capture(rawPayload, cfg, mode) {
     if (attempt(() => hasDeniedSubject(payload, cfg), false)) return;
   }
 
-  const runId = attempt(() => deriveRunId(cfg, payload), '');
-  if (!runId) return;
+  // §4.3 and SCOPE.md §6 Tier 1. Two run ids from here down, and the difference only ever
+  // matters for `--subagent`: `parentRunId` is where this session's *state* lives — the
+  // staged turn, the drain lock, the marker — and `runId` is the lane this item is filed in.
+  // For every other mode they are the same value.
+  const parentRunId = attempt(() => deriveRunId(cfg, payload), '');
+  if (!parentRunId) return;
+  const runId = mode === 'subagent'
+    ? attempt(() => subagentLane(cfg, parentRunId, payload), parentRunId)
+    : parentRunId;
 
   // 4-6. classify, build the text, redact.
   //
@@ -250,7 +258,10 @@ function capture(rawPayload, cfg, mode) {
     () => {
       if (mode === 'stop-failure') return null;
       return mode === 'stop' || mode === 'subagent'
-        ? buildTurnItem(payload, cfg, runId, mode)
+        // `parentRunId`, not `runId`: `stage-prompt.mjs` wrote the turn on the PARENT's
+        // `UserPromptSubmit` and nothing is ever staged under a sub-run, so a subagent
+        // filed in its own lane still reads its question out of the parent's turn file.
+        ? buildTurnItem(payload, cfg, parentRunId, mode)
         : buildToolItem(payload, cfg, mode);
     },
     null,
@@ -290,9 +301,73 @@ function capture(rawPayload, cfg, mode) {
     attempt(() => closeTurn(cfg, runId, payload, apiErrorOf(payload)));
   }
 
+  // 8c. A `--subagent` in its own lane ALWAYS drains, and this is not optional bookkeeping.
+  //     A `SubagentStop` is terminal for its sub-run — nothing will ever be captured under
+  //     that id again — and the spool is keyed by run id, so neither the parent's `--stop`
+  //     nor `session-end` can see it: both drain the run they derived. One item sits far
+  //     below `batchMaxItems`, so without this it waits for a trigger that cannot arrive and
+  //     §7's sweep deletes it at 24 h. Filing under an id nothing drains would not isolate a
+  //     subagent's evidence, it would lose it.
+  //
+  //     `--run` is what makes it land in the right place, and it is not optional either.
+  //     The child is a fresh process that re-derives its own run id from the environment,
+  //     which under any strategy answers the PARENT — the sub-run exists only in this
+  //     process's head. `cwd-changed` pins for the same reason. Without the flag the drain
+  //     would pick up the parent's spool and leave the lane it was spawned for untouched.
+  //
+  //     No `--with-outcome`: attribution belongs to the parent's turn, and `--stop` carries
+  //     it. This is the same plain drain the batch trigger fires.
+  if (mode === 'subagent' && runId !== parentRunId) {
+    attempt(() => fireDrain(cfg, runId, payload, ['--run', runId]));
+    return;
+  }
+
   if (attempt(() => drainTriggerFired(cfg, runId), false)) {
     attempt(() => fireDrain(cfg, runId, payload, []));
   }
+}
+
+/**
+ * Which run a `SubagentStop` is filed under — its own, or the parent's.
+ *
+ * ---------------------------------------------------------------------------
+ * The cost this exists to undo
+ * ---------------------------------------------------------------------------
+ * SCOPE.md I4: subagents are not short of memory — they read the parent run, which is
+ * everything. The cost runs the other way. A fan-out of six dumps six streams of unrelated
+ * work into one run, and next week's recall in that project cannot tell them apart. The
+ * sub-run id is the only coordinate that separates siblings (`session_id` and `prompt_id`
+ * are the parent's, measured), so it is the lane the evidence belongs in.
+ *
+ * ---------------------------------------------------------------------------
+ * Why it is gated on the ledger rather than always used
+ * ---------------------------------------------------------------------------
+ * An id is only a lane if something can rejoin it. `SubagentStart` calls `link_run` and
+ * records the result in `lib/links.mjs`, but it does not always get that far: recall can be
+ * turned off, the agent can be the plugin's own `mubit-recall`, there may be no staged
+ * parent turn to query against, and the call itself can fail. In every one of those the
+ * sub-run is unjoined, and evidence written there is not isolated — it is unreachable from
+ * the parent forever, which is strictly worse than the pooling it was meant to fix.
+ *
+ * The ledger is what makes that decidable **here**, where §5.4's zero-network rule holds
+ * absolutely: it is a synchronous read of one small file, it is the record of joins that
+ * actually landed, and `lib/links.mjs` writes both ends precisely so the sub end can answer
+ * this question on its own. An absent, damaged or declined record reads as "no lane", and
+ * the fallback is the parent run — which is exactly what this hook did before Tier 1, so
+ * the degraded path is the shipped behaviour rather than a new one.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} parentRunId
+ * @param {Record<string, any>} payload
+ * @returns {string}
+ */
+function subagentLane(cfg, parentRunId, payload) {
+  // Idempotent, and it answers the parent unchanged when the payload carries no subagent
+  // identity — a `SubagentStop` with no `agent_id` has nothing to isolate it by.
+  const subRunId = deriveSubRunId(parentRunId, payload);
+  if (!subRunId || subRunId === parentRunId) return parentRunId;
+  const decision = linkDecision(cfg, subRunId, parentRunId);
+  return decision && decision.decision === 'linked' ? subRunId : parentRunId;
 }
 
 /**
@@ -403,11 +478,11 @@ function buildToolItem(payload, cfg, mode) {
  *
  * @param {Record<string, any>} payload
  * @param {Record<string, any>} cfg
- * @param {string} runId
+ * @param {string} parentRunId  where the staged turn lives — never a sub-run (§5.3)
  * @param {'stop'|'subagent'} mode
  * @returns {Record<string, any>|null}
  */
-function buildTurnItem(payload, cfg, runId, mode) {
+function buildTurnItem(payload, cfg, parentRunId, mode) {
   const event = mode === 'subagent' ? 'SubagentStop' : 'Stop';
   const cls = attempt(
     () => classifyTurn('', '', {
@@ -418,7 +493,7 @@ function buildTurnItem(payload, cfg, runId, mode) {
     { intent: 'task_result', importance: 'medium', contentType: 'text', agentId: '', agentType: '' },
   );
 
-  const turn = attempt(() => readTurn(cfg, runId, payload.prompt_id), null);
+  const turn = attempt(() => readTurn(cfg, parentRunId, payload.prompt_id), null);
   const staged = str(turn?.prompt) || str(payload.prompt);
   const answer = str(payload.last_assistant_message) || str(payload.message);
   if (!staged && !answer) return null;

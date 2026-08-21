@@ -82,6 +82,8 @@ import { join } from 'node:path';
 
 import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
+import { postLinkRun } from '../../lib/http.mjs';
+import { recordLink } from '../../lib/links.mjs';
 import { log } from '../../lib/log.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
 import { deriveAgentId, deriveRunId, deriveSubRunId, resolveProjectDir } from '../../lib/runid.mjs';
@@ -108,6 +110,26 @@ const MAX_QUERY_CHARS = 2000;
 
 /** `prompt_id` and the run ids name files, so they are untrusted input to a path. */
 const MAX_ID = 128;
+
+/**
+ * What the Tier 1 join may cost a spawn, and why it is a small fixed number rather than
+ * "whatever is left".
+ *
+ * A fan-out of ten pays this ten times, in front of ten agents that are waiting to start. A
+ * link that cannot land in half a second is not worth that, and nothing is lost by giving up
+ * on it: the record already says `linked: false`, which holds every field a later
+ * re-assertion needs. The ceiling is also deliberately below `cfg.timeoutMs` (4000), because
+ * `dial()` marks an abort on a tighter-than-configured deadline `abortedEarly` and
+ * `settle()` then keeps it off the breaker — a deadline this hook chose is not evidence
+ * about the server, and opening the circuit over it would cost recall and the capture drain.
+ */
+const LINK_BUDGET_MS = 500;
+
+/** Room after the link settles to write the record and get stdout out inside the budget. */
+const LINK_MARGIN_MS = 120;
+
+/** Below this there is no time for a dial to complete; skipping beats aborting one. */
+const LINK_FLOOR_MS = 60;
 
 /**
  * Resolved once, before stdin, because the harness deadline is derived from `recallBudgetMs`
@@ -164,15 +186,23 @@ await runHook('subagent-start', {
       return SUPPRESS;
     }
 
+    // The directory the SPAWN happened in, not the one the session launched in — a subagent
+    // spawned after a `cd` belongs to the repo it is working in, same rule as the parent's.
+    // Both ends of the join below sit in it: a subagent works in its parent's repo.
+    const projectDir = resolveProjectDir(cfg, payload);
+
     const outcome = await recallBlock(cfg, {
-      runId,          // the PARENT run: nothing is stored under a sub-run id (§4.3).
+      // Still the PARENT run, on purpose, and the one thing Tier 1 did NOT move. A subagent
+      // should read everything the parent can; its own sub-run holds only its own evidence,
+      // so querying that instead would hand it a fraction of what is already there. The
+      // *write* side is what moved — `linkSubRun` below joins the two, which is what lets
+      // `include_linked_runs` reach the sub-run from here in one hop (§4.3, §6 Tier 1).
+      runId,
       agentId,        // …but the subagent's own identity, so siblings are separable.
       query,
       deadline,
       tokenBudget: CFG.subagentRecallTokenBudget,
-      // The directory the SPAWN happened in, not the one the session launched in — a subagent
-      // spawned after a `cd` belongs to the repo it is working in, same rule as the parent's.
-      projectDir: resolveProjectDir(cfg, payload),
+      projectDir,
       // `seen` is deliberately omitted. See point 2 in the header — a subagent has seen
       // nothing earlier, so there is nothing here that could honestly be degraded.
     });
@@ -187,8 +217,20 @@ await runHook('subagent-start', {
     }
 
     // Written even on an empty result: an absent record and a record of an empty recall are
-    // different facts about a subagent that ran.
-    persistSubRun(cfg, { runId, subRunId, agentId, payload, outcome, ms });
+    // different facts about a subagent that ran. And written BEFORE the link is attempted,
+    // so a crash mid-call leaves a recoverable `linked: false` rather than nothing.
+    const saved = persistSubRun(cfg, { runId, subRunId, agentId, payload, outcome, ms });
+
+    // §6 Tier 1: pay the IOU this record has carried since it was written. Awaited only so
+    // that `linked` can state what actually happened; never retried, never fatal, and inside
+    // the budget this hook already had.
+    await linkSubRun(cfg, {
+      runId,
+      subRunId,
+      projectDir,
+      saved,
+      deadlineAt: numOr(ctx?.deadlineAt, started + HARNESS_BUDGET_MS),
+    });
 
     // An empty result injects NOTHING. Injecting "I found nothing" wastes tokens and teaches
     // the model to distrust the channel.
@@ -249,20 +291,23 @@ function parentQuery(cfg, runId, payload) {
  * one coordinate that differs between siblings.
  *
  * ---------------------------------------------------------------------------
- * Why a file, and why it says `linked: false`
+ * Why a file, now that the join is real
  * ---------------------------------------------------------------------------
  * Mubit's subagent-isolation pattern is for an orchestrator to give each subagent its own
  * `run_id` and join them with `link_run()`, reading them back with `include_linked_runs`.
- * **This client cannot do that half.** `lib/http.mjs`'s `ROUTES` exposes health, register,
- * heartbeat, ingest, query, context, outcome, checkpoint, lessons and reflect — and no
- * link-run route. Inventing an endpoint would be worse than the gap: writing a subagent's
- * evidence under an id nothing can rejoin would *lose* it rather than isolate it.
+ * `lib/http.mjs`'s `ROUTES` carries `/v2/control/runs/link` now, so this client does both
+ * halves: `linkSubRun` makes the join and `linked` reports whether it landed.
  *
- * So the isolation is local for now, and the record is the thing that makes the gap
- * recoverable later rather than lost: it holds both ends of the join (`sub_run_id`,
- * `parent_run_id`), the two agent ids, and the ids this subagent's block actually rendered,
- * so a later `link_run` has everything it needs without a rerun. `linked: false` states the
- * gap in the data rather than leaving a reader to infer it from an absent field.
+ * The file outlives the route rather than being replaced by it, because the graph it feeds
+ * lives in `run_scopes` — an in-memory map on the backend, durable only through a
+ * checkpoint. A pod roll before one takes joins the user still wants, and this record holds
+ * everything a blind re-assertion needs without a rerun: both ends (`sub_run_id`,
+ * `parent_run_id`), the two agent ids, and the ids this subagent's block actually rendered.
+ *
+ * `linked` is written `false` and flipped only on a 200. A record claiming a link that does
+ * not exist is worse than one admitting it does not — the whole value of this file is that a
+ * later reader can trust it — and writing it first means a crash mid-call leaves a
+ * recoverable `false` rather than nothing at all.
  *
  * `agent_transcript_path` — per-subagent, and the one field that could anchor a real
  * sub-run — arrives on `SubagentStop`, not here, so it is not in this record. It is where
@@ -271,14 +316,16 @@ function parentQuery(cfg, runId, payload) {
  * @param {Record<string, any>} cfg
  * @param {{runId: string, subRunId: string, agentId: string,
  *          payload: Record<string, any>, outcome: Record<string, any>, ms: number}} o
- * @returns {void}
+ * @returns {{path: string, record: Record<string, any>}|null} what was written, so the
+ *   `linked` flip below can rewrite it without parsing it back off disk.
  */
 function persistSubRun(cfg, o) {
   try {
     const name = safeSegment(o.subRunId, MAX_ID);
-    if (!name) return;
+    if (!name) return null;
     const dir = join(runDir(cfg, o.runId), 'subagents');
-    writeJsonAtomic(join(dir, `${name}.json`), {
+    const path = join(dir, `${name}.json`);
+    const record = {
       sub_run_id: o.subRunId,
       parent_run_id: o.runId,
       // The host's own id, unmodified — `mubit_agent_id` is what went on the wire. Both,
@@ -309,12 +356,103 @@ function persistSubRun(cfg, o) {
       // What this subagent was actually given, separable from what its siblings were given.
       recalled: Array.isArray(o.outcome?.refIds) ? [...o.outcome.refIds] : [],
       linked: false,
-    });
+    };
+    writeJsonAtomic(path, record);
+    return { path, record };
   } catch (err) {
     // §4.9: an unwritable data dir costs this subagent's record, never its spawn.
     log(cfg, 'warn', `subagent-start: could not record the sub-run (${messageOf(err)})`,
       { run_id: o.runId });
+    return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// The join — §6 Tier 1
+// ---------------------------------------------------------------------------
+
+/**
+ * `POST /v2/control/runs/link`, parent to sub-run.
+ *
+ * ---------------------------------------------------------------------------
+ * Why the edge points this way, and why one hop is enough
+ * ---------------------------------------------------------------------------
+ * A parent with N subagents is a **star**, and every query originates at the hub: the
+ * parent's own `prompt-recall`, the parent's `session-end` reflect, and this hook's recall
+ * all read the parent run. So `linked_runs_for(parent)` returns all N children in a single
+ * hop and no sibling ever has to reach another sibling. That is why Tier 1 needs no mesh,
+ * no decision from the user, and no UX at all — the topology fits the backend's one-hop
+ * limit natively. Sub-to-sub is SCOPE.md's §6 Tier 3 problem, not this one's.
+ *
+ * ---------------------------------------------------------------------------
+ * Three rules this obeys, all of them §4.9
+ * ---------------------------------------------------------------------------
+ * 1. **`linked` flips only on `ok`.** Anything else and the record keeps saying `false`,
+ *    which is true and recoverable. See `persistSubRun`'s header.
+ * 2. **A failure is a `warn`, never a hook failure.** This is the spawn path: a network
+ *    fault must cost the join and nothing else. `postLinkRun` is total — it answers a
+ *    refusal envelope rather than throwing — but it is wrapped anyway, because the one thing
+ *    this hook may never do is exit non-zero.
+ * 3. **Nothing is dialled when there is nothing to join.** A payload with no subagent
+ *    identity derives the parent unchanged, and an edge from a run to itself adds no reach:
+ *    a run already consults its own memory. `postLinkRun` refuses that case pre-flight too,
+ *    but catching it here also keeps it out of the local ledger, where it would sit forever
+ *    as noise in the Tier 3 picker.
+ *
+ * The ledger write comes last and only on success. `lib/links.mjs` is the record of
+ * decisions that **landed** — it is what re-asserts a join after `run_scopes` is lost with a
+ * pod, and what `capture.mjs` reads, offline and with no round trip, to decide whether this
+ * subagent's evidence has a lane it can be rejoined from.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {{runId: string, subRunId: string, projectDir: string,
+ *          saved: {path: string, record: Record<string, any>}|null, deadlineAt: number}} o
+ * @returns {Promise<boolean>} true when the join landed and the record says so
+ */
+async function linkSubRun(cfg, o) {
+  // No record means the data dir is unwritable, so there is nothing a successful link could
+  // be recorded against. Claiming it in the ledger alone would be a link nobody can see.
+  if (!o.saved) return false;
+  if (!o.subRunId || o.subRunId === o.runId) return false;
+
+  const budget = Math.min(LINK_BUDGET_MS, o.deadlineAt - Date.now() - LINK_MARGIN_MS);
+  if (budget < LINK_FLOOR_MS) {
+    log(cfg, 'debug', 'subagent-start: no budget left to link the sub-run; the record stands',
+      { run_id: o.runId, linked_run_id: o.subRunId });
+    return false;
+  }
+
+  /** @type {Record<string, any>|null} */
+  let res = null;
+  try {
+    res = await postLinkRun(cfg, { run_id: o.runId, linked_run_id: o.subRunId },
+      { timeoutMs: budget, retry: false });
+  } catch (err) {
+    log(cfg, 'warn', `subagent-start: the link call threw (${messageOf(err)})`,
+      { run_id: o.runId, linked_run_id: o.subRunId });
+    return false;
+  }
+
+  if (!res || res.ok !== true) {
+    log(cfg, 'warn',
+      `subagent-start: could not link the sub-run (${str(res?.state) || numOr(res?.status, 0)})`,
+      { run_id: o.runId, linked_run_id: o.subRunId, error: str(res?.error).slice(0, 300) });
+    return false;
+  }
+
+  // Both ends sit in the same directory: a subagent works in its parent's repo.
+  recordLink(cfg, { runId: o.runId, projectDir: o.projectDir },
+    { runId: o.subRunId, projectDir: o.projectDir });
+
+  try {
+    writeJsonAtomic(o.saved.path, { ...o.saved.record, linked: true });
+  } catch (err) {
+    // The join is real on the server either way; what is lost is this file's account of it.
+    log(cfg, 'warn', `subagent-start: linked, but could not restamp the record (${messageOf(err)})`,
+      { run_id: o.runId, linked_run_id: o.subRunId });
+    return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------

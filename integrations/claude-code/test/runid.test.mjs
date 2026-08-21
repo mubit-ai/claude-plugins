@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -75,6 +75,22 @@ function record(over = {}) {
 
 /** @param {string} cwd @param {string[]} args */
 function git(cwd, args) { spawnSync('git', args, { cwd, stdio: 'ignore' }); }
+
+/**
+ * The §4.8 ring log, parsed. Read through the real sink — a temp data dir plus
+ * `MUBIT_CC_LOG_LEVEL` — rather than by stubbing `log`, so what is asserted is
+ * the line a user pastes into an issue and not a call this test arranged.
+ * @param {string} dataDir
+ * @returns {Record<string, any>[]}
+ */
+function logLines(dataDir) {
+  const p = join(dataDir, 'logs', 'mubit-cc.log');
+  if (!existsSync(p)) return [];
+  return readFileSync(p, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+}
+
+/** The four §4.3 strategies, spelled out here so a rename has to be made twice. */
+const LEGAL_STRATEGIES = ['per-directory', 'git-branch', 'per-conversation', 'static'];
 
 const HASH8 = /-[0-9a-f]{8}$/;
 
@@ -181,6 +197,105 @@ test('static: a run id with unusual but harmless characters is still accepted', 
 
   assert.equal(derive(config, runid, env, fx.sessionStart()), 'cc-a:b*c',
     'the wire value is the pin verbatim; only the path segment is flattened');
+});
+
+/*
+ * §4.3, I6 — a value that is not one of the four.
+ *
+ * The fallback is deliberate and stays: `normaliseStrategy` is on the path of every hook, and
+ * throwing on a typo would take a live session's run id away over a config error the user
+ * cannot see mid-session. Contrast `staticRunId` above, which *does* throw — and is right to,
+ * because there is no honest answer for an unset pin, whereas here there is a documented
+ * default.
+ *
+ * What was wrong was the silence. `testkit/ux/scenarios/W2-02-branch-switch.md` set
+ * `MUBIT_CC_RUN_STRATEGY=repo` — not a strategy — and ran under `per-directory` for its whole
+ * life, where a branch switch does not move the run id. It would have passed while proving the
+ * exact opposite of its own claim, and nothing anywhere said so.
+ */
+
+// §4.3: the fallback itself must not regress — an unrecognised value is still per-directory.
+test('an unrecognised run strategy still falls back to per-directory', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const projectDir = makeProjectDir({ git: true });
+  // Separate data dirs and session ids: no session map may be doing the work the fallback is
+  // supposed to be doing.
+  const sid = (n) => fx.sessionStart({ session_id: `ffffffff-0000-0000-0000-00000000000${n}` });
+
+  const bad = derive(config, runid, envFor(makeDataDir(), projectDir, 'repo'), sid(1));
+  const good = derive(config, runid, envFor(makeDataDir(), projectDir, 'per-directory'), sid(2));
+
+  assert.equal(bad, good,
+    'a typo in MUBIT_CC_RUN_STRATEGY must not take the run id away from a live session');
+});
+
+// §4.3/I6: the fallback is now *said*. One warn line, naming the value received and all four
+// legal strategies, is the difference between a misconfiguration and an invisible one.
+test('an unrecognised run strategy warns, naming the value and the four legal strategies', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'repo',
+    { MUBIT_CC_LOG_LEVEL: 'warn' });
+
+  derive(config, runid, env, fx.sessionStart());
+
+  const warnings = logLines(dataDir).filter((l) => l.level === 'warn');
+  assert.equal(warnings.length, 1,
+    `an unrecognised strategy must warn exactly once, got:\n${JSON.stringify(warnings, null, 2)}`);
+  assert.ok(warnings[0].msg.includes('repo'),
+    `the warning must name the value received, got: ${warnings[0].msg}`);
+  for (const s of LEGAL_STRATEGIES) {
+    assert.ok(warnings[0].msg.includes(s),
+      `the warning must name "${s}" as a legal strategy, or it says what is wrong without `
+      + `saying what is right, got: ${warnings[0].msg}`);
+  }
+});
+
+// §4.8: once, not per call. `normaliseStrategy` runs on every `deriveRunId` and `deriveRunId`
+// runs in every hook, so a line per invocation would flood the ring log — and rotating it is
+// the one way this warning could cost a hook its budget.
+test('an unrecognised run strategy warns once per process, not once per derivation', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'nonsense',
+    { MUBIT_CC_LOG_LEVEL: 'warn' });
+
+  derive(config, runid, env, fx.sessionStart());
+  derive(config, runid, env, fx.postToolUse());
+  derive(config, runid, env, fx.stop());
+
+  assert.equal(logLines(dataDir).filter((l) => l.level === 'warn').length, 1,
+    'three derivations in one process must produce one warning, not three');
+});
+
+// The ordinary case, and by far the common one: nothing set at all. `lib/config.mjs` resolves
+// an unset `MUBIT_CC_RUN_STRATEGY` to `per-directory`, which is not a misconfiguration and
+// must not be reported as one — a warning every session would train users to ignore the log.
+test('an unset or blank run strategy is silent', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const projectDir = makeProjectDir({ git: true });
+
+  for (const [name, value] of [['unset', undefined], ['blank', '   ']]) {
+    const dataDir = makeDataDir();
+    const env = baseEnv({
+      dataDir,
+      projectDir,
+      extra: {
+        MUBIT_CC_RUN_STRATEGY: /** @type {any} */ (value),
+        MUBIT_CC_RUN_ID: undefined,
+        MUBIT_CC_LOG_LEVEL: 'warn',
+      },
+    });
+
+    derive(config, runid, env, fx.sessionStart());
+
+    assert.deepEqual(logLines(dataDir).filter((l) => l.level === 'warn'), [],
+      `an ${name} run strategy is the documented default, not a misconfiguration`);
+  }
 });
 
 // ===========================================================================
@@ -330,6 +445,111 @@ test('source=clear: produces a NEW run id with an incrementing -c<n>', async () 
   assert.equal(cleared1, `${base}-c1`);
   assert.equal(cleared2, `${base}-c2`);
   assert.equal(readJsonFile(sessionFile(dataDir, fx.SESSION_ID)).clear_count, 2);
+});
+
+/*
+ * §4.3, I5 — where the memory went.
+ *
+ * The reset above is defensible: `/clear` means "forget the thread", and a user who typed it
+ * and then got the thread back would be right to complain. What is not defensible is that the
+ * run it was cleared from left no trace anywhere — so a session that reset its project memory
+ * by accident had nothing on disk pointing at what it lost, and no way to ask for it back.
+ *
+ * `previous_run_id` is data only. No route, no HTTP, nothing that has to exist yet: SC-09's
+ * `/mubit-memory:link` is what consumes it, and it can be written and read long before that.
+ */
+
+// §4.3/I5: the record written on a clear names the run the session was in before it.
+test('source=clear: the record names the run it was cleared from', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'per-directory');
+
+  const base = derive(config, runid, env, fx.sessionStart({ source: 'startup' }));
+  const cleared = derive(config, runid, env, fx.sessionStart({ source: 'clear' }));
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.run_id, cleared, 'the record must follow the new run');
+  assert.equal(rec.previous_run_id, base,
+    'without this the memory a /clear set aside is unreachable: nothing on disk relates the '
+    + 'run the session is now in to the one it was in a moment ago');
+});
+
+// §4.3/I5: the pointer describes the *current* run's provenance, so a second clear points one
+// step back and not all the way to the original. Otherwise `-c2` claims to have come from a
+// run it did not come from, and reconnecting it would rejoin the wrong thread.
+test('source=clear: a second clear points at the -c1 run, not the original', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'per-directory');
+
+  const base = derive(config, runid, env, fx.sessionStart({ source: 'startup' }));
+  const cleared1 = derive(config, runid, env, fx.sessionStart({ source: 'clear' }));
+  const cleared2 = derive(config, runid, env, fx.sessionStart({ source: 'clear' }));
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.run_id, cleared2);
+  assert.equal(rec.previous_run_id, cleared1,
+    `-c2 came from ${cleared1}, not from ${base}; one step back is the only true answer`);
+});
+
+/*
+ * The other half, and the one an implementation gets wrong by writing the field and stopping:
+ * `rememberRun` spreads `...inherited`, so anything left in a record rides forward into every
+ * later write for free. A `previous_run_id` that outlives the run it described is worse than
+ * no field at all — it points a recovery command at a run this session never came from.
+ */
+test('source=startup/resume: no previous_run_id, and a clear\'s does not ride forward', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'per-directory');
+  const read = () => readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+
+  const base = derive(config, runid, env, fx.sessionStart({ source: 'startup' }));
+  assert.equal(read().previous_run_id ?? '', '',
+    'startup deliberately discards the mapping; there is no run it "came from"');
+
+  const cleared = derive(config, runid, env, fx.sessionStart({ source: 'clear' }));
+  assert.equal(read().previous_run_id, base, 'the clear is what sets the pointer');
+
+  // Back to a fresh derivation on the same host session id. The run moved for a reason that
+  // is not a clear, so the stored pointer no longer describes the run the record names.
+  assert.equal(derive(config, runid, env, fx.sessionStart({ source: 'startup' })), base);
+  assert.equal(read().previous_run_id ?? '', '',
+    `a startup back onto ${base} must not keep claiming it was cleared from ${cleared}`);
+
+  // resume reuses the mapped run and says nothing new about where it came from.
+  derive(config, runid, env, fx.sessionStart({ source: 'resume' }));
+  assert.equal(read().previous_run_id ?? '', '', 'a resume is not a reset');
+});
+
+/*
+ * Upgrade safety, the same property `project_root` documents for itself: a record written
+ * before the field existed says nothing about where its run came from, and "unknown" must
+ * read as unknown rather than as a broken record or a moved one.
+ */
+test('a session record written before previous_run_id existed reads as unknown', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'per-directory');
+
+  // Written raw rather than through `saveSessionMap`, which normalises and would stamp the
+  // very field this test is about.
+  mkdirSync(join(dataDir, 'sessions'), { recursive: true });
+  writeFileSync(sessionFile(dataDir, fx.SESSION_ID),
+    JSON.stringify(record({ run_id: 'cc-upgraded-deadbeef' })));
+
+  const loaded = withEnv(env, () => runid.loadSessionMap(fx.SESSION_ID));
+  assert.equal('previous_run_id' in loaded, false,
+    'the fixture is the §4.3 shape as it shipped, or this test proves nothing');
+
+  assert.equal(derive(config, runid, env, fx.sessionStart({ source: 'resume' })),
+    'cc-upgraded-deadbeef',
+    'an unknown previous run is not a reason to move a live session to a new one');
 });
 
 // §4.3: resume with nothing mapped (fresh install, restored terminal) still has
@@ -649,4 +869,125 @@ test('deriveRunId(cfg, {}) still answers from CLAUDE_PROJECT_DIR after the sessi
 
   assert.equal(withEnv(env, () => runid.deriveRunId(config.loadConfig(env), {})), bare,
     'the empty-payload derivation is the launcher\'s and the status line\'s; it may not move');
+});
+
+// ===========================================================================
+// §6 Tier 2 — the origin remote, cached on the record
+// ===========================================================================
+
+/*
+ * SCOPE.md §6 measured the signal that partitions projects the way a human would: six
+ * directories, six run ids, two git remotes, two groups. Tier 2 proposes a link the first
+ * time a second checkout of one repository shows up, and `SessionStart` is where it has to
+ * notice — which is the one place that cannot afford to ask.
+ *
+ * `git remote get-url origin` per candidate would be a process spawn per project in the
+ * session map, on the spawn path, inside the 400/600/900 ms sub-budgets, measured on a cold
+ * FS. So the remote is resolved once and stored, exactly as `project_root` is and for exactly
+ * the reason its own comment gives: the reader should not have to work it out, and the reader
+ * here is a hook with a deadline.
+ */
+
+/** The origin `makeProjectDir({remote})` sets, and what `git config --get` must report back. */
+const ORIGIN = 'git@github.com:acme/storefront.git';
+
+// §6 Tier 2: without this field the offer has nothing to match on but a shell-out per session.
+test('the session record caches the repo origin the run was derived from', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repo = makeProjectDir({ git: true, remote: ORIGIN });
+  const env = envFor(dataDir, repo, 'per-directory');
+
+  derive(config, runid, env, fx.sessionStart({ cwd: repo }));
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.git_remote, ORIGIN,
+    'the record must carry this project\'s origin, or the Tier 2 offer can only get it by '
+    + 'spawning git once per candidate on every SessionStart');
+});
+
+/*
+ * The caching itself, asserted rather than inferred from a stopwatch. A budget test on a warm
+ * FS passes happily while the shell-out is still there; this one cannot, because the value on
+ * the record and the value `git` would report are deliberately different. If the write
+ * re-resolves, the sentinel is gone and the live origin is in its place.
+ */
+test('a remote already on the record is inherited, not resolved again', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repo = makeProjectDir({ git: true, remote: ORIGIN });
+  const env = envFor(dataDir, repo, 'per-directory');
+
+  // A first session stamps the record; the run id and the root are then whatever this
+  // machine derives, which is what the reuse branch has to agree with.
+  const runId = derive(config, runid, env, fx.sessionStart({ cwd: repo }));
+  const stamped = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(stamped.git_remote, ORIGIN,
+    'the first write is what there is to inherit; with nothing on the record the sentinel '
+    + 'below survives because nobody ever writes the field, which proves nothing');
+  withEnv(env, () => runid.saveSessionMap(fx.SESSION_ID, {
+    ...stamped,
+    git_remote: 'git@github.com:acme/cached-not-resolved.git',
+    // Older than TOUCH_INTERVAL_MS, so the next hook actually rewrites the file. Without
+    // this the record is left alone and the assertion below passes for the wrong reason.
+    last_seen_at: Date.now() - (5 * 60 * 1000),
+  }));
+
+  // No `source`: the branch every hook after SessionStart takes.
+  assert.equal(derive(config, runid, env, fx.postToolUse({ cwd: repo })), runId,
+    'the reuse branch is the one under test; a moved run would mean a different write path');
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.git_remote, 'git@github.com:acme/cached-not-resolved.git',
+    `a record that already knows the remote must not spawn git again — got ${rec.git_remote}, `
+    + `which is what "git config --get remote.origin.url" answers in ${repo}`);
+});
+
+// The invalidation rule, and the only one there is: the cache is about a root, so a session
+// that moves to another repo must not carry the first repo's remote into the second's record.
+// Without this a mid-session `cd` would group two unrelated repositories forever.
+test('a session that moves to another repo re-resolves the remote', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repoA = makeProjectDir({ git: true, remote: ORIGIN });
+  const repoB = makeProjectDir({ git: true, remote: 'git@github.com:acme/pricing.git' });
+  const env = envFor(dataDir, repoA, 'per-directory');
+
+  derive(config, runid, env, fx.sessionStart({ cwd: repoA }));
+  derive(config, runid, env, fx.postToolUse({ cwd: repoB }));
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.git_remote, 'git@github.com:acme/pricing.git',
+    'the cached remote belongs to the recorded root; carrying A\'s origin into B\'s record '
+    + 'would make two unrelated repositories look like one group');
+});
+
+// Upgrade safety, the property `project_root` documents for itself. A record written before
+// the field existed says nothing about the remote, and "unknown" must read as "resolve it",
+// never as "this project has no remote" — which would silently disable the offer for every
+// session already on disk.
+test('a session record with no git_remote is stamped with one on the next write', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repo = makeProjectDir({ git: true, remote: ORIGIN });
+  const env = envFor(dataDir, repo, 'per-directory');
+
+  // Written raw rather than through `saveSessionMap`, which normalises and would stamp the
+  // very field this test is about. `record()` is the §4.3 shape as it shipped.
+  writeFileSync(sessionFile(dataDir, fx.SESSION_ID), JSON.stringify(record({
+    run_id: 'cc-upgraded-deadbeef', project_dir: repo, project_root: realpathSync(repo),
+  })));
+  assert.equal('git_remote' in withEnv(env, () => runid.loadSessionMap(fx.SESSION_ID)), false,
+    'the fixture has to be a pre-upgrade record, or this test proves nothing');
+
+  derive(config, runid, env, fx.postToolUse({ cwd: repo }));
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.git_remote, ORIGIN,
+    'an absent field is unknown, not empty; leaving it empty would keep every pre-upgrade '
+    + 'session out of the Tier 2 offer for as long as it lives');
 });

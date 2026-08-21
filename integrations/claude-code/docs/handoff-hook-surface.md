@@ -214,6 +214,15 @@ fans work out to subagents that each get their own `run_id`"*, linked back with
 `client.advanced.link_run()` and read together with `include_linked_runs=True`. Six parallel
 subagents currently pour six streams of evidence into one undifferentiated run.
 
+> **Landed 2026-08-21, both halves** (HS-5 for the recall, SC-08 for the isolation). The
+> paragraph above is the state before them and is kept as the argument, not as the current
+> code. `ROUTES` carries `/v2/control/runs/link` now; `subagent-start` calls it with
+> `(parent, sub)` and records the result; and `capture --subagent` files under the sub-run id
+> where that join is on record. The sentence that has *not* expired is the last one — the
+> `metadata_json` attribution stays exactly where it was, because it is what makes a
+> `SubagentStop` matchable against the host's own `agent_id` whichever run the item is filed
+> under.
+
 `SubagentStart` closes both. It carries `agent_id` and `agent_type`, matches on agent type, and
 — despite being unable to block subagent creation — **can return `additionalContext`**, which
 the docs describe as *"added to the subagent's context at the start of its conversation, before
@@ -224,7 +233,8 @@ its first prompt."*
 > reference says otherwise, at `### SubagentStart`. Check the source doc, not a summary.
 
 **Where:** new hook, new `hooks/src/subagent-start.mjs`; run derivation in `lib/runid.mjs`
-needs a sub-run form; `include_linked_runs` on the parent's recall.
+needs a sub-run form; `include_linked_runs` on the parent's recall. *(All three exist:
+`lib/recall.mjs` sends `include_linked_runs`, and `deriveSubRunId` is the sub-run form.)*
 
 **Watch for:**
 
@@ -236,7 +246,9 @@ needs a sub-run form; `include_linked_runs` on the parent's recall.
   narrower. Reusing `recallTokenBudget` unchanged would spend a parent-sized block on a
   three-turn Haiku agent.
 - **Cost.** This adds a process and possibly a network round trip per subagent spawn. Fan-out
-  of ten is ten of them. Non-blocking as far as the harness is concerned, but not free.
+  of ten is ten of them. Non-blocking as far as the harness is concerned, but not free. *(Two
+  round trips as shipped — recall and the link — which is why the link carries a 500 ms
+  ceiling of its own inside the same hook budget rather than the configured 4 s timeout.)*
 
 ---
 

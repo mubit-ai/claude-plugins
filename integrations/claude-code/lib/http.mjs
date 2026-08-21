@@ -18,7 +18,7 @@
  * `state` is a `ConnState` from §4.7 (`unreachable | server_error | auth_failed |
  * not_responding`) for anything that reached the socket, plus two values that never do.
  *
- * `invalid_request`, for the five pre-flight guards below. A guard failure is a bug in
+ * `invalid_request`, for the six pre-flight guards below. A guard failure is a bug in
  * the *caller*, not a verdict about the server, so it is deliberately outside the ConnState
  * union — it must never reach `recordFailure` and must never colour the status line.
  *
@@ -27,7 +27,7 @@
  * the user needs to see it on the status line. It shares the important half: nothing is
  * dialed and nothing is recorded.
  *
- * Five pre-flight guards, each preventing a specific silent failure. All five return
+ * Six pre-flight guards, each preventing a specific silent failure. All six return
  * `ok:false` having dialed nothing:
  *
  *   1. `/v2/control/query` is capped at 256 KiB server-side;
@@ -47,6 +47,9 @@
  *      arriving as an opaque 422.
  *   5. `postLessons` deliberately has **no** `run_id`: empty means "all runs", which is
  *      exactly what a global-lessons fetch wants.
+ *   6. The two ends of a run link must be two different runs, and neither may be the
+ *      poisoned literal. Guard 3 only ever inspects `body.run_id`, so `linked_run_id` — the
+ *      one place a second run id appears in a body — is checked here or nowhere.
  *
  * Retries: **one**, only for `state === "not_responding"`, and only when the caller passes
  * `{retry: true}` — which only `drain.mjs` does, because it is detached and nobody is
@@ -98,6 +101,11 @@ export const ROUTES = Object.freeze({
   checkpoint: '/v2/control/checkpoint',
   lessons: '/v2/control/lessons',
   reflect: '/v2/control/reflect',
+  // SCOPE.md Target C: the join between two runs. `ControlService.LinkRun` / `UnlinkRun`,
+  // maintained bidirectionally server-side — one call links both ends, and there is no
+  // second request to make from the other run.
+  linkRun: '/v2/control/runs/link',
+  unlinkRun: '/v2/control/runs/unlink',
 });
 
 /** §1.1: `POST /v2/control/query` has its own body limit. */
@@ -404,6 +412,72 @@ export async function postCheckpoint(cfg, req, opts = {}) {
  */
 export async function postLessons(cfg, req = {}, opts = {}) {
   return request(cfg, 'POST', ROUTES.lessons, req ?? {}, opts);
+}
+
+/**
+ * `POST /v2/control/runs/link` — `LinkRunRequest` requires `run_id` and `linked_run_id`,
+ * both non-empty (§1.3).
+ *
+ * This is the one rung between "one run" and "the whole instance" (SCOPE.md Target C). The
+ * server keeps the join **bidirectional** and already de-duplicates and sorts
+ * `linked_run_ids`, so re-linking a pair is idempotent on the wire and only one of the two
+ * runs ever has to call — a caller re-asserting its links after a checkpoint loss can do so
+ * blindly.
+ *
+ * Two guards beyond the required fields, both refusing without a round trip:
+ *
+ *   - **A run may not be linked to itself.** The server rejects it with `invalid_argument`,
+ *     and it is meaningless besides: a run already consults its own memory, so the join adds
+ *     no reach. The identity test is on the *trimmed* values, because `requireString` already
+ *     trims to decide presence and a guard one space away from useless is not a guard.
+ *   - **§4.3 applies to `linked_run_id` too.** `request()`'s poisoned-run-id guard inspects
+ *     `body.run_id` and nothing else, so it structurally cannot see this field — the same
+ *     reason `getIngestJob` repeats it for the query string. It matters more here than
+ *     anywhere: joining a real run to the collapsed everything-run is precisely the leak
+ *     Target C exists to avoid.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} req   `{run_id, linked_run_id}`
+ * @param {{timeoutMs?: number, retry?: boolean, record?: boolean}} [opts]
+ * @returns {Promise<Result>}
+ */
+export async function postLinkRun(cfg, req, opts = {}) {
+  const started = Date.now();
+  const bad = firstOf(
+    requireString(req, 'run_id', 'postLinkRun'),
+    requireString(req, 'linked_run_id', 'postLinkRun',
+      'the OTHER run to join — both ends of the edge are required'),
+    requireDistinctRuns(req, 'postLinkRun'),
+    requireCleanLinkedRunId(req, 'postLinkRun'),
+  );
+  if (bad) return refuse(cfg, started, bad, { route: ROUTES.linkRun });
+  return request(cfg, 'POST', ROUTES.linkRun, req, opts);
+}
+
+/**
+ * `POST /v2/control/runs/unlink` — the revocation, and the same pair in the same fields.
+ *
+ * Validated identically to `postLinkRun` on purpose: revoking half an edge is the same bug
+ * as creating one, and a self-unlink is a request to undo something that could never have
+ * existed. `/mubit-memory:unlink` is the whole reason a link is safe to offer at all, so it
+ * must not be the sloppier of the two.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} req   `{run_id, linked_run_id}`
+ * @param {{timeoutMs?: number, retry?: boolean, record?: boolean}} [opts]
+ * @returns {Promise<Result>}
+ */
+export async function postUnlinkRun(cfg, req, opts = {}) {
+  const started = Date.now();
+  const bad = firstOf(
+    requireString(req, 'run_id', 'postUnlinkRun'),
+    requireString(req, 'linked_run_id', 'postUnlinkRun',
+      'the OTHER run to revoke — both ends of the edge are required'),
+    requireDistinctRuns(req, 'postUnlinkRun'),
+    requireCleanLinkedRunId(req, 'postUnlinkRun'),
+  );
+  if (bad) return refuse(cfg, started, bad, { route: ROUTES.unlinkRun });
+  return request(cfg, 'POST', ROUTES.unlinkRun, req, opts);
 }
 
 /**
@@ -773,6 +847,43 @@ function requireMode(req) {
     + `${QUERY_MODES.map((m) => `"${m}"`).join(', ')} (case-sensitive). `
     + 'Anything else — including an omitted mode — silently becomes agent_routed server-side '
     + 'and costs an LLM call per prompt with no error.';
+}
+
+/**
+ * Target C: the two ends of a join must be two different runs.
+ *
+ * Stated as what it costs rather than as a rule that was broken — the reason a self-link is
+ * refused is not that the server dislikes it (though it does, with `invalid_argument`) but
+ * that a run already consults its own memory, so joining it to itself buys no reach at all.
+ * A caller that reaches here has almost certainly passed the same variable twice.
+ *
+ * @param {any} req
+ * @param {string} who
+ * @returns {string}
+ */
+function requireDistinctRuns(req, who) {
+  const a = req && typeof req === 'object' ? String(req.run_id ?? '').trim() : '';
+  const b = req && typeof req === 'object' ? String(req.linked_run_id ?? '').trim() : '';
+  if (!a || !b || a !== b) return '';
+  return `${who}: "run_id" and "linked_run_id" are both "${a}" — a run already consults its own `
+    + 'memory, so linking it to itself adds no reach. Pass the other run\'s id.';
+}
+
+/**
+ * §4.3 / F21 for the second run id in the body. `request()` only ever inspects `body.run_id`,
+ * so this field would otherwise reach the wire unchecked — and a run joined to the poisoned
+ * literal inherits every user, project and machine that ever fell into it.
+ *
+ * @param {any} req
+ * @param {string} who
+ * @returns {string}
+ */
+function requireCleanLinkedRunId(req, who) {
+  const linked = req && typeof req === 'object' ? String(req.linked_run_id ?? '').trim() : '';
+  if (linked !== POISONED_RUN_ID) return '';
+  return `${who}: refusing to link to run_id "${POISONED_RUN_ID}" — the MCP server's `
+    + 'MUBIT_DEFAULT_SESSION_ID default collapses every user, project and machine into one run, '
+    + 'and joining a real run to it is the leak this route exists to avoid (§4.3)';
 }
 
 /** @param {any} req */

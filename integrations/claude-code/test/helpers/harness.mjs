@@ -64,7 +64,14 @@ export function makeDataDir() {
 /**
  * A fresh fake project directory. Optionally `git init`s it so run-id strategies
  * that shell out to git have something real to find.
- * @param {{git?: boolean, branch?: string, files?: Record<string,string>}} [opts]
+ *
+ * `remote` adds an `origin`, which is §6 Tier 2's signal: two checkouts of one repository
+ * are the group a human would draw, and the same-remote offer is what proposes joining
+ * them. A real `git remote add` rather than a seam, because the value the plugin caches
+ * has to be the one `git` actually reports for that directory — a hand-written string
+ * would pass a test the shipped code fails.
+ *
+ * @param {{git?: boolean, branch?: string, remote?: string, files?: Record<string,string>}} [opts]
  * @returns {string}
  */
 export function makeProjectDir(opts = {}) {
@@ -84,6 +91,7 @@ export function makeProjectDir(opts = {}) {
     run(['add', '-A']);
     run(['commit', '-qm', 'init']);
     if (opts.branch) run(['checkout', '-qb', opts.branch]);
+    if (opts.remote) run(['remote', 'add', 'origin', opts.remote]);
   }
   return dir;
 }
@@ -321,6 +329,10 @@ export function defaultRoutes() {
     },
     'POST /v2/control/memory_health': { json: { healthy: true } },
     'POST /v2/control/diagnose': { json: { findings: [] } },
+    // Target C: the join. The backend maintains it bidirectionally, so one call links both
+    // ends and there is no second request to reply to.
+    'POST /v2/control/runs/link': { json: { success: true } },
+    'POST /v2/control/runs/unlink': { json: { success: true } },
   };
 }
 

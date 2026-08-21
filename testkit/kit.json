@@ -1,0 +1,15 @@
+{
+  "kitVersion": "1.0.0",
+  "model": "claude-sonnet-5",
+  "reps": 3,
+  "canary": "what conventions and constraints apply to this project",
+  "recallBudgetMs": 1500,
+  "maxCostUsd": 5,
+  "_notes": {
+    "model": "Pinned to a concrete id, not the `sonnet` alias. The alias resolved to claude-sonnet-5 on 2026-08-20, but an alias is a moving target and two sweeps six months apart would silently measure different models while `compare` called them comparable.",
+    "recallBudgetMs": "MUBIT_CC_RECALL_BUDGET_MS, internal to the recall hook. Not the 3s UserPromptSubmit registration timeout the host enforces.",
+    "reps": "3 gives 2 scored reps per pair after the warm-up rep is dropped. Six non-tied pairs is the minimum at which a two-sided sign test can reach p<0.05 at all, so 3 reps x 3+ cases is the smallest sweep that can produce a significant result.",
+    "resultsDir": "Outside every git repo on purpose. This repo is a generated mirror whose next publish runs `git rm -rq .`, so results kept inside it do not survive \u2014 and cross-version history is the only reason to record anything. MUBIT_LAB_RESULTS overrides it."
+  },
+  "resultsDir": "/Users/eldaru/Mubit/testkit-results"
+}

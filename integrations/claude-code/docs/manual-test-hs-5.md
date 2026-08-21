@@ -373,14 +373,14 @@ cc-hs5-demo-sub-a0a7d24f8713
   prompt_id      p-1
   recalled       ref_rule_1, ref_lesson_1, ref_fact_1
   recall         rung 1 · 3 src · 51 tok · 200 chars · 0 ptr
-  linked         false
+  linked         true
 cc-hs5-demo-sub-ab55bb82d198
   agent_id       ab55bb82d19855fbc
   mubit_agent_id claude-code-sub-ab55bb82d198
   prompt_id      p-1
   recalled       ref_rule_1, ref_lesson_1, ref_fact_1
   recall         rung 1 · 3 src · 51 tok · 200 chars · 0 ptr
-  linked         false
+  linked         true
 ```
 
 **Read `prompt_id` first: it is `p-1` on both.** That is the collapse, still there, exactly as
@@ -389,7 +389,12 @@ is everything above that line: two files, two sub-run ids, two agent ids, and a 
 attributable `recalled` list per subagent. Six parallel subagents now leave six records instead
 of six streams into one.
 
-**`linked: false` is not a stub.** It states a real gap, and §9 is about it.
+**`linked` reads `true` here, and it did not when this test was first run.** SC-08 landed the
+Tier 1 join: `subagent-start` now calls `POST /v2/control/runs/link` with `(parent, sub)` and
+flips the field only when the call returns ok. The §0 stub answers `{"success": true}` to every
+non-query URL, so both records link against it — `grep 'runs/link' "$SCRATCH/stub.log"` shows
+the two calls. Against a Mubit that refuses, or with the stub stopped, the field reads `false`
+again and says so honestly; that is the whole point of it. §9.2 has the design.
 
 `rung 1` on both is worth one glance: the ladder in `lib/recall.mjs` is shared with
 `prompt-recall`, and rung 1 is the zero-LLM-call one. A fan-out of ten on rung 2 would be ten
@@ -697,23 +702,29 @@ isolated contexts and fan out to them widely, `subagentRecallTokenBudget` is the
 in `plugin.json` disables the block by falling back to the parent budget rather than turning the
 hook off — set `recall: false` for that.
 
-### 9.2 There is no `link_run` route, so isolation is local
+### 9.2 The `link_run` route landed, and isolation is now joined
+
+*Corrected 2026-08-21 (SC-08). When this was written the section read "there is no `link_run`
+route, so isolation is local", and that was true: `ROUTES` had eleven entries and none of them
+was a join. It has thirteen now.*
 
 Mubit's subagent-isolation pattern is for each subagent to get its own `run_id`, joined back
-with `link_run()` and read together with `include_linked_runs`. **This client cannot do the join
-half.** `lib/http.mjs`'s `ROUTES` is:
+with `link_run()` and read together with `include_linked_runs`. The client does both halves:
 
-```
-health, register, heartbeat, ingest, ingestJobs, query, context, outcome, checkpoint,
-lessons, reflect
-```
+- `subagent-start` writes the §5 record with `linked: false`, then calls
+  `POST /v2/control/runs/link` with `(parent, sub)` and flips the field on a 200. The order
+  matters — a crash mid-call leaves a record that under-claims rather than one that lies.
+- `capture.mjs --subagent` files the `SubagentStop` item under the **sub-run** id, but only
+  where that join is on record in `lib/links.mjs`, falling back to the parent otherwise.
+  Evidence written under an id nothing can rejoin would be *lost* rather than isolated, and
+  that gate is what keeps the claim honest when the link never landed.
+- The parent's recall sends `include_linked_runs`, and a parent with N subagents is a star, so
+  one hop from the hub reaches all N.
 
-No link-run route. Inventing an endpoint would be worse than the gap — writing a subagent's
-evidence under an id nothing can rejoin would *lose* it rather than isolate it. So this ticket
-deliberately stops at recall injection plus the sub-run id, and the record in §5 is the local
-half of the join: it holds both ends (`sub_run_id`, `parent_run_id`), both agent ids, and the
-ids this subagent's block actually rendered, so a later `link_run` needs no rerun.
-`linked: false` says so in the data.
+The record survives the route rather than being replaced by it: the graph lives in `run_scopes`,
+an in-memory map durable only through a checkpoint, and the record holds both ends
+(`sub_run_id`, `parent_run_id`), both agent ids and the ids this subagent's block rendered — so
+a re-assertion after a pod roll needs no rerun.
 
 **Where the next step starts.** `agent_transcript_path` is on `SubagentStop`, not on
 `SubagentStart` — §1's field lists show it — and it is per-subagent:

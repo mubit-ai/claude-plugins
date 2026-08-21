@@ -50,7 +50,7 @@ import { endpointHash } from '../../lib/breaker.mjs';
 import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { health, heartbeat, postLessons, registerAgent } from '../../lib/http.mjs';
-import { readLinks, recordDecline } from '../../lib/links.mjs';
+import { readLinks, recordOffer } from '../../lib/links.mjs';
 import { log } from '../../lib/log.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
 import { recordRules } from '../../lib/rules.mjs';
@@ -331,13 +331,16 @@ await runHook('session-start', {
     // which is where the remote comes from — see `lib/runid.mjs`'s `rememberedRemote` for why
     // it is not asked of `git` here, once per candidate, on the spawn path.
     const offered = sameRemoteOffer(cfg, runId, payload);
-    // Proposed once, and the answer remembered either way (§6). The decline is written when
-    // the offer is MADE, because there is no second event to write it on: nothing reports
-    // back that a user read a preamble and did nothing. So silence is the "no", the ledger
-    // says so at both ends, and a user who wants the link runs the command — `recordLink`
-    // replaces a `declined` decision with a `linked` one, so accepting late still works.
+    // Proposed a bounded number of times, and the answer remembered either way (§6). There is
+    // no second event to write a refusal on — nothing reports back that a user read a preamble
+    // and did nothing — so silence is still the "no". What it cannot be is the *first* silence:
+    // a headless session renders this preamble to a model with no human anywhere near it, and
+    // `SessionStart` carries no signal that would let this hook tell the difference. One
+    // `claude --print` would otherwise answer for the user permanently. `recordOffer` counts
+    // instead, and writes `declined` at both ends once the count reaches its limit.
+    // `recordLink` replaces either state with `linked`, so accepting late still works.
     for (const o of offered) {
-      recordDecline(cfg, { runId, projectDir: o.mine }, { runId: o.runId, projectDir: o.dir });
+      recordOffer(cfg, { runId, projectDir: o.mine }, { runId: o.runId, projectDir: o.dir });
     }
 
     const summary = `mubit: ${cfg.mode}${DOT}run ${runId}${DOT}`
@@ -625,7 +628,11 @@ function sameRemoteOffer(cfg, runId, payload) {
     const myDir = firstString(mine.project_dir);
 
     /** Every far end this run has already answered for, from one read of one file. */
-    const decided = new Set(readLinks(cfg, runId).map((e) => e.run_id));
+    // `offered` is deliberately NOT decided: it is the record of having asked, not of an
+    // answer, and a pair still under the offer limit is still a question.
+    const decided = new Set(readLinks(cfg, runId)
+      .filter((e) => e.decision === 'linked' || e.decision === 'declined')
+      .map((e) => e.run_id));
     /** One project per root, most recently used first. */
     const seenRoots = new Set(myRoot ? [myRoot] : []);
     /** @type {Offer[]} */

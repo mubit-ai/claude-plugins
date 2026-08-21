@@ -1012,16 +1012,21 @@ test('two projects with no remote are not "the same remote"', async (t) => {
 });
 
 /*
- * "Proposed once, and the answer remembered either way" (§6 Tier 2). The offer is made on one
- * session and recorded against the PAIR, so the next session in *either* project is quiet —
- * which is the case a decision stored against a session id gets wrong, and the reason
- * `lib/links.mjs` writes both ends.
+ * "Proposed once, and the answer remembered either way" (§6 Tier 2) — where "once" is now
+ * `OFFER_LIMIT` renders rather than one, because a headless session renders a preamble no
+ * human sees and must not answer on their behalf.
  *
- * Three real sessions in two real repositories, and no hand-written run ids: the ids are the
- * ones this machine derives, which is the only way the pair under test is the pair the plugin
+ * What has to hold either way, and what this test is really for: the count and the decision
+ * belong to the PAIR, not to a session or a side. Sessions in `there` and `here` draw down the
+ * SAME budget, and when it runs out both go quiet together. A counter stored per session — or
+ * per direction — would let each project ask its own three times, which is six, from a user
+ * who was asked once too often at three.
+ *
+ * Real sessions in two real repositories, and no hand-written run ids: the ids are the ones
+ * this machine derives, which is the only way the pair under test is the pair the plugin
  * actually formed.
  */
-test('the offer is made once, and the decision is keyed to the pair', async (t) => {
+test('the offer budget and the decision both belong to the pair', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -1038,15 +1043,26 @@ test('the offer is made once, and the decision is keyed to the pair', async (t) 
   assert.ok(linkSection(second.json.hookSpecificOutput.additionalContext).includes(there),
     'the second checkout is the moment the question becomes real');
 
-  // Session 3, back in `there`, under a new host session id: the answer already exists.
+  // Session 3, back in `there`, under a new host session id. It draws down the SAME budget:
+  // this is offer 2 of 3, not offer 1 of a fresh allowance belonging to the other project.
   const third = await startIn(dataDir, server, there, { session_id: 'sess-there-2' });
-  assert.equal(linkSection(third.json.hookSpecificOutput.additionalContext), '',
-    'the decision belongs to the pair of projects, not to the session that recorded it — an '
-    + 'offer that simply moves to the other project and asks again has remembered nothing');
+  assert.ok(linkSection(third.json.hookSpecificOutput.additionalContext).includes(here),
+    'the far project asks about the near one, from the other side of the same undecided pair');
 
-  // And session 4, in `here` again, for the same reason from the same side.
+  // Session 4, in `here` again: offer 3 of 3, which exhausts it.
   const fourth = await startIn(dataDir, server, here, { session_id: 'sess-here-2' });
-  assert.equal(linkSection(fourth.json.hookSpecificOutput.additionalContext), '',
+  assert.ok(linkSection(fourth.json.hookSpecificOutput.additionalContext).includes(there),
+    'the third render is still a question; the budget is spent by making it, not before');
+
+  // Session 5, in `there`: spent, from the side that did not spend the last one.
+  const fifth = await startIn(dataDir, server, there, { session_id: 'sess-there-3' });
+  assert.equal(linkSection(fifth.json.hookSpecificOutput.additionalContext), '',
+    'the count belongs to the pair, not to a side — if each project had its own budget the '
+    + 'user would be asked six times, and §6 says once');
+
+  // And session 6, in `here`, for the same reason from the same side.
+  const sixth = await startIn(dataDir, server, here, { session_id: 'sess-here-3' });
+  assert.equal(linkSection(sixth.json.hookSpecificOutput.additionalContext), '',
     'an offer that fires every SessionStart for the rest of the install\'s life is the nag '
     + '§6 Tier 2 exists to avoid');
 

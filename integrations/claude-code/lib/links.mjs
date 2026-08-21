@@ -77,8 +77,27 @@ export const LINKS_DIR = 'links';
 /** Bumped only if the on-disk shape changes; an unknown version reads as no record. */
 const VERSION = 1;
 
-/** The two decisions a pair can be in. Anything else on disk is damage and reads as absent. */
-const DECISIONS = Object.freeze(['linked', 'declined']);
+/**
+ * The states a pair can be in on disk. Anything else is damage and reads as absent.
+ *
+ * `offered` is not a decision — it is the record of having *asked*, and it carries a count.
+ * SC-10 originally wrote `declined` the moment the Tier 2 offer was rendered, on the argument
+ * that silence is the "no". That holds for a human who saw the question; it is not an answer
+ * from a headless session, and there is no interactivity signal on a `SessionStart` payload to
+ * tell the two apart. A single `claude --print` — CI, a script, or this kit's own `checkArms`,
+ * which starts two headless sessions per preflight — therefore answered for the user, forever.
+ * Counting the asks keeps "silence is the no" while surviving renders nobody could have seen.
+ */
+const DECISIONS = Object.freeze(['linked', 'declined', 'offered']);
+
+/**
+ * How many times a pair may be offered before silence is taken as a refusal.
+ *
+ * Small on purpose. The offer costs one short paragraph in a preamble the user reads anyway,
+ * and §6's requirement is that it "does not nag" — three renders is not a nag, and it clears
+ * the one or two unattended sessions a preflight or a CI job realistically burns.
+ */
+const OFFER_LIMIT = 3;
 
 /**
  * How many decisions one run may keep.
@@ -97,9 +116,12 @@ const MAX_ID = 200;
 /**
  * @typedef {object} LinkEntry
  * @property {string} run_id        the OTHER run — the far end of this decision
- * @property {"linked"|"declined"} decision
+ * @property {"linked"|"declined"|"offered"} decision  `offered` is a pair that has been asked
+ *   about and not answered — see `DECISIONS`; it is not a decision and must not read as one
  * @property {string} project_dir   the far end's directory, for a UI that shows paths not hashes
  * @property {number} at            when the decision was last recorded (§6 renders "2d ago")
+ * @property {number} [offers]      how many times the Tier 2 offer has been rendered for this
+ *   pair; reaching `OFFER_LIMIT` is what turns silence into `declined`
  */
 
 /**
@@ -235,6 +257,29 @@ export function recordDecline(cfg, a, b) {
 }
 
 /**
+ * Record that this pair was *offered* — not that it was refused.
+ *
+ * Returns the new count so the caller need not re-read. At `OFFER_LIMIT` the pair becomes
+ * `declined` at both ends and stops being offered: silence is still the "no", it just takes
+ * more than one unattended render to say it. See `DECISIONS` for why.
+ *
+ * A pair already `linked` or `declined` is left exactly as it is — this only ever advances a
+ * pair nobody has answered for.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {LinkSide} a
+ * @param {LinkSide} b
+ * @returns {number} how many times the pair has now been offered
+ */
+export function recordOffer(cfg, a, b) {
+  const existing = linkDecision(cfg, a.runId, b.runId);
+  if (existing && existing.decision !== 'offered') return existing.offers ?? 0;
+  const offers = (existing?.offers ?? 0) + 1;
+  recordDecision(cfg, a, b, offers >= OFFER_LIMIT ? 'declined' : 'offered', offers);
+  return offers;
+}
+
+/**
  * Drop a pair from both ledgers — the local half of `/mubit-memory:unlink`.
  *
  * A revoked pair reads as *undecided*, not as declined: the user withdrew a link they had
@@ -277,7 +322,7 @@ export function forgetLink(cfg, a, b) {
  * @param {"linked"|"declined"} decision
  * @returns {boolean}
  */
-function recordDecision(cfg, a, b, decision) {
+function recordDecision(cfg, a, b, decision, offers = 0) {
   try {
     const idA = str(a?.runId);
     const idB = str(b?.runId);
@@ -287,8 +332,8 @@ function recordDecision(cfg, a, b, decision) {
     if (idA === idB) return false;
 
     const at = Date.now();
-    const landedA = upsert(cfg, idA, { run_id: idB, decision, project_dir: str(b?.projectDir), at });
-    const landedB = upsert(cfg, idB, { run_id: idA, decision, project_dir: str(a?.projectDir), at });
+    const landedA = upsert(cfg, idA, { run_id: idB, decision, project_dir: str(b?.projectDir), at, offers });
+    const landedB = upsert(cfg, idB, { run_id: idA, decision, project_dir: str(a?.projectDir), at, offers });
     return landedA && landedB;
   } catch {
     return false;
@@ -372,9 +417,10 @@ function normalise(raw) {
   if (!DECISIONS.includes(decision)) return null;
   return {
     run_id: runId,
-    decision: /** @type {"linked"|"declined"} */ (decision),
+    decision: /** @type {"linked"|"declined"|"offered"} */ (decision),
     project_dir: str(raw.project_dir),
     at: numOr(raw.at, 0),
+    offers: Math.max(0, Math.trunc(numOr(raw.offers, 0))),
   };
 }
 

@@ -43,16 +43,18 @@
  * tools a measurement of this paragraph. Change the two together or neither.
  */
 
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { endpointHash } from '../../lib/breaker.mjs';
 import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { health, heartbeat, postLessons, registerAgent } from '../../lib/http.mjs';
+import { readLinks, recordDecline } from '../../lib/links.mjs';
 import { log } from '../../lib/log.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
 import { recordRules } from '../../lib/rules.mjs';
-import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, loadSessionMap } from '../../lib/runid.mjs';
 import { dataDir, readJson, resolveDataDir, writeJsonAtomic } from '../../lib/state.mjs';
 
 /** §5.1: 2500 ms internal. The harness gets a slightly looser leash so the internal
@@ -103,6 +105,26 @@ const MAX_ID_CHARS = 160;
  * anything from it, because the status line has not been given a frame yet.
  */
 const NAG_AFTER_SESSIONS = 2;
+
+/**
+ * §6 Tier 2: how many session records the offer may read.
+ *
+ * A bound rather than a policy, and the reason it exists is the path this runs on. §6
+ * measured six directories on a working machine and `pruneStale` keeps the map to live
+ * sessions, so 64 is far past the real case; what it buys is that a data directory somebody
+ * has been accumulating for a year cannot turn a `SessionStart` into a directory walk. Past
+ * the bound the offer simply does not fire, which is the correct failure for a proposal.
+ */
+const MAX_SESSION_READS = 64;
+
+/**
+ * How many projects one offer may name.
+ *
+ * §6 measured same-remote sets of two to four and `/mubit-memory:link` takes several at once,
+ * linking every pair — so naming the whole group in one line is the shape the surface already
+ * has. Three keeps the preamble to a list a person reads rather than one they skip.
+ */
+const MAX_OFFERED = 3;
 
 await runHook('session-start', {
   budgetMs: HARNESS_BUDGET_MS,
@@ -303,6 +325,21 @@ await runHook('session-start', {
     // that was compacted away, and the offline block has just told the model not to try.
     const anchor = src === 'compact' ? latestCheckpointId(cfg, runId) : '';
 
+    // §6 Tier 2 — the same-remote offer. Local reads of files this hook's own derivation
+    // already wrote, below every round trip it makes, so it cannot starve a sub-budget: the
+    // worst it can cost is the offer. `deriveRunId` has just stamped this session's record,
+    // which is where the remote comes from — see `lib/runid.mjs`'s `rememberedRemote` for why
+    // it is not asked of `git` here, once per candidate, on the spawn path.
+    const offered = sameRemoteOffer(cfg, runId, payload);
+    // Proposed once, and the answer remembered either way (§6). The decline is written when
+    // the offer is MADE, because there is no second event to write it on: nothing reports
+    // back that a user read a preamble and did nothing. So silence is the "no", the ledger
+    // says so at both ends, and a user who wants the link runs the command — `recordLink`
+    // replaces a `declined` decision with a `linked` one, so accepting late still works.
+    for (const o of offered) {
+      recordDecline(cfg, { runId, projectDir: o.mine }, { runId: o.runId, projectDir: o.dir });
+    }
+
     const summary = `mubit: ${cfg.mode}${DOT}run ${runId}${DOT}`
       + `${lessons.length} global lesson${lessons.length === 1 ? '' : 's'}`;
 
@@ -311,7 +348,7 @@ await runHook('session-start', {
         hookEventName: 'SessionStart',
         // §4.3/I5 — `src` is already in hand from the register/heartbeat decision above, so
         // saying a session was cleared costs a comparison and no round trip.
-        additionalContext: steerBlock(cfg, runId, lessons, anchor, src === 'clear'),
+        additionalContext: steerBlock(cfg, runId, lessons, anchor, src === 'clear', offered),
       },
       // §16.2's hint fires once, ever, per install, so on that one session it *takes* the
       // line rather than being appended to it: `systemMessage` is one line by contract, and
@@ -333,47 +370,52 @@ await runHook('session-start', {
  * compaction, and an empty one renders nothing — a session that never compacted has no
  * pre-compaction context, and claiming otherwise is a sentence the model would act on.
  *
- * §4.3/I5 adds a fourth, on one source only for the same reason. A `/clear` moves the session
- * to a run with nothing in it (`lib/runid.mjs` appends `-c<n>`), and until this line existed
- * the block said "Mubit memory is active", named the empty run, and left the model unable to
- * tell a reset project from one that has never learned anything. Those are different facts.
- * `resume`, `compact` and `fork` reuse the mapped run and `startup` re-derives it, so on every
- * other source nothing was reset and saying so would be false — and a paragraph every session
- * carries is one the single session that needs it cannot be heard over.
+ * §4.3/I5 and §6 Tier 2 add a fourth: one section about what this run can reach, carrying
+ * either or both of two notices, and nothing when neither applies.
+ *
+ * A `/clear` moves the session to a run with nothing in it (`lib/runid.mjs` appends `-c<n>`),
+ * and until that line existed the block said "Mubit memory is active", named the empty run,
+ * and left the model unable to tell a reset project from one that has never learned anything.
+ * Those are different facts. `resume`, `compact` and `fork` reuse the mapped run and `startup`
+ * re-derives it, so on every other source nothing was reset and saying so would be false — and
+ * a paragraph every session carries is one the single session that needs it cannot be heard
+ * over.
+ *
+ * The same-remote offer is the other notice, and the two share a section because they share a
+ * command. A cleared session in a repo that shares a remote gets both, and as two unrelated
+ * paragraphs they would be one command name with two different targets and nothing saying
+ * which is which — an excellent way to have the model reconnect the wrong thing. Under one
+ * heading they are what they actually are: two things this run could be joined to, in a fixed
+ * order, the run it came from first and another project second.
  *
  * Deliberately only on this block. `offlineBlock`, `unauthenticatedBlock` and
  * `unconfiguredBlock` have already said no memory is arriving this session for a reason the
  * user has to fix first, and `/mubit-memory:link` cannot run against an instance that is not
- * answering: a second explanation there competes with the one that is actionable.
+ * answering: a second explanation there competes with the one that is actionable. The offer
+ * is not merely hidden on those paths — it is never computed, so nothing is recorded as
+ * offered on a session where the user could not have acted on it.
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {{id: string, type: string, content: string}[]} lessons
  * @param {string} [anchor]  §5.6 checkpoint id, or '' when there is nothing to re-anchor to
  * @param {boolean} [cleared]  §4.3: this SessionStart's source was `clear`
+ * @param {Offer[]} [offered]  §6 Tier 2: projects sharing this repository's origin
  * @returns {string}
  */
-function steerBlock(cfg, runId, lessons, anchor = '', cleared = false) {
+function steerBlock(cfg, runId, lessons, anchor = '', cleared = false, offered = []) {
   const lines = [
     '# Mubit memory is active',
     '',
     `Run: ${runId} (${cfg.mode})`,
-  ];
-  if (cleared) {
-    lines.push(
-      'This project\'s memory was reset by /clear, so this run starts empty and nothing '
-      + 'captured before it will be recalled — that is not the same as a project that has '
-      + 'learned nothing. Run /mubit-memory:link to reconnect this run to the one it was '
-      + 'cleared from.');
-  }
-  lines.push(
     'Relevant memory is injected automatically before each of your turns — no need to open a '
       + 'turn by searching for it.',
     'Do search when the injected memory falls short: mubit_recall for a topic, mubit_diagnose '
       + 'when a command has failed, mubit_dereference for a reference_id you already hold.',
     'Save what you learn with mubit_learned, and credit what helped with mubit_outcome. '
       + '/mubit-memory:remember and /mubit-memory:recall are the explicit forms.',
-  );
+  ];
+  lines.push(...linkLines(cleared, offered));
   if (anchor) {
     lines.push('', '## Compacted context',
       `Mubit checkpoint ${anchor} holds this run's context from before the compaction that `
@@ -462,6 +504,219 @@ function offlineBlock(cfg, runId, state) {
     'Work is still captured and buffered locally; it is sent when Mubit answers again.',
     '',
   ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// §6 Tier 2 — offer a link when a second project shares this repository's remote
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} Offer
+ * @property {string} runId      the far end — never rendered, only recorded
+ * @property {string} dir        the far end's directory, which is how a user names a project
+ * @property {number} lastSeenAt the far end's `last_seen_at`, rendered as a relative date
+ * @property {string} mine       this project's directory, for the ledger's far half
+ */
+
+/**
+ * The section both link notices render into, or `[]` when neither applies.
+ *
+ * Users never see run ids (§6). `cc-storefront-1a2b3c4d` is `cc-` plus a slug plus eight hex
+ * of a git toplevel: it is not something anybody recognises their own project in, and a
+ * preamble that prints one is one release away from a preamble that asks for one. So this
+ * renders directories and relative dates, exactly as `/mubit-memory:link` does — the same
+ * paths the command accepts, so a user can take one from the offer and hand it straight back.
+ *
+ * The last line is not decoration. The skill carries `disable-model-invocation: true` and
+ * says why in the plugin's own voice: a link widens what a run may **read**, durably, across
+ * every future session, and a bad one is silent until somebody notices an unrelated project
+ * bleeding into their answers weeks later. The model may notice and say so. A human confirms.
+ * An offer that read as an instruction would hand the model the decision this whole tier
+ * exists to keep away from it.
+ *
+ * @param {boolean} cleared
+ * @param {Offer[]} offered
+ * @returns {string[]}
+ */
+function linkLines(cleared, offered) {
+  if (!cleared && !offered.length) return [];
+  const lines = ['', '## Linking this project'];
+  if (cleared) {
+    lines.push(
+      'This project\'s memory was reset by /clear, so this run starts empty and nothing '
+      + 'captured before it will be recalled — that is not the same as a project that has '
+      + 'learned nothing. /mubit-memory:link with no argument reconnects this run to the one '
+      + 'it was cleared from.');
+  }
+  if (offered.length) {
+    // Two notices, two paragraphs, one section: they are the same command with different
+    // targets, and running them together on the page is how the wrong one gets picked.
+    if (cleared) lines.push('');
+    const home = String(process.env.HOME ?? '').trim();
+    const paths = offered.map((o) => tildify(o.dir, home));
+    lines.push(offered.length === 1
+      ? 'Another project on this machine shares this repository\'s git remote and has Mubit '
+        + 'memory of its own:'
+      : 'Other projects on this machine share this repository\'s git remote and have Mubit '
+        + 'memory of their own:');
+    for (const [i, o] of offered.entries()) {
+      lines.push(`- ${paths[i]} (last active ${relativeAge(o.lastSeenAt, Date.now())})`);
+    }
+    lines.push(
+      'Linked projects can read each other\'s memory: '
+      + `/mubit-memory:link ${paths.join(' ')} connects them. `
+      + 'Only a human runs that command — tell the user it is available and let them decide, '
+      + 'rather than running it. Mubit proposes this once and will not raise it again.');
+  }
+  return lines;
+}
+
+/**
+ * The projects this run could be joined to: another directory on this machine, in a checkout
+ * of the same repository, with Mubit memory of its own and no decision on record yet.
+ *
+ * ---------------------------------------------------------------------------
+ * Why the remote is read and never asked for
+ * ---------------------------------------------------------------------------
+ * `git remote get-url origin` per candidate is a process spawn per project in the session
+ * map, on the spawn path, inside §5.1's sub-budgets, measured on a cold FS. `lib/runid.mjs`
+ * therefore resolves each run's origin once and stores it on the record — the same argument
+ * `project_root` already makes for itself there — and this function does nothing but compare
+ * strings that are already on disk. A far end whose directory has since been deleted, or was
+ * never a repository this process could see, still matches on the value its own run recorded.
+ *
+ * ---------------------------------------------------------------------------
+ * What is deliberately excluded
+ * ---------------------------------------------------------------------------
+ *   - **This project's own other runs.** A `/clear` mints `<derived>-c1` in the same
+ *     directory, and `git-branch` mints one per branch; both share this root. They are the
+ *     same project, not a second one, and the `/clear` notice above is what addresses them.
+ *     Matching on the root rather than the run id is what keeps the offer to §6's actual
+ *     claim: a *second repo*.
+ *   - **Sub-runs.** `SubagentStart` links them automatically (Tier 1) and they carry their
+ *     parent's directory, so offering one would propose a join that already exists, named by
+ *     a path that is already on the list.
+ *   - **Blanks.** Two directories that are not repositories both record `''`, and treating
+ *     that as a match would offer to link every scratch directory on the machine to every
+ *     other — the same case `bin/link.src.mjs` refuses when it annotates "same remote".
+ *   - **Anything already decided.** `lib/links.mjs` holds a decision per pair, and only a pair
+ *     nobody has answered for is a question: `linked` has nothing to propose and `declined` is
+ *     the answer this hook itself recorded the last time it asked. The ledger is read once
+ *     into a set rather than asked per candidate — it is one file, keyed on this run, and
+ *     `linkDecision` would re-read it for every record the scan considers.
+ *
+ * Nothing here throws. §12.1-F14 and `lib/hook.mjs` discipline: an unreadable data dir, a
+ * torn session file or a directory named `x.json` costs the offer and never the session.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {Record<string, any>} payload
+ * @returns {Offer[]}
+ */
+function sameRemoteOffer(cfg, runId, payload) {
+  try {
+    // This session's own record, by name rather than by search: `deriveRunId` has just
+    // written it, and reading it directly means the bounded scan below cannot lose it.
+    const mine = loadSessionMap(String(payload?.session_id ?? ''));
+    if (!mine || firstString(mine.run_id) !== runId) return [];
+    const remote = firstString(mine.git_remote);
+    if (!remote) return [];
+    const myRoot = firstString(mine.project_root, mine.project_dir);
+    const myDir = firstString(mine.project_dir);
+
+    /** Every far end this run has already answered for, from one read of one file. */
+    const decided = new Set(readLinks(cfg, runId).map((e) => e.run_id));
+    /** One project per root, most recently used first. */
+    const seenRoots = new Set(myRoot ? [myRoot] : []);
+    /** @type {Offer[]} */
+    const out = [];
+    for (const rec of recentSessions(cfg)) {
+      if (out.length >= MAX_OFFERED) break;
+      const other = firstString(rec.run_id);
+      if (!other || other === runId || other.includes('-sub-')) continue;
+      if (firstString(rec.git_remote) !== remote) continue;
+      const dir = firstString(rec.project_dir);
+      const root = firstString(rec.project_root, rec.project_dir);
+      if (!dir || !root || seenRoots.has(root)) continue;
+      // Before the decision check, not after: a project whose newest run is already decided
+      // must not be re-offered through an older run of the same directory.
+      seenRoots.add(root);
+      if (decided.has(other)) continue;
+      out.push({ runId: other, dir, lastSeenAt: intOr(rec.last_seen_at, 0), mine: myDir });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The session map, newest first, bounded at `MAX_SESSION_READS` files.
+ *
+ * A small directory of small files, but it is still I/O on the spawn path, so the number of
+ * reads is capped rather than trusted to stay small. Damage of every shape reads as absence:
+ * `readJson` answers `null` for a missing, empty or truncated file, an entry that is not a
+ * regular file is skipped, and a record naming no run is not a record.
+ *
+ * @param {Record<string, any>} cfg
+ * @returns {Array<Record<string, any>>}
+ */
+function recentSessions(cfg) {
+  /** @type {Array<Record<string, any>>} */
+  const out = [];
+  try {
+    const dir = join(resolveDataDir(cfg), 'sessions');
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (out.length >= MAX_SESSION_READS) break;
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const rec = readJson(join(dir, entry.name), null);
+      if (!rec || typeof rec !== 'object' || Array.isArray(rec)) continue;
+      if (!firstString(rec.run_id)) continue;
+      out.push(rec);
+    }
+  } catch {
+    // An unreadable data dir costs the offer, never the session (§12.1-F14).
+    return out;
+  }
+  return out.sort((a, b) => intOr(b.last_seen_at, 0) - intOr(a.last_seen_at, 0));
+}
+
+/**
+ * `~/work/pricing`, the way `/mubit-memory:link` prints and accepts it.
+ *
+ * Duplicated from `bin/link.src.mjs` rather than shared, because a hook may not import from
+ * `bin/` — the bundle would pull a CLI into the spawn path. Two copies of four lines is the
+ * cheaper of the two mistakes; what matters is that the offer and the picker name a project
+ * identically, so a path read in one can be pasted into the other.
+ *
+ * @param {string} p @param {string} home @returns {string}
+ */
+function tildify(p, home) {
+  const h = String(home ?? '').replace(/\/+$/, '');
+  if (!h || !p) return p;
+  if (p === h) return '~';
+  return p.startsWith(`${h}/`) ? `~${p.slice(h.length)}` : p;
+}
+
+/**
+ * `2d ago`, matching the picker's own coarseness and for its reason: the question this answers
+ * is "is that the project I was working in last week", and a timestamp to the second makes
+ * that harder to read rather than easier.
+ *
+ * The argument is the far end's `last_seen_at` and nothing else. SC-09 shipped this rendering
+ * with the ledger's timestamp instead — when the *decision* was recorded rather than when the
+ * project was last worked in — and a project last opened two days ago read "just now".
+ *
+ * @param {number} then @param {number} now @returns {string}
+ */
+function relativeAge(then, now) {
+  const t = intOr(then, 0);
+  if (!t) return 'unknown';
+  const mins = Math.floor(Math.max(0, intOr(now, Date.now()) - t) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +923,14 @@ function sourceOf(payload) {
 function intOr(v, d) {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? Math.trunc(n) : d;
+}
+
+/** The first of these that is a non-blank string, or `''`. @param {...any} vals */
+function firstString(...vals) {
+  for (const v of vals) {
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return '';
 }
 
 function messageOf(err) {

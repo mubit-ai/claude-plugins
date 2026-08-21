@@ -20,8 +20,8 @@ import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  runHook, assertHookContract, assertWithinBudget, fakeMubit, makeDataDir, makeProjectDir,
-  baseEnv, readJsonFile,
+  runHook, assertHookContract, assertWithinBudget, fakeMubit, lib, makeDataDir, makeProjectDir,
+  baseEnv, readJsonFile, withEnv,
 } from './helpers/harness.mjs';
 import * as fx from './helpers/fixtures.mjs';
 
@@ -831,4 +831,351 @@ test('a lessons call past its 900ms sub-budget degrades only that section', asyn
     'session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
     { env: env(makeDataDir(), server.url) },
   )).ms);
+});
+
+// ===========================================================================
+// §6 Tier 2 — the same-remote offer
+// ===========================================================================
+
+/*
+ * SCOPE.md §6 measured the signal: six directories on one machine, six run ids, two git
+ * remotes, and the two groups the remote draws are the two a human would draw. Tier 2 is the
+ * plugin proposing that join the first time a second checkout shows up — the moment the
+ * question becomes real, on a machine where it applies, and never on one where it does not.
+ *
+ * Three properties are worth more than the happy path here.
+ *
+ *   1. **Directories and dates, never hashes.** The same constraint SC-09 built the whole link
+ *      surface around: `cc-storefront-1a2b3c4d` is a hash of a git toplevel, nobody recognises
+ *      their own project in one, and a prompt that prints one is a release away from a prompt
+ *      that asks for one. The steer block names *this* run by design (§5.1); the offer names
+ *      the other project by directory, and this file slices the section out to say so.
+ *   2. **Asked once, remembered against the pair.** The user declined linking two projects,
+ *      not two sessions, so the answer has to survive a new session in either of them — which
+ *      is why `lib/links.mjs` writes both ends.
+ *   3. **It costs the spawn path nothing it was not already paying.** The remote comes off the
+ *      session record (`lib/runid.mjs`), the scan is bounded, and every part of it is
+ *      best-effort: a damaged data dir costs the offer and never the session.
+ */
+
+/** Two checkouts of one repository. The origin is the whole signal (§6). */
+const REMOTE = 'git@github.com:acme/storefront.git';
+
+/** A day, so `last_seen_at` offsets read the way the offer renders them. */
+const DAY = 86400000;
+
+/** The heading both link notices render under; see `steerBlock`. */
+const LINK_HEADING = '## Linking this project';
+
+/** The shape `lib/runid.mjs` mints, as `test/link.test.mjs` writes it. */
+const RUN_ID_SHAPE = /\bcc-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}\b/;
+
+function envIn(dataDir, endpoint, projectDir, extra = {}) {
+  return baseEnv({ dataDir, endpoint, projectDir, extra });
+}
+
+/**
+ * A §4.3 `SessionRecord` for ANOTHER project on this machine, exactly as `rememberRun` writes
+ * one — `git_remote` included, because that field is the whole reason the offer can decide
+ * without spawning `git` once per candidate.
+ */
+function seedProject(dataDir, sessionId, over = {}) {
+  const rec = {
+    run_id: '',
+    agent_id: 'claude-code',
+    strategy: 'per-directory',
+    project_dir: '',
+    project_root: '',
+    created_at: Date.now() - (30 * DAY),
+    last_seen_at: Date.now(),
+    mode: 'local',
+    clear_count: 0,
+    previous_run_id: '',
+    endpoint_hash: 'deadbeefcafe',
+    git_remote: '',
+    ...over,
+  };
+  if (!rec.project_root) rec.project_root = rec.project_dir;
+  writeFileSync(join(dataDir, 'sessions', `${sessionId}.json`), JSON.stringify(rec));
+  return rec;
+}
+
+/**
+ * The link section of a steer block, or `''` when neither notice fired. Sliced out rather
+ * than matched across the whole block because the block names this run on purpose (§5.1) and
+ * the offer may not name any run at all — the assertion only means something inside the
+ * section it is about.
+ */
+function linkSection(ctx) {
+  const at = String(ctx ?? '').indexOf(LINK_HEADING);
+  if (at < 0) return '';
+  const rest = String(ctx).slice(at + LINK_HEADING.length);
+  const next = rest.indexOf('\n## ');
+  return next < 0 ? rest : rest.slice(0, next);
+}
+
+/** SC-09's executable rule, applied to the offer. @param {string} out @param {string[]} ids */
+function assertNoRunIds(out, ids, what) {
+  for (const id of ids) {
+    assert.ok(!out.includes(id),
+      `${what} printed the run id ${JSON.stringify(id)}. §6: users never see run ids — a hash `
+      + `of a git toplevel is not something anyone can recognise their project in.\n${out}`);
+  }
+  const leak = RUN_ID_SHAPE.exec(out);
+  assert.equal(leak, null,
+    `${what} printed something shaped like a run id (${leak?.[0]}). The offer addresses `
+    + `projects by directory, exactly as /mubit-memory:link does.\n${out}`);
+}
+
+/** The steer block of a healthy session start in `projectDir`. */
+async function startIn(dataDir, server, projectDir, over = {}) {
+  const r = await runHook('session-start',
+    fx.sessionStart({ cwd: projectDir, ...over }),
+    { env: envIn(dataDir, server.url, projectDir) });
+  assertHookContract(r);
+  return r;
+}
+
+// §6 Tier 2: the offer itself. The far end is deliberately NOT a git repository — its remote
+// can only have come off the session record, so a version that shells out per candidate
+// cannot pass this, warm FS or cold.
+test('a second project on the same remote is offered, by directory and relative date', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const here = makeProjectDir({ git: true, remote: REMOTE });
+  const there = makeProjectDir();
+  seedProject(dataDir, 'sess-pricing', {
+    run_id: 'cc-pricing-1a2b3c4d',
+    project_dir: there,
+    git_remote: REMOTE,
+    last_seen_at: Date.now() - (2 * DAY),
+  });
+
+  const r = await startIn(dataDir, server, here);
+  const section = linkSection(r.json.hookSpecificOutput.additionalContext);
+
+  assert.ok(section, 'a second checkout of the same repository is exactly when the question '
+    + `becomes real; nothing was offered:\n${r.json.hookSpecificOutput.additionalContext}`);
+  assert.ok(section.includes(there),
+    `the offer must name the other project's directory, got:\n${section}`);
+  assert.match(section, /2d ago/,
+    `a project last opened two days ago reads "2d ago" — SC-09 shipped "just now" here by `
+    + `letting the wrong timestamp win, got:\n${section}`);
+  assert.doesNotMatch(section, /just now/,
+    'the date comes from the far end\'s last_seen_at, not from the clock or the ledger');
+  assert.match(section, /\/mubit-memory:link/,
+    'an offer that does not name the command that accepts it is a notification, not an offer');
+  assertNoRunIds(section, ['cc-pricing-1a2b3c4d'], 'the Tier 2 offer');
+});
+
+// The other half of the signal, and the case a naive equality check gets wrong in the other
+// direction: a remote that is not this repository's is not a match.
+test('a project with a different origin is not offered', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const here = makeProjectDir({ git: true, remote: REMOTE });
+  seedProject(dataDir, 'sess-other', {
+    run_id: 'cc-unrelated-9a8b7c6d',
+    project_dir: makeProjectDir(),
+    git_remote: 'git@github.com:acme/unrelated.git',
+    last_seen_at: Date.now() - DAY,
+  });
+
+  const r = await startIn(dataDir, server, here);
+
+  assert.equal(linkSection(r.json.hookSpecificOutput.additionalContext), '',
+    'two projects with different remotes are two projects; proposing a link between them is '
+    + 'the nag §6 says must never appear on a machine where the question does not apply');
+});
+
+// `test/link.test.mjs` learned this the same way: two directories that are not repositories
+// both answer `''`, and calling that a match would group every scratch directory on the box.
+test('two projects with no remote are not "the same remote"', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const here = makeProjectDir({ git: true });
+  seedProject(dataDir, 'sess-scratch', {
+    run_id: 'cc-scratch-5f6e7d8c',
+    project_dir: makeProjectDir(),
+    git_remote: '',
+    last_seen_at: Date.now() - DAY,
+  });
+
+  const r = await startIn(dataDir, server, here);
+
+  assert.equal(linkSection(r.json.hookSpecificOutput.additionalContext), '',
+    'a repository with no origin has no group; matching blank against blank would offer to '
+    + 'link every unrelated directory on the machine to every other');
+});
+
+/*
+ * "Proposed once, and the answer remembered either way" (§6 Tier 2). The offer is made on one
+ * session and recorded against the PAIR, so the next session in *either* project is quiet —
+ * which is the case a decision stored against a session id gets wrong, and the reason
+ * `lib/links.mjs` writes both ends.
+ *
+ * Three real sessions in two real repositories, and no hand-written run ids: the ids are the
+ * ones this machine derives, which is the only way the pair under test is the pair the plugin
+ * actually formed.
+ */
+test('the offer is made once, and the decision is keyed to the pair', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const here = makeProjectDir({ git: true, remote: REMOTE });
+  const there = makeProjectDir({ git: true, remote: REMOTE });
+
+  // Session 1, in `there`: nothing else on this machine shares the remote yet.
+  const first = await startIn(dataDir, server, there, { session_id: 'sess-there-1' });
+  assert.equal(linkSection(first.json.hookSpecificOutput.additionalContext), '',
+    'the first project on a machine has nothing to be offered; §6\'s signal is self-timing');
+
+  // Session 2, in `here`: now there are two, and the offer fires.
+  const second = await startIn(dataDir, server, here, { session_id: 'sess-here-1' });
+  assert.ok(linkSection(second.json.hookSpecificOutput.additionalContext).includes(there),
+    'the second checkout is the moment the question becomes real');
+
+  // Session 3, back in `there`, under a new host session id: the answer already exists.
+  const third = await startIn(dataDir, server, there, { session_id: 'sess-there-2' });
+  assert.equal(linkSection(third.json.hookSpecificOutput.additionalContext), '',
+    'the decision belongs to the pair of projects, not to the session that recorded it — an '
+    + 'offer that simply moves to the other project and asks again has remembered nothing');
+
+  // And session 4, in `here` again, for the same reason from the same side.
+  const fourth = await startIn(dataDir, server, here, { session_id: 'sess-here-2' });
+  assert.equal(linkSection(fourth.json.hookSpecificOutput.additionalContext), '',
+    'an offer that fires every SessionStart for the rest of the install\'s life is the nag '
+    + '§6 Tier 2 exists to avoid');
+
+  // The ledger says the same thing, at both ends and in the vocabulary `lib/links.mjs` owns.
+  const config = await lib('config.mjs');
+  const links = await lib('links.mjs');
+  const cfg = config.loadConfig(envIn(dataDir, server.url, here));
+  const hereRun = readJsonFile(join(dataDir, 'sessions', 'sess-here-1.json')).run_id;
+  const thereRun = readJsonFile(join(dataDir, 'sessions', 'sess-there-1.json')).run_id;
+  assert.equal(links.linkDecision(cfg, hereRun, thereRun)?.decision, 'declined',
+    'an offer with nowhere to record "no" fires forever; this is the record');
+  assert.equal(links.linkDecision(cfg, thereRun, hereRun)?.decision, 'declined',
+    'both ends, or the same offer is simply made again from the other project');
+});
+
+// The third state `linkDecision` distinguishes, and the one a user reaches on purpose: these
+// two are already linked, so there is nothing to propose. `null` means ask; `linked` and
+// `declined` are both answers, and only one of them is a refusal.
+test('a pair that is already linked is not offered', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const here = makeProjectDir({ git: true, remote: REMOTE });
+  const there = makeProjectDir();
+  seedProject(dataDir, 'sess-pricing', {
+    run_id: 'cc-pricing-1a2b3c4d', project_dir: there, git_remote: REMOTE,
+  });
+
+  // The run id this project derives, taken the way `mcp/src/launch.mjs` takes it: an empty
+  // payload, which writes no session record and therefore arranges nothing.
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const links = await lib('links.mjs');
+  const env = envIn(dataDir, server.url, here);
+  const cfg = config.loadConfig(env);
+  const hereRun = withEnv(env, () => runid.deriveRunId(cfg, {}));
+  links.recordLink(cfg, { runId: hereRun, projectDir: here },
+    { runId: 'cc-pricing-1a2b3c4d', projectDir: there });
+
+  const r = await startIn(dataDir, server, here);
+
+  assert.equal(linkSection(r.json.hookSpecificOutput.additionalContext), '',
+    'offering a link that is already in force tells the user their own decision did not '
+    + 'take; `list` is where a standing link is shown, not the session preamble');
+});
+
+/*
+ * §4.3/I5 and §6 Tier 2 can both be true of one session — a `/clear` in a repo that shares a
+ * remote — and they are one command with two different targets. Two unrelated paragraphs both
+ * saying "run /mubit-memory:link" is how a model ends up running the wrong one, so they share
+ * a section and the section says which is which.
+ */
+test('a cleared session in a shared repo says both things, under one heading', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const here = makeProjectDir({ git: true, remote: REMOTE });
+  const there = makeProjectDir();
+  seedProject(dataDir, 'sess-pricing', {
+    run_id: 'cc-pricing-1a2b3c4d',
+    project_dir: there,
+    git_remote: REMOTE,
+    last_seen_at: Date.now() - (2 * DAY),
+  });
+  seedProject(dataDir, fx.SESSION_ID, {
+    run_id: 'cc-here-0f0f0f0f', project_dir: here, project_root: here, git_remote: REMOTE,
+  });
+
+  const r = await startIn(dataDir, server, here, { source: 'clear' });
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  const section = linkSection(ctx);
+
+  assert.equal(ctx.split(LINK_HEADING).length - 1, 1,
+    `both notices are about what this run can reach, so they share one section:\n${ctx}`);
+  assert.match(section, /reset by \/clear/i,
+    `the cleared session still has to be told why its run is empty:\n${section}`);
+  assert.ok(section.includes(there),
+    `and the offer still has to name the project it is proposing:\n${section}`);
+  assertNoRunIds(section, ['cc-pricing-1a2b3c4d', 'cc-here-0f0f0f0f'], 'the combined section');
+});
+
+// §12.1-F14 / `lib/hook.mjs` discipline: the scan is over a directory of files this plugin
+// wrote, but it is still I/O on the spawn path, and every kind of damage found there costs the
+// offer and nothing else. A session that fails to start because a session file was truncated
+// by a SIGKILL is a far worse bug than a missing prompt.
+test('damage in the session map costs the offer, never the session', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const here = makeProjectDir({ git: true, remote: REMOTE });
+  const there = makeProjectDir();
+  const sessions = join(dataDir, 'sessions');
+  writeFileSync(join(sessions, 'torn.json'), '{"run_id": "cc-torn-11112222", "project_di');
+  writeFileSync(join(sessions, 'empty.json'), '');
+  writeFileSync(join(sessions, 'array.json'), '[1,2,3]');
+  mkdirSync(join(sessions, 'directory.json'), { recursive: true });
+  seedProject(dataDir, 'sess-pricing', {
+    run_id: 'cc-pricing-1a2b3c4d', project_dir: there, git_remote: REMOTE,
+  });
+
+  const r = await startIn(dataDir, server, here);
+
+  assert.ok(linkSection(r.json.hookSpecificOutput.additionalContext).includes(there),
+    'a readable record next to four broken ones is still a readable record');
+  assert.equal(r.code, 0, 'no shape of damage in the data dir may fail this hook (§4.9)');
+});
+
+// §5.1 — the offer reads files the hook's own derivation already wrote and dials nothing, so
+// it may not move the sub-budgets. Measured with the offer actually firing: a resample against
+// an empty data dir would measure the path where there is nothing to offer.
+test('the same-remote offer stays inside the SessionStart budget', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const here = makeProjectDir({ git: true, remote: REMOTE });
+  const there = makeProjectDir();
+  const sample = async () => {
+    const dataDir = makeDataDir();
+    seedProject(dataDir, 'sess-pricing', {
+      run_id: 'cc-pricing-1a2b3c4d', project_dir: there, git_remote: REMOTE,
+    });
+    return runHook('session-start', fx.sessionStart({ cwd: here }),
+      { env: envIn(dataDir, server.url, here) });
+  };
+
+  const r = await sample();
+  assertHookContract(r);
+  assert.ok(linkSection(r.json.hookSpecificOutput.additionalContext).includes(there),
+    'the measurement only means something if the offer fired on the run being measured');
+
+  await assertWithinBudget('session-start --link-offer', 3200, r.ms,
+    async () => (await sample()).ms);
 });

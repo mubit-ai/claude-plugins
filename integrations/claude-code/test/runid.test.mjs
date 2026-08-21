@@ -976,10 +976,14 @@ test('a session record with no git_remote is stamped with one on the next write'
   const repo = makeProjectDir({ git: true, remote: ORIGIN });
   const env = envFor(dataDir, repo, 'per-directory');
 
-  // `record()` is the §4.3 shape as it shipped: no `git_remote` key at all.
-  withEnv(env, () => runid.saveSessionMap(fx.SESSION_ID, record({
+  // Written raw rather than through `saveSessionMap`, which normalises and would stamp the
+  // very field this test is about. `record()` is the §4.3 shape as it shipped.
+  writeFileSync(sessionFile(dataDir, fx.SESSION_ID), JSON.stringify(record({
     run_id: 'cc-upgraded-deadbeef', project_dir: repo, project_root: realpathSync(repo),
   })));
+  assert.equal('git_remote' in withEnv(env, () => runid.loadSessionMap(fx.SESSION_ID)), false,
+    'the fixture has to be a pre-upgrade record, or this test proves nothing');
+
   derive(config, runid, env, fx.postToolUse({ cwd: repo }));
 
   const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));

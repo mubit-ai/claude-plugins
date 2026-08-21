@@ -451,6 +451,12 @@ function subagentShort(payload) {
  *   without it the memory a `/clear` set aside is unreachable, because nothing on disk
  *   relates the two runs. Absent on records written before it existed, which reads as
  *   "unknown" and never as "not cleared", exactly as `project_root` does for itself.
+ * @property {string} git_remote  `remote.origin.url` for `project_root`, or `''` when the
+ *   directory is not a repository or has no origin. SCOPE.md §6 measured this as the signal
+ *   that partitions projects the way a human would, and §6 Tier 2 proposes a link the first
+ *   time a second run with a matching one appears. Stored for the same reason `project_root`
+ *   is — see `rememberRun`, which is also where the "or `''`" matters: a blank is a fact
+ *   about a directory with no origin, and two blanks are not a match.
  * @property {string} endpoint_hash
  */
 
@@ -517,6 +523,9 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
 
   const inherited = isObject(prev) ? prev : {};
   const dir = projectDirOf(cfg, payload);
+  // Resolved here rather than left for a reader to work out: `sameProject` has to be able
+  // to answer without re-deriving, and the root is what the id was hashed from anyway.
+  const root = projectRootOf(dir);
   saveSessionMap(sessionId, {
     ...inherited,
     run_id: next.run_id,
@@ -525,9 +534,8 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
     agent_id: AGENT_ROLE,
     strategy: next.strategy,
     project_dir: dir,
-    // Resolved here rather than left for a reader to work out: `sameProject` has to be able
-    // to answer without re-deriving, and the root is what the id was hashed from anyway.
-    project_root: projectRootOf(dir),
+    project_root: root,
+    git_remote: rememberedRemote(inherited, root) ?? gitOrigin(root),
     created_at: numberOr(inherited.created_at, now),
     last_seen_at: now,
     mode: firstString(cfg.mode) || 'local',
@@ -574,6 +582,42 @@ function previousRunId(prev, next) {
 }
 
 /**
+ * §6 Tier 2: the origin this record already knows, or `null` for "ask git".
+ *
+ * The cache exists because of where its reader stands. `hooks/src/session-start.mjs` has to
+ * decide, inside §5.1's sub-budgets and on a cold FS, whether any other project on this
+ * machine shares this repository's origin — and the honest way to answer that per candidate
+ * is a process spawn per candidate. So the remote is resolved once, by the run it belongs to,
+ * and every later reader gets it for free from the map. That is the same argument
+ * `project_root` makes for itself one line above, made for a second field.
+ *
+ * Two rules, and they are the whole of the invalidation:
+ *
+ *   - **The cache belongs to a root, not to a session.** A mid-session `cd` into another repo
+ *     moves `project_root`, and carrying the first repo's origin into the second's record
+ *     would make two unrelated repositories look like one group — permanently, since nothing
+ *     would ever re-resolve it.
+ *   - **A stored `''` is an answer.** A directory that is not a repository, or one with no
+ *     `origin`, has no remote, and re-asking on every hook would spend a spawn to be told so
+ *     again. Absent is different: a record written before this field existed knows nothing,
+ *     and reading that as "no remote" would keep every pre-upgrade session out of the offer
+ *     for as long as it lives.
+ *
+ * The cost of the cache is one session's staleness: an `origin` added mid-session is picked
+ * up by the next record written for a different session id. That is the right trade for a
+ * value whose only consumer is a proposal a human confirms.
+ *
+ * @param {Record<string, any>} prev
+ * @param {string} root
+ * @returns {string|null}
+ */
+function rememberedRemote(prev, root) {
+  if (!isObject(prev) || typeof prev.git_remote !== 'string') return null;
+  if (firstString(prev.project_root) !== root) return null;
+  return prev.git_remote.trim();
+}
+
+/**
  * Fill in every documented key so a record is never half a record, without
  * overwriting anything the caller supplied.
  * @param {Record<string, any>} record
@@ -588,6 +632,7 @@ function normaliseRecord(record) {
     strategy: DEFAULT_STRATEGY,
     project_dir: '',
     project_root: '',
+    git_remote: '',
     created_at: now,
     last_seen_at: now,
     mode: 'local',
@@ -683,6 +728,18 @@ function usableDir(v) {
 /** @param {string} dir @returns {string} */
 function gitToplevel(dir) {
   return gitOutput(dir, ['rev-parse', '--show-toplevel']);
+}
+
+/**
+ * §6: `remote.origin.url`, which is what partitions projects into the groups a human would
+ * draw. `git config --get` rather than `git remote get-url`, because that is the form
+ * `bin/link.src.mjs` already reads it in: the offer and the picker must not be able to
+ * disagree about whether two projects share a remote, and two spellings of the question are
+ * two chances to.
+ * @param {string} dir @returns {string}
+ */
+function gitOrigin(dir) {
+  return gitOutput(dir, ['config', '--get', 'remote.origin.url']);
 }
 
 /** @param {string} dir @returns {string} */

@@ -380,6 +380,70 @@ test('source=clear produces a NEW run, not the mapped one', async (t) => {
   assert.equal(rec.run_id, runIds[0], 'the session map must follow the new run');
 });
 
+/*
+ * §4.3/I5 — the reset is defensible; the silence was not.
+ *
+ * `/clear` starts the session on a run with nothing in it, and until now nothing said so. The
+ * model opened with "Mubit memory is active" and a run id, recalled nothing all session, and
+ * neither it nor the user had any way to tell that apart from a project that has simply never
+ * learned anything. Those are different facts and the user acts differently on each.
+ *
+ * The fact costs nothing to state: `sourceOf(payload)` is already read for the
+ * register-versus-heartbeat decision, so this is a branch on a value in hand, not a round
+ * trip. Nothing here may touch §5.1's 400/600/900 ms sub-budgets.
+ */
+test('source=clear says the memory was reset, and names the command that reconnects it', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSessionRecord(dataDir, fx.SESSION_ID, { clear_count: 0 });
+
+  const r = await runHook('session-start', fx.sessionStart({ source: 'clear', cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /Mubit memory is active/,
+    'a cleared session is still a working session; this is a note on the steer block, not a '
+    + 'replacement for it');
+  assert.match(ctx, /reset by \/clear/i,
+    `the model has to be told why this run is empty, got:\n${ctx}`);
+  assert.match(ctx, /\/mubit-memory:link/,
+    `saying the memory is gone without saying how to get it back is half a message:\n${ctx}`);
+
+  // §5.1 — the whole point of putting it here is that the fact was already in hand.
+  await assertWithinBudget('session-start --clear', 3200, r.ms, async () => (await runHook(
+    'session-start', fx.sessionStart({ source: 'clear', cwd: PROJECT_DIR }),
+    { env: env(makeDataDir(), server.url) },
+  )).ms);
+});
+
+/*
+ * The other direction, and the one that decides whether the line is information or noise.
+ * `resume`, `compact` and `fork` all reuse the mapped run and `startup` re-derives it, so on
+ * every source but one the project's memory is exactly where it was. Telling a resumed session
+ * it was reset would be a straight falsehood, and telling every session about `/clear` would
+ * train the model to ignore the paragraph the one cleared session needs.
+ */
+for (const source of ['startup', 'resume', 'compact', 'fork']) {
+  test(`source=${source} says nothing about a reset`, async (t) => {
+    const server = await fakeMubit();
+    t.after(() => server.close());
+    const dataDir = makeDataDir();
+    seedSessionRecord(dataDir, fx.SESSION_ID);
+
+    const r = await runHook('session-start', fx.sessionStart({ source, cwd: PROJECT_DIR }),
+      { env: env(dataDir, server.url) });
+    assertHookContract(r);
+
+    const ctx = r.json.hookSpecificOutput.additionalContext;
+    assert.doesNotMatch(ctx, /reset by \/clear/i,
+      `${source} keeps the project's memory where it was, got:\n${ctx}`);
+    assert.ok(!ctx.includes('/mubit-memory:link'),
+      `${source} has nothing to reconnect, and offering the command implies it does`);
+  });
+}
+
 // §4.3 `compact`: compaction is one conversation continuing, so the run continues too.
 test('source=compact reuses the parent session record run', async (t) => {
   const server = await fakeMubit();

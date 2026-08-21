@@ -43,13 +43,20 @@ import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
+import { log } from './log.mjs';
 import { dataDir, readJson, writeJsonAtomic } from './state.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/** §4.3 strategies. Anything else resolves to the default rather than failing. */
+/**
+ * §4.3 strategies. Anything else resolves to the default rather than failing — but says so
+ * once, through `warnUnknownStrategy`. Falling back is the right behaviour (a typo must not
+ * take a live session's run id away mid-session); falling back *silently* is not, and a
+ * scenario in `testkit/ux/` spent its whole life configured with `repo` and running under
+ * `per-directory` because nothing on disk ever mentioned the substitution.
+ */
 const STRATEGIES = new Set(['per-directory', 'git-branch', 'per-conversation', 'static']);
 const DEFAULT_STRATEGY = 'per-directory';
 
@@ -105,7 +112,7 @@ const TOUCH_INTERVAL_MS = 60 * 1000;
  * | --- | --- |
  * | `startup` | derive fresh, overwriting any stale mapping |
  * | `resume` | reuse the mapped run; derive when nothing is mapped |
- * | `clear` | **new run** — the derived run plus an incrementing `-c<n>` |
+ * | `clear` | **new run** — the derived run plus an incrementing `-c<n>`, and the record's `previous_run_id` names the run it left |
  * | `compact`, `fork` | reuse the parent session record's run |
  * | absent / unknown | reuse the mapped run when there is one (a `PostToolUse` after a `/clear` belongs to the cleared run), else derive |
  *
@@ -133,6 +140,10 @@ export function deriveRunId(cfg, payload = {}) {
  */
 function resolveRunId(cfg, payload) {
   const strategy = normaliseStrategy(cfg.runStrategy);
+  // Here rather than inside `normaliseStrategy`, which stays pure and is also called on the
+  // strategy *recorded* in a session map — where an unrecognised value is an old record, not
+  // a misconfiguration, and warning about it would blame the user for an upgrade.
+  warnUnknownStrategy(cfg, cfg.runStrategy);
   const source = normaliseSource(payload.source);
   const sessionId = hostSessionId(payload);
 
@@ -154,7 +165,8 @@ function resolveRunId(cfg, payload) {
     runId = pinned;
   } else if (source === 'clear') {
     // `per-directory`/`git-branch` are stable per directory, so the counter is
-    // the only thing that can honour "forget the thread".
+    // the only thing that can honour "forget the thread". Where the memory went
+    // is not lost with it: `rememberRun` records `previous_run_id` from `prev`.
     clear = clearCount(prev) + 1;
     runId = `${deriveFresh(cfg, payload, strategy)}-c${clear}`;
   } else if (source === 'startup') {
@@ -424,6 +436,12 @@ function subagentShort(payload) {
  * @property {number} last_seen_at
  * @property {string} mode
  * @property {number} clear_count
+ * @property {string} previous_run_id  the run this session was in immediately before a
+ *   `/clear` moved it to `run_id`, and `''` on every other source. §4.3's `clear` row is the
+ *   only one that abandons a mapping, so it is the only one with a "before" worth naming —
+ *   without it the memory a `/clear` set aside is unreachable, because nothing on disk
+ *   relates the two runs. Absent on records written before it existed, which reads as
+ *   "unknown" and never as "not cleared", exactly as `project_root` does for itself.
  * @property {string} endpoint_hash
  */
 
@@ -505,8 +523,45 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
     last_seen_at: now,
     mode: firstString(cfg.mode) || 'local',
     clear_count: next.clear_count,
+    previous_run_id: previousRunId(prev, next),
     endpoint_hash: endpointHash(cfg.endpoint),
   });
+}
+
+/**
+ * I5: where a `/clear` put the memory it stopped using — or `''`, which means "this run was
+ * not arrived at by clearing".
+ *
+ * Written on every call rather than left to `...inherited`, and that is the whole design.
+ * `rememberRun` spreads the previous record forward, so a value written once would survive
+ * every later write for free; a `previous_run_id` that outlives the run it described is worse
+ * than no field at all, because `/mubit-memory:link` would then reconnect a session to a run
+ * it never came from. So the rule is: the pointer belongs to the run the record currently
+ * names, and it is recomputed whenever that run is.
+ *
+ *   - a clear, and the run really moved → `prev.run_id`, one step back. A second `/clear`
+ *     therefore names the `-c1` run, not the original, because that is where `-c2` came from.
+ *   - a clear under a `static` pin that the record already named → `''` by way of the
+ *     unchanged-run branch above. A pin is honoured on every source, so `runId` did not move
+ *     and nothing was set aside. If the pin was introduced *between* the two writes the run
+ *     did move, and the pointer names where the memory actually is — which is the useful
+ *     answer, not an exception to the rule.
+ *   - the run is unchanged → whatever the record already said, which still describes it.
+ *     This is what survives the `TOUCH_INTERVAL_MS` rewrite an ordinary `PostToolUse` makes
+ *     an hour into a cleared session.
+ *   - anything else — `startup`, a mid-session `cd`, a strategy change → `''`. The run moved
+ *     for a reason that is not a reset, so any stored pointer is now about some other run.
+ *
+ * @param {Record<string, any>|null} prev
+ * @param {{run_id: string, source: string}} next
+ * @returns {string}
+ */
+function previousRunId(prev, next) {
+  if (!isObject(prev)) return '';
+  const prevRun = firstString(prev.run_id);
+  if (prevRun === next.run_id) return firstString(prev.previous_run_id);
+  if (next.source !== 'clear') return '';
+  return prevRun;
 }
 
 /**
@@ -528,6 +583,7 @@ function normaliseRecord(record) {
     last_seen_at: now,
     mode: 'local',
     clear_count: 0,
+    previous_run_id: '',
     endpoint_hash: '',
   };
   if (isObject(record)) {
@@ -703,6 +759,45 @@ function clearCount(rec) {
 function normaliseStrategy(v) {
   const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
   return STRATEGIES.has(s) ? s : DEFAULT_STRATEGY;
+}
+
+/**
+ * Whether this process has already reported that `cfg.runStrategy` is not a strategy.
+ *
+ * Once, not per call. `resolveRunId` is on the path of every `deriveRunId`, and `deriveRunId`
+ * runs in every hook, so a line per invocation would be a ring-log entry per tool call — noise
+ * that buries the one line worth reading and could itself rotate a 1 MiB log inside a hook's
+ * budget. A hook is one process, so once per process is exactly once per hook.
+ *
+ * @type {boolean}
+ */
+let warnedUnknownStrategy = false;
+
+/**
+ * §4.3/I6: say that a strategy was substituted, rather than substituting it silently.
+ *
+ * Deliberately not a throw. The run id is load-bearing for every hook, and there IS a
+ * documented default here — unlike `staticRunId`, where an unset pin has no honest answer and
+ * a config error is the only correct one. So the fallback stands and the warning is what makes
+ * it visible.
+ *
+ * Only a non-empty, unrecognised value qualifies. `lib/config.mjs` already resolves an unset
+ * `MUBIT_CC_RUN_STRATEGY` to `per-directory`, which is the ordinary case on nearly every
+ * install; warning on it every session is how a log trains its reader to ignore it.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {any} raw  `cfg.runStrategy` exactly as configuration produced it
+ * @returns {void}
+ */
+function warnUnknownStrategy(cfg, raw) {
+  if (warnedUnknownStrategy) return;
+  const s = typeof raw === 'string' ? raw.trim() : '';
+  if (!s || STRATEGIES.has(s.toLowerCase())) return;
+  warnedUnknownStrategy = true;
+  log(cfg, 'warn',
+    `run strategy ${JSON.stringify(s)} is not one of the four, so this session is using `
+    + `${DEFAULT_STRATEGY} instead. Set MUBIT_CC_RUN_STRATEGY (or "runStrategy" in `
+    + `.mubit-cc.json) to one of: ${[...STRATEGIES].join(', ')}.`);
 }
 
 /** An unrecognised `source` is "no source", which reuses rather than resets. */

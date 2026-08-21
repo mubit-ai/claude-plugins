@@ -39,15 +39,30 @@ const SERVER_BUNDLE = join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js');
 /** §3.2 matcher note — `.mcp.json` names the server `mubit`. */
 const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
-/** §2/§9 — the skills the plugin ships. `auth` is the seventh. */
-const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth'];
+/** §2/§9 — the skills the plugin ships. `auth` is the seventh, `link` the eighth. */
+const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth', 'link'];
 
 /**
- * `auth` is the one skill that calls no MCP tool: it runs `bin/auth.mjs` to obtain a
- * credential, which is precisely the thing that has to exist before any MCP tool works.
- * Every tool-surface assertion below therefore skips it by name rather than by accident.
+ * The two skills that call no MCP tool, because each runs a bundled script instead.
+ *
+ *   - `auth` obtains a credential, which is precisely the thing that has to exist before
+ *     any MCP tool works, so it cannot depend on one.
+ *   - `link` declares the run graph (SCOPE.md §6 Tier 3). It is deliberately not an MCP
+ *     tool: a model-callable link route would let an agent widen its own read reach, which
+ *     is the same hole the MCP egress guard just closed in the other direction.
+ *
+ * Every tool-surface assertion below therefore skips them by name rather than by accident.
+ *
+ * `modelInvocable` is the one place the two differ, and it is §6's "Not the LLM" argument
+ * in a single field: a user must be able to type `/mubit-memory:auth` when nothing is
+ * configured, and a model must not be able to reach `link` at all.
  */
-const MCP_SKILLS = SKILLS.filter((s) => s !== 'auth');
+const SCRIPT_SKILLS = [
+  { name: 'auth', bin: 'bin/auth.mjs', modelInvocable: true },
+  { name: 'link', bin: 'bin/link.mjs', modelInvocable: false },
+];
+
+const MCP_SKILLS = SKILLS.filter((s) => !SCRIPT_SKILLS.some((k) => k.name === s));
 
 // ---------------------------------------------------------------------------
 // Local helpers
@@ -120,7 +135,8 @@ function skillFile(name) {
 
 function loadSkill(name) {
   const text = readOrFail(skillFile(name), `skills/${name}/SKILL.md`,
-    'Build-guide §9 defines the skill set: recall, remember, reflect, forget, doctor, setup, auth.');
+    'Build-guide §9 defines the skill set: recall, remember, reflect, forget, doctor, setup, '
+    + 'auth, link.');
   return parseFrontmatter(text, `skills/${name}/SKILL.md`);
 }
 
@@ -393,27 +409,40 @@ test('forget/SKILL.md warns that deletion is not undoable and offers mubit_outco
 // ---------------------------------------------------------------------------
 
 /**
- * `auth` runs a bundled script instead of calling an MCP tool, so its permission grant
- * is `allowed-tools`, not `tools`. Without a grant the host prompts for approval on
- * every run, which is a poor first impression from the command whose entire job is to
- * make the first five minutes work.
+ * A script-backed skill runs a bundled `.mjs` instead of calling an MCP tool, so its
+ * permission grant is `allowed-tools`, not `tools`. Without a grant the host prompts for
+ * approval on every run, which is a poor first impression from the command whose entire job
+ * is to make the first five minutes work — and a *bare* `Bash` grant would hand the skill
+ * the whole shell, which is the opposite trade.
+ *
+ * Written over the table rather than once per skill: the rule is the same for both, and the
+ * next script-backed skill inherits it by adding one row instead of copying a test.
  */
-test('auth/SKILL.md grants exactly the Bash permission it needs, and no MCP tools', () => {
-  const { fm } = loadSkill('auth');
+for (const { name, bin } of SCRIPT_SKILLS) {
+  test(`${name}/SKILL.md grants exactly the Bash permission it needs, and no MCP tools`, () => {
+    const { fm } = loadSkill(name);
 
-  const allowed = fm['allowed-tools'];
-  assert.ok(allowed, 'auth must declare allowed-tools so the host does not prompt on every run');
-  const text = Array.isArray(allowed) ? allowed.join(' ') : String(allowed);
+    const allowed = fm['allowed-tools'];
+    assert.ok(allowed, `${name} must declare allowed-tools so the host does not prompt on every run`);
+    const text = Array.isArray(allowed) ? allowed.join(' ') : String(allowed);
 
-  assert.match(text, /Bash\(/, 'the grant is a Bash permission rule');
-  assert.match(text, /bin\/auth\.mjs/,
-    'the rule must name the script; a bare Bash grant hands the skill the whole shell');
-  assert.match(text, /\$\{CLAUDE_PLUGIN_ROOT\}/,
-    'the plugin is installed at a path nobody can predict — a relative path resolves to the wrong place');
+    assert.match(text, /Bash\(/, 'the grant is a Bash permission rule');
+    assert.ok(text.includes(bin),
+      `${name}: the rule must name ${bin}; a bare Bash grant hands the skill the whole shell`);
+    assert.match(text, /\$\{CLAUDE_PLUGIN_ROOT\}/,
+      'the plugin is installed at a path nobody can predict — a relative path resolves to the wrong place');
 
-  assert.equal(toolsOf(fm), undefined,
-    'auth exists to create the credential every MCP tool needs; it cannot depend on one');
-});
+    const others = SCRIPT_SKILLS.filter((k) => k.name !== name).map((k) => k.bin);
+    for (const other of others) {
+      assert.ok(!text.includes(other),
+        `${name} grants ${other} as well as its own binary — a skill's grant is its blast radius`);
+    }
+
+    assert.equal(toolsOf(fm), undefined,
+      `${name} runs a bundled script precisely so it does not need an MCP tool; granting one `
+      + 'would make it depend on the surface it exists beside');
+  });
+}
 
 // The credential has to exist before anything else works, so this is the one skill a
 // user runs when nothing is configured. It must be reachable by name at that point.
@@ -505,4 +534,91 @@ test('remember/SKILL.md names the setting that widens what an agent may write', 
   const { body } = loadSkill('remember');
   assert.match(body, /mcpLessonScope|MUBIT_MCP_LESSON_SCOPE/,
     'remember/SKILL.md does not name the setting that raises the scope ceiling (§6.2)');
+});
+
+// ---------------------------------------------------------------------------
+// §9 — link (SCOPE.md §6 Tier 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * The single most load-bearing line in the file, and the one a later "make it more useful"
+ * pass would delete first.
+ *
+ * A link widens what a run may **read**, durably, across every future session. Handing that
+ * to the model is the same class of mistake the MCP egress guard closed on the write side:
+ * an agent granting itself access to memory the user never connected. `disable-model-invocation`
+ * is what makes that structural rather than advisory — without it the skill's own description
+ * is an invitation, because it describes exactly the capability a stuck agent wants.
+ */
+test('link/SKILL.md is not model-invocable — a human declares the graph', () => {
+  const { fm } = loadSkill('link');
+  assert.equal(fm['disable-model-invocation'], true,
+    'skills/link/SKILL.md must set `disable-model-invocation: true` (SCOPE.md §6 "Not the LLM"). '
+    + 'A model-callable link route lets an agent widen its own read reach — the read-side twin '
+    + 'of the egress hole the MCP guard closed');
+});
+
+/**
+ * `disable-model-invocation` stops the model invoking it; the prose is what stops the model
+ * — or the next reader — reintroducing it as an MCP tool "for convenience". The asymmetry is
+ * the argument, so the argument has to be in the file rather than in a ticket nobody reads.
+ */
+test('link/SKILL.md carries the "Not the LLM" argument in the plugin\'s own voice', () => {
+  const { body } = loadSkill('link');
+  assert.match(body, /\bread\b/i,
+    'link must say that a link widens what a run may READ — the write side is not what is at stake');
+  assert.match(body, /durabl|permanent|future sessions|across sessions/i,
+    'link must say the widening is durable across future sessions, not scoped to this one');
+  assert.match(body, /\bnoise\b|one turn|costs? one/i,
+    'link must state the asymmetry: a bad recall costs one turn of noise (§6)');
+  assert.match(body, /silent|until (someone|somebody) notices|invisible/i,
+    'link must state the other half: a bad link is silent until someone notices an unrelated '
+    + 'project bleeding in (§6)');
+  assert.match(body, /human confirms|a human|the user confirms/i,
+    'link must say the model may notice and suggest, but a human confirms (§6)');
+  assert.match(body, /unlink/,
+    'link must name `unlink` as the revocation — the thing that makes a link safe to offer at all');
+});
+
+/**
+ * §6's ruling constraint: users never see run ids. `cc-plugin-lab-43f3807e` is a hash of a
+ * git toplevel, and a skill that told the model to pass one would push the hash straight back
+ * into the surface the whole design keeps it out of.
+ */
+test('link/SKILL.md addresses projects by directory, never by run id', () => {
+  const { body } = loadSkill('link');
+  assert.match(body, /director(y|ies)|path/i,
+    'link must say projects are addressed by directory (§6)');
+  assert.doesNotMatch(body, /\bcc-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}\b/,
+    'link/SKILL.md contains a literal run id. Users never see run ids (§6); putting one in the '
+    + 'skill teaches the model to ask for one');
+});
+
+/**
+ * The fact a user choosing *how many* projects to link needs, and the only place they will
+ * be choosing: recall reads the whole link graph, and reflect reads a narrower slice of it
+ * (ricedb `lib.rs:10309` — at most 3 linked runs x 20 traces). A mesh of four or more is
+ * therefore fully visible to recall and only partly visible to lesson extraction, which is
+ * a surprise worth spending two lines on rather than a bug report worth spending a day on.
+ */
+test('link/SKILL.md warns that reflect sees a narrower window than recall', () => {
+  const { body } = loadSkill('link');
+  assert.match(body, /reflect/i, 'link must mention reflect — it is the other reader of the graph');
+  assert.match(body, /\b3\b|\bthree\b/,
+    'link must name the ceiling: reflect consults at most three linked runs');
+  assert.match(body, /narrow|fewer|smaller|partly|only part/i,
+    'link must say the reflect window is narrower than recall\'s, or the number reads as a total');
+});
+
+/**
+ * Mesh, not hub. `linked_runs_for` returns `scope.linked_run_ids` without walking them, so a
+ * star leaves siblings unable to see each other while the surface says they are "linked".
+ * The skill has to describe what linking a group actually does, because that is the sentence
+ * a user checks their mental model against.
+ */
+test('link/SKILL.md says a group is linked pairwise, not through a hub', () => {
+  const { body } = loadSkill('link');
+  assert.match(body, /pair|mesh|each other|every pair/i,
+    'link must say that linking a group links every pair — one hop is all the backend walks, so '
+    + 'a hub-and-spoke graph strands the spokes from each other (SCOPE.md §6)');
 });

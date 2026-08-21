@@ -40,13 +40,12 @@ never runs, the counter never applies, and every step below passes while measuri
 That is not a plugin bug; it is what `static` means, and it is the first thing to check when
 step 6 shows memory that should be gone.
 
-> **`/mubit-memory:link` is delivered by ticket SC-09** (`feat/link-command`, §6 Tier 3).
-> Steps 8–9 and pass/fail item 5 are written against that intended surface and cannot pass
-> until it ships; SC-05 delivers steps 1–7 and the `previous_run_id` they read. The
-> Touchpoints fence below deliberately does **not** name a `link` skill — `lab ux --check`
-> exits non-zero on a scenario naming a touchpoint the plugin under test does not have, and
-> that alarm is worth more than an early entry. Add `skills: link*` to the fence in the same
-> commit that lands SC-09.
+> **`/mubit-memory:link` shipped in SC-09** (`feat/link-command`, §6 Tier 3), so steps 8–9 and
+> pass/fail item 5 are live: the whole scenario runs end to end against one branch. SC-05
+> delivers steps 1–7 and the `previous_run_id` they read; SC-09 reads it back. The Touchpoints
+> fence now names `link` — it deliberately did not while the skill was unbuilt, because
+> `lab ux --check` exits non-zero on a scenario naming a touchpoint the plugin under test does
+> not have, and that alarm was worth more than an early entry.
 
 ## Steps
 
@@ -93,9 +92,15 @@ const m=t.match(/reset by \/clear[^"]*/); console.log(m ? m[0] : "NOT SAID");'
 node "$PLUG/scripts/mubit-inspect.mjs" --data "$DATA" --runs
 ```
 
-**8 — `/mubit-memory:link`** (SC-09). With no argument it should offer the run named by
-`previous_run_id` — the session record already knows the answer, so the command should not have
-to ask.
+**8 — Reconnect it, with no argument.**
+
+```bash
+node "$PLUG/bin/link.mjs" link --json
+```
+
+With no argument this links the run named by `previous_run_id` and nothing else — the session
+record already knows the answer, so the command does not have to ask. `node "$PLUG/bin/link.mjs"`
+on its own lists what this project can now reach, with the pre-reset run marked `before /clear`.
 
 **9 — Ask the identical question a third time.**
 
@@ -127,7 +132,7 @@ still carrying its `-c1`.
 ```
 hooks:  SessionStart*, UserPromptSubmit, PostToolUse, Stop, SessionEnd
 tools:  mubit_recall
-skills: —
+skills: link*
 config: runStrategy, reflectOnEnd
 ```
 
@@ -140,8 +145,9 @@ config: runStrategy, reflectOnEnd
    defect this scenario was written for, and it is invisible to every other assertion.
 4. `previous_run_id` in step 7 names the step-4 run. **Hard.** Without it the memory is
    unreachable rather than set aside, and item 5 has nowhere to point.
-5. Step 9 injects at least one source again. **Hard, and blocked on SC-09.** Record it as
-   `blocked` until `feat/link-command` lands; do not report it as a failure of this branch.
+5. Step 9 injects at least one source again. **Hard.** This is the other half of the decision:
+   `/clear` forgets the thread, and one command gets it back. Without it the reset is a
+   shredder, and item 2 — which asks for the memory to be gone — would be the whole story.
 
 ## Known-not-bugs
 
@@ -164,7 +170,8 @@ config: runStrategy, reflectOnEnd
 | step 6 injects, run id did move | `mubit-inspect --cross-run` | recall is not scoped to the calling run; that is a backend scope bug, not `/clear` |
 | step 7 prints `NOT SAID` | `grep -c SessionStart "$TK/s2.log"` | the hook did not run on `source=clear`, or the note is gated on the wrong source |
 | `previous_run_id` is `(not cleared)` | the record's `clear_count` | a non-clear write landed after the clear and reset the pointer |
-| step 8 cannot find a run to link | step 7's `previous_run_id` | SC-09 reading a field this branch did not write, or reading it from the wrong session file |
+| step 8 exits 1 with `no_target` | step 7's `previous_run_id` | the pointer is empty, so there is nothing to reconnect — a non-clear write landed after the clear |
+| step 8 exits 2 | its `state` | the decision is recorded locally but Mubit did not confirm it; re-run it, and check the endpoint before blaming step 9 |
 
 ## Teardown
 

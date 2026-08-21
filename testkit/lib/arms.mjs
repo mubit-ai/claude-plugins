@@ -204,6 +204,9 @@ export const LEAK_PREFIXES = ['MUBIT_', 'CLAUDE_PLUGIN_'];
  * The kit's own variables, which share the `MUBIT_` prefix and are not leaks.
  *
  * `MUBIT_LAB_RESULTS` is set by the documented first line of the reuse loop.
+ * `MUBIT_LAB_PLUGIN_DIR` is how the kit is aimed at a plugin outside its own worktree — see
+ * `lib/paths.mjs` and the three test files that resolve the plugin under test. It arrived
+ * with SC-01 and spent its first hours failing the sweep it was set to run.
  * `MUBIT_MCP_LESSON_SCOPE` is the one lever the SCOPE.md §5 B1 experiment moves: it widens
  * the scope lessons are promoted to for a bounded window, which is the whole measurement.
  * Without it here, `checkEnvHygiene` reports it as a leak and blocks the sweep the variable
@@ -213,7 +216,11 @@ export const LEAK_PREFIXES = ['MUBIT_', 'CLAUDE_PLUGIN_'];
  * `MUBIT_ENDPOINT` from a local-server session silently measuring another instance, and that
  * one is still caught — by name, and by value.
  */
-export const KIT_OWNED_ENV = ['MUBIT_LAB_RESULTS', 'MUBIT_MCP_LESSON_SCOPE'];
+export const KIT_OWNED_ENV = [
+  'MUBIT_LAB_RESULTS',
+  'MUBIT_LAB_PLUGIN_DIR',
+  'MUBIT_MCP_LESSON_SCOPE',
+];
 
 /**
  * @param {Record<string,string|undefined>} [env]

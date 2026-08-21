@@ -9,6 +9,7 @@
  */
 
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -495,6 +496,24 @@ test('envLeaks does not report MUBIT_MCP_LESSON_SCOPE, which the B1 experiment s
     'B1 exports MUBIT_MCP_LESSON_SCOPE to measure a bounded cross-run window, and reporting it as a leak blocks the experiment it is required by');
   assert.equal(leaks[0]?.value, 'http://127.0.0.1:3100',
     'the leak this check was built for is an ambient endpoint silently measuring another instance, and it must still be caught by name and value');
+});
+
+// N3h: the sentinel polls between attempts, and an awaited timer that is `unref()`d does not
+// hold the event loop open. Node then exits **0** the moment nothing else does — mid-check,
+// with `renderChecks` never reached. `lab preflight` printed nothing, gated nothing, and
+// reported success, which is the exact failure mode this whole file exists to make
+// impossible. Caught by running the gate for real against the hosted instance; every offline
+// test passed throughout, because none of them awaited the sleep.
+test('the sentinel poll sleep keeps the event loop alive', () => {
+  const mod = pathToFileURL(join(KIT_ROOT, 'lib', 'preflight.mjs')).href;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import { sleep } from ${JSON.stringify(mod)};
+     await sleep(40);
+     process.stdout.write('alive');`], { encoding: 'utf8', timeout: 10_000 });
+
+  assert.equal(r.stdout, 'alive',
+    'an awaited sleep that does not hold the event loop open lets node exit 0 in the middle of the gate — preflight then prints nothing, checks nothing, and looks like a pass');
+  assert.equal(r.status, 0, 'the probe itself must exit cleanly, or the assertion above is measuring the wrong thing');
 });
 
 // SC-01: the kit resolves the plugin under test from `MUBIT_LAB_PLUGIN_DIR || LAB_ROOT`, so

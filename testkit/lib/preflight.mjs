@@ -230,7 +230,7 @@ const SENTINEL_LANDING_MS = 20_000;
 const SENTINEL_POLL_MS = 500;
 
 /** @param {number} ms */
-const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, Math.max(0, ms)); t.unref?.(); });
+export const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, Math.max(0, ms)); t.unref?.(); });
 
 /**
  * §8.1 — the product's actual contract: write a sentinel through the plugin's own ingest

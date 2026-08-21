@@ -21,10 +21,11 @@ codex plugin marketplace add /path/to/this/repo
 codex plugin add mubit-memory@mubit
 ```
 
-Then, in a Codex session:
+Then either ask a Codex session to run `mubit-memory:setup`, or do it yourself:
 
-```
-mubit-memory:setup
+```bash
+node ~/.codex/plugins/cache/mubit/mubit-memory/0.10.0/scripts/setup.mjs \
+     ~/.codex/plugins/cache/mubit/mubit-memory/0.10.0
 ```
 
 **That second step is not optional, and skipping it gives you a plugin that installs
@@ -41,6 +42,11 @@ recorded against a live host in [`docs/harness-probe.md`](docs/harness-probe.md)
 So `hooks.json` and `.mcp.json` ship here as **templates**, and `setup` installs them into the
 user layer with this plugin's absolute path substituted: the registrations merge into
 `$CODEX_HOME/hooks.json`, and the server is registered with `codex mcp add mubit`.
+
+The script merges rather than overwrites (other tools' hooks in `~/.codex/hooks.json` are
+kept), backs up both files it touches to `<name>.before-mubit`, and is idempotent — re-run it
+after every plugin upgrade. `--no-trust` skips the trust step; `--with-pre-tool` adds the
+`PreToolUse` registration.
 
 `setup` will also offer to record hook trust for you, and will ask before it does. A
 registered hook does not run until it is trusted, and under `codex exec` an untrusted hook is

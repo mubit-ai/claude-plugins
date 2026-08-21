@@ -36,6 +36,24 @@ ls "<plugin-root>/hooks/dist/capture.mjs" "<plugin-root>/mcp/dist/index.js"
 Both must exist. They are committed artifacts — there is no build step at install time — so if
 either is missing the install is damaged and reinstalling is the fix, not anything below.
 
+## Steps 1-3, as one command
+
+The mechanical half of this — substitute, merge, register, trust — is
+`<plugin-root>/scripts/setup.mjs`, so you do not have to hand-roll a JSON-RPC handshake to
+read the trust hashes:
+
+```bash
+node "<plugin-root>/scripts/setup.mjs" "<plugin-root>"
+```
+
+**Read step 3 before you run it**, because that command records hook trust and that is the
+user's decision, not yours. Pass `--no-trust` to do everything except that, and
+`--with-pre-tool` to include the `PreToolUse` registration. The script merges rather than
+overwrites, backs up both files it touches, and trusts only hooks under this plugin root.
+
+What follows is what it does, and what to tell the user about each part. If the script is
+missing — an older install — do it by hand as described; the results are identical.
+
 ## Step 1 — merge the hook registrations
 
 Read `<plugin-root>/hooks.json`, replace every `{{PLUGIN_ROOT}}` with the resolved path, and

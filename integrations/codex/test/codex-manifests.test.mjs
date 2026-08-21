@@ -420,6 +420,34 @@ test('all seven skills are present, one directory each', () => {
   }
 });
 
+test('the setup script exists, and the setup skill points at it', () => {
+  const script = join(CODEX_ROOT, 'scripts', 'setup.mjs');
+  // § Codex needs an install step that no other host does — the registrations and the MCP
+  //   server both have to be written into the user layer with an absolute path — and the
+  //   fiddliest part of it, reading each hook's trust hash back out of the app server, is not
+  //   something to ask a model to improvise per install.
+  assert.ok(existsSync(script),
+    'scripts/setup.mjs is missing. Without it /mubit-memory:setup has to hand-roll a JSON-RPC '
+    + 'handshake against `codex app-server` on every install.');
+  const skill = readOrFail(join(P.skills, 'setup', 'SKILL.md'), 'the setup skill.');
+  assert.match(skill, /scripts\/setup\.mjs/,
+    'the setup skill must name the script, or the two drift into different install procedures.');
+  assert.match(skill, /--no-trust/,
+    'the skill must document the escape hatch for a user who would rather approve the hooks '
+    + 'themselves in /hooks. Trust is their decision.');
+});
+
+test('the setup script never trusts a hook that is not this plugin`s', () => {
+  const src = readOrFail(join(CODEX_ROOT, 'scripts', 'setup.mjs'), 'the setup script.');
+  // § `hooks/list` returns every hook Codex can see, including other tools'. Writing the whole
+  //   result into config.toml would silently approve someone else's hook on the user's behalf
+  //   — which is precisely the control the trust mechanism exists to be.
+  assert.match(src, /\.filter\(/,
+    'the hooks/list result must be filtered before anything is written to config.toml.');
+  assert.match(src, /before-mubit/,
+    'the script must back up hooks.json and config.toml before it edits them.');
+});
+
 test('.gitignore re-includes the committed artifact directories', () => {
   const raw = readOrFail(P.gitignore, 'the artifact negations; see its own comment.');
   for (const dir of ['hooks/dist', 'mcp/dist', 'bin']) {

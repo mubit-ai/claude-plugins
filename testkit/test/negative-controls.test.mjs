@@ -254,11 +254,13 @@ async function storingInstanceSlowQuery({ delayMs }) {
       return { json: { accepted: true, job_id: 'job_slow_1', status: 'queued' } };
     },
     'GET /v2/control/ingest/jobs': { json: { job_id: 'job_slow_1', status: 'completed', done: true } },
-    'POST /v2/control/query': async (r) => {
-      await new Promise((res) => { setTimeout(res, delayMs); });
+    // `delayMs` on the reply, not an async handler: `fakeMubit` calls route functions without
+    // awaiting them, so an async one resolves to a Promise, `reply.json` reads `undefined`,
+    // and the fake answers `{}` — a slow instance silently modelled as an empty one.
+    'POST /v2/control/query': (r) => {
       const q = String(r.body?.query ?? '');
       const hits = q ? (stored.get(String(r.body?.run_id ?? '')) ?? []).filter((t) => t.includes(q)) : [];
-      return { json: { evidence: hits.map((content, i) => ({
+      return { delayMs, json: { evidence: hits.map((content, i) => ({
         id: `e${i}`, reference_id: `ref_${i}`, entry_type: 'lesson', score: 0.9, content,
       })) } };
     },
@@ -529,13 +531,13 @@ test('envLeaks does not report MUBIT_MCP_LESSON_SCOPE, which the B1 experiment s
     'the leak this check was built for is an ambient endpoint silently measuring another instance, and it must still be caught by name and value');
 });
 
-// N3i: the read-back is the one call in the sentinel with no budget floor. Ingest already
+// N3j: the read-back is the one call in the sentinel with no budget floor. Ingest already
 // gets `max(budgetMs, 10_000)` and the job poll `max(budgetMs, 5000)`, but the query that
 // decides the check ran on the bare per-prompt budget — and `kit.json` ships 1500 ms, which
 // is a recall budget for a warm index, not for a nonce queried the instant it was written.
 // Measured against api.mubit.ai: the read takes ~3.2 s cold, so the default preflight failed
 // with `aborted after 1457ms` on a backend that was working perfectly.
-test('N3i — a slow first read does not fail the sentinel at the shipped 1500ms budget', async () => {
+test('N3j — a slow first read does not fail the sentinel at the shipped 1500ms budget', async () => {
   const { server } = await storingInstanceSlowQuery({ delayMs: 2200 });
   try {
     const checks = await checkRecallCanary({

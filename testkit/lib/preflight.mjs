@@ -229,8 +229,34 @@ const SENTINEL_LANDING_MS = 20_000;
 /** Gap between job polls and between read-back attempts. */
 const SENTINEL_POLL_MS = 500;
 
-/** @param {number} ms */
-export const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, Math.max(0, ms)); t.unref?.(); });
+/**
+ * Floor for the sentinel's read-back, independent of `budgetMs`.
+ *
+ * `budgetMs` is the *per-prompt* recall budget — `kit.json` ships 1500 ms, and it is
+ * documented as the hook's internal budget against a warm index. The sentinel asks the
+ * opposite question: a nonce, queried the instant it was written, against an index that has
+ * never seen it. Measured against api.mubit.ai, that read takes ~3.2 s while an ordinary
+ * prompt-path recall on the same instance returns in ~1.2 s.
+ *
+ * So dialing the sentinel at the prompt budget makes the gate red on a backend that works,
+ * which is the failure this whole split exists to end. Ingest and the job poll already carry
+ * floors for the same reason (`max(budgetMs, 10_000)` and `max(budgetMs, 5000)`); this is the
+ * third, on the call that actually decides the check.
+ */
+const SENTINEL_READ_MS = 8000;
+
+/**
+ * Gap between polls, and it must **hold the event loop open**.
+ *
+ * Not `unref()`d, deliberately and with a test on it (N3h). An unref'd timer lets node exit
+ * the moment nothing else is pending — which, at the first poll with no socket in flight, is
+ * immediately. The awaited promise never resolves, `preflight()` never returns, and the
+ * process exits **0** having printed nothing and checked nothing. A gate that reports success
+ * by falling silent is worse than no gate.
+ *
+ * @param {number} ms
+ */
+export const sleep = (ms) => new Promise((r) => { setTimeout(r, Math.max(0, ms)); });
 
 /**
  * §8.1 — the product's actual contract: write a sentinel through the plugin's own ingest
@@ -335,7 +361,13 @@ async function checkSameRunSentinel({ httpMod, recallMod, cfg, budgetMs, landing
       runId,
       agentId: 'tk-preflight',
       query: nonce,
-      deadline: Date.now() + budgetMs,
+      // Floored at SENTINEL_READ_MS, and deliberately NOT clamped to `landBy`. Clamping
+      // starves the final attempt exactly when the landing window is nearly spent, so a
+      // stalled ingest — which is diagnosed below, correctly, as ingest lag — comes back as
+      // `budget_exhausted` against a query that was never given time to answer. The loop's
+      // own `Date.now() + SENTINEL_POLL_MS >= landBy` is what bounds the retries; letting the
+      // last read run to completion past that is honest, and costs one request.
+      deadline: Date.now() + Math.max(budgetMs, SENTINEL_READ_MS),
       projectDir: process.cwd(),
     });
     reads += 1;

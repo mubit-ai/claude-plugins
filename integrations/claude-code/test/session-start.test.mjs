@@ -1179,3 +1179,37 @@ test('the same-remote offer stays inside the SessionStart budget', async (t) => 
   await assertWithinBudget('session-start --link-offer', 3200, r.ms,
     async () => (await sample()).ms);
 });
+
+// SC-10, found by driving the built hook headlessly. The offer's decline was written the
+// moment the offer was RENDERED, so one `claude --print` — CI, a script, or the testkit's own
+// `checkArms`, which starts two headless sessions on every preflight — consumed it for good.
+// Nobody was there to read the preamble, and the pair is answered forever.
+//
+// "Silence is the no" is right for a human who saw the question. It is not an answer from a
+// session that had no human in it, and the hook cannot tell those apart: there is no
+// interactivity signal on a SessionStart payload. So an offer is counted, and only a pair that
+// has been offered OFFER_LIMIT times reads as declined.
+test('an offer nobody could have seen does not answer for the user', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const here = makeProjectDir({ git: true, remote: REMOTE });
+  seedProject(dataDir, 'sess-far', {
+    run_id: 'cc-faraway-5e6f7a8b',
+    project_dir: makeProjectDir(),
+    git_remote: REMOTE,
+    last_seen_at: Date.now() - (2 * DAY),
+  });
+
+  const first = linkSection((await startIn(dataDir, server, here)).json.hookSpecificOutput.additionalContext);
+  assert.ok(first, 'the first session in a second checkout is exactly when the question becomes real');
+
+  const second = linkSection((await startIn(dataDir, server, here)).json.hookSpecificOutput.additionalContext);
+  assert.ok(second, 'one unattended render must not answer for a human who was never shown it — '
+    + 'the testkit alone starts two headless sessions per preflight, and each would burn one');
+
+  await startIn(dataDir, server, here);
+  const fourth = linkSection((await startIn(dataDir, server, here)).json.hookSpecificOutput.additionalContext);
+  assert.equal(fourth, '', 'it still has to stop: an offer that returns every session is the nag '
+    + '§6 says it must never become');
+});

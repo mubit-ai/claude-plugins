@@ -870,3 +870,120 @@ test('deriveRunId(cfg, {}) still answers from CLAUDE_PROJECT_DIR after the sessi
   assert.equal(withEnv(env, () => runid.deriveRunId(config.loadConfig(env), {})), bare,
     'the empty-payload derivation is the launcher\'s and the status line\'s; it may not move');
 });
+
+// ===========================================================================
+// §6 Tier 2 — the origin remote, cached on the record
+// ===========================================================================
+
+/*
+ * SCOPE.md §6 measured the signal that partitions projects the way a human would: six
+ * directories, six run ids, two git remotes, two groups. Tier 2 proposes a link the first
+ * time a second checkout of one repository shows up, and `SessionStart` is where it has to
+ * notice — which is the one place that cannot afford to ask.
+ *
+ * `git remote get-url origin` per candidate would be a process spawn per project in the
+ * session map, on the spawn path, inside the 400/600/900 ms sub-budgets, measured on a cold
+ * FS. So the remote is resolved once and stored, exactly as `project_root` is and for exactly
+ * the reason its own comment gives: the reader should not have to work it out, and the reader
+ * here is a hook with a deadline.
+ */
+
+/** The origin `makeProjectDir({remote})` sets, and what `git config --get` must report back. */
+const ORIGIN = 'git@github.com:acme/storefront.git';
+
+// §6 Tier 2: without this field the offer has nothing to match on but a shell-out per session.
+test('the session record caches the repo origin the run was derived from', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repo = makeProjectDir({ git: true, remote: ORIGIN });
+  const env = envFor(dataDir, repo, 'per-directory');
+
+  derive(config, runid, env, fx.sessionStart({ cwd: repo }));
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.git_remote, ORIGIN,
+    'the record must carry this project\'s origin, or the Tier 2 offer can only get it by '
+    + 'spawning git once per candidate on every SessionStart');
+});
+
+/*
+ * The caching itself, asserted rather than inferred from a stopwatch. A budget test on a warm
+ * FS passes happily while the shell-out is still there; this one cannot, because the value on
+ * the record and the value `git` would report are deliberately different. If the write
+ * re-resolves, the sentinel is gone and the live origin is in its place.
+ */
+test('a remote already on the record is inherited, not resolved again', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repo = makeProjectDir({ git: true, remote: ORIGIN });
+  const env = envFor(dataDir, repo, 'per-directory');
+
+  // A first session stamps the record; the run id and the root are then whatever this
+  // machine derives, which is what the reuse branch has to agree with.
+  const runId = derive(config, runid, env, fx.sessionStart({ cwd: repo }));
+  const stamped = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(stamped.git_remote, ORIGIN,
+    'the first write is what there is to inherit; with nothing on the record the sentinel '
+    + 'below survives because nobody ever writes the field, which proves nothing');
+  withEnv(env, () => runid.saveSessionMap(fx.SESSION_ID, {
+    ...stamped,
+    git_remote: 'git@github.com:acme/cached-not-resolved.git',
+    // Older than TOUCH_INTERVAL_MS, so the next hook actually rewrites the file. Without
+    // this the record is left alone and the assertion below passes for the wrong reason.
+    last_seen_at: Date.now() - (5 * 60 * 1000),
+  }));
+
+  // No `source`: the branch every hook after SessionStart takes.
+  assert.equal(derive(config, runid, env, fx.postToolUse({ cwd: repo })), runId,
+    'the reuse branch is the one under test; a moved run would mean a different write path');
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.git_remote, 'git@github.com:acme/cached-not-resolved.git',
+    `a record that already knows the remote must not spawn git again — got ${rec.git_remote}, `
+    + `which is what "git config --get remote.origin.url" answers in ${repo}`);
+});
+
+// The invalidation rule, and the only one there is: the cache is about a root, so a session
+// that moves to another repo must not carry the first repo's remote into the second's record.
+// Without this a mid-session `cd` would group two unrelated repositories forever.
+test('a session that moves to another repo re-resolves the remote', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repoA = makeProjectDir({ git: true, remote: ORIGIN });
+  const repoB = makeProjectDir({ git: true, remote: 'git@github.com:acme/pricing.git' });
+  const env = envFor(dataDir, repoA, 'per-directory');
+
+  derive(config, runid, env, fx.sessionStart({ cwd: repoA }));
+  derive(config, runid, env, fx.postToolUse({ cwd: repoB }));
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.git_remote, 'git@github.com:acme/pricing.git',
+    'the cached remote belongs to the recorded root; carrying A\'s origin into B\'s record '
+    + 'would make two unrelated repositories look like one group');
+});
+
+// Upgrade safety, the property `project_root` documents for itself. A record written before
+// the field existed says nothing about the remote, and "unknown" must read as "resolve it",
+// never as "this project has no remote" — which would silently disable the offer for every
+// session already on disk.
+test('a session record with no git_remote is stamped with one on the next write', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repo = makeProjectDir({ git: true, remote: ORIGIN });
+  const env = envFor(dataDir, repo, 'per-directory');
+
+  // `record()` is the §4.3 shape as it shipped: no `git_remote` key at all.
+  withEnv(env, () => runid.saveSessionMap(fx.SESSION_ID, record({
+    run_id: 'cc-upgraded-deadbeef', project_dir: repo, project_root: realpathSync(repo),
+  })));
+  derive(config, runid, env, fx.postToolUse({ cwd: repo }));
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.git_remote, ORIGIN,
+    'an absent field is unknown, not empty; leaving it empty would keep every pre-upgrade '
+    + 'session out of the Tier 2 offer for as long as it lives');
+});

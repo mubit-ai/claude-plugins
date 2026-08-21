@@ -447,6 +447,111 @@ test('source=clear: produces a NEW run id with an incrementing -c<n>', async () 
   assert.equal(readJsonFile(sessionFile(dataDir, fx.SESSION_ID)).clear_count, 2);
 });
 
+/*
+ * §4.3, I5 — where the memory went.
+ *
+ * The reset above is defensible: `/clear` means "forget the thread", and a user who typed it
+ * and then got the thread back would be right to complain. What is not defensible is that the
+ * run it was cleared from left no trace anywhere — so a session that reset its project memory
+ * by accident had nothing on disk pointing at what it lost, and no way to ask for it back.
+ *
+ * `previous_run_id` is data only. No route, no HTTP, nothing that has to exist yet: SC-09's
+ * `/mubit-memory:link` is what consumes it, and it can be written and read long before that.
+ */
+
+// §4.3/I5: the record written on a clear names the run the session was in before it.
+test('source=clear: the record names the run it was cleared from', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'per-directory');
+
+  const base = derive(config, runid, env, fx.sessionStart({ source: 'startup' }));
+  const cleared = derive(config, runid, env, fx.sessionStart({ source: 'clear' }));
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.run_id, cleared, 'the record must follow the new run');
+  assert.equal(rec.previous_run_id, base,
+    'without this the memory a /clear set aside is unreachable: nothing on disk relates the '
+    + 'run the session is now in to the one it was in a moment ago');
+});
+
+// §4.3/I5: the pointer describes the *current* run's provenance, so a second clear points one
+// step back and not all the way to the original. Otherwise `-c2` claims to have come from a
+// run it did not come from, and reconnecting it would rejoin the wrong thread.
+test('source=clear: a second clear points at the -c1 run, not the original', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'per-directory');
+
+  const base = derive(config, runid, env, fx.sessionStart({ source: 'startup' }));
+  const cleared1 = derive(config, runid, env, fx.sessionStart({ source: 'clear' }));
+  const cleared2 = derive(config, runid, env, fx.sessionStart({ source: 'clear' }));
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.run_id, cleared2);
+  assert.equal(rec.previous_run_id, cleared1,
+    `-c2 came from ${cleared1}, not from ${base}; one step back is the only true answer`);
+});
+
+/*
+ * The other half, and the one an implementation gets wrong by writing the field and stopping:
+ * `rememberRun` spreads `...inherited`, so anything left in a record rides forward into every
+ * later write for free. A `previous_run_id` that outlives the run it described is worse than
+ * no field at all — it points a recovery command at a run this session never came from.
+ */
+test('source=startup/resume: no previous_run_id, and a clear\'s does not ride forward', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'per-directory');
+  const read = () => readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+
+  const base = derive(config, runid, env, fx.sessionStart({ source: 'startup' }));
+  assert.equal(read().previous_run_id ?? '', '',
+    'startup deliberately discards the mapping; there is no run it "came from"');
+
+  const cleared = derive(config, runid, env, fx.sessionStart({ source: 'clear' }));
+  assert.equal(read().previous_run_id, base, 'the clear is what sets the pointer');
+
+  // Back to a fresh derivation on the same host session id. The run moved for a reason that
+  // is not a clear, so the stored pointer no longer describes the run the record names.
+  assert.equal(derive(config, runid, env, fx.sessionStart({ source: 'startup' })), base);
+  assert.equal(read().previous_run_id ?? '', '',
+    `a startup back onto ${base} must not keep claiming it was cleared from ${cleared}`);
+
+  // resume reuses the mapped run and says nothing new about where it came from.
+  derive(config, runid, env, fx.sessionStart({ source: 'resume' }));
+  assert.equal(read().previous_run_id ?? '', '', 'a resume is not a reset');
+});
+
+/*
+ * Upgrade safety, the same property `project_root` documents for itself: a record written
+ * before the field existed says nothing about where its run came from, and "unknown" must
+ * read as unknown rather than as a broken record or a moved one.
+ */
+test('a session record written before previous_run_id existed reads as unknown', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'per-directory');
+
+  // Written raw rather than through `saveSessionMap`, which normalises and would stamp the
+  // very field this test is about.
+  mkdirSync(join(dataDir, 'sessions'), { recursive: true });
+  writeFileSync(sessionFile(dataDir, fx.SESSION_ID),
+    JSON.stringify(record({ run_id: 'cc-upgraded-deadbeef' })));
+
+  const loaded = withEnv(env, () => runid.loadSessionMap(fx.SESSION_ID));
+  assert.equal('previous_run_id' in loaded, false,
+    'the fixture is the §4.3 shape as it shipped, or this test proves nothing');
+
+  assert.equal(derive(config, runid, env, fx.sessionStart({ source: 'resume' })),
+    'cc-upgraded-deadbeef',
+    'an unknown previous run is not a reason to move a live session to a new one');
+});
+
 // §4.3: resume with nothing mapped (fresh install, restored terminal) still has
 // to answer with a real run id.
 test('source=resume: derives when there is no session record at all', async () => {

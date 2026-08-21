@@ -497,6 +497,21 @@ test('envLeaks does not report MUBIT_MCP_LESSON_SCOPE, which the B1 experiment s
     'the leak this check was built for is an ambient endpoint silently measuring another instance, and it must still be caught by name and value');
 });
 
+// SC-01: the kit resolves the plugin under test from `MUBIT_LAB_PLUGIN_DIR || LAB_ROOT`, so
+// the env var is the documented way to point it at a plugin in another worktree. It is
+// therefore kit-owned by construction — and until this test, using it failed the sweep as a
+// leak, which is the one variable whose whole purpose is to be set on purpose.
+test('envLeaks does not report MUBIT_LAB_PLUGIN_DIR, which is how the kit is aimed', () => {
+  const leaks = envLeaks({
+    MUBIT_LAB_PLUGIN_DIR: '/Users/x/Mubit/some-worktree',
+    MUBIT_ENDPOINT: 'http://127.0.0.1:3100',
+  });
+  assert.deepEqual(leaks.map((l) => l.name), ['MUBIT_ENDPOINT'],
+    'the kit documents MUBIT_LAB_PLUGIN_DIR as the override for measuring a plugin elsewhere; reporting it as a leak refuses the sweep it was set to run');
+  assert.equal(leaks[0]?.value, 'http://127.0.0.1:3100',
+    'an ambient endpoint must still be caught by name and value — adding a kit-owned name must never widen the check');
+});
+
 // §8.3 loose end 1: README:112 and bin/lab.mjs:18 both claimed `compare` refuses to place a
 // degraded run beside a trusted one. It does not — :575 WARNs and :627 stamps `trusted` on
 // the index row — and refusing outright would strand a legitimately-degraded overhead

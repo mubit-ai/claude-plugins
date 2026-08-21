@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -75,6 +75,22 @@ function record(over = {}) {
 
 /** @param {string} cwd @param {string[]} args */
 function git(cwd, args) { spawnSync('git', args, { cwd, stdio: 'ignore' }); }
+
+/**
+ * The §4.8 ring log, parsed. Read through the real sink — a temp data dir plus
+ * `MUBIT_CC_LOG_LEVEL` — rather than by stubbing `log`, so what is asserted is
+ * the line a user pastes into an issue and not a call this test arranged.
+ * @param {string} dataDir
+ * @returns {Record<string, any>[]}
+ */
+function logLines(dataDir) {
+  const p = join(dataDir, 'logs', 'mubit-cc.log');
+  if (!existsSync(p)) return [];
+  return readFileSync(p, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+}
+
+/** The four §4.3 strategies, spelled out here so a rename has to be made twice. */
+const LEGAL_STRATEGIES = ['per-directory', 'git-branch', 'per-conversation', 'static'];
 
 const HASH8 = /-[0-9a-f]{8}$/;
 
@@ -181,6 +197,105 @@ test('static: a run id with unusual but harmless characters is still accepted', 
 
   assert.equal(derive(config, runid, env, fx.sessionStart()), 'cc-a:b*c',
     'the wire value is the pin verbatim; only the path segment is flattened');
+});
+
+/*
+ * §4.3, I6 — a value that is not one of the four.
+ *
+ * The fallback is deliberate and stays: `normaliseStrategy` is on the path of every hook, and
+ * throwing on a typo would take a live session's run id away over a config error the user
+ * cannot see mid-session. Contrast `staticRunId` above, which *does* throw — and is right to,
+ * because there is no honest answer for an unset pin, whereas here there is a documented
+ * default.
+ *
+ * What was wrong was the silence. `testkit/ux/scenarios/W2-02-branch-switch.md` set
+ * `MUBIT_CC_RUN_STRATEGY=repo` — not a strategy — and ran under `per-directory` for its whole
+ * life, where a branch switch does not move the run id. It would have passed while proving the
+ * exact opposite of its own claim, and nothing anywhere said so.
+ */
+
+// §4.3: the fallback itself must not regress — an unrecognised value is still per-directory.
+test('an unrecognised run strategy still falls back to per-directory', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const projectDir = makeProjectDir({ git: true });
+  // Separate data dirs and session ids: no session map may be doing the work the fallback is
+  // supposed to be doing.
+  const sid = (n) => fx.sessionStart({ session_id: `ffffffff-0000-0000-0000-00000000000${n}` });
+
+  const bad = derive(config, runid, envFor(makeDataDir(), projectDir, 'repo'), sid(1));
+  const good = derive(config, runid, envFor(makeDataDir(), projectDir, 'per-directory'), sid(2));
+
+  assert.equal(bad, good,
+    'a typo in MUBIT_CC_RUN_STRATEGY must not take the run id away from a live session');
+});
+
+// §4.3/I6: the fallback is now *said*. One warn line, naming the value received and all four
+// legal strategies, is the difference between a misconfiguration and an invisible one.
+test('an unrecognised run strategy warns, naming the value and the four legal strategies', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'repo',
+    { MUBIT_CC_LOG_LEVEL: 'warn' });
+
+  derive(config, runid, env, fx.sessionStart());
+
+  const warnings = logLines(dataDir).filter((l) => l.level === 'warn');
+  assert.equal(warnings.length, 1,
+    `an unrecognised strategy must warn exactly once, got:\n${JSON.stringify(warnings, null, 2)}`);
+  assert.ok(warnings[0].msg.includes('repo'),
+    `the warning must name the value received, got: ${warnings[0].msg}`);
+  for (const s of LEGAL_STRATEGIES) {
+    assert.ok(warnings[0].msg.includes(s),
+      `the warning must name "${s}" as a legal strategy, or it says what is wrong without `
+      + `saying what is right, got: ${warnings[0].msg}`);
+  }
+});
+
+// §4.8: once, not per call. `normaliseStrategy` runs on every `deriveRunId` and `deriveRunId`
+// runs in every hook, so a line per invocation would flood the ring log — and rotating it is
+// the one way this warning could cost a hook its budget.
+test('an unrecognised run strategy warns once per process, not once per derivation', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'nonsense',
+    { MUBIT_CC_LOG_LEVEL: 'warn' });
+
+  derive(config, runid, env, fx.sessionStart());
+  derive(config, runid, env, fx.postToolUse());
+  derive(config, runid, env, fx.stop());
+
+  assert.equal(logLines(dataDir).filter((l) => l.level === 'warn').length, 1,
+    'three derivations in one process must produce one warning, not three');
+});
+
+// The ordinary case, and by far the common one: nothing set at all. `lib/config.mjs` resolves
+// an unset `MUBIT_CC_RUN_STRATEGY` to `per-directory`, which is not a misconfiguration and
+// must not be reported as one — a warning every session would train users to ignore the log.
+test('an unset or blank run strategy is silent', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const projectDir = makeProjectDir({ git: true });
+
+  for (const [name, value] of [['unset', undefined], ['blank', '   ']]) {
+    const dataDir = makeDataDir();
+    const env = baseEnv({
+      dataDir,
+      projectDir,
+      extra: {
+        MUBIT_CC_RUN_STRATEGY: /** @type {any} */ (value),
+        MUBIT_CC_RUN_ID: undefined,
+        MUBIT_CC_LOG_LEVEL: 'warn',
+      },
+    });
+
+    derive(config, runid, env, fx.sessionStart());
+
+    assert.deepEqual(logLines(dataDir).filter((l) => l.level === 'warn'), [],
+      `an ${name} run strategy is the documented default, not a misconfiguration`);
+  }
 });
 
 // ===========================================================================

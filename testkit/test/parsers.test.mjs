@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 
 import { hookBudgets, parseDebugLog, parseRingLog, parseTokens, parseTranscripts } from '../lib/latency.mjs';
 import { readInit, readResult, pluginLoaded, toTrial } from '../lib/metrics.mjs';
+import { resolvePluginDir, LAB_ROOT } from '../lib/paths.mjs';
 import { median, percentile, signTest, pairedDelta } from '../lib/stats.mjs';
 
 test('parseTokens expands the k suffix — the bug a naive grep ships with', () => {
@@ -88,7 +89,7 @@ test('parseTranscripts reads stop_hook_summary and ignores every other subtype',
 });
 
 test('hookBudgets reads the plugin under test, not a hardcoded table', () => {
-  const b = hookBudgets('/Users/eldaru/Mubit/pre-main/integrations/claude-code');
+  const b = hookBudgets(resolvePluginDir(process.env.MUBIT_LAB_PLUGIN_DIR || LAB_ROOT));
   assert.equal(b.UserPromptSubmit, 3000);
   assert.equal(b.SessionEnd, 8000);
   assert.equal(b.PreCompact, 10000);

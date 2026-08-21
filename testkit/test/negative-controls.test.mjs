@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { integrity, noiseFloor, abTable, dropWarmup } from '../lib/report.mjs';
-import { resolvePluginDir } from '../lib/paths.mjs';
+import { resolvePluginDir, LAB_ROOT } from '../lib/paths.mjs';
 import { checkEnvHygiene, checkRecallCanary } from '../lib/preflight.mjs';
 import { buildRun, disableSettings, envLeaks } from '../lib/arms.mjs';
 
@@ -132,7 +132,7 @@ test('N2c — four pairs cannot reach p<0.05 and the table says so rather than c
 /* -------------------------------------------------------------------------- */
 
 test('N3 — an unreachable endpoint fails the canary, naming recall rather than a generic timeout', async () => {
-  const pluginDir = resolvePluginDir('/Users/eldaru/Mubit/pre-main');
+  const pluginDir = resolvePluginDir(process.env.MUBIT_LAB_PLUGIN_DIR || LAB_ROOT);
   const checks = await checkRecallCanary({
     pluginDir,
     query: 'anything',

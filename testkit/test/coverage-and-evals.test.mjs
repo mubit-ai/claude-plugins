@@ -15,9 +15,9 @@ import { tmpdir } from 'node:os';
 
 import { coverage, groundTruth, loadScenarios, parseScenario, FAMILIES, MOMENTS } from '../lib/ux.mjs';
 import { install, uninstall, listCases, readAggregate, writeShimAggregate, LINK_NAME } from '../lib/evals.mjs';
-import { resolvePluginDir, KIT_ROOT } from '../lib/paths.mjs';
+import { resolvePluginDir, KIT_ROOT, LAB_ROOT } from '../lib/paths.mjs';
 
-const PLUGIN = resolvePluginDir('/Users/eldaru/Mubit/pre-main');
+const PLUGIN = resolvePluginDir(process.env.MUBIT_LAB_PLUGIN_DIR || LAB_ROOT);
 
 /* -------------------------------------------------------------------------- */
 /* coverage                                                                    */

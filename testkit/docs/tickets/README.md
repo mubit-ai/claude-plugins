@@ -1,5 +1,17 @@
 # Ticket register — memory scope fixes
 
+**All twelve are landed on `plugin-scope-fix`.** Final gates: plugin 1167/1167 (source and
+dist), testkit 61/61, `verify-manifests` passed, dist a fixed point, `lab ux --check` exit 0 at
+20 scenarios with hooks 13/13 · tools 10/10 · skills 8/8, and `lab preflight` green against
+`api.mubit.ai` on all eight checks.
+
+Four defects were found by *running* the work rather than testing it, and each has its own
+commit: `lab preflight` exiting 0 having printed and checked nothing (an `unref()`d timer it
+awaited); the sentinel read dialing a per-prompt budget it could not meet; the picker listing a
+`/clear`ed project twice under one label; and the Tier 2 offer being answered permanently by a
+single headless render. See `../W2-01-baseline-walk.md`, `../SC-08-e2e-walk.md` and
+`integrations/claude-code/docs/manual-test-scope.md` for the measurements.
+
 Twelve tickets derived from [`../SCOPE.md`](../SCOPE.md). Each file states the defect, the
 exact call sites, the test that must go red first, and how to verify it green.
 

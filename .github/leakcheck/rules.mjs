@@ -57,6 +57,9 @@ export const CONFIG = {
     '.github/leakcheck/POLICY.md',
     '.github/scripts/leakcheck.mjs',
     '.github/scripts/llm-leak-review.mjs',
+    // Its fixtures are synthetic leaks on purpose — that is the whole point of it.
+    '.github/scripts/leakcheck.selftest.mjs',
+    '.github/leakcheck/rules.local.example.mjs',
     'package-lock.json',
     '**/package-lock.json',
   ],

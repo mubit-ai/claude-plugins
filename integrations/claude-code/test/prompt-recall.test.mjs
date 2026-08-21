@@ -10,7 +10,7 @@
  *   | query{mode:"agent_routed",  evidence_only}    |     1     |  ← rung 2, only on a 403
  *   | context{mode:"sections"}                      |     2     |  ← rung 3, opt-in only
  *
- * `/v2/control/context` is not the cheap assembly path its name suggests: it is the most
+ * `/v2/control/context` is not the cheap assembly path its name implies: it is the most
  * expensive of the three requests above, and the synthesized answer it pays for is one the
  * recall hook throws away. So the hook is query-first and treats `context` as the last rung
  * — the inverse of what the endpoint names suggest.

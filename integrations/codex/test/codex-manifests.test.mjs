@@ -454,6 +454,29 @@ test('the setup script pins the data directory rather than leaving it to be sear
     'there must be an override. The search is a good guess and it is still a guess.');
 });
 
+test('the setup script rewrites the trust tables rather than appending them', () => {
+  const src = readOrFail(join(CODEX_ROOT, 'scripts', 'setup.mjs'), 'the setup script.');
+  // § This one was live and destructive, so it gets a test rather than a comment.
+  //
+  //   A hook's trust key is `<sourcePath>:<event>:<group>:<index>` and does NOT change when
+  //   its command does. So re-running setup after any edit — a plugin upgrade, a changed data
+  //   directory — produced a second `[hooks.state."<same key>"]` table. TOML forbids
+  //   redefining a table, so `config.toml` stopped parsing and Codex refused to start at all:
+  //   "failed to load bootstrap configuration ... duplicate key". Not the plugin degrading —
+  //   the whole CLI down, over a file the plugin appended to.
+  assert.match(src, /function stripHookState/,
+    'setup must strip the existing [hooks.state] tables before writing its own. Appending a '
+    + 'second table for the same key is a TOML duplicate-key error that stops Codex starting.');
+  assert.match(src, /refusing to leave/,
+    'and it must verify the count afterwards and restore the backup if it does not match — a '
+    + 'config.toml this script has broken is not something to discover at the next session.');
+  // The strip has to be line-based: config.toml is the user's, carrying their project trust
+  // levels and their notify hook. A parse-and-reserialise would reformat all of it.
+  assert.ok(!/TOML\.parse|parseToml/i.test(src),
+    'the strip must be line-based. Round-tripping the user`s config.toml through a serialiser '
+    + 'to rewrite eleven tables would reformat every setting they own.');
+});
+
 test('the setup script never trusts a hook that is not this plugin`s', () => {
   const src = readOrFail(join(CODEX_ROOT, 'scripts', 'setup.mjs'), 'the setup script.');
   // § `hooks/list` returns every hook Codex can see, including other tools'. Writing the whole

@@ -61,6 +61,39 @@ for (const need of ['hooks/dist/capture.mjs', 'mcp/dist/index.js', 'mcp/dist/ser
   }
 }
 
+/**
+ * `config.toml` with every `[hooks.state."…"]` table removed, body and all.
+ *
+ * Line-based rather than a TOML parse, because this file is the user's: it carries their
+ * project trust levels, their model choice, their notify hook. Round-tripping it through a
+ * parser and a serialiser would reformat all of that to rewrite eleven tables. Removing the
+ * lines leaves every byte we do not own exactly as it was.
+ *
+ * A `[hooks.state]` table's body is a single `trusted_hash` line, so the state machine only
+ * has to survive that and the blank lines between tables; anything else ends the skip.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function stripHookState(text) {
+  const out = [];
+  let skipping = false;
+  for (const line of text.split('\n')) {
+    if (/^\[hooks\.state\./.test(line)) { skipping = true; continue; }
+    if (skipping) {
+      if (/^trusted_hash\s*=/.test(line)) continue;
+      if (/^\s*$/.test(line)) continue;
+      skipping = false;
+    }
+    out.push(line);
+  }
+  // Also drop the header this script writes, so re-running does not stack comment blocks.
+  const kept = out.filter((l) => !/^# Mubit Memory — hook trust/.test(l)
+    && !/^# Every \[hooks\.state\] table below is regenerated/.test(l));
+  while (kept.length && !kept[kept.length - 1].trim()) kept.pop();
+  return kept.length ? `${kept.join('\n')}\n` : '';
+}
+
 // --- 0. resolve the data directory, and PIN it -----------------------------------
 //
 // This is the step whose absence made a Codex session and a Claude Code session in one
@@ -151,11 +184,29 @@ setTimeout(() => {
   }
   console.log(`\nAbout to record trust for ${hooks.length} hook(s) in ${join(HOME, 'config.toml')}:`);
   for (const h of hooks) console.log(`  ${h.eventName.padEnd(18)} ${h.command}`);
-  let toml = '\n# Mubit Memory — hook trust recorded by mubit-codex-setup\n';
-  for (const h of hooks) toml += `[hooks.state."${h.key}"]\ntrusted_hash = "${h.currentHash}"\n`;
+
   const cfg = join(HOME, 'config.toml');
   if (existsSync(cfg)) copyFileSync(cfg, `${cfg}.before-mubit`);
-  writeFileSync(cfg, (existsSync(cfg) ? readFileSync(cfg, 'utf8') : '') + toml);
-  console.log(`\nrecorded. Start a NEW Codex session — hooks and MCP servers are read at session start.`);
+  const before = existsSync(cfg) ? readFileSync(cfg, 'utf8') : '';
+
+  // Replace, never append. A hook's trust key is `<sourcePath>:<event>:<group>:<index>` and
+  // does not change when its command does — so re-running setup after any edit produces a
+  // SECOND `[hooks.state."<same key>"]` table. TOML forbids redefining a table, so the file
+  // stops parsing and Codex refuses to start at all: "failed to load bootstrap configuration".
+  //
+  // Not hypothetical. This is what the first version of this script did on its second run.
+  const kept = stripHookState(before);
+  let toml = '\n# Mubit Memory — hook trust, rewritten in full by scripts/setup.mjs.\n';
+  toml += '# Every [hooks.state] table below is regenerated on each run; edits here are lost.\n';
+  for (const h of hooks) toml += `[hooks.state."${h.key}"]\ntrusted_hash = "${h.currentHash}"\n`;
+  writeFileSync(cfg, `${kept}${toml}`);
+
+  const dupes = (`${kept}${toml}`.match(/^\[hooks\.state\./gm) ?? []).length;
+  if (dupes !== hooks.length) {
+    console.error(`\nrefusing to leave ${dupes} trust tables for ${hooks.length} hooks — restoring.`);
+    writeFileSync(cfg, before);
+    process.exit(1);
+  }
+  console.log(`\nrecorded ${hooks.length}. Start a NEW Codex session — hooks and MCP servers are read at session start.`);
   process.exit(0);
 }, 3000);

@@ -166,6 +166,21 @@ async function ladder(cfg, o) {
     limit: QUERY_LIMIT,
     entry_types: [...ENTRY_TYPES],
     include_working_memory: true,
+    // SCOPE.md Target C — the rung between "this run" and "the whole instance".
+    //
+    // Set, `consulted_runs` extends with `linked_runs_for(run_id)` and the evidence loop
+    // consults every linked run with **no scope filter at all**, `run`-scoped entries
+    // included. That is the whole reason joining runs beats widening scopes: reach becomes
+    // the link graph, so an unlinked project sees nothing by construction rather than by a
+    // threshold's good behaviour, and the lessons themselves stay at `run` scope.
+    //
+    // **Inert until something is linked, which is why it can be `true` unconditionally.**
+    // `linked_runs_for` returns the calling run's own `linked_run_ids` — one hop, no walk —
+    // and a plugin that has never called `postLinkRun` has none, so this asks the server to
+    // extend an empty set. It is not a widening the client took for itself: only a human
+    // granting a link (§6 Tiers 2-3) or a subagent spawn (Tier 1) puts anything in that set.
+    // `test/prompt-recall.test.mjs` asserts exactly that on an unlinked run.
+    include_linked_runs: true,
     // §1.8: `env_tags` exists on AgentQueryRequest but NOT on ContextRequest — version-aware
     // tag scoring is capability rungs 1-2 gain over rung 3, not something they give up.
     // Tagged from the directory this prompt was sent in, not the one the session launched
@@ -242,6 +257,21 @@ async function ladder(cfg, o) {
  * the client has no seam inside it to degrade. An operator paying two LLM calls per prompt
  * pays full token price too. `pointers` is 0 here, honestly rather than by omission.
  *
+ * **`include_linked_runs` is not sent here, and its absence is a decision.** It could not be
+ * established that `ContextRequest` accepts the field. The evidence available is the client
+ * this plugin vendors — `mcp/dist/server.js`, generated against the same service — which
+ * lists it explicitly on `recall()` (`:47357`) and on `reflect()` (`:47483`) and omits it
+ * from `getContext()` (`:47398-47415`). That is evidence about the request builder rather
+ * than proof about the server's schema, so it is short of certainty; §1.8 already documents
+ * `env_tags` as a field `AgentQueryRequest` has and `ContextRequest` does not, which is the
+ * same shape of gap, and the two bodies are known not to be interchangeable.
+ *
+ * A field the server silently ignores is worse than an absent one: it reads, to anyone
+ * auditing reach, as a link graph being consulted when it is not. So rung 3 — opt-in, off by
+ * default, and already paying two LLM calls for a server-assembled block — does not get the
+ * link graph, and this note is here so the next reader knows the gap was measured rather than
+ * missed. SCOPE.md §5 leaves it open; confirming it needs the service's own schema.
+ *
  * @param {Record<string, any>} cfg
  * @param {RecallOptions} o
  * @returns {Promise<Outcome>}
@@ -260,6 +290,8 @@ async function rungThree(cfg, o) {
     limit: CONTEXT_LIMIT,
     include_working_memory: true,
     format: 'structured',
+    // No `include_linked_runs` here, deliberately — see the note above this function. It is
+    // the one field rungs 1-2 carry that this body does not, alongside `env_tags`.
   }, { timeoutMs: budget });
 
   if (!res.ok) return failure(res.state, res.error, 3);

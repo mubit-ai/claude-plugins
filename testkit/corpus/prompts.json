@@ -1,0 +1,48 @@
+{
+  "schema": "mubit-testkit/corpus/v1",
+  "notes": "Prompts are deliberately small and self-contained: the kit measures the overhead a plugin adds to a turn, and a prompt that takes twenty tool calls buries that overhead in variance. Each names the workflow family it stands for, so `--cases W1` selects by family. `expects_memory` marks the prompts where a working memory layer should have something to say — those are the ones whose injected-token counts mean anything.",
+  "prompts": [
+    {
+      "id": "W1-bugfix",
+      "family": "W1",
+      "expects_memory": true,
+      "text": "cart.py has a rounding bug: total() returns a float when every price is an integer. Read it, fix it, and say in one sentence what was wrong."
+    },
+    {
+      "id": "W1-feature",
+      "family": "W1",
+      "expects_memory": true,
+      "text": "Add a discount(items, pct) function to cart.py that applies a percentage discount to the cart total. Keep it consistent with the rest of the file."
+    },
+    {
+      "id": "W1-explain",
+      "family": "W1",
+      "expects_memory": false,
+      "text": "Read cart.py and describe in three sentences what it does and where it is fragile."
+    },
+    {
+      "id": "W3-orient",
+      "family": "W3",
+      "expects_memory": true,
+      "text": "I have never seen this repository before. Tell me what it is, how it is laid out, and where I would start."
+    },
+    {
+      "id": "W3-build",
+      "family": "W3",
+      "expects_memory": true,
+      "text": "How do I run the tests in this project? Look for whatever the project actually uses rather than guessing."
+    },
+    {
+      "id": "W4-design",
+      "family": "W4",
+      "expects_memory": false,
+      "text": "Draft a short design note for adding tax calculation to this cart: two paragraphs, the decision and its trade-off."
+    },
+    {
+      "id": "W4-plan",
+      "family": "W4",
+      "expects_memory": false,
+      "text": "Plan, without editing anything, the steps to add currency support to this cart. Five bullets at most."
+    }
+  ]
+}

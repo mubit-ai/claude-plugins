@@ -1,0 +1,1756 @@
+{
+  "schema": "mubit-testkit/coverage/v1",
+  "generatedAgainst": {
+    "pluginVersion": "0.10.0",
+    "pluginSha": "05adfe0"
+  },
+  "truth": {
+    "hooks": [
+      "CwdChanged",
+      "PostCompact",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "PreCompact",
+      "PreToolUse",
+      "SessionEnd",
+      "SessionStart",
+      "Stop",
+      "StopFailure",
+      "SubagentStart",
+      "SubagentStop",
+      "UserPromptSubmit"
+    ],
+    "tools": [
+      "mubit_archive",
+      "mubit_dereference",
+      "mubit_diagnose",
+      "mubit_forget",
+      "mubit_learned",
+      "mubit_lessons",
+      "mubit_outcome",
+      "mubit_recall",
+      "mubit_reflect",
+      "mubit_status"
+    ],
+    "skills": [
+      "auth",
+      "doctor",
+      "forget",
+      "recall",
+      "reflect",
+      "remember",
+      "setup"
+    ],
+    "agents": [
+      "mubit-recall"
+    ],
+    "config": [
+      "apiKey",
+      "capture",
+      "endpoint",
+      "mcpLessonScope",
+      "mcpTools",
+      "outcomeMode",
+      "preToolWarnings",
+      "recall",
+      "recallAssemble",
+      "recallAsync",
+      "recallMaxPerSection",
+      "recallRepeatMode",
+      "recallTokenBudget",
+      "redact",
+      "reflectOnEnd",
+      "runStrategy",
+      "sessionEndDetach",
+      "statusLine",
+      "subagentRecallTokenBudget",
+      "userId"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "W1-01",
+      "title": "A test starts failing in a repo you already worked in",
+      "family": "W1",
+      "moments": [
+        "M1",
+        "M2",
+        "M4",
+        "M6"
+      ],
+      "primaryMoment": "M4",
+      "sessions": "1",
+      "duration": "~8 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "UserPromptSubmit",
+          "PostToolUse",
+          "PostToolUseFailure",
+          "Stop",
+          "StopFailure",
+          "SessionEnd"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "capture",
+          "redact"
+        ]
+      },
+      "primary": [
+        "PostToolUseFailure"
+      ]
+    },
+    {
+      "id": "W1-02",
+      "title": "A small feature over six turns",
+      "family": "W1",
+      "moments": [
+        "M2"
+      ],
+      "primaryMoment": "M2",
+      "sessions": "1",
+      "duration": "~10 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "recallRepeatMode",
+          "recallTokenBudget",
+          "recallMaxPerSection",
+          "recallAsync"
+        ]
+      },
+      "primary": [
+        "UserPromptSubmit"
+      ]
+    },
+    {
+      "id": "W1-03",
+      "title": "\"From now on, always do X in this repo\"",
+      "family": "W1",
+      "moments": [
+        "M4",
+        "M6"
+      ],
+      "primaryMoment": "M4",
+      "sessions": "1",
+      "duration": "~6 min",
+      "touch": {
+        "hooks": [
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [
+          "mubit_learned"
+        ],
+        "skills": [
+          "remember"
+        ],
+        "config": [
+          "mcpLessonScope",
+          "reflectOnEnd"
+        ]
+      },
+      "primary": [
+        "mubit_learned"
+      ]
+    },
+    {
+      "id": "W1-04",
+      "title": "About to run something destructive",
+      "family": "W1",
+      "moments": [
+        "M3"
+      ],
+      "primaryMoment": "M3",
+      "sessions": "1",
+      "duration": "~5 min",
+      "touch": {
+        "hooks": [
+          "UserPromptSubmit",
+          "PreToolUse",
+          "PostToolUse",
+          "Stop"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "preToolWarnings"
+        ]
+      },
+      "primary": [
+        "PreToolUse"
+      ]
+    },
+    {
+      "id": "W1-05",
+      "title": "Asking memory a question on purpose",
+      "family": "W1",
+      "moments": [
+        "M2"
+      ],
+      "primaryMoment": "M2",
+      "sessions": "1",
+      "duration": "~5 min",
+      "touch": {
+        "hooks": [
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop"
+        ],
+        "tools": [
+          "mubit_recall",
+          "mubit_dereference"
+        ],
+        "skills": [
+          "recall"
+        ],
+        "config": [
+          "recallTokenBudget"
+        ]
+      },
+      "primary": [
+        "mubit_recall"
+      ]
+    },
+    {
+      "id": "W2-01",
+      "title": "Teach it once in one session, start over in another",
+      "family": "W2",
+      "moments": [
+        "M1",
+        "M2",
+        "M4",
+        "M6",
+        "M7"
+      ],
+      "primaryMoment": "M2",
+      "sessions": "2",
+      "duration": "~12 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "runStrategy",
+          "reflectOnEnd",
+          "sessionEndDetach",
+          "recallRepeatMode",
+          "recallAsync"
+        ]
+      },
+      "primary": [
+        "UserPromptSubmit"
+      ]
+    },
+    {
+      "id": "W2-02",
+      "title": "Switching branch or directory mid-session",
+      "family": "W2",
+      "moments": [
+        "M2"
+      ],
+      "primaryMoment": "M2",
+      "sessions": "1",
+      "duration": "~7 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "CwdChanged",
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "runStrategy"
+        ]
+      },
+      "primary": [
+        "CwdChanged"
+      ]
+    },
+    {
+      "id": "W2-03",
+      "title": "Surviving a compaction",
+      "family": "W2",
+      "moments": [
+        "M5"
+      ],
+      "primaryMoment": "M5",
+      "sessions": "1",
+      "duration": "~15 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "UserPromptSubmit",
+          "PostToolUse",
+          "PreCompact",
+          "PostCompact",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "capture",
+          "recallAsync"
+        ]
+      },
+      "primary": [
+        "PreCompact"
+      ]
+    },
+    {
+      "id": "W2-04",
+      "title": "The subagent already knows",
+      "family": "W2",
+      "moments": [
+        "M2"
+      ],
+      "primaryMoment": "M2",
+      "sessions": "1",
+      "duration": "~8 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "UserPromptSubmit",
+          "SubagentStart",
+          "SubagentStop",
+          "PostToolUse",
+          "Stop"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "subagentRecallTokenBudget",
+          "recallTokenBudget"
+        ]
+      },
+      "primary": [
+        "SubagentStart"
+      ]
+    },
+    {
+      "id": "W2-05",
+      "title": "Correcting something it learned wrong",
+      "family": "W2",
+      "moments": [
+        "M4"
+      ],
+      "primaryMoment": "M4",
+      "sessions": "2",
+      "duration": "~10 min",
+      "touch": {
+        "hooks": [
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [
+          "mubit_forget",
+          "mubit_outcome",
+          "mubit_archive"
+        ],
+        "skills": [
+          "forget"
+        ],
+        "config": [
+          "outcomeMode"
+        ]
+      },
+      "primary": [
+        "mubit_forget"
+      ]
+    },
+    {
+      "id": "W3-01",
+      "title": "A cold repo, the first hour",
+      "family": "W3",
+      "moments": [
+        "M2",
+        "M8"
+      ],
+      "primaryMoment": "M2",
+      "sessions": "1",
+      "duration": "~6 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "statusLine",
+          "recallAsync"
+        ]
+      },
+      "primary": [
+        "SessionStart"
+      ]
+    },
+    {
+      "id": "W3-02",
+      "title": "The second visit to a repo you do not know",
+      "family": "W3",
+      "moments": [
+        "M7"
+      ],
+      "primaryMoment": "M7",
+      "sessions": "2",
+      "duration": "~12 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "reflectOnEnd",
+          "sessionEndDetach"
+        ]
+      },
+      "primary": [
+        "UserPromptSubmit"
+      ]
+    },
+    {
+      "id": "W3-03",
+      "title": "A build command fails in a repo you do not know",
+      "family": "W3",
+      "moments": [
+        "M8"
+      ],
+      "primaryMoment": "M8",
+      "sessions": "1",
+      "duration": "~8 min",
+      "touch": {
+        "hooks": [
+          "UserPromptSubmit",
+          "PreToolUse",
+          "PostToolUse",
+          "PostToolUseFailure",
+          "Stop"
+        ],
+        "tools": [
+          "mubit_diagnose",
+          "mubit_status"
+        ],
+        "skills": [
+          "doctor"
+        ],
+        "config": [
+          "endpoint",
+          "apiKey"
+        ]
+      },
+      "primary": [
+        "mubit_diagnose"
+      ]
+    },
+    {
+      "id": "W3-04",
+      "title": "Unconfigured, then offline",
+      "family": "W3",
+      "moments": [
+        "M8"
+      ],
+      "primaryMoment": "M8",
+      "sessions": "2",
+      "duration": "~8 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [
+          "mubit_status"
+        ],
+        "skills": [
+          "auth",
+          "setup"
+        ],
+        "config": [
+          "endpoint",
+          "apiKey"
+        ]
+      },
+      "primary": [
+        "SessionStart"
+      ]
+    },
+    {
+      "id": "W4-01",
+      "title": "Writing a design document",
+      "family": "W4",
+      "moments": [
+        "M4"
+      ],
+      "primaryMoment": "M4",
+      "sessions": "1",
+      "duration": "~8 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "capture",
+          "redact"
+        ]
+      },
+      "primary": [
+        "PostToolUse"
+      ]
+    },
+    {
+      "id": "W4-02",
+      "title": "Research with WebFetch",
+      "family": "W4",
+      "moments": [
+        "M4"
+      ],
+      "primaryMoment": "M4",
+      "sessions": "1",
+      "duration": "~8 min",
+      "touch": {
+        "hooks": [
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "capture",
+          "redact"
+        ]
+      },
+      "primary": [
+        "PostToolUse"
+      ]
+    },
+    {
+      "id": "W4-03",
+      "title": "Planning, with nothing edited",
+      "family": "W4",
+      "moments": [
+        "M4"
+      ],
+      "primaryMoment": "M4",
+      "sessions": "1",
+      "duration": "~5 min",
+      "touch": {
+        "hooks": [
+          "SessionStart",
+          "UserPromptSubmit",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [],
+        "skills": [],
+        "config": [
+          "capture",
+          "reflectOnEnd"
+        ]
+      },
+      "primary": [
+        "Stop"
+      ]
+    },
+    {
+      "id": "W4-04",
+      "title": "Asking what it learned",
+      "family": "W4",
+      "moments": [
+        "M6"
+      ],
+      "primaryMoment": "M6",
+      "sessions": "1",
+      "duration": "~6 min",
+      "touch": {
+        "hooks": [
+          "UserPromptSubmit",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ],
+        "tools": [
+          "mubit_reflect",
+          "mubit_lessons"
+        ],
+        "skills": [
+          "reflect"
+        ],
+        "config": [
+          "reflectOnEnd"
+        ]
+      },
+      "primary": [
+        "mubit_reflect"
+      ]
+    }
+  ],
+  "matrix": [
+    {
+      "touchpoint": "CwdChanged",
+      "kind": "hooks",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "X",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "PostCompact",
+      "kind": "hooks",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "PostToolUse",
+      "kind": "hooks",
+      "cells": [
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "X",
+        "X",
+        "",
+        "x"
+      ]
+    },
+    {
+      "touchpoint": "PostToolUseFailure",
+      "kind": "hooks",
+      "cells": [
+        "X",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "PreCompact",
+      "kind": "hooks",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "X",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "PreToolUse",
+      "kind": "hooks",
+      "cells": [
+        "",
+        "",
+        "",
+        "X",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "SessionEnd",
+      "kind": "hooks",
+      "cells": [
+        "x",
+        "x",
+        "x",
+        "",
+        "",
+        "x",
+        "x",
+        "x",
+        "",
+        "x",
+        "x",
+        "x",
+        "",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x"
+      ]
+    },
+    {
+      "touchpoint": "SessionStart",
+      "kind": "hooks",
+      "cells": [
+        "x",
+        "x",
+        "",
+        "",
+        "",
+        "x",
+        "x",
+        "x",
+        "x",
+        "",
+        "X",
+        "x",
+        "",
+        "X",
+        "x",
+        "",
+        "x",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "Stop",
+      "kind": "hooks",
+      "cells": [
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "X",
+        "x"
+      ]
+    },
+    {
+      "touchpoint": "StopFailure",
+      "kind": "hooks",
+      "cells": [
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "SubagentStart",
+      "kind": "hooks",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "X",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "SubagentStop",
+      "kind": "hooks",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "UserPromptSubmit",
+      "kind": "hooks",
+      "cells": [
+        "x",
+        "X",
+        "x",
+        "x",
+        "x",
+        "X",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "X",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x",
+        "x"
+      ]
+    },
+    {
+      "touchpoint": "mubit_archive",
+      "kind": "tools",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "mubit_dereference",
+      "kind": "tools",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "mubit_diagnose",
+      "kind": "tools",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "X",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "mubit_forget",
+      "kind": "tools",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "X",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "mubit_learned",
+      "kind": "tools",
+      "cells": [
+        "",
+        "",
+        "X",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "mubit_lessons",
+      "kind": "tools",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x"
+      ]
+    },
+    {
+      "touchpoint": "mubit_outcome",
+      "kind": "tools",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "mubit_recall",
+      "kind": "tools",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "X",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "mubit_reflect",
+      "kind": "tools",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "X"
+      ]
+    },
+    {
+      "touchpoint": "mubit_status",
+      "kind": "tools",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "x",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "auth",
+      "kind": "skills",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "doctor",
+      "kind": "skills",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "forget",
+      "kind": "skills",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "recall",
+      "kind": "skills",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "reflect",
+      "kind": "skills",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x"
+      ]
+    },
+    {
+      "touchpoint": "remember",
+      "kind": "skills",
+      "cells": [
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "setup",
+      "kind": "skills",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "apiKey",
+      "kind": "config",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "x",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "capture",
+      "kind": "config",
+      "cells": [
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "x",
+        "x",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "endpoint",
+      "kind": "config",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "x",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "mcpLessonScope",
+      "kind": "config",
+      "cells": [
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "outcomeMode",
+      "kind": "config",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "preToolWarnings",
+      "kind": "config",
+      "cells": [
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "recallAsync",
+      "kind": "config",
+      "cells": [
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "x",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "recallMaxPerSection",
+      "kind": "config",
+      "cells": [
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "recallRepeatMode",
+      "kind": "config",
+      "cells": [
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "recallTokenBudget",
+      "kind": "config",
+      "cells": [
+        "",
+        "x",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "redact",
+      "kind": "config",
+      "cells": [
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "x",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "reflectOnEnd",
+      "kind": "config",
+      "cells": [
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "x"
+      ]
+    },
+    {
+      "touchpoint": "runStrategy",
+      "kind": "config",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "sessionEndDetach",
+      "kind": "config",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "statusLine",
+      "kind": "config",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "touchpoint": "subagentRecallTokenBudget",
+      "kind": "config",
+      "cells": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "x",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    }
+  ],
+  "untested": [
+    {
+      "kind": "config",
+      "name": "mcpTools"
+    },
+    {
+      "kind": "config",
+      "name": "recall"
+    },
+    {
+      "kind": "config",
+      "name": "recallAssemble"
+    },
+    {
+      "kind": "config",
+      "name": "userId"
+    }
+  ],
+  "drift": []
+}

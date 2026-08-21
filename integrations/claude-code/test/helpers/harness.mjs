@@ -321,6 +321,10 @@ export function defaultRoutes() {
     },
     'POST /v2/control/memory_health': { json: { healthy: true } },
     'POST /v2/control/diagnose': { json: { findings: [] } },
+    // Target C: the join. The backend maintains it bidirectionally, so one call links both
+    // ends and there is no second request to reply to.
+    'POST /v2/control/runs/link': { json: { success: true } },
+    'POST /v2/control/runs/unlink': { json: { success: true } },
   };
 }
 

@@ -24,6 +24,8 @@ import { spoolItem } from './helpers/fixtures.mjs';
 
 const RUN = 'cc-my-project-9f2a11c4';
 const AGENT = 'claude-code-4f21ab';
+/** Target C: the other end of a join — a second real run, never a sub-id of the first. */
+const LINKED = 'cc-pre-main-1a2b3c4d';
 
 /**
  * Fake Mubit + a data dir + a resolved config pointed at it + a fresh `lib/http.mjs`.
@@ -491,6 +493,14 @@ const REJECT_ROWS = [
   ['registerAgent requires agent_id', (h, c) => h.registerAgent(c, { run_id: RUN, role: 'worker' })],
   // job query — run_id on the query string
   ['getIngestJob requires run_id', (h, c) => h.getIngestJob(c, '', 'job_test_1')],
+  // LinkRun — both halves of the join, or the request names one end of an edge
+  ['postLinkRun requires run_id', (h, c) => h.postLinkRun(c, { linked_run_id: LINKED })],
+  ['postLinkRun requires linked_run_id', (h, c) => h.postLinkRun(c, { run_id: RUN })],
+  ['postLinkRun rejects an empty linked_run_id',
+    (h, c) => h.postLinkRun(c, { run_id: RUN, linked_run_id: '   ' })],
+  // UnlinkRun — the same pair, and revoking half an edge is the same bug
+  ['postUnlinkRun requires run_id', (h, c) => h.postUnlinkRun(c, { linked_run_id: LINKED })],
+  ['postUnlinkRun requires linked_run_id', (h, c) => h.postUnlinkRun(c, { run_id: RUN })],
 ];
 
 for (const [label, call] of REJECT_ROWS) {
@@ -523,6 +533,10 @@ const HAPPY_ROWS = [
     (h, c) => h.registerAgent(c, { run_id: RUN, agent_id: AGENT, role: 'worker', status: 'active', capabilities: ['code'] })],
   ['heartbeat', '/v2/control/agents/heartbeat',
     (h, c) => h.heartbeat(c, { run_id: RUN, agent_id: AGENT, status: 'idle' })],
+  ['postLinkRun', '/v2/control/runs/link',
+    (h, c) => h.postLinkRun(c, { run_id: RUN, linked_run_id: LINKED })],
+  ['postUnlinkRun', '/v2/control/runs/unlink',
+    (h, c) => h.postUnlinkRun(c, { run_id: RUN, linked_run_id: LINKED })],
 ];
 
 for (const [name, path, call] of HAPPY_ROWS) {
@@ -565,6 +579,105 @@ test('postIngest: forwards item_id, content_type and intent verbatim', async (t)
   assert.equal(sent.items[0].item_id, item.item_id);
   assert.equal(sent.items[0].content_type, 'text');
   assert.equal(sent.items[0].intent, item.intent);
+});
+
+// ---------------------------------------------------------------------------
+// Linking runs — SCOPE.md Target C
+// ---------------------------------------------------------------------------
+//
+// The mechanism was built on the backend and unused by the plugin: `link_run` maintains the
+// join bidirectionally and `include_linked_runs` extends `consulted_runs` with it, but
+// `ROUTES` had no way to create one, so `hooks/src/subagent-start.mjs` wrote `linked: false`
+// and left the join as an IOU. These two routes are the whole of the client work.
+
+// §1.1: the paths are the server's, not ours to choose. `POST /v2/control/runs/link` and
+// `/runs/unlink` are what `ControlService.LinkRun` / `UnlinkRun` are exposed at; a typo here
+// is a 404 that reads as a broken instance.
+test('ROUTES: carries the link and unlink paths the server actually exposes', async (t) => {
+  const { http } = await setup(t);
+  assert.equal(http.ROUTES.linkRun, '/v2/control/runs/link');
+  assert.equal(http.ROUTES.unlinkRun, '/v2/control/runs/unlink');
+});
+
+// Both ids on the wire, verbatim. The server needs the pair; sending one is an edge with one
+// end, which is a 422 that looks like a server fault to everything downstream.
+test('postLinkRun: sends both run ids in the body of POST /v2/control/runs/link', async (t) => {
+  const { server, cfg, http } = await setup(t);
+
+  const r = await noThrow(() => http.postLinkRun(cfg, { run_id: RUN, linked_run_id: LINKED }), 'postLinkRun');
+
+  assert.equal(r.ok, true, `postLinkRun should have succeeded, got ${JSON.stringify(r)}`);
+  server.assertCalled('POST', '/v2/control/runs/link', 1);
+  const body = server.lastCall('POST', '/v2/control/runs/link').body;
+  assert.equal(body.run_id, RUN, 'the run doing the linking');
+  assert.equal(body.linked_run_id, LINKED, 'and the run it is being joined to');
+});
+
+test('postUnlinkRun: sends both run ids in the body of POST /v2/control/runs/unlink', async (t) => {
+  const { server, cfg, http } = await setup(t);
+
+  const r = await noThrow(() => http.postUnlinkRun(cfg, { run_id: RUN, linked_run_id: LINKED }), 'postUnlinkRun');
+
+  assert.equal(r.ok, true, `postUnlinkRun should have succeeded, got ${JSON.stringify(r)}`);
+  server.assertCalled('POST', '/v2/control/runs/unlink', 1);
+  const body = server.lastCall('POST', '/v2/control/runs/unlink').body;
+  assert.equal(body.run_id, RUN);
+  assert.equal(body.linked_run_id, LINKED,
+    'revocation names the same pair the link did, in the same fields');
+});
+
+// The backend rejects a self-link too, and a round trip to learn that is waste. This is the
+// half that matters: a guard that refuses *after* dialing is decorative.
+test('postLinkRun: run_id === linked_run_id is refused, and NOTHING is dialed', async (t) => {
+  const { server, cfg, dataDir, http } = await setup(t);
+
+  const r = await noThrow(() => http.postLinkRun(cfg, { run_id: RUN, linked_run_id: RUN }), 'postLinkRun(self)');
+
+  assert.equal(r.ok, false);
+  assert.equal(r.state, 'invalid_request', 'a caller bug, not a verdict about the server (§4.7)');
+  assert.equal(server.requests.length, 0,
+    `a self-link must cost no round trip at all; saw: ${server.summary()}`);
+  assert.match(String(r.error), /itself/i, 'the message names what was actually wrong');
+  assert.match(String(r.error), /consult|reach/i,
+    'and says why it is meaningless — a run already sees its own memory — rather than merely that it is invalid');
+  assert.match(logText(dataDir), /link/i, 'the refusal is logged at error level, like every other guard');
+});
+
+test('postUnlinkRun: run_id === linked_run_id is refused, and NOTHING is dialed', async (t) => {
+  const { server, cfg, http } = await setup(t);
+
+  const r = await noThrow(() => http.postUnlinkRun(cfg, { run_id: RUN, linked_run_id: RUN }), 'postUnlinkRun(self)');
+
+  assert.equal(r.ok, false);
+  assert.equal(server.requests.length, 0,
+    `revoking a link that could never have existed must dial nothing; saw: ${server.summary()}`);
+});
+
+// Whitespace does not make two ids different runs. `requireString` already trims to decide
+// presence, so the identity test trims too or the guard is one space away from useless.
+test('postLinkRun: a self-link that differs only in whitespace is still refused', async (t) => {
+  const { server, cfg, http } = await setup(t);
+
+  const r = await http.postLinkRun(cfg, { run_id: RUN, linked_run_id: `  ${RUN} ` });
+
+  assert.equal(r.ok, false);
+  assert.equal(server.requests.length, 0, `saw: ${server.summary()}`);
+});
+
+// §4.3 / F21: `request()`'s poisoned-run-id guard inspects `body.run_id` and nothing else, so
+// it structurally cannot see this field. Repeated here for the same reason `getIngestJob`
+// repeats it for the query string — and it matters more here than anywhere: linking a real
+// run to the collapsed everything-run is precisely the leak Target C exists to avoid.
+test('postLinkRun: refuses linked_run_id === "default" and dials nothing', async (t) => {
+  const { server, cfg, http } = await setup(t);
+
+  const r = await noThrow(() => http.postLinkRun(cfg, { run_id: RUN, linked_run_id: 'default' }),
+    'postLinkRun(linked_run_id=default)');
+
+  assert.equal(r.ok, false);
+  assert.equal(server.requests.length, 0,
+    `"default" must never reach the wire in either field; saw: ${server.summary()}`);
+  assert.match(String(r.error), /default/, 'the message names the literal that was refused');
 });
 
 // ---------------------------------------------------------------------------

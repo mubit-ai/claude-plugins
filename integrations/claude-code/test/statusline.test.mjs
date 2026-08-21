@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `bin/statusline.mjs` — build-guide §10 (and §16.2 for the degradation path).
+ * `bin/statusline.mjs` — the status line (§10, and §16.2 for the degradation path).
  *
  * The status line is the only part of this plugin that runs on every frame of the
  * host UI. Three properties matter more than anything it prints:
@@ -43,7 +43,7 @@ function statuslineScript() {
   if (existsSync(src)) return src;
   return assert.fail(
     `bin/statusline.mjs does not exist yet (nor bin/statusline.src.mjs) under ${PLUGIN_ROOT}.\n` +
-    '  Build-guide §10 defines it; §11.2 bundles statusline.src.mjs → statusline.mjs.');
+    '  §10 defines it; §11.2 bundles statusline.src.mjs → statusline.mjs.');
 }
 
 /**
@@ -219,7 +219,7 @@ test('renders the documented shape: glyph, run, mode, recall, saved, lessons', a
 });
 
 // ---------------------------------------------------------------------------
-// MUB-2 — the line has to be able to say "recall is dead"
+// The line has to be able to say "recall is dead"
 // ---------------------------------------------------------------------------
 
 // A run of dry recalls used to render as `recall 0/0 tok` beside a green ●: a healthy-looking
@@ -335,7 +335,7 @@ test('cold start renders ◍ warming rather than a failure glyph', async () => {
   assert.ok(r.line.includes('warming'), `expected the "warming" label, got: ${r.line}`);
 });
 
-// The decision phase-2-recall.md leaves open, now recorded: cold start suppresses
+// The question the design left open, now settled and recorded here: cold start suppresses
 // `not_responding` as well. §10 ranks ◍ warming *below* ◌ slow; §4.7 says failures inside the
 // grace window do not show a failure glyph at all. §4.7 wins, because the two sections answer
 // different questions — §10 ranks two simultaneous facts, §4.7 decides whether a fact is a

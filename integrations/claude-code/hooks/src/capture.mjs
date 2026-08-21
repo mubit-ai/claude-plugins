@@ -144,7 +144,7 @@ const TERM_MAX_CHARS = 24;
  * The mark `--stop-failure` writes on the turn file, and the whole reason that mode exists.
  *
  * `lib/outcome.mjs` reads this key and posts nothing for the turn. It is deliberately NOT
- * `outcome: "failure"`, which build-guide §5.5 originally called for ("On a StopFailure turn:
+ * `outcome: "failure"`, which the original design called for ("On a StopFailure turn:
  * outcome 'failure', signal -0.3"): -0.3 against the turn's recalled ids is a claim that the
  * *memory* was wrong, and a rate limit is not evidence about memory. See the fifth row of
  * `decideOutcome`'s table.
@@ -160,10 +160,10 @@ const API_ERROR_KEY = 'api_error';
 const MAX_API_ERROR_CHARS = 64;
 
 /**
- * What the host itself substitutes for a missing `error` on the way to the matcher
- * (`matchQuery: e.error ?? "unknown"`), and the taxonomy's own catch-all. An empty mark would
- * read as "no API error at all" and put the turn straight back into the outcome path, so
- * there is no path out of `--stop-failure` with a blank one.
+ * What the host itself substitutes for a missing `error` on the way to the matcher, and the
+ * taxonomy's own catch-all. An empty mark would read as "no API error at all" and put the
+ * turn straight back into the outcome path, so there is no path out of `--stop-failure` with
+ * a blank one.
  */
 const API_ERROR_UNKNOWN = 'unknown';
 
@@ -298,11 +298,11 @@ function capture(rawPayload, cfg, mode) {
 /**
  * The `StopFailure` payload's error kind, as the host spells it.
  *
- * The field is **`error`** — read out of Claude Code 2.1.235's own Zod schema
- * (`hook_event_name: wt("StopFailure"), error: …, error_details: …optional(),
- * last_assistant_message: …optional()`), not from the published hook reference, which calls
- * it `error_type` in one place and `reason` in another. Reading the wrong name here would
- * stamp every API-failed turn `unknown` while every test agreed with it.
+ * The field is **`error`** — observed on the live payload from Claude Code 2.1.235, which
+ * carries `error` beside an optional `error_details` and `last_assistant_message`. It is not
+ * the name in the published hook reference, which calls it `error_type` in one place and
+ * `reason` in another. Reading the wrong name here would stamp every API-failed turn
+ * `unknown` while every test agreed with it.
  *
  * @param {Record<string, any>} payload
  * @returns {string} never empty

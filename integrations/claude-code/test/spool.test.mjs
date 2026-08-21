@@ -193,7 +193,7 @@ test('readBatch: each entry carries {path, item}', async () => {
   assert.equal(dirname(entry.path), spoolDir(dataDir));
 });
 
-// §4.6 / F15: a partially written file (SIGKILL mid-write) is unlinked in passing and the
+// §4.6: a partially written file (SIGKILL mid-write) is unlinked in passing and the
 // batch still sends. Retrying a torn file forever is how a spool becomes unbounded.
 test('readBatch: unlinks unparseable files and still returns the good ones', async () => {
   const { cfg, dataDir, S } = await setup();
@@ -375,7 +375,7 @@ test('claimOnce: markers are namespaced by name', async () => {
   assert.equal(S.claimOnce(cfg, RUN, 'flushed-session-b'), true);
 });
 
-// §4.6, F14: "returns `true` on a non-EEXIST error — proceed on marker failure". The marker
+// §4.6: "returns `true` on a non-EEXIST error — proceed on marker failure". The marker
 // prevents a *double* flush; a read-only or full ${CLAUDE_PLUGIN_DATA} must not be able to
 // prevent the flush *entirely*. Losing the batch is worse than sending it twice, and the
 // per-batch idempotency_key makes a double send a server-side no-op anyway.

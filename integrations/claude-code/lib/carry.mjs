@@ -5,21 +5,17 @@
  * ---------------------------------------------------------------------------
  * Why a file, and not `"async": true`
  * ---------------------------------------------------------------------------
- * Claude Code really does have a backgrounding path for hooks. Extracted from the 2.1.235
- * binary's own manifest schema:
- *
- *     async:       "If true, hook runs in background without blocking"
- *     asyncRewake: "If true, hook runs in background and wakes the model on exit code 2
- *                   (blocking error). Implies async."
- *
- * They are absent from the published hook reference, but they exist, they are honoured, and
- * `ASYNC_REWAKE_FLUSH_TIMEOUT_MS` bounds the flush. So the mechanism is real. It is simply
- * **not runtime-flippable**: `async` is a static field of a `hooks.json` registration, and
- * nothing in a manifest can be conditioned on a config key the user sets after install.
- * Expressing a flag-gated `recallAsync` that way needs two registrations of the same hook —
- * one async, one not — each no-oping when the other is meant to be in charge. That is two
- * node processes in front of every prompt, forever, including for the people who never turn
- * the flag on. The flag exists precisely so that they pay nothing.
+ * Claude Code really does have a backgrounding path for hooks. As of 2.1.235 a hook
+ * registration honours two fields the published hook reference does not document: `async`,
+ * which runs the hook in the background without blocking, and `asyncRewake`, which does the
+ * same and additionally wakes the model when the hook exits 2 (a blocking error). The host
+ * bounds the resulting flush with a timeout of its own. So the mechanism is real. It is
+ * simply **not runtime-flippable**: `async` is a static field of a `hooks.json`
+ * registration, and nothing in a manifest can be conditioned on a config key the user sets
+ * after install. Expressing a flag-gated `recallAsync` that way needs two registrations of
+ * the same hook — one async, one not — each no-oping when the other is meant to be in
+ * charge. That is two node processes in front of every prompt, forever, including for the
+ * people who never turn the flag on. The flag exists precisely so that they pay nothing.
  *
  * Carry-forward routes around it with no manifest change at all. The synchronous hook reads
  * a block the previous turn's detached refresh left here and returns; the refresh dials
@@ -160,7 +156,7 @@ export function takeCarry(cfg, runId) {
       fetchMs: int(raw.fetch_ms, 0),
     };
   } catch {
-    // §4.9/§12.1-F14: an unreadable ${CLAUDE_PLUGIN_DATA} costs the carried turn, nothing else.
+    // §4.9/§12.1: an unreadable ${CLAUDE_PLUGIN_DATA} costs the carried turn, nothing else.
     return null;
   }
 }

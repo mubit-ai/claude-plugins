@@ -56,8 +56,8 @@
  *
  * — so every re-anchor this hook emitted was discarded, silently, on every compaction since
  * the first release. `--pre` was never affected because `systemMessage` is a top-level field
- * and never reaches that union. `test/hook-output.test.mjs` holds the accepted set, the
- * command that re-derives it from the host binary, and the gate that now covers every hook.
+ * and never reaches that union. `test/hook-output.test.mjs` holds the accepted set and the
+ * gate that now covers every hook.
  *
  * So the re-anchor moved to `hooks/src/session-start.mjs`, which fires with
  * `source === "compact"` after a compaction and whose `SessionStart` name **is** accepted. It

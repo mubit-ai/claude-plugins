@@ -2,7 +2,7 @@
 /**
  * `lib/http.mjs` — the only network primitive in the plugin.
  *
- * Build-guide §4.2 (the module), §1.1 (routes and the per-route 256 KiB cap on
+ * The module, its routes, and the per-route body cap on
  * `/v2/control/query`), §1.2 (auth, and the one allowlisted unauthenticated route), §1.3
  * (required fields — a missing one is a 422, not a silent default), §1.8 + §5.2 (the `mode`
  * literal and what a typo costs), §4.3 (the `"default"` run-id guard), §4.7 (the breaker is
@@ -30,19 +30,18 @@
  * Five pre-flight guards, each preventing a specific silent failure. All five return
  * `ok:false` having dialed nothing:
  *
- *   1. `/v2/control/query` is capped at 256 KiB server-side;
- *      everything else inherits 64 MiB. Blowing the cap is a 413, which looks like a server
- *      fault to the breaker — so we would open a circuit over our own oversized request.
- *   2. The `mode` literal. the servermaps only `"direct_bypass"` and `"direct"`
- *      to the direct lane; every other value — *including an omitted one*
- * — silently becomes `AgentRouted` with no error, costing an LLM
- *      call per prompt forever. The class being rejected is therefore "anything that
- *      silently becomes agent_routed", which makes `agent_routed` itself legal: it is rung 2
- *      of the §1.8 ladder, entered deliberately after a 403 on rung 1.
- *   3. `run_id === "default"`. The MCP server defaults
- *      `MUBIT_DEFAULT_SESSION_ID` to that literal, which collapses every user, project and
- *      machine into one run. Exact match only — a project legitimately called
- *      `default-config` must still be able to have a run.
+ *   1. Bodies to `/v2/control/query` are held under 256 KiB, everything else under 64 MiB.
+ *      An oversized body comes back a 413, which looks like a server fault to the breaker —
+ *      so we would open a circuit over our own request.
+ *   2. The `mode` literal. Only `"direct_bypass"` and `"direct"` reach the direct lane;
+ *      every other value — *including an omitted one* — falls through to the routed path
+ *      with no error, costing a model call per prompt forever. The class being rejected is
+ *      therefore "anything that silently becomes agent_routed", which makes `agent_routed`
+ *      itself legal: it is the rung entered deliberately after a 403 on the direct one.
+ *   3. `run_id === "default"`. That literal is the bundled server's placeholder, and it
+ *      identifies nothing: a run id has to name one project on one machine. Exact match
+ *      only — a project legitimately called `default-config` must still be able to have
+ *      a run.
  *   4. §1.3 required fields, validated locally so the error names the field instead of
  *      arriving as an opaque 422.
  *   5. `postLessons` deliberately has **no** `run_id`: empty means "all runs", which is
@@ -57,7 +56,7 @@
  * Two `opts` beyond the documented `{timeoutMs, retry}`, both for callers that own the
  * meaning of a result better than this module can:
  *   - `{record: false}` suppresses breaker bookkeeping for one call.
- *   - a **403 is never recorded** by default. §5.2/F22: `permission_denied` on a rung the
+ *   - a **403 is never recorded** by default. §5.2: `permission_denied` on a rung the
  *     plugin deliberately probed is a policy verdict, not a transport fault, and recording it
  *     as `auth_failed` would pin the status line to "✖ auth" on a perfectly healthy instance
  *     whose operator merely set `the instance's direct-search policy disabled`.
@@ -119,7 +118,7 @@ const HEALTH_CACHE = ['status', 'health.json'];
  */
 export const QUERY_MODES = Object.freeze(['direct_bypass', 'direct', 'agent_routed']);
 
-/** §4.3 / F21: the one run id that must never reach the wire. */
+/** §4.3: the one run id that must never reach the wire. */
 const POISONED_RUN_ID = 'default';
 
 // ---------------------------------------------------------------------------
@@ -149,8 +148,8 @@ export async function request(cfg, method, path, body, opts = {}) {
     // 64 MiB batch carrying it costs nothing.
     if (wantsBody && isPoisonedRunId(body)) {
       return refuse(cfg, started,
-        `refusing to send run_id "${POISONED_RUN_ID}" to ${verb} ${route} — the MCP server's `
-        + 'MUBIT_DEFAULT_SESSION_ID default collapses every user, project and machine into one run (§4.3)',
+        `refusing to send run_id "${POISONED_RUN_ID}" to ${verb} ${route} — it is the bundled `
+        + 'server\'s placeholder and identifies no project (§4.3)',
         { route, run_id: POISONED_RUN_ID });
     }
 
@@ -228,7 +227,7 @@ export async function request(cfg, method, path, body, opts = {}) {
  *, so `JSON.parse` here is a guaranteed false negative —
  * it would report every healthy server as unhealthy and the plugin would never dial again.
  *
- * This is also the one route `enforce_core_access_policy` allowlists,
+ * This is also the one route that answers before a credential is checked,
  * which is what makes it usable as a readiness probe before the user has pasted a key.
  *
  * @param {Record<string, any>} cfg
@@ -297,7 +296,7 @@ export async function health(cfg, opts = {}) {
 // ---------------------------------------------------------------------------
 
 /**
- * `POST /v2/control/ingest` — `StateIngestRequestPayload` requires
+ * `POST /v2/control/ingest` — the request body requires
  * `run_id`; every `Stateingest itemPayload` requires `item_id` and
  * `content_type`. One malformed item rejects the whole batch, because that is exactly what
  * the server does — a 422 on item 2 loses items 1 and 3 as well.
@@ -341,7 +340,7 @@ export async function postQuery(cfg, req, opts = {}) {
 
 /**
  * `POST /v2/control/context` — rung 3 only, and it costs two LLM calls (§1.8).
- * `StateContextRequestPayload` requires `run_id`.
+ * The request body requires `run_id`.
  *
  * @param {Record<string, any>} cfg
  * @param {Record<string, any>} req
@@ -356,7 +355,7 @@ export async function postContext(cfg, req, opts = {}) {
 }
 
 /**
- * `POST /v2/control/outcome` — `StateRecordOutcomePayload` requires
+ * `POST /v2/control/outcome` — the request body requires
  * `run_id` and a **non-empty** `reference_id`. §1.3: for run-level attribution with no single
  * primary lesson, pass `"global"` and put the real ids in `entry_ids[]` — never `""`.
  *
@@ -377,7 +376,7 @@ export async function postOutcome(cfg, req, opts = {}) {
 }
 
 /**
- * `POST /v2/control/checkpoint` — `StateCheckpointPayload` requires
+ * `POST /v2/control/checkpoint` — the request body requires
  * `run_id`.
  *
  * @param {Record<string, any>} cfg
@@ -407,7 +406,7 @@ export async function postLessons(cfg, req = {}, opts = {}) {
 }
 
 /**
- * `POST /v2/control/agents/register` — `StateAgentRegisterRequestPayload`
+ * `POST /v2/control/agents/register` — the request body
  * requires `run_id` and `agent_id`.
  *
  * @param {Record<string, any>} cfg
@@ -526,7 +525,7 @@ async function dial(cfg, o) {
 
       const parsed = decodeJson(text);
       if (parsed.error) {
-        // §4.7/F10: a 200 whose body will not parse is a broken server (a reverse proxy
+        // §4.7: a 200 whose body will not parse is a broken server (a reverse proxy
         // serving an HTML error page is the real-world shape), never an unhandled rejection.
         return {
           ok: false,
@@ -568,9 +567,10 @@ async function dial(cfg, o) {
 }
 
 /**
- * Breaker bookkeeping for one completed `request()`/`health()` — the whole reason F7 can
- * ever fire. Recorded once per call, not once per attempt: a retried timeout is one symptom,
- * and double-counting it would escalate `timeoutStreak` twice as fast as §4.7 allows.
+ * Breaker bookkeeping for one completed `request()`/`health()` — the whole reason the
+ * breaker can ever open. Recorded once per call, not once per attempt: a retried timeout is
+ * one symptom, and double-counting it would escalate `timeoutStreak` twice as fast as §4.7
+ * allows.
  *
  * @param {Record<string, any>} cfg
  * @param {{ok: boolean, state?: string, status?: number, abortedEarly?: boolean}} res
@@ -579,7 +579,7 @@ async function dial(cfg, o) {
 function settle(cfg, res, opts) {
   if (opts && opts.record === false) return;
   if (res.ok) { recordSuccess(cfg); return; }
-  // §5.2/F22: `permission_denied` is a policy verdict about a rung the caller chose to probe,
+  // §5.2: `permission_denied` is a policy verdict about a rung the caller chose to probe,
   // not a transport fault. Recording it would pin the status line to "✖ auth" on an instance
   // that is merely running with the instance's direct-search policy disabled.
   if (res.status === 403) return;
@@ -714,7 +714,7 @@ function preview(body) {
 }
 
 /**
- * §1.3: fields without `#[serde(default)]` are mandatory, and a missing one is a 422 — which
+ * A field with no server-side default is mandatory, and a missing one is a 422 — which
  * looks like a server fault to everything downstream. Empty strings count as missing.
  *
  * @param {any} req
@@ -782,7 +782,7 @@ function safeMode(req) {
 }
 
 /**
- * §4.3 / F21: exact match only. `cc-default-config-9f2a11c4` is a legitimate run id and must
+ * §4.3: exact match only. `cc-default-config-9f2a11c4` is a legitimate run id and must
  * still be able to reach the wire — this is a ban on one poisoned literal, not a substring.
  * @param {any} body
  */

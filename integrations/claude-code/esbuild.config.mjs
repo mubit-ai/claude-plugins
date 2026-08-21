@@ -1,4 +1,4 @@
-// Build definition for the mubit-memory Claude Code plugin — build-guide §11.2.
+// Build definition for the mubit-memory Claude Code plugin.
 //
 // Everything Claude Code executes is a bundled, dependency-free .mjs: `node <path>` on a
 // single file is a ~30 ms cold start, where `npx` or a TS loader would cost ~500 ms on
@@ -37,7 +37,7 @@ const HOOKS = ['session-start','cwd-changed','prompt-recall','stage-prompt','pre
  * 21 tool schemas where ten were configured. Two correct halves that never met.
  *
  * The sibling is the honest input: it is the source this repo publishes `@mubit-ai/mcp`
- * from, `scripts/set-version.mjs` already holds the two versions in lockstep, and the
+ * from, the two versions are held in lockstep at release time, and the
  * release guard already describes this plugin as built from the in-repo `@mubit-ai/mcp` it
  * dev-depends on. Building from the registry made that description false without anything
  * failing.
@@ -59,7 +59,7 @@ const MCP_SERVER_BUILD = 'npm --prefix ../mcp ci && npm --prefix ../mcp run buil
  * module scope, which made `npm run build` unusable for every other target too.
  *
  * This plugin's own version is the right fallback rather than a guess: the two ship in
- * lockstep (`scripts/set-version.mjs` holds them together, and `manifests.test.mjs` enforces
+ * lockstep (release tooling holds them together, and `manifests.test.mjs` enforces
  * three-way lockstep across the manifests), and `mcp-surface.test.mjs` already asserts the
  * server's advertised `serverInfo.version` equals this package's version — so the fallback
  * is checked by a test rather than assumed.
@@ -163,7 +163,7 @@ const targets = [
   // The launcher hands the server its own version, because the server cannot read it once
   // relocated: it does `require("../package.json")`, which resolves inside @mubit-ai/mcp and
   // not inside this plugin. Inlined from the tracked sibling manifest, so the value is
-  // byte-reproducible and `scripts/set-version.mjs` already keeps it in lockstep.
+  // byte-reproducible and release tooling already keeps it in lockstep.
   {
     entryPoints: ['mcp/src/launch.mjs'],
     outfile: 'mcp/dist/index.js',
@@ -180,6 +180,12 @@ const targets = [
     entryPoints: [MCP_SERVER_ENTRY],
     outfile: 'mcp/dist/server.js',
     ...shared,
+    // The one target that must not carry a sourcemap. `shared` pins `sourcemap: 'inline'`,
+    // which embeds `sourcesContent` — the original source of everything the bundle consumed.
+    // For every other target that is this repository's own tracked source and costs nothing.
+    // This one is built from the sibling TypeScript package, which is not published anywhere,
+    // so an inline map ships 67 KB of it in base64 on a single line where no diff will show it.
+    sourcemap: false,
     banner: {
       js: `${shared.banner.js}\n`
         + "import { createRequire as __mubitCreateRequire } from 'node:module';\n"

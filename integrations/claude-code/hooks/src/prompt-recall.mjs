@@ -46,7 +46,7 @@
  *
  * Two things about it are worth stating before someone "simplifies" them:
  *
- *   - **It is not `"async": true` in the manifest.** That field is real — the 2.1.235 binary
+ *   - **It is not `"async": true` in the manifest.** That field is real — Claude Code 2.1.235
  *     describes it as "if true, hook runs in background without blocking" — but it is a
  *     *static* manifest field and cannot be conditioned on a config key. A flag expressed
  *     that way needs two registrations no-oping against each other, which is two processes
@@ -189,7 +189,7 @@ await runHook('prompt-recall', {
     // point in `carryForward` does. See the header for why the order inside it is fixed.
     if (cfg.recallAsync) return carryForward(cfg, payload, runId, started);
 
-    // §4.7/F7: a blocking hook in front of every prompt must not pay a connect timeout to a
+    // §4.7: a blocking hook in front of every prompt must not pay a connect timeout to a
     // server already known to be down. Read-only — `allowRequest` would spend the single
     // half-open probe that `lib/http.mjs` is about to ask for itself.
     if (breakerOpen(cfg)) {
@@ -296,10 +296,10 @@ await runHook('prompt-recall', {
  *      the memories that were in front of the model when it answered.
  *   3. **`markSeen`, before the spawn.** It is synchronous; the child's `readSeen` is a node
  *      boot away. Do it after the spawn and the refresh assembles against a stale set, the
- *      repeat is re-sent in full next turn, and the HS-3 saving reverts with nothing red.
+ *      repeat is re-sent in full next turn, and the whole saving reverts with nothing red.
  *   4. **Spawn, unless the breaker is open.** A block already on disk is rendered either
- *      way — it cost a round trip nobody should pay twice — but F7's rule still holds for
- *      the dial: no process per prompt against a server already known to be down.
+ *      way — it cost a round trip nobody should pay twice — but the breaker's rule still
+ *      holds for the dial: no process per prompt against a server already known to be down.
  *
  * @param {Record<string, any>} cfg
  * @param {Record<string, any>} payload

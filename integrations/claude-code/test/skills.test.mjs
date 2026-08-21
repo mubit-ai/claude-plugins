@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Skills and the subagent — build-guide §9.
+ * Skills and the subagent.
  *
  * A skill is markdown with YAML frontmatter, so it is testable as data. Two kinds of
  * assertion live here:
@@ -120,13 +120,13 @@ function skillFile(name) {
 
 function loadSkill(name) {
   const text = readOrFail(skillFile(name), `skills/${name}/SKILL.md`,
-    'Build-guide §9 defines the skill set: recall, remember, reflect, forget, doctor, setup, auth.');
+    'The plugin ships one skill each for recall, remember, reflect, forget, doctor, setup and auth.');
   return parseFrontmatter(text, `skills/${name}/SKILL.md`);
 }
 
 function loadAgent() {
   const p = join(AGENTS_DIR, 'mubit-recall.md');
-  const text = readOrFail(p, 'agents/mubit-recall.md', 'Build-guide §9.4 defines the Haiku recall subagent.');
+  const text = readOrFail(p, 'agents/mubit-recall.md', 'The plugin ships a Haiku recall subagent at this path.');
   return parseFrontmatter(text, 'agents/mubit-recall.md');
 }
 
@@ -197,7 +197,7 @@ for (const name of SKILLS) {
 // §2/§9 — exactly this set. An extra skill is extra always-loaded context that §3.5's
 // contextCost estimate does not account for.
 test('exactly the documented skills ship — no more, no fewer', () => {
-  assert.ok(existsSync(SKILLS_DIR), `skills/ does not exist yet: ${SKILLS_DIR} (build-guide §9)`);
+  assert.ok(existsSync(SKILLS_DIR), `skills/ does not exist yet: ${SKILLS_DIR}`);
   const dirs = readdirSync(SKILLS_DIR, { withFileTypes: true })
     .filter((d) => d.isDirectory()).map((d) => d.name).sort();
   assert.deepEqual(dirs, [...SKILLS].sort(),
@@ -233,7 +233,7 @@ test('agents/mubit-recall.md declares none of hooks, mcpServers, permissionMode'
 // match a plugin-provided server, so the skill loses the tool it was written around.
 test('every tools: entry across skills and agents is fully qualified', () => {
   const files = allMarkdown();
-  assert.ok(files.length > 0, `no skills or agents exist yet under ${PLUGIN_ROOT} (build-guide §9)`);
+  assert.ok(files.length > 0, `no skills or agents exist yet under ${PLUGIN_ROOT}`);
 
   let granted = 0;
   for (const { rel, text } of files) {
@@ -258,7 +258,7 @@ test('every tool named by a skill or agent exists in the bundled MCP server', ()
 
   const files = allMarkdown();
   assert.ok(files.length > 0,
-    `no skills or agents exist yet under ${PLUGIN_ROOT} (build-guide §9) — this check would otherwise pass vacuously`);
+    `no skills or agents exist yet under ${PLUGIN_ROOT} — this check would otherwise pass vacuously`);
 
   for (const { rel, text } of files) {
     const tools = toolsOf(parseFrontmatter(text, rel).fm) ?? [];
@@ -350,7 +350,8 @@ test('reflect/SKILL.md explains that background extraction never widens scope', 
 // makes the guard itself the disclosure once it ships — and it only ever catches the terms
 // someone thought to enumerate. Pinning the whole configuration story to two hosted settings
 // leaves no room for a local-stack walkthrough to be correct, without naming one.
-// `scripts/check-mirror-clean.mjs` keeps the denylist, and is not published.
+// The denylist itself lives outside this repository, where enumerating the terms is not
+// itself the disclosure.
 test('setup/SKILL.md configures a hosted instance in two settings, and installs nothing', () => {
   const { body } = loadSkill('setup');
   assert.match(body, /endpoint/i, 'setup must tell the user to set an endpoint');

@@ -547,7 +547,7 @@ export function assertHookContract(r) {
 // ---------------------------------------------------------------------------
 
 /**
- * Drive the plugin's MCP server over real newline-delimited JSON-RPC — build-guide §8.
+ * Drive the plugin's MCP server over real newline-delimited JSON-RPC (§8).
  *
  * Everything else in this file stubs the server out: `test/launch.test.mjs` swaps
  * `./server.js` for a module that snapshots `process.env`, which is the right tool for the

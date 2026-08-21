@@ -7,9 +7,10 @@ manifest key that drifted, and says what defines it.
 Each file is independently runnable and the whole suite finishes in well under ten seconds,
 so the red-green loop stays tight.
 
-The `§` references throughout are sections of the plugin's design guide, which is not part of
-this distribution. They are there to say *why* an assertion exists; the assertions themselves
-stand on their own.
+The `§` references throughout are section numbers from the notes this suite was written
+against. Those notes are not part of this distribution and cannot be resolved from here; the
+references survive only as a marker that an assertion had a reason. The reason itself is
+spelled out in the comment above each test, and the assertions stand on their own.
 
 ## Running
 
@@ -29,17 +30,21 @@ By default, hook tests run `hooks/src/*.mjs` so you can iterate without rebuildi
 `runHook()` resolves `hooks/src/<name>.mjs` unless `MUBIT_CC_TEST_TARGET=dist` (or a per-call
 `target: 'dist'`) redirects it at the bundle `hooks/hooks.json` actually points at.
 
-`npm run test:dist` is that redirect, and it is now **enforced rather than a habit**:
-`.github/workflows/claude-code-plugin-ci.yml` runs it as its own step, downstream of the
-rebuild and the `git diff --exit-code` freshness gate, so the bundles under test are provably
-byte-identical to what a marketplace fetch hands a user. The freshness gate alone only proves
-the artifacts were *built* from this source — esbuild can emit a bundle that Node then refuses
-to import, and the diff stays clean. `release.test.mjs` asserts that CI step exists, and
-resolves the script name out of `package.json`, so use the script rather than retyping the env
-var: that is what keeps this file and CI from drifting into two spellings.
+`npm run test:dist` is that redirect, and it is **enforced rather than a habit**:
+`.github/workflows/verify.yml` runs it as a step of its own, beside the pass against the
+sources, so the code under test is the code a marketplace fetch hands a user. That second pass
+is not redundant. A plugin is installed by fetching this repository — there is no install step
+and no build — so the bundles under `hooks/dist`, `mcp/dist` and `bin/` are committed
+artifacts, and esbuild can emit one that Node then refuses to import without anything about
+the source looking wrong. Use the npm script rather than retyping the env var: that is what
+keeps this file and CI from drifting into two spellings.
 
-Still worth running locally before you commit. It costs ~6 s, and CI is the backstop, not the
-first line of defence.
+`.github/workflows/leak-scan.yml` is the other gate, and it asks a different question. This
+repository is public, so that job scans for anything internal that should never have reached
+it — and it is the last line rather than the first, since a leak it catches is already public.
+
+Both are still worth running locally before you commit. The suite costs ~6 s, and CI is the
+backstop, not the first line of defence.
 
 No framework, no dependencies, no Docker, no real Mubit, and no network beyond loopback:
 `fakeMubit()` is a real `node:http` server on `127.0.0.1:0` and hooks are real subprocesses
@@ -52,7 +57,11 @@ under ~10 seconds.
 | File | Covers |
 |---|---|
 | `manifests.test.mjs` | manifests as data, version lockstep, allowlist ↔ the shipped MCP tool table |
+| `hook-output.test.mjs` | the host's own output contract, over every registration in `hooks/hooks.json` |
 | `mcp-surface.test.mjs` | real stdio `tools/list` against `mcp/dist/` — the allowlist as the model sees it |
+| `mcp-instructions.test.mjs` | the server `instructions` field — the only steer a subagent gets |
+| `mcp-egress.test.mjs` | what an MCP write puts on the wire: run scope, and the run id it cannot be talked out of |
+| `engine-floor.test.mjs` | the Node floor guard — the failure where nothing loads and nothing says so |
 | `state.test.mjs` | paths, atomic JSON, TTL pruning, markers, redacted logging |
 | `config.test.mjs` | precedence, loopback detection, env tags, frozen defaults |
 | `credentials.test.mjs` | the 0600 store, merge-not-replace, never throws |
@@ -73,6 +82,9 @@ under ~10 seconds.
 | `session-start.test.mjs` | the `source` table, sub-budgets, the offline steer block |
 | `assemble.test.mjs` | section mapping and order, budget, `sourceRefIds` |
 | `prompt-recall.test.mjs` | the three-rung ladder, policy cache, the `context` absence, the staged turn |
+| `async-recall.test.mjs` | carry-forward recall: the detached refresh, who marks the seen-set, attribution on the receiving turn |
+| `seen-set.test.mjs` | the cross-turn seen-set: what has already been paid for, and the degraded repeat |
+| `subagent-start.test.mjs` | injection into a subagent, and the plugin's own agent excluding itself |
 | `attribution.test.mjs` | `reference_id` → `entry_ids` end to end |
 | `checkpoint.test.mjs` | redacted snapshot, spooled anchor, visible failure |
 | `session-end.test.mjs` | the required reflect, once-marker, best-effort ordering, one outcome rule shared with `drain` |
@@ -80,14 +92,13 @@ under ~10 seconds.
 | `statusline.test.mjs` | network-free, glyph precedence, empty-state survival |
 | `launch.test.mjs` | run-id derivation, env-before-import, allowlist default |
 | `skills.test.mjs` | frontmatter, tool prefixes, load-bearing prose |
-| `release.test.mjs` | release wiring, committed `dist`, the shipped licence |
-| `failure.test.mjs` | F1–F29, the cross-cutting failure surface |
+| `failure.test.mjs` | the cross-cutting failure surface, twenty-nine cases end to end |
 
 ## `failure.test.mjs` is the important one
 
-The build guide says to write it first, and the reason generalises: the happy path is a handful
-of assertions, but the failure surface is where the bugs live and it decides whether anyone
-keeps the plugin installed.
+It was written first, and the reason generalises: the happy path is a handful of assertions,
+but the failure surface is where the bugs live and it decides whether anyone keeps the plugin
+installed.
 
 Roughly a third of the whole suite exists to pin facts that are counter-intuitive enough that a
 reasonable person would "fix" them in the wrong direction:
@@ -107,8 +118,8 @@ reasonable person would "fix" them in the wrong direction:
   and the absent keys on each, then greps the built bundle for the same, because the paths a test
   cannot reach are the ones the guarantee has to cover too.
 
-When one of those fails, re-read the guide section cited in the comment above it before
-changing the assertion.
+When one of those fails, re-read the reasoning in the comment above it before changing the
+assertion.
 
 ## The harness
 
@@ -146,10 +157,10 @@ credential-shaped strings.
   and either can answer most questions. `statusline.test.mjs` prefers the built
   `bin/statusline.mjs` and falls back to `src`. `launch.test.mjs` prefers `mcp/src/launch.mjs`
   and falls back to `dist`. `mcp-surface.test.mjs` is dist-only and hard-errors without the
-  bundle — the *registered* tool table exists nowhere but the shipped server, which is how B1
-  shipped past a green suite.
-- Table-drive anything the guide gives as a table, one assertion per row.
-- Comment each test with the guide section it protects.
+  bundle — the *registered* tool table exists nowhere but the shipped server, which is how a
+  broken tool table once shipped past a green suite.
+- Table-drive anything that is specified as a table, one assertion per row.
+- Comment each test with the property it protects, and why that property is worth a test.
 - Never sleep for real windows. Shrink them with `MUBIT_CC_BREAKER_*`, `MUBIT_CC_BATCH_*`, and
   friends.
 - Skip permission-based tests when running as root (`process.getuid?.() === 0`) — root ignores

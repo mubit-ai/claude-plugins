@@ -121,7 +121,7 @@ test('request: a 500 returns {ok:false, state:"server_error"} without throwing',
   assert.equal(r.status, 500);
 });
 
-// §4.7 / F10: an unparseable body on a JSON route is a server fault, not an unhandled
+// §4.7: an unparseable body on a JSON route is a server fault, not an unhandled
 // rejection. A reverse proxy returning an HTML error page is the real-world shape.
 test('request: a non-JSON body on a JSON route returns server_error, no unhandled rejection', async (t) => {
   const { cfg, http } = await setup(t, {
@@ -134,7 +134,7 @@ test('request: a non-JSON body on a JSON route returns server_error, no unhandle
   assert.equal(r.state, 'server_error');
 });
 
-// §4.7 / F1: nothing listening. The most common state of a local Mubit.
+// §4.7: nothing listening. The most common state of a local Mubit.
 test('request: a refused connection returns {ok:false, state:"unreachable"} without throwing', async (t) => {
   const { cfg, http } = await setupDead(t);
   const r = await noThrow(() => http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN },
@@ -167,7 +167,7 @@ test('request: sends application/json on control routes', async (t) => {
   assert.deepEqual(call.body, { run_id: RUN }, 'the body is sent verbatim as JSON');
 });
 
-// §4.7: http.mjs is what feeds the breaker; without this, F7 can never fire.
+// §4.7: http.mjs is what feeds the breaker; without this, the breaker could never open.
 test('request: a server failure is recorded on the breaker', async (t) => {
   const { cfg, dataDir, http } = await setup(t, {
     routes: { 'POST /v2/control/ingest': { status: 500, json: { error: 'boom' } } },
@@ -239,7 +239,7 @@ test('health: surrounding whitespace on "OK" is still healthy', async (t) => {
   assert.equal(r.ok, true);
 });
 
-// §4.1/C1b — the guard that makes `unconfigured` mean what it says. Before it, `urlFor`
+// §4.1 — the guard that makes `unconfigured` mean what it says. Before it, `urlFor`
 // handed `fetch` the bare route, `fetch` threw ERR_INVALID_URL before opening a socket, and
 // the throw was classified as a fault in a server that was never contacted.
 test('no endpoint: every call refuses without dialing and without touching the breaker', async (t) => {
@@ -279,9 +279,8 @@ test('health: the result is cached for 30s — a second call makes zero extra re
     'the cached verdict lives at status/health.json (§7)');
 });
 
-// §1.2: health is explicitly allowlisted by enforce_core_access_policy
-// — it is the one route that answers without a key, which is what makes it usable as the
-// readiness probe before the user has pasted one.
+// §1.2: health is the one route that answers before a credential is checked, which is what
+// makes it usable as the readiness probe before the user has pasted a key.
 test('health: works with no API key configured', async (t) => {
   const { server, cfg, http } = await setup(t, { apiKey: '' });
 
@@ -335,7 +334,7 @@ test('auth: a missing key sends no Authorization header at all', async (t) => {
 
 // §1.1: /v2/control/query has a per-route 256 KiB cap; everything
 // else inherits 64 MiB. Blowing it produces a 413 that looks like a server fault to the
-// breaker, so the check happens client-side and nothing is dialed. (F17)
+// breaker, so the check happens client-side and nothing is dialed.
 test('postQuery: a body over 256 KiB is rejected pre-flight and nothing is dialed', async (t) => {
   const { server, cfg, http } = await setup(t);
 
@@ -422,9 +421,9 @@ test('postQuery: an omitted mode is rejected pre-flight — omission is the expe
   assert.equal(server.requests.length, 0);
 });
 
-// §4.3 / F21: MUBIT_DEFAULT_SESSION_ID defaults to the literal "default" in the MCP server,
-// collapsing every user, project and machine into one
-// run. request() is the last line of defence and refuses to send it.
+// §4.3: `"default"` is the placeholder a session carries before anything has derived a real
+// run id for it, so nothing sent under it can be attributed to the work that produced it.
+// request() is the last line of defence and refuses to put it on the wire at all.
 test('request: refuses any body whose run_id === "default", and dials nothing', async (t) => {
   const { server, cfg, dataDir, http } = await setup(t);
 
@@ -462,12 +461,12 @@ const ingestItem = () => spoolItem();
 
 /** @type {Array<[string, (h: any, cfg: any) => Promise<any>]>} */
 const REJECT_ROWS = [
-  // StateIngestRequestPayload — run_id
+  // POST /v2/control/ingest — run_id
   ['postIngest requires run_id', (h, c) => h.postIngest(c, { agent_id: AGENT, items: [ingestItem()] })],
-  // Stateingest itemPayload — item_id
+  // POST /v2/control/ingest, per item — item_id
   ['postIngest requires item_id on every item',
     (h, c) => h.postIngest(c, { run_id: RUN, agent_id: AGENT, items: [{ content_type: 'text', text: 'x', intent: 'trace' }] })],
-  // Stateingest itemPayload — content_type
+  // POST /v2/control/ingest, per item — content_type
   ['postIngest requires content_type on every item',
     (h, c) => h.postIngest(c, { run_id: RUN, agent_id: AGENT, items: [{ item_id: 'i1', text: 'x', intent: 'trace' }] })],
   // One bad item poisons the batch: the server rejects the whole request, not the item.
@@ -475,18 +474,18 @@ const REJECT_ROWS = [
     (h, c) => h.postIngest(c, { run_id: RUN, agent_id: AGENT, items: [ingestItem(), { text: 'x' }] })],
   // query payload — run_id
   ['postQuery requires run_id', (h, c) => h.postQuery(c, { query: 'why', mode: 'direct_bypass', evidence_only: true })],
-  // StateContextRequestPayload — run_id
+  // POST /v2/control/context — run_id
   ['postContext requires run_id', (h, c) => h.postContext(c, { query: 'why', mode: 'sections' })],
-  // StateCheckpointPayload — run_id
+  // POST /v2/control/checkpoint — run_id
   ['postCheckpoint requires run_id', (h, c) => h.postCheckpoint(c, { agent_id: AGENT, content: 'tail' })],
-  // StateRecordOutcomePayload — run_id
+  // POST /v2/control/outcome — run_id
   ['postOutcome requires run_id', (h, c) => h.postOutcome(c, { reference_id: 'global', outcome: 'success' })],
-  // StateRecordOutcomePayload — reference_id must be present…
+  // POST /v2/control/outcome — reference_id must be present…
   ['postOutcome requires reference_id', (h, c) => h.postOutcome(c, { run_id: RUN, outcome: 'success' })],
   // …and NON-EMPTY (§1.3: pass "global" for run-level attribution, never "").
   ['postOutcome rejects an empty reference_id',
     (h, c) => h.postOutcome(c, { run_id: RUN, reference_id: '', outcome: 'success', entry_ids: ['ref_1'] })],
-  // StateAgentRegisterRequestPayload — run_id, agent_id
+  // POST /v2/control/agents/register — run_id, agent_id
   ['registerAgent requires run_id', (h, c) => h.registerAgent(c, { agent_id: AGENT, role: 'worker' })],
   ['registerAgent requires agent_id', (h, c) => h.registerAgent(c, { run_id: RUN, role: 'worker' })],
   // job query — run_id on the query string
@@ -622,7 +621,7 @@ test('retry: postIngest forwards {retry:true} to request()', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// The breaker gate — §4.2, §4.7, F7
+// The breaker gate — §4.2, §4.7
 // ---------------------------------------------------------------------------
 
 // §4.2: "consults the breaker before dialing". An open breaker means zero syscalls, which
@@ -703,7 +702,7 @@ test('timeout: a response inside the budget still succeeds', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// MUB-9 — a deadline the client chose is not a verdict about the server
+// A deadline the client chose is not a verdict about the server
 // ---------------------------------------------------------------------------
 
 // §4.7/§5.2: `session-start`'s health slice and `prompt-recall`'s budget both dial on a

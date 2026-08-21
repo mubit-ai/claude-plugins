@@ -2,12 +2,9 @@
 /**
  * `lib/redact.mjs` — the three-stage sanitisation pipeline.
  *
- * Guide §4.4 (module design) and §12.2 (test plan); spec §6.4 (the fuller
- * treatment, including why the entropy rule is contentious).
- *
- * Redaction is the plugin's headline differentiator: cognee's plugin stores
- * secrets appearing in tool output subject only to byte caps and has no
- * redaction layer at all (spec §6.4). Everything below is load-bearing.
+ * Redaction is the plugin's headline differentiator, and the one promise where being
+ * approximately right is the same as being wrong: capture runs on every tool call, so
+ * anything this pipeline misses leaves the machine. Everything below is load-bearing.
  *
  * Pipeline order, which the tests pin explicitly:
  *   Stage 1  pattern scrub   →  each match becomes `[REDACTED:<kind>]`
@@ -136,6 +133,7 @@ describe('stage 1 — pattern scrub (§4.4)', () => {
     },
     {
       kind: 'high-entropy',
+      // leakcheck-allow: redaction-threshold — the client's own detector, exercised right here.
       pattern: 'len >= 32, charset [A-Za-z0-9+/=_-], entropy >= 4.0',
       text: `cache blob ${SECRETS.highEntropy} written to disk`,
       secret: SECRETS.highEntropy,
@@ -339,10 +337,11 @@ describe('high-entropy false-positive guard (spec §6.4)', () => {
   });
 
   /**
-   * A 40-char git SHA can never trip the rule: Shannon entropy over a 16-symbol
-   * alphabet is bounded by log2(16) = 4.0, and a 40-char run cannot be exactly
-   * uniform (40/16 = 2.5), so it is strictly below the >= 4.0 threshold. This
-   * is a property of the threshold, not a lucky fixture.
+   * The threshold is the client's own and this test asserts it three lines down, so hiding
+   * the prose here would hide nothing. leakcheck-allow: redaction-threshold
+   * Shannon entropy over a 16-symbol alphabet is bounded by log2(16) = 4.0, and a 40-char
+   * git SHA cannot be exactly uniform (40/16 = 2.5), so it is strictly below the >= 4.0
+   * threshold. That is a property of the threshold, not a lucky fixture.
    */
   it('leaves a git SHA intact, and entropy() proves why', async () => {
     const { redactText, entropy } = await R();
@@ -505,7 +504,7 @@ describe('stage 2 — path denylist (§4.4)', () => {
     'docs/env-vars.md',
     'test/fixtures/environment.ts',
     '.github/workflows/ci.yml',
-    'packages/server/src/lesson-templates.ts',
+    'packages/app/src/templates.ts',
   ];
 
   for (const p of DENIED) {

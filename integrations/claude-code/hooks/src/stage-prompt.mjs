@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `hooks/src/stage-prompt.mjs` — UserPromptSubmit, the fast path. Build-guide §5.3.
+ * `hooks/src/stage-prompt.mjs` — UserPromptSubmit, the fast path.
  *
  * **Budget < 25 ms. Zero network.** It runs on the same event as `prompt-recall`, which is
  * allowed 1500 ms and a round trip; this one is allowed neither, because everything it does

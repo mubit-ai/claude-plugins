@@ -1,11 +1,5 @@
-# This file is generated. It is copied over the mirror's `.gitignore` on every publish by
-# `.github/workflows/mirror-claude-plugins.yml`, the same way README.md is. Edit it in the
-# source repo at `.github/mirror/claude-plugins-gitignore`; a change made in the mirror is
-# overwritten by the next publish.
-#
-# It has to be copied rather than left alone, because the publish begins by deleting every
-# tracked file (`git rm -rq --ignore-unmatch .`) — which includes this one. Restoring it in
-# the same step is what stops the window below from ever opening.
+# This file is generated, like README.md. Edit it in the source repository — a change made
+# here is overwritten on the next release.
 
 # Local session-recording state. Codaph writes full Claude Code transcripts here — tool
 # calls, file contents, command output — which on a developer machine means verbatim
@@ -21,3 +15,6 @@ node_modules/
 # Editor / OS noise
 .DS_Store
 *.log
+
+# Local-only leak rules: names that must not be published in the repository they guard.
+.github/leakcheck/rules.local.mjs

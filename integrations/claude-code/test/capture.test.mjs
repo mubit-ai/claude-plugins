@@ -146,7 +146,7 @@ function assertRequiredItemFields(item) {
 }
 
 /**
- * The standing guard for defect F1.
+ * The standing guard for the dropped-tool-output defect.
  *
  * A tool item is `"<tool>(<params>) -> <output>"`. For a year every shipped item ended at
  * the arrow, because capture read `payload.tool_output` and the host sends `tool_response`:
@@ -154,11 +154,11 @@ function assertRequiredItemFields(item) {
  * because the only payload the tests had ever seen was one the tests wrote themselves.
  *
  * So: any item whose text reaches the arrow must carry something after it. Call this
- * wherever a fixture supplies a tool result — an empty tail there is F1, returned.
+ * wherever a fixture supplies a tool result — an empty tail there is that defect, returned.
  */
 function assertNonEmptyTail(item) {
   assert.ok(!/->\s*$/.test(item.text),
-    `captured item ends at the arrow with no tool output — that is defect F1: ${JSON.stringify(item.text)}`);
+    `captured item ends at the arrow with no tool output — the result was dropped: ${JSON.stringify(item.text)}`);
 }
 
 // What `capture` may cost on top of starting node — `assertWithinBudget` measures that floor
@@ -221,7 +221,7 @@ test('capture: PostToolUse writes exactly one correctly shaped spool item and is
   assert.equal(meta.execution_time_ms, 42, 'the host sends duration_ms, not execution_time_ms');
 });
 
-// F1 — the host's field is `tool_response`. Every shipped memory read
+// The host's field is `tool_response`. Every shipped memory read
 // `Read(file_path=X) -> ` because capture read a name nothing ever sends.
 test('capture: the tool result arrives as tool_response and lands in the item text', async (t) => {
   const dataDir = makeDataDir();
@@ -236,7 +236,7 @@ test('capture: the tool result arrives as tool_response and lands in the item te
     `tool_response must be rendered after the arrow: ${JSON.stringify(item.text)}`);
 });
 
-// F1 — `tool_output` is the older host's name for the same thing. Keeping it as a fallback
+// `tool_output` is the older host's name for the same thing. Keeping it as a fallback
 // costs one `??`, and nothing is gained by making an old payload shape fail.
 test('capture: the legacy tool_output field is still read as a fallback', async (t) => {
   const dataDir = makeDataDir();
@@ -254,7 +254,7 @@ test('capture: the legacy tool_output field is still read as a fallback', async 
     `tool_output must still be rendered after the arrow: ${JSON.stringify(item.text)}`);
 });
 
-// F1, standing regression — the six `tool_response` shapes taken off real transcripts. No
+// Standing regression — the six `tool_response` shapes taken off real transcripts. No
 // two of them look alike, and the renderer has to find the payload in all of them.
 test('capture: every recorded tool_response shape renders something after the arrow', async (t) => {
   const server = await mubit(t);
@@ -483,12 +483,10 @@ test('capture --stop: always spawns a drain with --with-outcome <prompt_id>', as
 /**
  * The fifth mode, and the one whose whole job is to make a *later* decision possible.
  *
- * The host's own registry, read out of Claude Code 2.1.235 the way the constants in
- * `hook-output.test.mjs` are:
- *
- *     StopFailure: {summary: "When the turn ends due to an API error",
- *       description: "Fires **instead of Stop** when an API error (rate limit, auth failure,
- *       etc.) ended the turn. Fire-and-forget — hook output and exit codes are ignored."}
+ * The host's own registry, established against Claude Code 2.1.235 the way the constants in
+ * `hook-output.test.mjs` are, describes this event as firing **instead of Stop** when an API
+ * error — a rate limit, an auth failure — ended the turn, and as fire-and-forget: its output
+ * and its exit code are both ignored.
  *
  * "Instead of Stop" is the fact the whole ticket turns on. `capture --stop` is the only thing
  * in this plugin that ever writes `ended_at` / `outcome_pending`, so on a rate-limited turn
@@ -561,8 +559,8 @@ test('capture --stop-failure: closes the turn, stamps the API error, and starts 
 });
 
 // The mark is the host's value, copied through. The taxonomy is not a list this plugin can
-// keep: 2.1.235 ships ten values plus a feature-flagged eleventh (`account_on_hold`, behind
-// `fOr()`), so the same host is right about the list on one account and wrong on another.
+// keep: 2.1.235 ships ten values plus a feature-flagged eleventh (`account_on_hold`), so the
+// same host is right about the list on one account and wrong on another.
 // That is why the registration carries no matcher — and why the mark is whatever arrived.
 test('capture --stop-failure: records the error value the host sent, in or out of the taxonomy', async (t) => {
   const server = await mubit(t);
@@ -571,14 +569,14 @@ test('capture --stop-failure: records the error value the host sent, in or out o
   const rows = [
     { name: 'the common one', over: { error: 'rate_limit' }, expect: 'rate_limit' },
     { name: 'the taxonomy\'s own catch-all', over: { error: 'unknown' }, expect: 'unknown' },
-    // Present only where `fOr()` is on. A hard-coded matcher list would silently drop this
+    // Present only where that flag is on. A hard-coded matcher list would silently drop this
     // turn on the accounts that have it.
     { name: 'the feature-flagged eleventh', over: { error: 'account_on_hold' }, expect: 'account_on_hold' },
     // The list the plugin was handed is a snapshot of one host build. A value it has never
     // heard of must still close the turn and still suppress the outcome.
     { name: 'a value added after this plugin shipped', over: { error: 'context_window_exceeded' }, expect: 'context_window_exceeded' },
-    // The host itself defaults a missing one on the way to the matcher (`e.error ?? "unknown"`),
-    // so an absent field is `unknown` here too rather than an empty mark that reads as "no
+    // The host itself defaults a missing one to `unknown` on the way to the matcher, so an
+    // absent field is `unknown` here too rather than an empty mark that reads as "no
     // API error at all" — which would put the turn straight back into the outcome path.
     { name: 'no error field at all', over: { error: undefined }, expect: 'unknown' },
   ];
@@ -705,7 +703,7 @@ test('capture --subagent: attributes the item to the subagent agent_id', async (
 });
 
 /**
- * F2 — the tool set is the host's, not the plugin's.
+ * The tool set is the host's, not the plugin's.
  *
  * `hooks.json` now matches every tool, so what is worth remembering is decided here, in
  * code, where it can be tested. `Agent` — a delegated investigation, among the highest-value
@@ -744,7 +742,7 @@ test('capture: an Agent dispatch is captured and a TodoWrite is skipped', async 
     'TodoWrite carries no memory — it must be skipped in code now that the matcher lets it through');
 });
 
-// F2 — the whole skip list, each name and the reason it earns no memory. These arrive now
+// The whole skip list, each name and the reason it earns no memory. These arrive now
 // only because the matcher stopped filtering; every one of them is bookkeeping, or a
 // duplicate of something already captured. Anything NOT on this list is kept, including
 // tools that did not exist when it was written — that is the point of the inversion, so the

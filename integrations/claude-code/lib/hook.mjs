@@ -124,7 +124,7 @@ export async function runHook(name, options = {}) {
     const raw = payloadPath ? readFileText(payloadPath) : await readStdin();
     const parsed = parseObject(raw);
     if (!parsed.ok) {
-      // Exactly one line, and it is the only thing this process says. §12.1-F12/F13 count it.
+      // Exactly one line, and it is the only thing this process says. §12.1 counts it.
       safely(() => log(cfg, 'warn',
         `hook ${name}: stdin payload was not parseable JSON; emitting {} and exiting 0`,
         { hook: name, bytes: raw.length }));

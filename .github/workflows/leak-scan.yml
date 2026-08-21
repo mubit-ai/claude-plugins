@@ -1,0 +1,107 @@
+# Leak scan — nothing internal leaves this repository.
+#
+# This repository is public and generated. Two notes for whoever maintains it:
+#
+#   1. This repository's contents are regenerated on release. Unless that step is taught to
+#      carry `.github/` across, a release removes this workflow and the gate silently stops
+#      existing — give `.github/**` whatever treatment `README.md` and `.gitignore` already get.
+#
+#   2. The real gate belongs in the source repository too. Catching a leak here catches it
+#      after it is already public. This job is the last line, not the first.
+#
+# Nothing here installs dependencies. The plugin's only devDependency is a `file:../mcp` path
+# that does not exist in this repository, so `npm ci` cannot succeed — and a gate that depends
+# on a broken install is a gate that gets switched off.
+
+name: leak-scan
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leak-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: deterministic scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # A leak scanner fails silently — a rule that stops matching just makes the report
+      # shorter, and shorter reads like progress. This plants a known leak of each kind in a
+      # throwaway repository and asserts the scanner still finds them.
+      - name: leakcheck self-test
+        run: node .github/scripts/leakcheck.selftest.mjs
+
+      # Fails on any blocking finding that is not carried in baseline.json. The baseline is
+      # debt, not absolution: it should only ever get smaller.
+      - name: leakcheck
+        run: node .github/scripts/leakcheck.mjs --sarif leakcheck.sarif
+
+      # Findings land in the Security tab with their line and their rationale, so the backlog
+      # is visible between pull requests rather than only inside a failing job.
+      - name: upload SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: leakcheck.sarif
+          category: leakcheck
+
+  llm-review:
+    name: model review of the diff
+    # Forks do not get secrets; the script exits 0 when the key is missing, but there is no
+    # reason to spend a runner finding that out.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: fetch the base
+        run: git fetch --no-tags --depth=200 origin "${{ github.base_ref }}"
+
+      - name: review added lines against the policy
+        env:
+          LEAKCHECK_API_KEY: ${{ secrets.LEAKCHECK_API_KEY }}
+          LEAKCHECK_MODEL: ${{ vars.LEAKCHECK_MODEL }}
+          LEAKCHECK_BASE_URL: ${{ vars.LEAKCHECK_BASE_URL }}
+        run: node .github/scripts/llm-leak-review.mjs --base "origin/${{ github.base_ref }}"
+
+  release-gate:
+    name: release gate (no baseline)
+    # `main` is what users install from. Nothing carried in the baseline may reach it, so this
+    # is the one job that ignores the baseline entirely.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: leakcheck --strict
+        run: node .github/scripts/leakcheck.mjs --strict

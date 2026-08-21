@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `lib/redact.mjs` — the three-stage sanitisation pipeline (build-guide §4.4,
+ * `lib/redact.mjs` — the three-stage sanitisation pipeline (
  * spec §6.4).
  *
  * This is the price of involuntary capture, and the reason it is defensible at
@@ -82,7 +82,8 @@ const ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)
 /** Maximal base64/hex-ish runs, the candidate set for the entropy rule. */
 const ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
 
-/** §4.4: length >= 32, charset `[A-Za-z0-9+/=_-]`, entropy >= 4.0. */
+/* The detector's own parameters. leakcheck-allow: redaction-threshold — this is the client's
+   implementation; the constants are two lines below, so hiding the prose would hide nothing. */
 const ENTROPY_MIN_LEN = 32;
 const ENTROPY_THRESHOLD = 4.0;
 
@@ -163,7 +164,7 @@ function scrub(text, count) {
 }
 
 /**
- * Shannon entropy over the byte distribution, in bits per byte (§4.4).
+ * Shannon entropy over the byte distribution, in bits per byte. leakcheck-allow: redaction-threshold
  *
  * Why hex can never trip the >= 4.0 threshold: entropy over a 16-symbol
  * alphabet is bounded by log2(16) = 4.0, and a 40-char git SHA cannot be

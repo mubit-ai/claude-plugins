@@ -2,12 +2,13 @@
 /**
  * `failure.test.mjs` — the failure surface of the `mubit-memory` Claude Code plugin.
  *
- * Written FIRST, before any implementation exists (build-guide §12, §12.1):
- *   "the happy path is a handful of assertions; the failure surface is where the bugs
- *    live and it determines whether a user keeps the plugin installed."
+ * Written FIRST, before any implementation exists, on the principle that the happy path
+ * is a handful of assertions while the failure surface is where the bugs live — and it is
+ * the failure surface that decides whether a user keeps the plugin installed.
  *
- * Every one of the 29 cases below is row F1..F29 of build-guide §12.1, in order.
- * Each carries a comment naming the guide fact it protects, because most of these
+ * The 29 cases below enumerate that surface in order: every transport fault, every
+ * malformed input, every contended lock and every policy verdict the plugin can meet.
+ * Each carries a comment naming the behaviour it protects, because most of these
  * assertions look arbitrary until you know which real-world failure produced them.
  *
  * RED STATE: until `lib/*.mjs` and `hooks/src/*.mjs` are written, these fail with
@@ -47,7 +48,7 @@ const RUN = 'cc-failtest-0001';
 
 /**
  * A spawned `node` process costs ~30-60 ms of startup before the hook's own budget
- * even begins. Budget assertions (F11, F28) allow for it explicitly rather than
+ * even begins. The two budget assertions below allow for it explicitly rather than
  * pretending the wall clock of a child process is the hook's internal clock.
  */
 const NODE_STARTUP_ALLOWANCE_MS = 900;
@@ -71,7 +72,7 @@ async function server(t, routes = {}) {
 /**
  * A URL that is guaranteed to refuse connections: bind a real listener to get a
  * port the OS just handed out, then close it. Deterministic ECONNREFUSED, no
- * guessing at "probably nothing is on 9". Used by F1 and F20.
+ * guessing at "probably nothing is on 9". Used by the ECONNREFUSED cases below.
  */
 async function deadEndpoint() {
   const srv = await fakeMubit();
@@ -82,8 +83,8 @@ async function deadEndpoint() {
 
 /**
  * The complete, deterministic hook environment. Cold-start grace defaults to 0 so
- * a failure test sees the failure glyph rather than `warming` (F20 turns it back on
- * deliberately). Log level `warn` so "logs once" assertions see warn+error and
+ * a failure test sees the failure glyph rather than `warming` (the cold-start case turns
+ * it back on deliberately). Log level `warn` so "logs once" assertions see warn+error and
  * nothing else.
  * @param {{dataDir: string, endpoint?: string, runId?: string, extra?: Record<string,string>}} o
  */
@@ -222,7 +223,7 @@ describe('transport failures', () => {
   // "Nothing listening" must be a *typed* state, not an exception — §4.7's table maps
   // ECONNREFUSED/ENOTFOUND/EHOSTUNREACH/ECONNRESET to `unreachable`. And nothing may be
   // lost: §5.5 "all failures leave the spool intact for the next drain."
-  test('F1: nothing listening (ECONNREFUSED) -> unreachable, exit 0, JSON stdout, items stay spooled', async (t) => {
+  test('nothing listening (ECONNREFUSED) -> unreachable, exit 0, JSON stdout, items stay spooled', async (t) => {
     const dataDir = makeDataDir();
     const endpoint = await deadEndpoint();
     const env = hookEnv({ dataDir, endpoint });
@@ -246,8 +247,8 @@ describe('transport failures', () => {
   });
 
   // §5.5 step 6: "5xx / network -> recordFailure(state); LEAVE the spool files in place."
-  // Contrast with F16, where a 422 quarantines the batch instead.
-  test('F2: 500 on /v2/control/ingest -> server_error and the spool is left alone', async (t) => {
+  // Contrast with the 422 case below, which quarantines the batch instead.
+  test('500 on /v2/control/ingest -> server_error and the spool is left alone', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, {
       'POST /v2/control/ingest': { status: 500, json: { error: 'internal' } },
@@ -266,7 +267,7 @@ describe('transport failures', () => {
 
   // §4.7: "5xx, or unparseable body on a JSON route -> server_error". A reverse proxy
   // returning an HTML error page with a 200 is the common shape of this in the wild.
-  test('F10: non-JSON body on a JSON route -> server_error, and no unhandled rejection', async (t) => {
+  test('non-JSON body on a JSON route -> server_error, and no unhandled rejection', async (t) => {
     /** @type {any[]} */
     const rejections = [];
     const onRejection = (e) => rejections.push(e);
@@ -299,7 +300,7 @@ describe('auth is the one error the user can fix', () => {
   // §4.7: "auth_failed is sticky and does NOT feed the failure-count breaker — opening a
   // breaker on a 401 hides the one error the user can actually fix." Five 401s in a row
   // with threshold 5 is the exact shape that would open a naive breaker.
-  test('F3: 401 on /v2/control/query -> auth_failed, breaker failures unchanged, marker shows auth', async (t) => {
+  test('401 on /v2/control/query -> auth_failed, breaker failures unchanged, marker shows auth', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, {
       'POST /v2/control/query': { status: 401, json: { error: 'unauthorized' } },
@@ -339,7 +340,7 @@ describe('a timeout is not a verdict', () => {
   // §4.7: "A single AbortError sets no state — it increments timeoutStreak and leaves the
   // reported state unchanged." A cold cache, a laptop waking from sleep and a `cargo build`
   // hogging the CPU all produce exactly one timeout against a perfectly healthy server.
-  test('F4: one timeout leaves the reported state unchanged and only bumps timeoutStreak', async (t) => {
+  test('one timeout leaves the reported state unchanged and only bumps timeoutStreak', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, {
       'POST /v2/control/lessons': [{ json: { lessons: [] } }, { hang: true }],
@@ -364,7 +365,7 @@ describe('a timeout is not a verdict', () => {
 
   // §4.7: "Only timeoutStreak >= 3 escalates, and only to not_responding, never to
   // unreachable or server_error." §10 renders that as `◌ slow`, not `✖ unreachable`.
-  test('F5: three consecutive timeouts escalate to not_responding and never to unreachable', async (t) => {
+  test('three consecutive timeouts escalate to not_responding and never to unreachable', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, { 'POST /v2/control/lessons': { hang: true } });
     const env = hookEnv({ dataDir, endpoint: srv.url, extra: { MUBIT_CC_TIMEOUT_MS: '100' } });
@@ -389,7 +390,7 @@ describe('a timeout is not a verdict', () => {
 
   // The streak has to be *consecutive*, otherwise a slow machine accumulates timeouts all
   // day and eventually reports a healthy server as not responding (§4.7).
-  test('F6: one timeout then a success resets timeoutStreak to 0', async (t) => {
+  test('one timeout then a success resets timeoutStreak to 0', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, {
       'POST /v2/control/lessons': [{ hang: true }, { json: { lessons: [] } }],
@@ -417,7 +418,7 @@ describe('a timeout is not a verdict', () => {
 describe('circuit breaker', () => {
   // §4.7: "5 failures in a 300 s window opens for a 120 s cooldown." An open breaker that
   // still dials is not a breaker — the whole point is to stop paying the round trip.
-  test('F7: five failures inside the window open the breaker and the next request never dials', async (t) => {
+  test('five failures inside the window open the breaker and the next request never dials', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, { 'POST /v2/control/lessons': { status: 500, json: { error: 'boom' } } });
     const env = hookEnv({
@@ -445,7 +446,7 @@ describe('circuit breaker', () => {
 
   // §4.7: "After cooldown exactly one half-open probe dials." Two is a thundering herd on
   // an instance that has just come back up.
-  test('F8: after the cooldown exactly one half-open probe dials and a concurrent call short-circuits', async (t) => {
+  test('after the cooldown exactly one half-open probe dials and a concurrent call short-circuits', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, {
       'POST /v2/control/lessons': [
@@ -472,8 +473,9 @@ describe('circuit breaker', () => {
     srv.reset();
     // reset() clears the route cursor as well as the request log, rewinding the array above
     // back to its first 500 — so without this the half-open probe is answered by a sixth
-    // failure and the success reply is unreachable. Re-point the route explicitly. (F9 uses
-    // the same table and passes only because it never resets.)
+    // failure and the success reply is unreachable. Re-point the route explicitly. (The
+    // half-open-probe-closes-the-breaker case uses the same table and passes only because it
+    // never resets.)
     srv.route('POST /v2/control/lessons', { json: { lessons: [] }, delayMs: 150 });
     await sleep(140); // cooldown elapsed, breaker is half-open
 
@@ -485,7 +487,7 @@ describe('circuit breaker', () => {
 
   // §4.7: "success closes and clears `failures`". A breaker that recovers but keeps its
   // old failures re-opens on the very next blip.
-  test('F9: a successful half-open probe closes the breaker and clears failures', async (t) => {
+  test('a successful half-open probe closes the breaker and clears failures', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, {
       'POST /v2/control/lessons': [
@@ -528,7 +530,7 @@ describe('budgets are hard deadlines', () => {
   // §5.2: recall runs under a 1500 ms internal budget on a hook that fires before EVERY
   // prompt. Waiting for a slow server is a user-visible stall, so the budget wins and the
   // prompt proceeds with no memory.
-  test('F11: a response slower than the recall budget still emits {"suppressOutput":true} within budget+100ms', async (t) => {
+  test('a response slower than the recall budget still emits {"suppressOutput":true} within budget+100ms', async (t) => {
     const dataDir = makeDataDir();
     const budgetMs = 300;
     const serverDelayMs = 5000;
@@ -553,7 +555,7 @@ describe('budgets are hard deadlines', () => {
 
   // §5.2 step 3: "RUNG 2 — ... Skip when < 500ms of budget remains." Rung 2 costs an LLM
   // call (§1.8); starting one you cannot finish spends the call and injects nothing.
-  test('F28: rung 2 is skipped when under 500ms of budget remains, and the hook still lands inside its budget', async (t) => {
+  test('rung 2 is skipped when under 500ms of budget remains, and the hook still lands inside its budget', async (t) => {
     const dataDir = makeDataDir();
     const budgetMs = 900;
     const srv = await server(t, {
@@ -595,7 +597,7 @@ describe('hostile stdin', () => {
   // §4.9: "Reads stdin to EOF and JSON.parses it (malformed → emit {} and exit 0)."
   // Exit-code discipline: this plugin never exits 2 and never exits non-zero — a memory
   // layer has no business blocking a prompt.
-  test('F12: malformed stdin -> every hook exits 0, emits {}, logs once, dials nothing', async (t) => {
+  test('malformed stdin -> every hook exits 0, emits {}, logs once, dials nothing', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t);
     const env = hookEnv({ dataDir, endpoint: srv.url });
@@ -617,7 +619,7 @@ describe('hostile stdin', () => {
 
   // Claude Code can close stdin without writing (§4.9 reads to EOF). Empty is not "{}",
   // it is zero bytes, and `JSON.parse("")` throws.
-  test('F13: empty stdin -> every hook exits 0, emits {}, logs once, dials nothing', async (t) => {
+  test('empty stdin -> every hook exits 0, emits {}, logs once, dials nothing', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t);
     const env = hookEnv({ dataDir, endpoint: srv.url });
@@ -645,7 +647,7 @@ describe('a read-only ${CLAUDE_PLUGIN_DATA}', () => {
   // marker prevents a *double* flush; a read-only or full ${CLAUDE_PLUGIN_DATA} must not be
   // able to prevent the flush entirely. Losing the batch is worse than sending it twice,
   // and the per-batch idempotency_key makes a double send a server-side no-op anyway."
-  test('F14: read-only data dir -> hooks still exit 0 and claimOnce returns true', async (t) => {
+  test('read-only data dir -> hooks still exit 0 and claimOnce returns true', async (t) => {
     if (process.getuid?.() === 0) {
       t.skip('running as root: permission bits are not enforced, so this scenario cannot be staged');
       return;
@@ -683,7 +685,7 @@ describe('a read-only ${CLAUDE_PLUGIN_DATA}', () => {
 describe('spool integrity', () => {
   // §4.6: file-per-item exists precisely so "partial writes [are] self-evident
   // (unparseable → unlink)". One half-written file must not wedge every later batch.
-  test('F15: a truncated JSON spool file is unlinked by readBatch and the rest of the batch still sends', async (t) => {
+  test('a truncated JSON spool file is unlinked by readBatch and the rest of the batch still sends', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t);
     const env = hookEnv({ dataDir, endpoint: srv.url });
@@ -708,7 +710,7 @@ describe('spool integrity', () => {
   // §5.5 step 6: "4xx other than 408/429 → the payload is bad, not the server: move the
   // batch to spool/rejected/ and log. Retrying a 422 forever is how a spool becomes
   // unbounded."
-  test('F16: a 422 from ingest quarantines the batch in spool/rejected/ and never retries it', async (t) => {
+  test('a 422 from ingest quarantines the batch in spool/rejected/ and never retries it', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, {
       'POST /v2/control/ingest': { status: 422, json: { error: 'missing field `content_type`' } },
@@ -738,7 +740,7 @@ describe('pre-flight guards', () => {
   // ... blowing that cap produces a 413 that looks like a server
   // fault to the breaker." Five oversized prompts would otherwise open the breaker on an
   // entirely healthy instance.
-  test('F17: an oversized /v2/control/query body is caught pre-flight and never dialed', async (t) => {
+  test('an oversized /v2/control/query body is caught pre-flight and never dialed', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t);
     const env = hookEnv({ dataDir, endpoint: srv.url });
@@ -767,7 +769,7 @@ describe('pre-flight guards', () => {
   // collapsing every user, project and machine into one
   // run. lib/http.mjs is the backstop: it "refuses to send run_id === 'default', logging an
   // error and dropping the request."
-  test('F21: run_id "default" is refused pre-flight and logged as an error', async (t) => {
+  test('run_id "default" is refused pre-flight and logged as an error', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t);
     const env = hookEnv({ dataDir, endpoint: srv.url, extra: { MUBIT_CC_LOG_LEVEL: 'error' } });
@@ -794,10 +796,11 @@ describe('pre-flight guards', () => {
       `expected a log line naming the poisoned run id; saw:\n${logged.join('\n')}`);
   });
 
-  // §5.2: "only 'direct_bypass' and 'direct' map to the direct lane, and every
-  // other value silently falls through to AgentRouted — there is no
-  // error. A typo therefore costs an LLM call per prompt with no diagnostic."
-  test('F26: a mode literal outside {direct_bypass, direct, agent_routed} is rejected pre-flight and dials nothing', async (t) => {
+  // §5.2: only `direct_bypass` and `direct` select the direct lane. Any other value is
+  // accepted on the wire and answered without complaint, so a typo is invisible from the
+  // outside: the prompt still gets a response, just from the slower path, and nothing
+  // anywhere says why. The guard therefore lives here, where the typo is still visible.
+  test('a mode literal outside {direct_bypass, direct, agent_routed} is rejected pre-flight and dials nothing', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t);
     const env = hookEnv({ dataDir, endpoint: srv.url, extra: { MUBIT_CC_LOG_LEVEL: 'error' } });
@@ -834,7 +837,7 @@ describe('pre-flight guards', () => {
 describe('drain lock', () => {
   // §5.5 step 1: "acquireDrainLock(); null → another drainer is live, exit 0. Single
   // drainer." Two concurrent drainers double-send the same batch and race the unlink.
-  test('F18: two drainers race the O_EXCL lock and exactly one proceeds', async (t) => {
+  test('two drainers race the O_EXCL lock and exactly one proceeds', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t);
     const env = hookEnv({ dataDir, endpoint: srv.url });
@@ -865,7 +868,7 @@ describe('drain lock', () => {
   // §7: "A drain.lock older than 60 s is assumed orphaned (its owner was SIGKILLed with the
   // terminal) and stolen ... a stuck lock silently stops all capture, which is worse than a
   // rare double drain that the idempotency_key absorbs."
-  test('F19: a drain.lock older than 60s is stolen and the drain proceeds', async (t) => {
+  test('a drain.lock older than 60s is stolen and the drain proceeds', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t);
     const env = hookEnv({ dataDir, endpoint: srv.url });
@@ -903,7 +906,7 @@ describe('cold start', () => {
   // failures are recorded but the status line shows ◍ warming ... A user who just ran
   // whose instance is still starting should not be told their memory is broken for the
   // first seconds it spends warming up."
-  test('F20: a failure inside the cold-start grace shows warming, not a failure glyph', async (t) => {
+  test('a failure inside the cold-start grace shows warming, not a failure glyph', async (t) => {
     const endpoint = await deadEndpoint();
 
     // Inside the grace window.
@@ -944,9 +947,9 @@ describe('cold start', () => {
 // ===========================================================================
 
 /**
- * Rung 2 is opt-in as of the rung-1-only default (§5.2). F22-F24 are about the *ladder* — that
- * a 403 is a verdict rather than a fault, is cached, and re-probes on expiry — so they ask for
- * the fallback explicitly and keep testing exactly what they always tested.
+ * Rung 2 is opt-in as of the rung-1-only default (§5.2). The first three cases below are about
+ * the *ladder* — that a 403 is a verdict rather than a fault, is cached, and re-probes on expiry
+ * — so they ask for the fallback explicitly and keep testing exactly what they always tested.
  */
 const FALLBACK_ON = { MUBIT_CC_RECALL_FALLBACK: 'agent_routed' };
 
@@ -955,7 +958,7 @@ describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () =
   // descends the ladder, and it must not touch the breaker or the auth_failed state."
   // This is the server the instance's direct-search policy disabled: an ordinary,
   // supported instance configuration, not a broken one.
-  test('F22: 403 permission_denied on rung 1 falls to rung 2 without touching the breaker or auth state', async (t) => {
+  test('403 permission_denied on rung 1 falls to rung 2 without touching the breaker or auth state', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, { 'POST /v2/control/query': policyGatedQuery() });
     const env = hookEnv({ dataDir, endpoint: srv.url, extra: FALLBACK_ON });
@@ -980,7 +983,7 @@ describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () =
 
   // §1.8: "A permission_denied is an instance-level policy fact, not a per-request outcome;
   // re-probing direct_bypass on every prompt burns a round trip forever."
-  test('F23: after a cached denial the next prompt goes straight to rung 2 without re-probing rung 1', async (t) => {
+  test('after a cached denial the next prompt goes straight to rung 2 without re-probing rung 1', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, { 'POST /v2/control/query': policyGatedQuery() });
     const env = hookEnv({ dataDir, endpoint: srv.url, extra: FALLBACK_ON });
@@ -997,7 +1000,7 @@ describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () =
   // §5.2: "On expiry the hook re-probes rung 1 once — an operator who flips
   // the instance's direct-search policy back on gets the free path back within a day, with no
   // reinstall."
-  test('F24: a cached denial older than MUBIT_CC_POLICY_TTL_MS re-probes rung 1 exactly once', async (t) => {
+  test('a cached denial older than MUBIT_CC_POLICY_TTL_MS re-probes rung 1 exactly once', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, { 'POST /v2/control/query': policyGatedQuery() });
     const env = hookEnv({ dataDir, endpoint: srv.url, extra: { ...FALLBACK_ON, MUBIT_CC_POLICY_TTL_MS: '86400000' } });
@@ -1022,7 +1025,7 @@ describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () =
 
   // §5.2: "Only a 401/403 on a rung the plugin did not deliberately probe means auth is
   // broken." A 401 is never a policy verdict — caching it would hide a revoked key for 24h.
-  test('F25: 401 on rung 1 is auth_failed, is never cached as a policy verdict, and does not descend the ladder', async (t) => {
+  test('401 on rung 1 is auth_failed, is never cached as a policy verdict, and does not descend the ladder', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, {
       'POST /v2/control/query': { status: 401, json: { error: 'unauthorized' } },
@@ -1042,7 +1045,7 @@ describe('the policy ladder — a 403 on rung 1 is a verdict, not a fault', () =
 
   // §5.2: "A 'granted' verdict is not cached: rung 1 succeeding is self-evident and caching
   // it would only add a stale-state failure mode."
-  test('F27: a successful rung 1 writes nothing to policy/ — grants are never cached', async (t) => {
+  test('a successful rung 1 writes nothing to policy/ — grants are never cached', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t); // default routes: query succeeds
     const env = hookEnv({ dataDir, endpoint: srv.url, extra: FALLBACK_ON });
@@ -1066,7 +1069,7 @@ describe('session end', () => {
   // `reflect: failed`, never surfaced as a blocking error." The drain must still commit:
   // §1.4 says a lost reflect costs scope promotion for that session's lessons, not the
   // captures themselves.
-  test('F29: a failing reflect at SessionEnd is logged, marked failed, exits 0, and the drain still commits', async (t) => {
+  test('a failing reflect at SessionEnd is logged, marked failed, exits 0, and the drain still commits', async (t) => {
     const dataDir = makeDataDir();
     const srv = await server(t, {
       'POST /v2/control/reflect': { status: 500, json: { error: 'llm provider unavailable' } },

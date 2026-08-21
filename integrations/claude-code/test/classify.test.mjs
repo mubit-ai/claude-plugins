@@ -134,11 +134,10 @@ describe('classifyTool — the §4.5 tool_name table', () => {
    *
    * Failures are high on purpose. A failed approach is the highest-value thing
    * a coding agent can remember — it is the one class of knowledge the model
-   * cannot re-derive from the codebase — and the server turns a streak of them
-   * into an extracted lesson for free:
-   * the negative-streak reflection threshold defaults to 3.
+   * cannot re-derive from the codebase — and a run of them is what makes an
+   * extracted lesson show up later without anyone having asked for one.
    * Grading failures `low` would both bury them in retrieval and starve the
-   * auto-reflection trigger that needs them.
+   * auto-reflection that depends on them.
    */
   for (const row of TABLE) {
     it(`${row.tool} on PostToolUseFailure → trace/high`, async () => {

@@ -46,8 +46,8 @@ function env(dataDir, endpoint, extra = {}) {
       MUBIT_CC_RUN_STRATEGY: 'static',
       MUBIT_CC_RUN_ID: RUN_ID,
       // Every assertion in this file is about the BODY — what it sends, in what order, and
-      // what it writes. Since MUB-10 that body runs in a detached child by default, so this
-      // switch keeps it here where the assertions can see it. The hand-off itself, and the
+      // what it writes. That body now runs in a detached child by default, so this switch
+      // keeps it here where the assertions can see it. The hand-off itself, and the
       // fact the body survives the hook being killed, are `session-end-detach.test.mjs`.
       MUBIT_CC_SESSION_END_DETACH: '0',
       ...extra,
@@ -399,8 +399,8 @@ for (const row of [
  * THE test for this ticket, on the flush side — and the one that has to exist because of
  * *how* `StopFailure` fires.
  *
- * The host's registry (Claude Code 2.1.235): `StopFailure` "fires **instead of** Stop when an
- * API error … ended the turn". So `capture --stop` never runs on a rate-limited turn, and
+ * The host's registry (Claude Code 2.1.235) has `StopFailure` firing **instead of** Stop when
+ * an API error ended the turn. So `capture --stop` never runs on a rate-limited turn, and
  * `capture --stop-failure` is what closes it — `outcome_pending: true`, exactly like any
  * other closed turn, because hiding the turn from the sweep is not the same as deciding
  * about it. This flush therefore genuinely picks the turn up, reads it, and posts nothing;
@@ -586,7 +586,7 @@ test('marker gains reflect {at, lessons_stored, status} from the response', asyn
   assert.ok(marker.reflect.at >= before);
 });
 
-// §5.7 "Failure" / §12.1 F29 — a failed reflect is best-effort. What must NOT happen is
+// §5.7 "Failure" / §12.1 — a failed reflect is best-effort. What must NOT happen is
 // losing the drain with it: the captures are already gone from the spool's perspective.
 test('a failed reflect is logged, marked failed, exits 0 — and the drain still commits', async (t) => {
   const server = await fakeMubit({ 'POST /v2/control/reflect': { status: 500, json: { error: 'llm down' } } });
@@ -614,13 +614,9 @@ test('a failed reflect is logged, marked failed, exits 0 — and the drain still
 
 /**
  * §1.4 / §5.7 "Expectation-setting". A reflect that stores 3 lessons has NOT made them
- * cross-session durable. Promotion past `run` scope is gated three more ways, all in the
- * same server-side loop:
- *
- *   1. not a rule           — `lesson.is_rule` entries never scope-promote
- *   2. validation `Active`  — pending/rejected candidates must earn trust first 
- *   3. recurrence           — the normalized key must recur
- *                             the promotion threshold times, default 3 
+ * cross-session durable. Storing a lesson and that lesson outliving its own run are two
+ * different events; only the first is anything this hook can see, and nothing in the reflect
+ * response says whether the second will follow.
  *
  * One reflect per session is the NECESSARY condition, not the sufficient one. So the hook
  * reports a count and nothing more — a marker or systemMessage promising durability would

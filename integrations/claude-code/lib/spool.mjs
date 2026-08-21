@@ -2,7 +2,7 @@
 /**
  * `lib/spool.mjs` — the durable buffer between capture and the network.
  *
- * Build-guide §4.6 (module API), §7 (state layout + the 60 s drain-lock TTL),
+ * The module API, the state layout and the 60 s drain-lock TTL,
  * §5.4/§5.5 (capture writes, drain reads), §12.6 (the 200-concurrent-append property).
  *
  * Capture is synchronous, hot and network-free; drain is detached, batched and networked.
@@ -142,7 +142,7 @@ export function appendItem(cfg, runId, item) {
     }
     return '';
   } catch {
-    // §4.9/§12.1-F14: an unwritable ${CLAUDE_PLUGIN_DATA} costs the capture, nothing else.
+    // §4.9/§12.1: an unwritable ${CLAUDE_PLUGIN_DATA} costs the capture, nothing else.
     return '';
   }
 }
@@ -200,7 +200,7 @@ function orderedNames(dir) {
  *
  * An unparseable file is a SIGKILL caught mid-write (or a foreign file dropped in the
  * spool). It is unlinked in passing and the batch still ships: retrying a torn file
- * forever is how a spool becomes unbounded (§12.1-F15).
+ * forever is how a spool becomes unbounded (§12.1).
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
@@ -443,7 +443,7 @@ export function releaseDrainLock(lock) {
  * to prevent a *double* flush; a read-only or full `${CLAUDE_PLUGIN_DATA}` must not be able
  * to prevent the flush *entirely*. Losing a session's captures is worse than sending them
  * twice, and the same items carry the same per-batch `idempotency_key` either way, so the
- * double send is one the server can collapse (§4.6, §12.1-F14).
+ * double send is one the server can collapse (§4.6, §12.1).
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId

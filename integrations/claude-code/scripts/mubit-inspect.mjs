@@ -256,7 +256,7 @@ const CROSS_RUN_COL = {
   },
 };
 
-/** Server run ids are scoped (`state::<tenant>::<run>`); the local ones are not. */
+/** A run id may come back namespaced with `::` separators; the local ones are bare. */
 const bareRun = (id) => String(id || '').split('::').pop().trim();
 
 /** The run a dereferenced entry was written in, or '' when the call could not say. */

@@ -12,7 +12,7 @@
     "endpoint": { "type": "string", "title": "Mubit endpoint", "default": "",
       "description": "Your Mubit instance URL, e.g. https://eu.mubit.ai. Required." },
     "apiKey": { "type": "string", "title": "API key", "default": "", "sensitive": true,
-      "description": "Mubit API key (mbt_...). Stored in the OS keychain, never in a settings file." },
+      "description": "Mubit API key (mbt_...). Set here, it is held in the OS keychain; /mubit-memory:auth stores it in the plugin's own data directory, readable only by you. Never in a settings file." },
     "userId": { "type": "string", "title": "User id", "default": "",
       "description": "Optional user/entity id for multi-user memory scoping." },
     "runStrategy": { "type": "string", "title": "Run strategy", "default": "per-directory",

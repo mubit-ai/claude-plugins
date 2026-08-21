@@ -176,8 +176,8 @@ async function main() {
     // than making it unlikely.
     //
     // It is still checked: a run id names a directory under the data dir as well as a run,
-    // and `"default"` is the value that collapses every user and project into one shared
-    // run (§4.3). An unusable pin drains nothing — the spool waits.
+    // and `"default"` is the placeholder that names no project (§4.3). An unusable pin
+    // drains nothing — the spool waits.
     runId = usableRunId(pinnedRun);
     if (!runId) {
       log(cfg, 'error', `drain: refusing the pinned run id ${JSON.stringify(pinnedRun)}`);

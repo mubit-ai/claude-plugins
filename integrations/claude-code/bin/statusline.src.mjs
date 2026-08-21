@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `bin/statusline.mjs` — build-guide §10 (the line, the glyph precedence, the cooldown and
+ * `bin/statusline.mjs` — the line, the glyph precedence, the cooldown and
  * the rung label) and §16.2 (the degradation ladder).
  *
  * ```

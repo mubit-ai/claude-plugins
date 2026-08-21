@@ -6,10 +6,9 @@
  * The ladder, and why it looks inverted
  * ---------------------------------------------------------------------------
  * The obvious design — ask `/v2/control/context` for a ready-to-inject `context_block` —
- * rests on the belief that `GetContext` is pure assembly with no LLM. **That belief is
- * false.** It builds an internal `AgentQueryRequest` and re-enters `query()` as
- * `AgentRouted` with `evidence_only` left at `false`, pays a routing call *and* a synthesis
- * call, and then throws the synthesized answer away.
+ * rests on the belief that the context route is pure assembly with no model call. **That
+ * belief is false.** Measured end to end it costs two model calls, not zero, and the answer
+ * they produce is discarded — this module assembles the block locally instead.
  *
  * | Rung | Request | LLM calls | Entered when |
  * | --- | --- | --- | --- |
@@ -166,7 +165,7 @@ async function ladder(cfg, o) {
     limit: QUERY_LIMIT,
     entry_types: [...ENTRY_TYPES],
     include_working_memory: true,
-    // §1.8: `env_tags` exists on AgentQueryRequest but NOT on ContextRequest — version-aware
+    // `env_tags` is accepted on the query route but not on the context route — version-aware
     // tag scoring is capability rungs 1-2 gain over rung 3, not something they give up.
     // Tagged from the directory this prompt was sent in, not the one the session launched
     // in — the same reason the run id reads the payload. A recall scored against `repo:`
@@ -190,7 +189,7 @@ async function ladder(cfg, o) {
       return fromEvidence(cfg, res.body, 1, o);
     }
     if (res.status === 403) {
-      // §5.2/F22: a policy verdict, not a fault. `lib/http.mjs` has already declined to
+      // §5.2: a policy verdict, not a fault. `lib/http.mjs` has already declined to
       // record it with the breaker; all that is left is to remember it and decide.
       cachePolicyDenial(cfg);
       if (cfg.recallFallback !== 'agent_routed') {

@@ -22,16 +22,16 @@
  *   3. Marks the run being entered, because `bin/statusline.mjs` follows the session map on
  *      every frame and renders `''` until the marker it names has been written.
  *
- * **Three host facts, read out of the shipping binary (2.1.235) rather than the docs:**
+ * **Three host facts, undocumented in the published hook reference and observed live on
+ * Claude Code 2.1.235:**
  *
- *   - `CwdChanged` passes the output schema's zod union and is **absent from the dispatch
- *     switch**. It has no `hookSpecificOutput` channel — the same class as `PreCompact` and
- *     `SessionEnd` — so anything it said would be validated and then discarded in silence.
- *     Every path here returns `{suppressOutput: true}`; the effect is entirely in the writes.
- *   - The payload names are `old_cwd` and `new_cwd`, not `previous_cwd`:
- *     `{...Ly(e,Vt()), hook_event_name:"CwdChanged", old_cwd:t, new_cwd:r}`.
- *   - It is dispatched with no `matchQuery`, so it supports no matcher, and it fires *after*
- *     the directory has already changed, so it cannot block one.
+ *   - `CwdChanged` has **no `hookSpecificOutput` channel** — the same class as `PreCompact`
+ *     and `SessionEnd` — so anything it said there would pass validation and then be
+ *     discarded in silence. Every path here returns `{suppressOutput: true}`; the effect is
+ *     entirely in the writes.
+ *   - The payload names are `old_cwd` and `new_cwd`, not `previous_cwd`.
+ *   - It supports no matcher, and it fires *after* the directory has already changed, so it
+ *     cannot block one.
  *
  * `CLAUDE_ENV_FILE` is deliberately **not** written, though the host does republish it on this
  * event. It is sourced as a shell script for Bash-tool commands; no hook process re-reads it,
@@ -57,7 +57,7 @@ import { spoolStats } from '../../lib/spool.mjs';
  */
 const BUDGET_MS = 2500;
 
-/** The one stdout this hook ever produces. See the note on the dispatch switch above. */
+/** The one stdout this hook ever produces. See the note on the missing channel above. */
 const SUPPRESS = Object.freeze({ suppressOutput: true });
 
 await runHook('cwd-changed', {

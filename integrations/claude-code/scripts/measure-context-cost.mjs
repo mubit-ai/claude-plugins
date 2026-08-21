@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Measure the plugin's always-loaded context surface — build-guide §3.5, phase 4 §19.
+ * Measure the plugin's always-loaded context surface.
  *
  * `marketplace.json` shipped `{"value": 2100, "cached": 0}` as a placeholder. A declared
  * context budget that nobody measured is worse than none: the number is the one thing a

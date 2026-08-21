@@ -2,8 +2,8 @@
 /**
  * `lib/state.mjs`, `lib/markers.mjs`, `lib/log.mjs`.
  *
- * Protects build-guide §4.8 (module API + the exact Marker shape) and §7 (state
- * layout under `${CLAUDE_PLUGIN_DATA}` and its TTL table).
+ * Protects the module API and the exact Marker shape (§4.8), and the state
+ * layout under `${CLAUDE_PLUGIN_DATA}` and its TTL table (§7).
  *
  * These three modules are the plugin's only durable surface: every hook is a
  * short-lived process, so anything that must survive a process boundary goes
@@ -243,7 +243,7 @@ test('readJson(): returns the fallback for a missing file', async () => {
   assert.deepEqual(state.readJson(join(dir, 'status', 'nope.json'), sentinel), sentinel);
 });
 
-// §4.8 + §12.1/F15: a truncated or corrupt file is normal after a SIGKILL.
+// §4.8 + §12.1: a truncated or corrupt file is normal after a SIGKILL.
 test('readJson(): returns the fallback for corrupt and truncated files', async () => {
   const state = await lib('state.mjs');
   const dir = makeDataDir();
@@ -356,7 +356,7 @@ test('pruneStale(): leaves files it does not own alone', async () => {
   assert.equal(existsSync(foreign), true);
 });
 
-// §4.9/§12.1-F14: state helpers never throw, even when DATA is unusable.
+// §4.9/§12.1: state helpers never throw, even when DATA is unusable.
 test('pruneStale(): does not throw when the data dir does not exist', async () => {
   const state = await lib('state.mjs');
   const dir = tempDir('mubit-cc-gone-');
@@ -369,7 +369,7 @@ test('pruneStale(): does not throw when the data dir does not exist', async () =
 // markers.mjs
 // ===========================================================================
 
-/** The Marker, verbatim from build-guide §4.8. */
+/** The Marker, verbatim (§4.8). */
 const MARKER = {
   run_id: 'cc-my-project-9f2a11c4',
   mode: 'local',
@@ -464,7 +464,7 @@ test('readMarker(): a missing marker yields a usable default, never a throw', as
   }
 });
 
-// §4.8/§12.1-F14: a corrupt marker degrades to the default rather than taking
+// §4.8/§12.1: a corrupt marker degrades to the default rather than taking
 // the status line (or the hook that writes it) down with it.
 test('readMarker(): a corrupt marker file degrades to the default', async () => {
   const markers = await lib('markers.mjs');
@@ -566,7 +566,7 @@ test('log(): rings at 1 MiB keeping exactly two files', async () => {
   }
 });
 
-// §4.9/§12.1-F14: logging is never allowed to be the thing that breaks a hook.
+// §4.9/§12.1: logging is never allowed to be the thing that breaks a hook.
 test('log(): does not throw when the log directory cannot be created', async () => {
   const log = await lib('log.mjs');
   const dir = tempDir('mubit-cc-nolog-');

@@ -27,7 +27,10 @@ test('ground truth is read from the plugin, never typed twice', () => {
   const t = groundTruth(PLUGIN);
   assert.equal(t.hooks.length, 13);
   assert.equal(t.tools.length, 10);
-  assert.equal(t.skills.length, 7);
+  // Eight since SC-09 added `link` (SCOPE.md §6 Tier 3). The count is pinned rather than
+  // read so that a skill appearing or disappearing is a decision somebody made here.
+  assert.equal(t.skills.length, 8);
+  assert.ok(t.skills.includes('link'), 'the Tier 3 link surface is part of the plugin under test');
   assert.ok(t.hooks.includes('SubagentStart'));
   assert.ok(t.tools.includes('mubit_recall'));
   assert.ok(t.config.includes('preToolWarnings'));

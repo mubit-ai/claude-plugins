@@ -202,9 +202,18 @@ export const LEAK_PREFIXES = ['MUBIT_', 'CLAUDE_PLUGIN_'];
 
 /**
  * The kit's own variables, which share the `MUBIT_` prefix and are not leaks.
- * `MUBIT_LAB_RESULTS` in particular is set by the documented first line of the reuse loop.
+ *
+ * `MUBIT_LAB_RESULTS` is set by the documented first line of the reuse loop.
+ * `MUBIT_MCP_LESSON_SCOPE` is the one lever the SCOPE.md §5 B1 experiment moves: it widens
+ * the scope lessons are promoted to for a bounded window, which is the whole measurement.
+ * Without it here, `checkEnvHygiene` reports it as a leak and blocks the sweep the variable
+ * exists to make possible.
+ *
+ * This is not a hole in the hygiene check. The leak it was built for is an ambient
+ * `MUBIT_ENDPOINT` from a local-server session silently measuring another instance, and that
+ * one is still caught — by name, and by value.
  */
-export const KIT_OWNED_ENV = ['MUBIT_LAB_RESULTS'];
+export const KIT_OWNED_ENV = ['MUBIT_LAB_RESULTS', 'MUBIT_MCP_LESSON_SCOPE'];
 
 /**
  * @param {Record<string,string|undefined>} [env]

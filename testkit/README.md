@@ -44,7 +44,7 @@ MUBIT_CC_BUILD_SKIP_SERVER=1 npm run build && npm test && npm run test:dist \
   && node scripts/verify-manifests.mjs
 
 # 1. trust the kit, then trust the backend — in that order
-node "$L/bin/lab.mjs" selftest                         # offline, ~1s, no model calls
+node "$L/bin/lab.mjs" selftest                         # offline, ~3s, no model calls
 node "$L/bin/lab.mjs" preflight  --plugin-dir "$V"     # refuses if recall is degraded
 
 # 2. measure
@@ -107,8 +107,15 @@ Check 6 costs two real (cheap, one-turn) model calls, and it is the one that cat
 kit's most dangerous failure: an arm that is not what its label says scores as "no
 difference", which is indistinguishable from a real null result.
 
-`--force` records anyway and stamps `degraded: true`; `compare` then refuses to place that
-run beside a trusted one.
+`--force` records anyway and stamps `degraded: true`. `compare` prints a `WARN` naming the
+run, and `history` shows it with `trusted` false — it does not refuse. That is deliberate: an
+overhead measurement taken against a degraded backend is still a real number, and refusing to
+place it in a table would strand it for nothing. The verdict that *does* stop you quoting a
+sweep is `sound`, which is about the arms rather than the backend, and it exits non-zero.
+
+Note what no longer sets `degraded`: an instance where cross-run sharing is off. That is the
+shipped configuration (check 5 above), the gate stays green through it, and an A/B recorded
+there is measuring the product as users have it.
 
 ## What the A/B measures, and what it refuses to measure
 
@@ -195,7 +202,7 @@ file it writes.
 ## Trusting the kit before trusting its numbers
 
 ```bash
-node bin/lab.mjs selftest     # 38 tests, offline, ~1s
+node bin/lab.mjs selftest     # 57 tests, offline, ~3s
 ```
 
 Four negative controls, plus the checks they depend on:
@@ -231,7 +238,7 @@ testkit/
     paths.mjs             plugin resolution, results root
     versions.mjs          the stamp, and the comparability gate
     arms.mjs              what "on" and "off" mean, as argv + env
-    preflight.mjs         the five checks
+    preflight.mjs         the gate: six checks, and which of them may refuse a sweep
     metrics.mjs           one run in, one TBench-compatible trial record out
     latency.mjs           the four responsiveness miners
     report.mjs            paired medians, integrity block, tables

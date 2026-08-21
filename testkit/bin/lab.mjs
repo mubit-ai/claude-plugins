@@ -15,7 +15,12 @@
  * `results/` unless it is green — not "a recent green preflight", a green one *now*. The
  * outage this guards against came and went inside an afternoon, so a cached verdict would
  * have vouched for a sweep running straight through it. `--force` records anyway and stamps
- * `degraded: true`, which `compare` then refuses to place beside a trusted run.
+ * `degraded: true`, which `compare` warns about and `history` shows as untrusted.
+ *
+ * It warns rather than refuses on purpose: an overhead measurement taken against a degraded
+ * backend is still a real number, and stranding it would cost more than the warning does.
+ * Only `degraded` is advisory — an *unsound* sweep, where an arm was not what its label said,
+ * exits non-zero and is never quoted.
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';

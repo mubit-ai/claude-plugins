@@ -519,6 +519,24 @@ test('envLeaks does not report MUBIT_LAB_PLUGIN_DIR, which is how the kit is aim
 test('compare warns about a degraded run rather than refusing it, and both docs say so', () => {
   const lab = readFileSync(join(KIT_ROOT, 'bin', 'lab.mjs'), 'utf8');
   const readme = readFileSync(join(KIT_ROOT, 'README.md'), 'utf8');
+  const arms = readFileSync(join(KIT_ROOT, 'lib', 'arms.mjs'), 'utf8');
+
+  // The same class of defect as `refuses to place`, and a more dangerous one: both docs
+  // listed `--strict-mcp-config` among the flags every arm gets, while `lib/arms.mjs` refuses
+  // to pass it and a test pins that refusal. A reader trusting the prose would "restore" the
+  // flag and build a treatment arm with `mcp_servers: []` — the plugin minus most of its
+  // context cost, scoring as no difference.
+  // Assert on the claim, not on the string: both files must go on *naming* the flag, since
+  // the reason it is absent is the thing worth writing down.
+  const bothArmsGet = readme.match(/Both arms get[^.]*\./s)?.[0] ?? '';
+  assert.ok(bothArmsGet, 'the README must still say what both arms get, or this check is vacuous');
+  assert.ok(!bothArmsGet.includes('--strict-mcp-config'),
+    'the README listed among the flags every arm gets one the kit deliberately never passes; a reader restoring it builds a treatment arm with mcp_servers: [] — the plugin minus most of its context cost, scoring as no difference');
+  assert.ok(/[Nn]either arm gets `--strict-mcp-config`/.test(readme),
+    'saying nothing about the flag is how the claim came back the first time; the README has to state the absence, not merely omit it');
+  assert.ok(!/`--strict-mcp-config` and `--setting-sources '' ` ?stop/.test(arms)
+    && !/`--strict-mcp-config` and `--setting-sources/.test(arms),
+    'lib/arms.mjs said in prose what its own flag list refuses to do twelve lines later');
 
   assert.ok(!/refuses to place/.test(readme),
     'the README describes a refusal the code has never performed, and the next operator plans around a guard that is not there');

@@ -129,7 +129,9 @@ export function armsHash() {
  *   - `--model` is pinned because an unpinned model makes two sweeps incomparable.
  *   - `--exclude-dynamic-system-prompt-sections` cuts cache-creation noise, which otherwise
  *     dominates cost: a 44-output-token call can bill $0.014 on a 6.4k-token cache write.
- *   - `--strict-mcp-config` and `--setting-sources ''` stop user config leaking into an arm.
+ *   - `--setting-sources ''` stops user config leaking into an arm — and is enough on its
+ *     own. **Not** `--strict-mcp-config`: see the comment on the flag list below for why
+ *     adding it would measure a plugin with most of itself missing.
  *   - `MUBIT_CC_RUN_STRATEGY=static` with a pinned run id is what lets `mubit-inspect` find
  *     exactly this run's state afterwards without guessing at a directory hash.
  *

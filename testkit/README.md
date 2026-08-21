@@ -129,7 +129,14 @@ generated fixture repo so the work is identical across versions.
 
 Both arms get `--model` pinned, `--exclude-dynamic-system-prompt-sections` (cache-creation
 noise dominates cost — a 44-output-token call can bill $0.014 on a 6.4k-token cache write),
-`--strict-mcp-config` and `--setting-sources ''`.
+and `--setting-sources ''`.
+
+Neither arm gets `--strict-mcp-config`, and that is deliberate: the flag suppresses the
+plugin's *own* MCP server, so the init event reports `mcp_servers: []` and zero mubit tools.
+Since the MCP surface is the bulk of the plugin's context cost, a treatment arm carrying it
+measures a plugin with most of itself missing — the exact "an arm is not what its label says"
+failure the preflight exists to catch. `--setting-sources ''` is what keeps the *user's* MCP
+servers out, and it is sufficient.
 
 Reported as **paired medians with an IQR and an exact binomial sign test**. No means: one
 40-second outlier owns the mean at n=5. Where the discordant-pair count cannot reach p<0.05

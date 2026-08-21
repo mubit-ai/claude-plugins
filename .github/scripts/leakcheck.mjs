@@ -191,7 +191,7 @@ function compile(rule) {
  */
 function fingerprint(rule, path, match) {
   const normalized = String(match).replace(/\s+/g, ' ').trim().toLowerCase();
-  return createHash('sha1').update(`${rule} ${path} ${normalized}`).digest('hex').slice(0, 16);
+  return createHash('sha1').update(`${rule}\u0000${path}\u0000${normalized}`).digest('hex').slice(0, 16);
 }
 
 /** `leakcheck-allow: <rule-id>` on the line, or on the line above it. */

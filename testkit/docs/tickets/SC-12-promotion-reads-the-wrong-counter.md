@@ -3,6 +3,8 @@
 **Branch:** integration (`plugin-scope-fix`) · **Kind:** docs — **filed, not implemented**
 **SCOPE.md:** I3
 
+**Every citation below was verified against `/Users/eldaru/Mubit/ricedb` on 2026-08-21.**
+
 ## Why this is filed rather than fixed
 
 The fix is Rust in `ricedb` and needs a deploy. It is recorded here so nobody re-derives it,
@@ -35,10 +37,18 @@ Meanwhile a **persisted semantic** `recurrence_count` already sits on the entry:
 | `MUBIT_CL_RECONCILE_MIN_SIM`, default **0.5** | — |
 | `MUBIT_CL_WRITE_RECONCILE`, **on** by default | `:1258` |
 | unit test, three real paraphrases of one lesson | `:18348` |
-| bumps `recurrence_count` in the entry's metadata | `:16778` |
+| bumps `recurrence_count` in the entry's metadata | `:16785` |
 
-It does not help promotion because `find_recurrent_lesson` consults **`run_id` only**
-(`:16740` — its own comment says *"an existing **same-run** entry"*).
+It does not help promotion because `find_recurrent_lesson` (`:16729`) consults **`run_id`
+only** — it passes `run_id.to_string()` straight into `nexus.consult(...)`, so it can never
+see a paraphrase written by a different run:
+
+```rust
+let candidates = nexus.consult(Vec::new(), Some(lesson.content.clone()), 8, None,
+                               run_id.to_string()).await          // :16739 — run_id only
+...
+obj.insert("recurrence_count".to_string(), json!(recurrences + 1));   // :16785 — the OTHER counter
+```
 
 **Two counters — one persisted, semantic and per-run; one in-memory, exact-match and
 cross-run — and promotion reads the wrong one.** That is the actual defect, and it is far
@@ -49,9 +59,10 @@ smaller than "add similarity keying".
 Both make it *more* fixable than the original account suggested, and both cost an afternoon to
 re-derive:
 
-1. **The `DashMap` is checkpointed** (`:3135` save, `:3261` restore), so it is **not**
-   process-local. A pod roll does not reset it if checkpointing is on for the instance.
-2. **`MUBIT_CL_AUTO_PROMOTE` (`:999`) is not a shortcut.** It is champion/challenger
+1. **The `DashMap` is checkpointed** — `lesson_recurrence_counts` is declared at `:2836`,
+   saved at `:3135` and restored at `:3261`, so it is **not** process-local. A pod roll does
+   not reset it if checkpointing is on for the instance.
+2. **`MUBIT_CL_AUTO_PROMOTE` (`:998-1000`) is not a shortcut.** It is champion/challenger
    prompt-version promotion, unrelated to lesson scope.
 
 ## The fix, when someone takes it

@@ -296,10 +296,9 @@ export async function health(cfg, opts = {}) {
 // ---------------------------------------------------------------------------
 
 /**
- * `POST /v2/control/ingest` — the request body requires
- * `run_id`; every `Stateingest itemPayload` requires `item_id` and
- * `content_type`. One malformed item rejects the whole batch, because that is exactly what
- * the server does — a 422 on item 2 loses items 1 and 3 as well.
+ * `POST /v2/control/ingest` — the request body requires `run_id`, and every item in it
+ * requires `item_id` and `content_type`. One malformed item rejects the whole batch: a 422
+ * on item 2 loses items 1 and 3 as well, which is why they are validated here first.
  *
  * `opts` is forwarded verbatim: `drain.mjs` is the one caller that asks for `{retry: true}`.
  *

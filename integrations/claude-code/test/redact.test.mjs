@@ -337,11 +337,9 @@ describe('high-entropy false-positive guard (spec §6.4)', () => {
   });
 
   /**
-   * The threshold is the client's own and this test asserts it three lines down, so hiding
-   * the prose here would hide nothing. leakcheck-allow: redaction-threshold
-   * Shannon entropy over a 16-symbol alphabet is bounded by log2(16) = 4.0, and a 40-char
-   * git SHA cannot be exactly uniform (40/16 = 2.5), so it is strictly below the >= 4.0
-   * threshold. That is a property of the threshold, not a lucky fixture.
+   * A git SHA survives because of what a 16-symbol alphabet can carry, not because of a
+   * lucky fixture: no hex string can reach the bar, whatever its length. The assertion three
+   * lines down is the statement of record; this comment only says why it is not a fluke.
    */
   it('leaves a git SHA intact, and entropy() proves why', async () => {
     const { redactText, entropy } = await R();

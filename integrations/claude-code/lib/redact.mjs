@@ -46,9 +46,8 @@ const PH = (kind) => `[REDACTED:${kind}]`;
  *
  * The plugin sets an idempotency key on EVERY ingest batch (§4.2 `postIngest`),
  * so redacting it destroys the only handle a human has on "did this batch get
- * sent twice?". Note that `idempotency_key=cc-<uuid8>-<epoch>` has a Shannon
- * entropy of ~4.32 bits/char, so without this guard the generic entropy rule
- * would swallow it even though no keyword rule would.
+ * sent twice?". It looks random enough that the generic rule would take it,
+ * which is the whole reason this guard exists.
  */
 const EXEMPT_RE = /idempotency[-_]key/i;
 

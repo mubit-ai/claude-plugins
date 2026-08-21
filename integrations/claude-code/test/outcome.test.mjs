@@ -157,9 +157,8 @@ describe('decideOutcome — the five cases, one row each', () => {
     });
   }
 
-  // THE assertion behind the neutral record. Attributed reinforcement counts any signal at
-  // or above zero as one reinforcement, so naming the entries here would credit exactly the
-  // memories nothing showed were read.
+  // THE assertion behind the neutral record: naming entries here would credit exactly the
+  // memories nothing showed were read, which is the opposite of what attribution is for.
   it('the neutral record never names the entries it could not credit', async () => {
     const { decideOutcome } = await O();
     const d = decideOutcome(turn({ used_evidence: evidence(false) }));

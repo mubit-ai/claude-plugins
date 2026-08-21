@@ -304,9 +304,9 @@ export const RULES = [
     id: 'internal-ticket-id',
     severity: 'block',
     kind: 'content',
-    pattern: /\bMUB-\d+\b|\bHS-\d\b|\baudit [A-Z]\d\b|\bF\d:\s/g,
+    pattern: /\bMUB-\d+\b|\bHS-\d{1,2}\b|\baudit [A-Z]\d{1,2}\b|\b[FC]\d{1,2}[:.]\s|§[\d.]+-[FC]\d{1,2}\b|\b[FC]\d{1,2}\.\.[FC]\d{1,2}\b/g,
     why: 'Issue-tracker and audit identifiers from a private tracker. They are unresolvable to a reader and they let an outsider count and correlate our internal work.',
-    fix: 'Say what changed. A tracker id in shipped source is a note to yourself in someone else\'s house.',
+    fix: 'Say what changed. A tracker id in shipped source is a note to yourself in someone else\'s house — and a de-identified `F1` sitting next to an untouched `F10` is worse than either, so the pattern deliberately covers two digits.',
     found: 'Seven source files and several runbooks carried identifiers from a private tracker.',
   },
   {

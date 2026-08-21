@@ -298,7 +298,7 @@ async function drainSpool(cfg, runId, agentId, promptId, started) {
     }
 
     if (isRejectedPayload(res)) {
-      // §5.5 step 6 / F16: the payload is bad, not the server. Quarantine and never retry.
+      // §5.5 step 6: the payload is bad, not the server. Quarantine and never retry.
       quarantine(cfg, runId, batch, res);
       rejected += batch.length;
       continue;

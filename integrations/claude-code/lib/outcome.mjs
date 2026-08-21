@@ -226,9 +226,9 @@ export function decideOutcome(turn) {
     post: true,
     outcome: unused ? OUTCOME_UNUSED : (failed ? OUTCOME_FAILURE : OUTCOME_SUCCESS),
     signal: unused ? SIGNAL_UNUSED : (failed ? SIGNAL_FAILURE : SIGNAL_SUCCESS),
-    // Empty on the neutral record only: attributed reinforcement counts any signal >= 0 as
-    // one reinforcement, so naming the entries here would credit exactly the memories nothing
-    // showed were read. The cost is that the record says a turn was injected-and-unused
+    // Empty on the neutral record only: naming entries here would credit exactly the
+    // memories nothing showed were read, which is the opposite of what attribution is for.
+    // The cost is that the record says a turn was injected-and-unused
     // without saying which entries were ignored — a real limitation, and the honest side of
     // the trade.
     entryIds: unused ? [] : entryIds,

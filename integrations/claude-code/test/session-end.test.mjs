@@ -261,9 +261,8 @@ function seedMeasuredTurn(dataDir, promptId, used, over = {}) {
 }
 
 // §5.5 step 7: injected and the reply carried none of the memory's vocabulary. Recorded at
-// exactly 0.0 with an EMPTY entry_ids[] — attributed reinforcement counts any signal >= 0 as
-// one reinforcement, so naming the entries here would credit precisely the memories nothing
-// showed were read.
+// exactly 0.0 with an EMPTY entry_ids[] — naming the entries here would credit precisely the
+// memories nothing showed were read.
 test('an ignored injection flushes as neutral 0.0 with no entry_ids', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());

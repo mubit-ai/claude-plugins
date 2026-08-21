@@ -372,12 +372,21 @@ export function deriveAgentId(payload = {}) {
  * ---------------------------------------------------------------------------
  * What it is NOT for
  * ---------------------------------------------------------------------------
- * **Never query against it.** A sub-run id has no memory stored under it: the store knows
- * the parent run, so asking about `cc-x-1-sub-ab55bb82d198` would return nothing for every
- * subagent, forever. It is a *local* lane — a name for one subagent's own record — until
- * there is a route that can join it back up. There is not one today: `lib/http.mjs`'s
- * `ROUTES` has no `link_run`, so nothing on the wire relates a sub-run to its parent, and
- * the parent id is carried alongside the record instead.
+ * **Never recall against it.** A sub-run holds one subagent's own evidence and nothing else,
+ * so querying it directly would hand that subagent a fraction of what the parent run already
+ * has. `hooks/src/subagent-start.mjs` recalls against the PARENT for exactly that reason and
+ * files its writes here: the read side and the write side point at different runs on purpose.
+ *
+ * That split is only safe because the two are joined. `lib/http.mjs`'s `ROUTES` carries
+ * `/v2/control/runs/link` now, and `subagent-start` calls it with `(parent, sub)` — so
+ * `include_linked_runs` on the parent's recall reaches every sub-run in one hop. A parent
+ * with N subagents is a star and every query originates at the hub, which is the topology
+ * the backend's one-hop limit fits natively (SCOPE.md §6 Tier 1).
+ *
+ * Until that call lands the id is still a purely local lane, and nothing on the wire relates
+ * it to its parent. That is why `hooks/src/capture.mjs` files a `SubagentStop` under it only
+ * when the join is on record in `lib/links.mjs`, and falls back to the parent otherwise:
+ * evidence under an id nothing can rejoin is not isolated, it is lost.
  *
  * A payload with no subagent identity answers with the parent unchanged. Minting a suffix
  * out of nothing would open a lane that `SubagentStop` — deriving from the same missing

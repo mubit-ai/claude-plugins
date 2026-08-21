@@ -8,10 +8,12 @@
  * nobody is waiting on it, so one extra dial after a transport timeout costs nothing.
  *
  * Not registered in `hooks.json`. It is spawned only by `stage-prompt`, `capture --stop`,
- * `session-end` or `cwd-changed`, which is what keeps the per-tool-call hot path free of
- * node's startup cost a second time. The last of those passes `--run <id>`: it drains the
- * run a session has just walked away from, and a child that re-derived would read the
- * session map that hook is in the middle of rewriting. Nothing waits on it, so everything here must be safe to abandon:
+ * `capture --subagent`, `session-end` or `cwd-changed`, which is what keeps the
+ * per-tool-call hot path free of node's startup cost a second time. Two of those pass
+ * `--run <id>`, and for the same reason: they drain a run this process would not derive.
+ * `cwd-changed` drains the run a session has just walked away from, while the session map
+ * it would re-derive from is mid-rewrite; `capture --subagent` drains a sub-run that exists
+ * only in the spawning process's head. Nothing waits on it, so everything here must be safe to abandon:
  * one drainer at a time, one request per batch, and a spool that is only ever unlinked
  * after a 2xx.
  *
@@ -174,6 +176,11 @@ async function main() {
     // re-derived would read whichever version of that file it won the race against, and
     // would drain the run it was spawned to leave alone. The flag removes the race rather
     // than making it unlikely.
+    //
+    // `capture --subagent` pins for a stronger reason than a race: a sub-run id is derived
+    // from the payload's `agent_id` on top of the parent, so re-deriving here answers the
+    // PARENT under every strategy. Without the flag the child would drain the parent's
+    // spool and leave the lane it was spawned for untouched, for §7 to delete at 24 h.
     //
     // It is still checked: a run id names a directory under the data dir as well as a run,
     // and `"default"` is the value that collapses every user and project into one shared

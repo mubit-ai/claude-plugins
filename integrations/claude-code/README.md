@@ -111,7 +111,7 @@ one per `if` pattern.)
 Every hook exits 0, always. A memory layer has no business breaking a prompt — a dead server,
 an unwritable data dir, or a corrupt state file costs you a memory, never a turn.
 
-### Seven skills and one subagent
+### Eight skills and one subagent
 
 | Command | Use it for |
 | --- | --- |
@@ -122,6 +122,7 @@ an unwritable data dir, or a corrupt state file costs you a memory, never a turn
 | `/mubit-memory:remember` | Save a durable lesson, rule, or standing preference. |
 | `/mubit-memory:reflect` | Extract lessons from this session mid-flight, rather than waiting for `SessionEnd`. |
 | `/mubit-memory:forget` | Delete a lesson, or down-weight one that is merely wrong. |
+| `/mubit-memory:link` | Connect two projects so recall in one can see the other, list what is connected, or revoke it. Only a human runs this one. |
 | `@mubit-memory:mubit-recall` | Subagent: multi-angle memory search in an isolated context, returns a synthesis instead of raw evidence. |
 
 ### Ten MCP tools

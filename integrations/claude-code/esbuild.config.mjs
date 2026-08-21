@@ -160,6 +160,10 @@ const targets = [
     'statusline.launcher.mjs', 'bin/statusline.mjs',
   ),
   { entryPoints: ['bin/auth.src.mjs'], outfile: 'bin/auth.mjs', ...shared },
+  // Same shape as `auth`, and no launcher for the same reason: both are typed by a user at a
+  // prompt rather than fired by the host, so a runtime too old to parse the bundle produces a
+  // message on the spot instead of a session that silently loses a hook.
+  { entryPoints: ['bin/link.src.mjs'], outfile: 'bin/link.mjs', ...shared },
   // The launcher hands the server its own version, because the server cannot read it once
   // relocated: it does `require("../package.json")`, which resolves inside @mubit-ai/mcp and
   // not inside this plugin. Inlined from the tracked sibling manifest, so the value is

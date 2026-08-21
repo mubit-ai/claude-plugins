@@ -515,8 +515,46 @@ default. So schema validity is necessary and not sufficient, and `codex-payload.
 cannot be the whole gate — which is why `codex-hooks.test.mjs` runs every hook against a real
 subprocess and reads what Codex actually says back.
 
-Two of those name `suppressOutput` on events this plugin emits it for. Empirically it is
-accepted on both 0.146.0 and 0.149.0: a full end-to-end run produces no `type:"error"` item
-and nothing on stderr. Treat the list as a thing to re-check after a Codex upgrade rather than
-as a live fault — and note that if it ever does fire, the symptom is a warning per tool call,
-which is loud enough to find and harmless enough to ignore until fixed.
+### Correction — these fire, and this plugin was tripping three of them
+
+The paragraph that used to sit here said the `suppressOutput` rules were "empirically accepted
+on both 0.146.0 and 0.149.0", on the evidence that a full end-to-end run produced no
+`type:"error"` item and nothing on stderr. **That was wrong**, and it was wrong in the most
+expensive direction: it read an absence of evidence in one output channel as evidence of
+absence, and signed off a list of rules that the extraction had already put in front of me.
+
+What a real interactive session does, on 0.149.0, once per tool call:
+
+```
+• PostToolUse hook (failed)
+  error: PostToolUse hook returned unsupported suppressOutput
+
+• PermissionRequest hook (failed)
+  error: PermissionRequest hook returned unsupported suppressOutput
+```
+
+Three events reject the field — `PreToolUse`, `PostToolUse`, `PermissionRequest` — and this
+plugin emitted `{"suppressOutput": true}` on all three, because Claude Code accepts it
+everywhere and the shared `lib/hook.mjs` had one envelope for both hosts. Recall, capture and
+the MCP tools all worked correctly throughout; the only cost was a hook the user was told had
+failed, twice per tool call.
+
+The fix is `forHost()` in `lib/hook.mjs`: under `MUBIT_CC_HOST=codex`, and only there, the
+field is dropped on those three events. It is cosmetic to us on all three — we attach no
+`systemMessage` and no `additionalContext` to any of them, so there is nothing to suppress.
+
+Two lessons worth carrying, both encoded as gates rather than as prose:
+
+- **Schema validity is not acceptance.** `codex-payload.test.mjs` validated every hook's real
+  stdout against the host's own output schema and went green, because `suppressOutput` is a
+  declared property of that schema with a documented default. The rules live in a second place
+  and had to be extracted into `test/fixtures/codex-output-rules.json`, which that test now
+  checks every hook against.
+- **`codex exec --json` is not where a hook failure shows up.** The stream carries no
+  `type:"error"` item for one; the binary models the failure as `HookErrorInfo` with a status
+  of `failed`, and the TUI is where it surfaced. An end-to-end run over that stream cannot be
+  the only check that hooks are healthy — which is why `manual-test-codex.md` now reads the
+  hook status out of the session rather than concluding from a quiet stderr.
+
+Re-extract the list after a Codex upgrade. It is the half of the contract the schemas do not
+carry, and nothing in the type system will tell you when it moves.

@@ -178,6 +178,48 @@ codex exec --json --skip-git-repo-check -C $E/proj \
 
 ## §5 — Assert on what happened, not on what should have
 
+### The hooks are not merely running — they are being accepted
+
+Do this one first, because a hook can run, do its whole job correctly, and still be reported to
+the user as failed. Codex validates a hook's stdout twice: against a generated JSON Schema, and
+then against a set of semantic rules the schema does not carry. Output that clears the schema
+and breaks a rule is discarded with a message per invocation:
+
+```
+• PostToolUse hook (failed)
+  error: PostToolUse hook returned unsupported suppressOutput
+```
+
+That failure does **not** appear as a `type:"error"` item in the `codex exec --json` stream, so
+none of the assertions below will catch it. It is worth its own check, and the check needs no
+model call and no network — pipe a payload through the hook Codex would run and read what comes
+back:
+
+```bash
+E=$(mktemp -d); mkdir -p $E/data
+for spec in "PreToolUse pre-tool" "PermissionRequest capture --permission" "PostToolUse capture"; do
+  set -- $spec; event=$1; hook=$2; shift 2
+  printf '%s' "{\"hook_event_name\":\"$event\",\"session_id\":\"01a0240c-7f5a-7de0-b4e4-caa34b796e11\",\"turn_id\":\"01a0240c-7f97-7ca3-a641-cf8d141498a0\",\"cwd\":\"$E\",\"model\":\"gpt-5.6-sol\",\"permission_mode\":\"default\",\"transcript_path\":\"$E/r.jsonl\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo hi\"},\"tool_response\":\"hi\",\"tool_use_id\":\"exec-1\"}" \
+  | env MUBIT_CC_HOST=codex MUBIT_CC_DATA_DIR=$E/data MUBIT_CC_RUN_STRATEGY=static \
+        MUBIT_CC_RUN_ID=hookcheck MUBIT_CC_ENDPOINT=http://127.0.0.1:9 \
+        node $PLUGIN_ROOT/hooks/dist/$hook.mjs "$@" \
+  | xargs -0 printf "%-18s %s\n" "$event"
+done
+```
+
+**Expect** an empty object from each, and in particular **no `suppressOutput` key**:
+
+```
+PreToolUse         {}
+PermissionRequest  {}
+PostToolUse        {}
+```
+
+`{"suppressOutput":true}` here is the bug, not a variant: those three events reject the field,
+and the other eight accept it. `test/fixtures/codex-output-rules.json` holds the extracted rule
+table and `npm test -- test/codex-payload.test.mjs` drives every hook against all of it, which
+is the exhaustive form of this check.
+
 ### The steer block reached the model
 
 ```bash

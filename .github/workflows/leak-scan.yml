@@ -6,8 +6,11 @@
 #      carry `.github/` across, a release removes this workflow and the gate silently stops
 #      existing — give `.github/**` whatever treatment `README.md` and `.gitignore` already get.
 #
-#   2. The real gate belongs in the source repository too. Catching a leak here catches it
-#      after it is already public. This job is the last line, not the first.
+#   2. This job runs AFTER the push, and this repository is public — so it reports on a commit
+#      that is already being served. `.githooks/pre-push` is what runs before that happens;
+#      install it with `git config core.hooksPath .githooks`. The same scanner belongs in the
+#      source repository as well, where it is genuinely pre-publication. This is the last line,
+#      not the first.
 #
 # Nothing here installs dependencies. The plugin's only devDependency is a `file:../mcp` path
 # that does not exist in this repository, so `npm ci` cannot succeed — and a gate that depends

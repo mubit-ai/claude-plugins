@@ -97,9 +97,18 @@ that could be anybody's.
 
 ## How this is enforced
 
-- `.github/scripts/leakcheck.mjs` — a deterministic scan of every tracked file, on every push
-  and pull request. Rules live in `rules.mjs`, each one annotated with the real finding that
-  motivated it.
+The order matters. This repository is public, so a push **is** a publication: by the time a
+workflow starts, the commit is already being served, and a later force-push does not un-publish
+a blob anyone can still fetch by SHA. Only the first item below runs before that happens.
+
+- `.githooks/pre-push` — **the gate.** Scans the commits being pushed, not the working tree,
+  and refuses the push. Install once per clone with `git config core.hooksPath .githooks`; it
+  then covers every worktree whose branch carries the hook. Overridable with `--no-verify`,
+  which is the point: a human can decide a rule is wrong, and the override is visible in the
+  shell they typed it in.
+- `.github/scripts/leakcheck.mjs` — the same scan, in CI, on every push and pull request. This
+  is a **detector**, not a gate: it tells you within a minute, and it stops a finding reaching
+  `main`. Rules live in `rules.mjs`, each one annotated with the real finding that motivated it.
 - `.github/scripts/llm-leak-review.mjs` — a model reads the diff against this document, for the
   cases a regex cannot state: a paragraph that explains a mechanism without using any of the
   words a rule looks for.

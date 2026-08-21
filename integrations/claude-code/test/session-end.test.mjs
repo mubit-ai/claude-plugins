@@ -160,9 +160,35 @@ test('issues POST /v2/control/reflect BY DEFAULT with no opt-in env', async (t) 
   const body = server.lastCall('POST', '/v2/control/reflect').body;
   assert.equal(body.run_id, RUN_ID);
   assert.notEqual(body.run_id, 'default');
-  assert.equal(body.include_linked_runs, false);
+  assert.equal(body.include_linked_runs, true,
+    'SCOPE.md Target C: reflect reads the link graph too. Pinned false, this field was the '
+    + 'reason a linked run\'s work could never reach lesson extraction');
   assert.equal(body.include_step_outcomes, true);
   assert.equal(body.last_n_items, 200);
+});
+
+// SCOPE.md Target C — the flag is INERT until something is linked, and a reader who finds it
+// set in a plugin that ships with no links needs that demonstrated rather than asserted in a
+// comment. `reflect`'s linked branch walks `scope.linked_run_ids`, which is empty for a run
+// nothing has ever joined, so there is no wider set for it to reach into.
+test('reflect asks for linked runs on a run that has none, and nothing widens', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  assertHookContract(r);
+  assert.equal(server.lastCall('POST', '/v2/control/reflect').body.include_linked_runs, true,
+    'the flag is sent unconditionally — the server decides reach from the graph, not the client');
+  assert.equal(existsSync(join(dataDir, 'links')), false,
+    'a default install has no link ledger at all, so the flag names the empty set — that is '
+    + 'what makes it safe to land ahead of Tiers 1-3');
+  server.assertNotCalled('POST', '/v2/control/runs/link');
+  assert.equal(readMarker(dataDir).reflect.lessons_stored, 1,
+    'and the reflection is the same one an unlinked run always got');
 });
 
 // §5.7 — "Runs INLINE, not detached." The ingest is deliberately slow: a detached

@@ -22,7 +22,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { basename, join } from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import {
   fakeMubit, queryResponse, evidence, runHook, assertHookContract,
   baseEnv, makeDataDir, makeProjectDir, readJsonFile, readJsonDir,
@@ -210,10 +210,44 @@ test('rung 1 request body matches §5.2 exactly', async (t) => {
   assert.equal(body.limit, 8);
   assert.deepEqual(body.entry_types, ['mental_model', 'rule', 'lesson', 'fact', 'trace']);
   assert.equal(body.include_working_memory, true);
+  // SCOPE.md Target C. Set, `consulted_runs` extends with `linked_runs_for(run_id)` and the
+  // evidence loop consults every linked run with NO scope filter — `run`-scoped entries
+  // included. That is the whole reason joining runs beats widening scopes: reach becomes the
+  // link graph rather than a threshold's good behaviour.
+  assert.equal(body.include_linked_runs, true,
+    'without this the plugin can create links it is unable to read back');
   assert.ok(Array.isArray(body.env_tags), 'env_tags exists on AgentQueryRequest but not on ContextRequest');
   assert.ok(body.env_tags.includes('tool:claude-code'));
   assert.ok(body.env_tags.includes('ci:test'), 'MUBIT_CC_ENV_TAGS extras are appended verbatim');
   assert.ok(body.env_tags.length <= 8, 'env_tags is capped at 8 (§4.1)');
+});
+
+// SCOPE.md Target C — the flag is INERT until something is linked, and a plugin that ships
+// with no links needs that shown rather than promised in a comment. `linked_runs_for` returns
+// `scope.linked_run_ids` for the calling run, so on a run nothing has joined the extended set
+// is the empty set and `consulted_runs` is exactly what it was before the flag existed.
+test('include_linked_runs is inert on an unlinked run: same block, same refIds, no ledger', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  assertHookContract(r);
+
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.include_linked_runs, true,
+    'the flag goes out unconditionally — the server decides reach from the graph, not the client');
+  assert.equal(existsSync(join(dir, 'links')), false,
+    'a default install has no link ledger at all, so the flag names the empty set: this is a '
+    + 'capability the user has to grant, not a widening the plugin took for itself');
+
+  // The rung-1 rendering of the default fixture, unchanged. A widened reach would show up
+  // here first — as evidence from a run this one was never joined to.
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.ok(ctx.includes('Ingest returns when queued, not when stored; poll the job.'),
+    `the ordinary rung-1 block is still what gets injected: ${ctx}`);
+  assert.equal(marker(dir).recall.sources, 3, 'three sources, as before the flag');
+  assert.deepEqual(turn(dir).recalled, ['ref_rule_1', 'ref_lesson_1', 'ref_fact_1'],
+    'the same three references an unlinked run has always been served');
 });
 
 /*
@@ -580,6 +614,18 @@ test('recallAssemble:"server" issues rung 3 with the documented sections body', 
     ['mental_models', 'active_rules', 'lessons', 'facts', 'working_memory', 'traces']);
   assert.equal(body.include_working_memory, true);
   assert.equal(body.query, PROMPT);
+
+  // SCOPE.md Target C, and the one rung it deliberately does NOT reach. `include_linked_runs`
+  // could not be established as a field ContextRequest accepts: the vendored client this
+  // plugin ships (`mcp/dist/server.js`) is generated against the same service and carries the
+  // field explicitly on `query` and on `reflect`, and omits it from `getContext`. Two bodies
+  // already known not to be interchangeable — §1.8 documents `env_tags` the same way — so it
+  // is left off rather than sent to be ignored. Rung 3 is opt-in and off by default; an
+  // operator paying two LLM calls a prompt for a server-assembled block does not get the link
+  // graph with it, and this pins that so the gap is a decision rather than an oversight.
+  assert.equal('include_linked_runs' in body, false,
+    'rung 3 must not send a field ContextRequest was never shown to accept — a silently '
+    + 'ignored flag reads as working reach that is not there');
 });
 
 // §5.2 step 5: "Rung 3 → use the server's context_block and section_summaries as-is."

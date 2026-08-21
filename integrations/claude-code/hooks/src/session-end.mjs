@@ -565,7 +565,27 @@ async function maybeReflect(cfg, o) {
 
   const res = await request(cfg, 'POST', ROUTES.reflect, {
     run_id: o.runId,
-    include_linked_runs: false,
+    // SCOPE.md Target C. `reflect` has its own `include_linked_runs` branch (`lib.rs:10309`),
+    // and it answers the question §5 left open: yes, reflection does see a linked run's
+    // evidence — through a much narrower window than `query` does, and with one hazard worth
+    // knowing before reading a reflection that talks about another project.
+    //
+    // What the branch actually adds: at most **3 linked runs × 20 traces**, so 60 items,
+    // **traces only** — not the full evidence set `query` gets — at a flat score of 0.35.
+    //
+    // The hazard is the interaction with `last_n_items` below. Linked evidence is pushed onto
+    // the END of the vector and the `last_n_items` drain keeps the LAST n (`lib.rs:10327`),
+    // so up to 60 of these 200 slots can be linked-run traces, displacing this session's own
+    // OLDEST evidence. On a long session with three linked runs, reflection therefore spends
+    // ~30% of its window summarising other projects' traces instead of this one's work.
+    // Nothing is lost that was not already outside the tail — but the tail gets shorter, and
+    // `REFLECT_LAST_N` is the dial if that ever proves to be the wrong trade.
+    //
+    // **Inert until something is linked**, which is what makes it safe to send
+    // unconditionally: the branch reads `scope.linked_run_ids`, which is empty for a run
+    // nothing has joined, so a default install asks the server to extend an empty set. Only a
+    // human granting a link, or a subagent spawn, ever puts anything in it.
+    include_linked_runs: true,
     // `include_step_outcomes` folds outcome signals into the evidence
     // (`control.proto`) — the NEGATIVE ones produce the highest-value lessons.
     include_step_outcomes: true,

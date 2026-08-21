@@ -44,7 +44,7 @@ MUBIT_CC_BUILD_SKIP_SERVER=1 npm run build && npm test && npm run test:dist \
   && node scripts/verify-manifests.mjs
 
 # 1. trust the kit, then trust the backend — in that order
-node "$L/bin/lab.mjs" selftest                         # offline, ~1s, no model calls
+node "$L/bin/lab.mjs" selftest                         # offline, ~3s, no model calls
 node "$L/bin/lab.mjs" preflight  --plugin-dir "$V"     # refuses if recall is degraded
 
 # 2. measure
@@ -66,51 +66,56 @@ no copy of the plugin, which is what makes one kit serve every version.
 
 ## Why the preflight is not optional
 
-The backend can be **healthy and useless at the same time**, and it currently is. Verified
-while this kit was being written:
+The backend can be **healthy and useless at the same time**. A health ping cannot see that,
+so the gate writes a sentinel through the plugin's own ingest path under a freshly minted run
+and reads it back under that same `run_id`:
 
 ```
-PASS  backend health   218ms ok
-FAIL  recall canary    scope, not retrieval: 0 sources in a fresh run, 3 for the SAME
-                       query pinned to run "…tb-full30-a-openssl-selfsigned-cert"
+PASS  backend health                               218ms ok
+PASS  recall canary: a run reads its own evidence  sentinel read back in its own run · 1 sources
+INFO  cross-run overlay                            0 sources in an unrelated run — instance-wide
+                                                   sharing is off; expected at mcpLessonScope=run
 ```
 
-The search index is fine. `POST /v2/control/query` returns HTTP 200, `degraded: false`, and
-`evidence: []` — and `consulted_runs` echoes exactly one run: the one the caller named. Every
-lesson on this instance is stored at `scope: "run"`, bound to the `source_run_id` of the
-session that produced it.
+Those are two different questions, and until `docs/SCOPE.md` §8 they were one check. The
+canary used to dial a synthetic `tk-preflight-canary` run that had never written anything, so
+what it measured was *cross-project* recall — which this plugin deliberately keeps off
+(`mcpLessonScope` defaults to `run`). It was red for the shipped configuration, and a gate
+that is red by design gets bypassed with `--force` within a week, after which it protects
+nothing.
 
-**What that does and does not prove has been re-derived — see
-[`docs/SCOPE.md`](docs/SCOPE.md).** The canary dials a synthetic `tk-preflight-canary` run
-that has never written anything, so what it measures is *cross-project* recall, which this
-plugin deliberately keeps off (`mcpLessonScope` defaults to `run`). Cross-session recall
-*within* a project rides the same `run_id` — `runStrategy: per-directory` derives it from the
-git toplevel — and does not depend on any of this. Every W2 scenario pins its run id and
-therefore tests that path, so a red canary is **not** a reason to expect them to fail.
+Cross-session recall *within* a project rides the same `run_id` — `runStrategy: per-directory`
+derives it from the git toplevel — and does not go near the overlay. Every W2 scenario pins
+its run id and therefore tests that path.
 
-The gate still earns its place: an A/B run against a genuinely broken retrieval path produces
-clean, plausible, reproducible numbers showing the plugin does nothing, and nothing in the
-output would say why. But the canary is currently testing the wrong one of the three states
-it can be in, and `docs/SCOPE.md` §8 specifies the split — same-run sentinel blocks a sweep,
-cross-run overlay merely reports.
-
-That is what the gate is for, and it is why the canary dials the real recall ladder through
-the plugin's own `lib/recall.mjs` rather than pinging health. The five checks:
+The gate still earns its place, now on the question that can actually go wrong: an A/B run
+against a genuinely broken retrieval path produces clean, plausible, reproducible numbers
+showing the plugin does nothing, and nothing in the output would say why. That is why the
+canary dials the real recall ladder through the plugin's own `lib/recall.mjs` rather than
+pinging health. The six checks:
 
 | # | Check | Fails on |
 | --- | --- | --- |
 | 1 | `claude` version | absent, or drifted from the pinned one (`--allow-host-drift` to override) |
 | 2 | env hygiene | any ambient `MUBIT_*` / `CLAUDE_PLUGIN_*` — env beats `credentials.json`, so a leftover export silently measures a different instance |
 | 3 | credentials resolve | no key in env or any `mubit-memory*/credentials.json` |
-| 4 | **recall canary** | `failed`, `budget_exhausted`, or `no_evidence` where the store is provably not empty |
-| 5 | the arms are what they claim | treatment did not load the plugin, or control did |
+| 4 | **recall canary** | the sentinel cannot be written, its ingest never lands, or the run that wrote it cannot read it back — plus `failed` and `budget_exhausted` anywhere on the path |
+| 5 | cross-run overlay | nothing. It is **informational**: it measures whether an unrelated run sees anything, which is off by default and is not a reason to refuse a measurement |
+| 6 | the arms are what they claim | treatment did not load the plugin, or control did |
 
-Check 5 costs two real (cheap, one-turn) model calls, and it is the one that catches the
+Check 6 costs two real (cheap, one-turn) model calls, and it is the one that catches the
 kit's most dangerous failure: an arm that is not what its label says scores as "no
 difference", which is indistinguishable from a real null result.
 
-`--force` records anyway and stamps `degraded: true`; `compare` then refuses to place that
-run beside a trusted one.
+`--force` records anyway and stamps `degraded: true`. `compare` prints a `WARN` naming the
+run, and `history` shows it with `trusted` false — it does not refuse. That is deliberate: an
+overhead measurement taken against a degraded backend is still a real number, and refusing to
+place it in a table would strand it for nothing. The verdict that *does* stop you quoting a
+sweep is `sound`, which is about the arms rather than the backend, and it exits non-zero.
+
+Note what no longer sets `degraded`: an instance where cross-run sharing is off. That is the
+shipped configuration (check 5 above), the gate stays green through it, and an A/B recorded
+there is measuring the product as users have it.
 
 ## What the A/B measures, and what it refuses to measure
 
@@ -197,7 +202,7 @@ file it writes.
 ## Trusting the kit before trusting its numbers
 
 ```bash
-node bin/lab.mjs selftest     # 38 tests, offline, ~1s
+node bin/lab.mjs selftest     # 58 tests, offline, ~3s
 ```
 
 Four negative controls, plus the checks they depend on:
@@ -211,7 +216,11 @@ Four negative controls, plus the checks they depend on:
   report `underpowered (need 6 pairs)` instead of a false null.
 - **N3 — degraded backend.** An unreachable endpoint fails the canary specifically, and a
   leaked `MUBIT_ENDPOINT` is caught before it can redirect a sweep — with the API key
-  reported by name and never by value.
+  reported by name and never by value. The split canary (`N3d`–`N3j`) is driven against a
+  loopback instance that really stores what it is given and answers a query only from the run
+  that asked: a run that cannot read back its own sentinel refuses the sweep, an unrelated
+  run seeing nothing does not, and an ingest still `queued` is reported as ingest lag rather
+  than as a dead index.
 - **N4 — the noise floor.** An A/A pair is measured and reported.
 
 Plus the parsers pinned against fixtures (`1.2k` expansion, the ring log's overrun-only
@@ -229,7 +238,7 @@ testkit/
     paths.mjs             plugin resolution, results root
     versions.mjs          the stamp, and the comparability gate
     arms.mjs              what "on" and "off" mean, as argv + env
-    preflight.mjs         the five checks
+    preflight.mjs         the gate: six checks, and which of them may refuse a sweep
     metrics.mjs           one run in, one TBench-compatible trial record out
     latency.mjs           the four responsiveness miners
     report.mjs            paired medians, integrity block, tables

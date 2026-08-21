@@ -10,14 +10,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 
 import { integrity, noiseFloor, abTable, dropWarmup } from '../lib/report.mjs';
-import { resolvePluginDir, LAB_ROOT } from '../lib/paths.mjs';
-import { checkEnvHygiene, checkRecallCanary } from '../lib/preflight.mjs';
+import { resolvePluginDir, KIT_ROOT, LAB_ROOT } from '../lib/paths.mjs';
+import { checkEnvHygiene, checkRecallCanary, renderChecks } from '../lib/preflight.mjs';
 import { buildRun, disableSettings, envLeaks } from '../lib/arms.mjs';
+
+const PLUGIN = resolvePluginDir(process.env.MUBIT_LAB_PLUGIN_DIR || LAB_ROOT);
 
 /** A minimal synthetic trial, so the integrity checks can be driven without spending money. */
 function trial(over = {}) {
@@ -172,6 +175,344 @@ test('N3c — a leaked API key is reported by name but never by value', () => {
   } finally {
     if (before === undefined) delete process.env.MUBIT_API_KEY; else process.env.MUBIT_API_KEY = before;
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/* the canary, split: same-run blocks, cross-run informs (SCOPE.md §8, I1)      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The plugin's own loopback fake, imported from the plugin under test rather than
+ * reimplemented here — the same reason the canary itself imports the plugin's `lib/recall.mjs`
+ * instead of hand-rolling the request. It binds 127.0.0.1:0, so this is real HTTP over a real
+ * socket with no network, no mocking and no model call.
+ *
+ * @param {Record<string, any>} [routes]
+ */
+async function loopbackInstance(routes = {}) {
+  const harness = join(PLUGIN, 'test', 'helpers', 'harness.mjs');
+  assert.ok(existsSync(harness),
+    `no test/helpers/harness.mjs under ${PLUGIN}: point --plugin-dir (or MUBIT_LAB_PLUGIN_DIR) at a source checkout, or the canary's loopback controls cannot run at all`);
+  const { fakeMubit } = await import(pathToFileURL(harness).href);
+  return fakeMubit(routes);
+}
+
+/**
+ * A loopback instance that actually stores what it is given and answers a query **only from
+ * the run that asked** — `mcpLessonScope: run`, the shipped configuration, in miniature.
+ *
+ * `lesson` is pre-stored under `owningRun`, which is what lets the cross-run ladder walk its
+ * whole length: an unrelated run sees nothing, `/v2/control/lessons` proves the store is not
+ * empty, and the same query pinned to the owning run finds it.
+ *
+ * @param {{lesson?: string, owningRun?: string}} [o]
+ */
+async function storingInstance({ lesson = '', owningRun = 'tb-full30-a-openssl-selfsigned-cert' } = {}) {
+  /** @type {Map<string, string[]>} run_id → the text of everything stored under it */
+  const stored = new Map();
+  const put = (runId, text) => {
+    if (!runId || !text) return;
+    stored.set(runId, [...(stored.get(runId) ?? []), text]);
+  };
+  if (lesson) put(owningRun, lesson);
+
+  const server = await loopbackInstance({
+    'POST /v2/control/ingest': (r) => {
+      for (const it of r.body?.items ?? []) put(String(r.body?.run_id ?? ''), String(it?.text ?? ''));
+      return { json: { accepted: true, job_id: 'job_test_1', status: 'queued' } };
+    },
+    'POST /v2/control/query': (r) => {
+      const q = String(r.body?.query ?? '');
+      const hits = q ? (stored.get(String(r.body?.run_id ?? '')) ?? []).filter((t) => t.includes(q)) : [];
+      return { json: { evidence: hits.map((content, i) => ({
+        id: `e${i}`, reference_id: `ref_${i}`, entry_type: 'lesson', score: 0.9, content,
+      })) } };
+    },
+    'POST /v2/control/lessons': {
+      json: { lessons: lesson ? [{ lesson_id: 'les_1', content: lesson, scope: 'run', source_run_id: owningRun }] : [] },
+    },
+  });
+  return { server, stored, owningRun };
+}
+
+// §8, structural constraint 1: `severity` replaces the dead `fatal?` field, and a check that
+// does not declare one must keep blocking. Every check that predates the split declares
+// nothing, so a default of "informational" would silently open all five of them at once.
+test('N3d — a check that declares no severity still blocks the gate', async () => {
+  const { gateOk } = await import('../lib/preflight.mjs');
+  const legacy = { id: 'arm-treatment', title: 'treatment arm loads the whole plugin', ok: false, measured: 'plugins=[]' };
+  assert.equal(gateOk([legacy]), false,
+    'a check with no severity would stop blocking, so every gate not touched by this split silently becomes advisory');
+  assert.equal(gateOk([{ ...legacy, ok: true }]), true,
+    'a passing blocking check must not hold the gate shut, or no sweep can ever be recorded');
+  assert.equal(gateOk([{ ...legacy, severity: 'block' }]), false,
+    'an explicit block:false must refuse the sweep exactly as the implicit one does');
+  assert.equal(gateOk([{ ...legacy, severity: 'info' }]), true,
+    'an informational check that failed would still refuse the sweep — which is the bypass-by---force this split exists to remove');
+});
+
+// §8.2 + structural constraint 2: `renderChecks` printed `detail` only for `!ok`, so demoting
+// a check to informational would drop the one line that explains it — the entire point of the
+// demotion. And an INFO row must not wear a PASS/FAIL label, because it is not a verdict.
+test('N3e — an informational row renders as INFO and keeps its explanation', () => {
+  const out = renderChecks([
+    { id: 'health', title: 'backend health', ok: true, measured: '9ms ok' },
+    {
+      id: 'cross-run-overlay',
+      title: 'cross-run overlay',
+      ok: false,
+      severity: 'info',
+      measured: '0 sources in an unrelated run — instance-wide sharing is off; expected at mcpLessonScope=run',
+      detail: 'the search index is healthy; every lesson here is stored at scope "run"',
+    },
+  ]);
+  assert.match(out, /INFO {2}cross-run overlay/,
+    'an informational row labelled FAIL is read as a verdict, and the next operator reaches for --force');
+  assert.ok(!/FAIL/.test(out),
+    'nothing here failed the gate, so a FAIL anywhere in this render is a lie about the instance');
+  assert.match(out, /instance-wide sharing is off/,
+    'the measured value is what makes the row informative rather than noise');
+  assert.match(out, /the search index is healthy/,
+    'dropping an informational row\'s detail leaves the operator with a number and no reading of it');
+});
+
+// §8.1: the product's actual contract — a run writes evidence and reads it back under that
+// same `run_id`. This is the check that is allowed to stop a sweep.
+test('N3f — the same-run sentinel is written and read back under one pinned run id', async () => {
+  const { server } = await storingInstance();
+  try {
+    const checks = await checkRecallCanary({
+      pluginDir: PLUGIN,
+      query: 'what conventions and constraints apply to this project',
+      budgetMs: 3000,
+      landingMs: 2000,
+      creds: { endpoint: server.url, apiKey: 'tk-fake-key' },
+    });
+    const canary = checks.find((c) => c.id === 'recall-canary');
+    assert.ok(canary, 'without a recall-canary row the gate has no opinion on retrieval at all');
+    assert.equal(canary.ok, true,
+      `an instance that stores and returns the sentinel must pass, or the gate is red for the shipped configuration again: ${canary.measured}`);
+
+    const ingest = server.lastCall('POST', '/v2/control/ingest');
+    assert.ok(ingest, 'a canary that never writes is still only testing whether someone else wrote something');
+    const wrote = String(ingest.body?.run_id ?? '');
+    const asked = server.calls('POST', '/v2/control/query').map((c) => String(c.body?.run_id ?? ''));
+    assert.ok(asked.includes(wrote),
+      `the sentinel was written to "${wrote}" and never read back under it (queries: ${asked.join(', ')}) — that is the cross-run question again, wearing a new name`);
+    assert.ok(!/^tk-preflight-canary$/.test(wrote),
+      'a fixed sentinel run id accumulates junk on the instance, one item per preflight, forever');
+  } finally { await server.close(); }
+});
+
+// §8.2 + §8, state 3: a fresh run seeing nothing from unrelated runs is the shipped default.
+// It is reported with its measured value and it does not refuse the measurement.
+test('N3g — instance-wide sharing being off is INFO, and the gate stays green', async () => {
+  const { gateOk } = await import('../lib/preflight.mjs');
+  const { server, owningRun } = await storingInstance({
+    lesson: 'Run the migration before starting the server, or the first request 500s on a missing table.',
+  });
+  try {
+    const checks = await checkRecallCanary({
+      pluginDir: PLUGIN,
+      query: 'what conventions and constraints apply to this project',
+      budgetMs: 3000,
+      landingMs: 2000,
+      creds: { endpoint: server.url, apiKey: 'tk-fake-key' },
+    });
+    const overlay = checks.find((c) => c.id === 'cross-run-overlay');
+    assert.ok(overlay, 'the cross-run ladder is good diagnosis and must survive the split, not be deleted by it');
+    assert.equal(overlay.severity, 'info',
+      'a blocking cross-run-overlay is the original defect under a different id: red by design, bypassed with --force within a week');
+    assert.match(overlay.measured, /instance-wide sharing is off/,
+      'demoting the row without keeping its measured value turns a diagnosis into a shrug');
+    assert.match(String(overlay.detail ?? ''), new RegExp(owningRun.slice(-20)),
+      'naming the run that owns the lesson is what tells the reader this is scope and not a broken index');
+    assert.equal(checks.find((c) => c.id === 'recall-canary')?.ok, true,
+      'same-run recall is working on this instance, so nothing here is a reason to refuse a sweep');
+    assert.equal(gateOk(checks), true,
+      'a gate that refuses the shipped configuration protects nothing, because every sweep runs under --force');
+  } finally { await server.close(); }
+});
+
+// §8, state 2: project memory broken. The one empty result that really is a reason to stop.
+test('N3h — a run that cannot read back its own sentinel refuses the sweep', async () => {
+  const { gateOk } = await import('../lib/preflight.mjs');
+  const server = await loopbackInstance({
+    'POST /v2/control/ingest': { json: { accepted: true, job_id: 'job_test_1', status: 'queued' } },
+    'POST /v2/control/query': { json: { evidence: [] } },
+  });
+  try {
+    const checks = await checkRecallCanary({
+      pluginDir: PLUGIN,
+      query: 'anything',
+      budgetMs: 1000,
+      landingMs: 600,
+      creds: { endpoint: server.url, apiKey: 'tk-fake-key' },
+    });
+    const canary = checks.find((c) => c.id === 'recall-canary');
+    assert.equal(canary?.ok, false,
+      'a store that swallows a write and then denies it is exactly the outage this gate exists for, and it just passed');
+    assert.notEqual(canary?.severity, 'info',
+      'demoting THIS one leaves the kit with no blocking retrieval check at all');
+    assert.equal(gateOk(checks), false,
+      'recording an A/B against a store that cannot read back its own writes produces clean numbers about nothing');
+    assert.equal(checks.some((c) => c.id === 'cross-run-overlay'), false,
+      'diagnosing the cross-run overlay after same-run recall is already down spends calls to explain the wrong thing');
+  } finally { await server.close(); }
+});
+
+// §8.1: "if it does not land in time report *that* as the measured value rather than reporting
+// a recall failure that was really an ingest lag."
+test('N3i — a sentinel whose ingest never lands is reported as ingest lag, not as a dead index', async () => {
+  const server = await loopbackInstance({
+    'POST /v2/control/ingest': { json: { accepted: true, job_id: 'job_test_1', status: 'queued' } },
+    'GET /v2/control/ingest/jobs/job_test_1': { json: { job_id: 'job_test_1', status: 'queued', done: false, error: '' } },
+    'POST /v2/control/query': { json: { evidence: [] } },
+  });
+  try {
+    const checks = await checkRecallCanary({
+      pluginDir: PLUGIN,
+      query: 'anything',
+      budgetMs: 1000,
+      landingMs: 600,
+      creds: { endpoint: server.url, apiKey: 'tk-fake-key' },
+    });
+    const canary = checks.find((c) => c.id === 'recall-canary');
+    assert.equal(canary?.ok, false, 'a sentinel that never became retrievable has not demonstrated the contract');
+    assert.match(canary?.measured ?? '', /queued|ingest/i,
+      'reporting an ingest that is still queued as a recall failure sends the reader to a vector index that is fine');
+    assert.ok(server.countOf('GET', '/v2/control/ingest/jobs/job_test_1') > 0,
+      'sleeping a constant instead of polling the job is how a slow instance gets misreported as a broken one');
+  } finally { await server.close(); }
+});
+
+// §8.1: `getIngestJob` has no other caller in the plugin, so an instance that does not serve
+// the route is a real possibility. The poll is a courtesy; the read-back is the contract.
+test('N3j — an instance with no ingest-job route is still judged on the read-back itself', async () => {
+  const { server } = await storingInstance();
+  server.route('GET /v2/control/ingest/jobs/job_test_1', { status: 404, json: { error: 'no such route' } });
+  try {
+    const checks = await checkRecallCanary({
+      pluginDir: PLUGIN,
+      query: 'anything',
+      budgetMs: 3000,
+      landingMs: 2000,
+      creds: { endpoint: server.url, apiKey: 'tk-fake-key' },
+    });
+    assert.equal(checks.find((c) => c.id === 'recall-canary')?.ok, true,
+      'failing the gate because a diagnostic route is absent blocks every sweep on an instance whose memory works');
+  } finally { await server.close(); }
+});
+
+// §8.1: "ingest lag" is a claim about the write still being in flight, and it may only be
+// made on positive evidence. `done: true` is that evidence whatever the status string spells,
+// and a backend that has no jobs route gives no evidence either way — in which case the
+// read-back is all there is to go on and it is the read-back that must be reported.
+test('N3k — a finished job is finished however it spells its status', async () => {
+  const server = await loopbackInstance({
+    'POST /v2/control/ingest': { json: { accepted: true, job_id: 'job_test_1', status: 'queued' } },
+    'GET /v2/control/ingest/jobs/job_test_1': { json: { job_id: 'job_test_1', status: 'processed', done: true, error: '' } },
+    'POST /v2/control/query': { json: { evidence: [] } },
+  });
+  try {
+    const checks = await checkRecallCanary({
+      pluginDir: PLUGIN,
+      query: 'anything',
+      budgetMs: 1000,
+      landingMs: 600,
+      creds: { endpoint: server.url, apiKey: 'tk-fake-key' },
+    });
+    const canary = checks.find((c) => c.id === 'recall-canary');
+    assert.equal(canary?.ok, false, 'the sentinel never came back, whatever the job called itself');
+    assert.ok(!/ingest lag/.test(canary?.measured ?? ''),
+      `the store said the write was done and then could not return it, which is the retrieval verdict; blaming ingest sends the operator to wait out a queue that is already empty: ${canary?.measured}`);
+    assert.match(canary?.measured ?? '', /sentinel/,
+      'the row still has to name what was asked for, or "0 sources" is unreadable');
+  } finally { await server.close(); }
+});
+
+/* -------------------------------------------------------------------------- */
+/* what a recorded run gets stamped with (SCOPE.md §8.3)                       */
+/* -------------------------------------------------------------------------- */
+
+/** The six rows `preflight()` returns on a healthy instance running the shipped default. */
+const shippedChecks = () => ([
+  { id: 'claude-version', title: 'claude CLI version', ok: true, measured: '2.1.237' },
+  { id: 'env', title: 'no ambient MUBIT_*/CLAUDE_PLUGIN_* env', ok: true, measured: 'clean' },
+  { id: 'creds', title: 'credentials resolved', ok: true, measured: 'https://api.mubit.ai from env' },
+  { id: 'health', title: 'backend health', ok: true, measured: '218ms ok' },
+  { id: 'recall-canary', title: 'recall canary: a run reads its own evidence', ok: true, measured: 'sentinel read back in its own run · 1 sources' },
+  {
+    id: 'cross-run-overlay',
+    title: 'cross-run overlay',
+    ok: false,
+    severity: 'info',
+    measured: '0 sources in an unrelated run — instance-wide sharing is off; expected at mcpLessonScope=run',
+  },
+  { id: 'mcp', title: 'MCP server answers mubit_status', ok: true, measured: '640ms' },
+  { id: 'arm-treatment', title: 'treatment arm loads the whole plugin', ok: true, measured: 'plugins=[mubit-memory]' },
+  { id: 'arm-control', title: 'control arm is clean', ok: true, measured: 'plugins=[]' },
+]);
+
+// §8.3: an A/B measured while instance-wide sharing is off is measuring the SHIPPED
+// configuration, and it is trustworthy. `degraded` is `!pre.ok` at bin/lab.mjs:203, :393 and
+// :424, so this is the reduce that decides whether `compare` and `history` trust the run.
+test('a sweep whose only unhappy row is the cross-run overlay is recorded trusted', async () => {
+  const { gateOk } = await import('../lib/preflight.mjs');
+  const checks = shippedChecks();
+  assert.equal(gateOk(checks), true,
+    'every run on a correctly-configured instance would be stamped degraded, and compare would warn about all of them until the warning means nothing');
+
+  const lab = readFileSync(join(KIT_ROOT, 'bin', 'lab.mjs'), 'utf8');
+  assert.equal((lab.match(/degraded: !pre\.ok/g) ?? []).length, 3,
+    'a summary that stops deriving `degraded` from the gate can be stamped from anywhere, and the reduce above stops meaning anything');
+
+  const overlay = checks.find((c) => c.id === 'cross-run-overlay');
+  assert.equal(gateOk(checks.filter((c) => c !== overlay)), true,
+    'dropping the informational row must change nothing about the verdict — if it does, the row is still being counted');
+});
+
+// §8.3: "Keep the hard-coded `degraded: true` at :421 — that is the eval VOID path, where the
+// arm genuinely did not measure what it claims, and it is correct."
+test('the eval VOID path still stamps degraded:true, because that arm measured nothing', () => {
+  const lab = readFileSync(join(KIT_ROOT, 'bin', 'lab.mjs'), 'utf8');
+  const void_ = lab.slice(lab.indexOf('detectedPlugin === false'));
+  assert.match(void_.slice(0, 2000), /appendIndex\(\{[^}]*degraded: true/,
+    'a VOID eval arm detected nothing the plugin does; recording it as trustworthy is the exact lie this kit exists to prevent');
+  assert.equal((lab.match(/degraded: true,/g) ?? []).length, 1,
+    'exactly one call site may stamp degraded unconditionally — a second one is a gate result being overridden by hand');
+});
+
+// §8.3 loose end 2: `KIT_OWNED_ENV` is the list of variables the kit sets deliberately, and
+// the SC-11 B1 experiment exports this one. Without it, B1 blocks its own sweep.
+test('envLeaks does not report MUBIT_MCP_LESSON_SCOPE, which the B1 experiment sets on purpose', () => {
+  const leaks = envLeaks({
+    MUBIT_MCP_LESSON_SCOPE: 'global',
+    MUBIT_LAB_RESULTS: '/Users/x/mubit-lab-results',
+    MUBIT_ENDPOINT: 'http://127.0.0.1:3100',
+  });
+  assert.deepEqual(leaks.map((l) => l.name), ['MUBIT_ENDPOINT'],
+    'B1 exports MUBIT_MCP_LESSON_SCOPE to measure a bounded cross-run window, and reporting it as a leak blocks the experiment it is required by');
+  assert.equal(leaks[0]?.value, 'http://127.0.0.1:3100',
+    'the leak this check was built for is an ambient endpoint silently measuring another instance, and it must still be caught by name and value');
+});
+
+// §8.3 loose end 1: README:112 and bin/lab.mjs:18 both claimed `compare` refuses to place a
+// degraded run beside a trusted one. It does not — :575 WARNs and :627 stamps `trusted` on
+// the index row — and refusing outright would strand a legitimately-degraded overhead
+// measurement, which is a real and useful number.
+test('compare warns about a degraded run rather than refusing it, and both docs say so', () => {
+  const lab = readFileSync(join(KIT_ROOT, 'bin', 'lab.mjs'), 'utf8');
+  const readme = readFileSync(join(KIT_ROOT, 'README.md'), 'utf8');
+
+  assert.ok(!/refuses to place/.test(readme),
+    'the README describes a refusal the code has never performed, and the next operator plans around a guard that is not there');
+  assert.ok(!/refuses to place/.test(lab),
+    'a corrected README beside a stale header comment is worse than either alone — the reader believes the comment');
+  assert.match(lab, /WARN {2}\$\{\[a, b\]/,
+    'losing the warning entirely would put a degraded run in a comparison table with nothing marking it');
+  assert.match(lab, /trusted: !summary\.degraded/,
+    'the index row is where `trusted` is actually decided, and a reader sent to the wrong guard cannot audit it');
 });
 
 /* -------------------------------------------------------------------------- */

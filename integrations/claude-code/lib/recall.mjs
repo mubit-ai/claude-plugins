@@ -257,20 +257,22 @@ async function ladder(cfg, o) {
  * the client has no seam inside it to degrade. An operator paying two LLM calls per prompt
  * pays full token price too. `pointers` is 0 here, honestly rather than by omission.
  *
- * **`include_linked_runs` is not sent here, and its absence is a decision.** It could not be
- * established that `ContextRequest` accepts the field. The evidence available is the client
- * this plugin vendors — `mcp/dist/server.js`, generated against the same service — which
- * lists it explicitly on `recall()` (`:47357`) and on `reflect()` (`:47483`) and omits it
- * from `getContext()` (`:47398-47415`). That is evidence about the request builder rather
- * than proof about the server's schema, so it is short of certainty; §1.8 already documents
- * `env_tags` as a field `AgentQueryRequest` has and `ContextRequest` does not, which is the
- * same shape of gap, and the two bodies are known not to be interchangeable.
+ * **`include_linked_runs` is not sent here, because `ContextRequest` does not have it.**
+ * Confirmed against the service's own schema, `proto/mubit/v1/control.proto`: the field
+ * exists on exactly two messages — `AgentQueryRequest` field 6 (`:500`, rungs 1-2 above) and
+ * `ReflectRequest` field 2 (`:861`, which `hooks/src/session-end.mjs` sets). `ContextRequest`
+ * (`:941-975`) declares twelve fields and none of them is this one. §1.8 already documents
+ * `env_tags` as the same shape of gap; the two bodies are not interchangeable.
  *
  * A field the server silently ignores is worse than an absent one: it reads, to anyone
  * auditing reach, as a link graph being consulted when it is not. So rung 3 — opt-in, off by
  * default, and already paying two LLM calls for a server-assembled block — does not get the
- * link graph, and this note is here so the next reader knows the gap was measured rather than
- * missed. SCOPE.md §5 leaves it open; confirming it needs the service's own schema.
+ * link graph.
+ *
+ * The consequence worth knowing rather than rediscovering: an operator who turns rung 3 on
+ * *narrows* reach, because rungs 1-2 consult the link graph and rung 3 cannot. Linking two
+ * projects and then enabling `recallSections` would quietly undo the link for every prompt
+ * that reaches rung 3.
  *
  * @param {Record<string, any>} cfg
  * @param {RecallOptions} o

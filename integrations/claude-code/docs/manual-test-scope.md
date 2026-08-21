@@ -321,6 +321,45 @@ blast radius of two runs instead of all of them, and revocable per pair — meas
 not asserted. There is no equivalent of that last line for `MUBIT_MCP_LESSON_SCOPE`: the only
 way to withdraw what it published is to delete the lesson, as §1.5 had to.
 
+### §4.3 — the `/mubit-memory:link` surface, end to end
+
+§4.1 drove the routes directly. This drives the command a user actually types, against the
+same instance, with two throwaway projects:
+
+```
+1. list      [ ] …/cli-test/there   2h ago
+2. link      Linked this project to …/cli-test/there.
+             Recall here can now see their memory, and theirs can see this one. `unlink` revokes it.
+3. list      [x] …/cli-test/there   2h ago
+```
+
+and the server agrees, which is the part a local ledger could fake:
+
+```
+consulted_runs               ["…::tk-cli-here-3f2a", "…::tk-cli-there-3f2a"]
+consulted_runs after unlink  ["…::tk-cli-here-3f2a"]
+```
+
+Run against the real session map, the picker renders what §6 asked for — directories,
+relative dates, `same remote` grouping, and no run id anywhere:
+
+```
+Memory in this project:  ~/Mubit/pre-main
+
+  [ ] ~/Mubit/pre-main                      just now   same remote
+  [ ] ~/Mubit/Benchmarking/TBench             1h ago
+  [ ] ~/Mubit/hook-surface                    2h ago   same remote
+  [ ] ~/Mubit/hook-surface                    2h ago   before /clear · same remote
+  [ ] ~/Mubit/claude-plugins                 22h ago   same remote
+```
+
+The two `hook-surface` rows are the reason to run this against a real map rather than a
+fixture. A `/clear` leaves one directory holding two runs, so "address projects by directory"
+stops being a unique address — and both rows rendered identically until the `before /clear`
+note was extended to cover projects other than the current one. Both rows are kept: both runs
+are real and linkable, and collapsing them would hide the pre-reset memory, which is exactly
+what SC-05's preamble tells the user to go and reconnect.
+
 ### §4.2 — reflect: the mechanism is in the code, and this probe could not observe it
 
 Attempted, and worth writing down as a **negative result** so nobody repeats it. `reflect` was

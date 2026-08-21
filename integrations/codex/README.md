@@ -10,7 +10,7 @@ bodies, one MCP launcher, built twice. **A Codex session and a Claude Code sessi
 the same directory are one Mubit run, sharing one memory** — that is the point of the port,
 not a side effect of it.
 
-Requires Codex CLI **0.146.0 or newer** and Node **20 or newer**.
+Requires Codex CLI **0.146.0 or newer** and Node **20 or newer**. Verified against 0.146.0 and 0.149.0; the hook schemas are byte-identical between them.
 
 ---
 

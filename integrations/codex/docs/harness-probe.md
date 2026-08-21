@@ -4,6 +4,12 @@ Everything below was executed on 2026-08-21 against `codex-cli 0.146.0` (Homebre
 `@openai/codex-darwin-arm64`), on macOS 26.5, with an **isolated `CODEX_HOME`** — a throwaway
 directory, never `~/.codex`. Every **Expect** block is a recorded transcript, not a prediction.
 
+**Re-checked against 0.149.0** the same day, after Codex self-updated mid-session. All
+twenty-one extracted schemas are **byte-identical** between the two builds, and the §4-§8 run
+reproduces exactly: same wire, same steer block, same turn keyed by `turn_id`, no hook warning
+of any kind. Nothing in this file changed. The only difference is in the Appendix's extraction
+recipe, which the newer binary's string layout broke — see there.
+
 The port's design rests on five questions. The plan named them; this file answers them. Four
 answers changed the design, so read §Answers first if you read nothing else.
 
@@ -462,7 +468,7 @@ it, one checked against the host's own schema can.
 
 ```bash
 BIN=/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex
-strings -n 8 "$BIN" > codex-strings.txt
+strings -n 2 "$BIN" > codex-strings.txt
 ```
 
 The schemas sit in one contiguous block, each preceded by its title
@@ -470,8 +476,47 @@ The schemas sit in one contiguous block, each preceded by its title
 `{\n  "$schema"` and parse. **Expect 21**: eleven inputs, ten outputs — `SessionEnd` has no
 output schema.
 
+**`-n 2`, not `-n 8`.** The schemas are pretty-printed, so a closing `},` sits alone on a
+two-character line. `strings -n 8` drops those, and what comes out is a schema block that
+looks complete, greps fine for any field you go looking for, and will not brace-match — so an
+extractor built on it silently yields **zero** schemas rather than failing. `-n 8` happened to
+work on 0.146.0's binary and did not on 0.149.0's; there is no reason to think the layout is
+stable, and no reason to use the larger bound.
+
+Sanity-check the count before trusting the output. Twenty-one is the answer; anything else,
+including nothing at all, means the recipe has drifted again rather than that Codex changed.
+
 One of them carries this comment verbatim, which is as clear a statement of intent as the port
 could ask for:
 
 > Claude requires `reason` when `decision` is `block`; we enforce that semantic rule during
 > output parsing rather than in the JSON schema.
+
+That "rather than in the JSON schema" is not decoration, and the binary spells out what it
+means. Alongside the schemas is a block of rejection messages the schemas do not encode:
+
+```
+PreToolUse hook returned unsupported continue:false
+PreToolUse hook returned unsupported stopReason
+PreToolUse hook returned unsupported suppressOutput
+PreToolUse hook returned permissionDecision:deny without a non-empty permissionDecisionReason
+PostToolUse hook returned reason without decision
+PostToolUse hook returned unsupported suppressOutput
+PostToolUse hook returned unsupported updatedMCPToolOutput
+PermissionRequest hook returned unsupported continue:false
+PermissionRequest hook returned unsupported suppressOutput
+PermissionRequest hook returned unsupported updatedInput
+PermissionRequest hook returned unsupported updatedPermissions
+PermissionRequest hook returned unsupported interrupt:true
+```
+
+Every one of those fields **is** in the corresponding output schema, with a documented
+default. So schema validity is necessary and not sufficient, and `codex-payload.test.mjs`
+cannot be the whole gate — which is why `codex-hooks.test.mjs` runs every hook against a real
+subprocess and reads what Codex actually says back.
+
+Two of those name `suppressOutput` on events this plugin emits it for. Empirically it is
+accepted on both 0.146.0 and 0.149.0: a full end-to-end run produces no `type:"error"` item
+and nothing on stderr. Treat the list as a thing to re-check after a Codex upgrade rather than
+as a live fault — and note that if it ever does fire, the symptom is a warning per tool call,
+which is loud enough to find and harmless enough to ignore until fixed.

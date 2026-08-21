@@ -43,13 +43,20 @@ import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
+import { log } from './log.mjs';
 import { dataDir, readJson, writeJsonAtomic } from './state.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/** §4.3 strategies. Anything else resolves to the default rather than failing. */
+/**
+ * §4.3 strategies. Anything else resolves to the default rather than failing — but says so
+ * once, through `warnUnknownStrategy`. Falling back is the right behaviour (a typo must not
+ * take a live session's run id away mid-session); falling back *silently* is not, and a
+ * scenario in `testkit/ux/` spent its whole life configured with `repo` and running under
+ * `per-directory` because nothing on disk ever mentioned the substitution.
+ */
 const STRATEGIES = new Set(['per-directory', 'git-branch', 'per-conversation', 'static']);
 const DEFAULT_STRATEGY = 'per-directory';
 
@@ -133,6 +140,10 @@ export function deriveRunId(cfg, payload = {}) {
  */
 function resolveRunId(cfg, payload) {
   const strategy = normaliseStrategy(cfg.runStrategy);
+  // Here rather than inside `normaliseStrategy`, which stays pure and is also called on the
+  // strategy *recorded* in a session map — where an unrecognised value is an old record, not
+  // a misconfiguration, and warning about it would blame the user for an upgrade.
+  warnUnknownStrategy(cfg, cfg.runStrategy);
   const source = normaliseSource(payload.source);
   const sessionId = hostSessionId(payload);
 
@@ -703,6 +714,45 @@ function clearCount(rec) {
 function normaliseStrategy(v) {
   const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
   return STRATEGIES.has(s) ? s : DEFAULT_STRATEGY;
+}
+
+/**
+ * Whether this process has already reported that `cfg.runStrategy` is not a strategy.
+ *
+ * Once, not per call. `resolveRunId` is on the path of every `deriveRunId`, and `deriveRunId`
+ * runs in every hook, so a line per invocation would be a ring-log entry per tool call — noise
+ * that buries the one line worth reading and could itself rotate a 1 MiB log inside a hook's
+ * budget. A hook is one process, so once per process is exactly once per hook.
+ *
+ * @type {boolean}
+ */
+let warnedUnknownStrategy = false;
+
+/**
+ * §4.3/I6: say that a strategy was substituted, rather than substituting it silently.
+ *
+ * Deliberately not a throw. The run id is load-bearing for every hook, and there IS a
+ * documented default here — unlike `staticRunId`, where an unset pin has no honest answer and
+ * a config error is the only correct one. So the fallback stands and the warning is what makes
+ * it visible.
+ *
+ * Only a non-empty, unrecognised value qualifies. `lib/config.mjs` already resolves an unset
+ * `MUBIT_CC_RUN_STRATEGY` to `per-directory`, which is the ordinary case on nearly every
+ * install; warning on it every session is how a log trains its reader to ignore it.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {any} raw  `cfg.runStrategy` exactly as configuration produced it
+ * @returns {void}
+ */
+function warnUnknownStrategy(cfg, raw) {
+  if (warnedUnknownStrategy) return;
+  const s = typeof raw === 'string' ? raw.trim() : '';
+  if (!s || STRATEGIES.has(s.toLowerCase())) return;
+  warnedUnknownStrategy = true;
+  log(cfg, 'warn',
+    `run strategy ${JSON.stringify(s)} is not one of the four, so this session is using `
+    + `${DEFAULT_STRATEGY} instead. Set MUBIT_CC_RUN_STRATEGY (or "runStrategy" in `
+    + `.mubit-cc.json) to one of: ${[...STRATEGIES].join(', ')}.`);
 }
 
 /** An unrecognised `source` is "no source", which reuses rather than resets. */

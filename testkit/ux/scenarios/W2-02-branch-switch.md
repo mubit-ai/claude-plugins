@@ -15,7 +15,7 @@ against no tags at all.
 
 W2-01's Setup, with `TK=/tmp/tk-w2-02` and `MUBIT_CC_RUN_ID` **unset** — this scenario is
 about run derivation, so pinning the run id would defeat it. Set
-`MUBIT_CC_RUN_STRATEGY=repo`. Create a second repo:
+`MUBIT_CC_RUN_STRATEGY=git-branch`. Create a second repo:
 
 ```bash
 mkdir -p "$TK/repo2" && cd "$TK/repo2" && git init -q
@@ -47,14 +47,23 @@ config: runStrategy
 
 ## Pass / fail
 
-1. `--runs` lists two runs after step 5. **Hard** under `runStrategy=repo`.
+1. `--runs` lists two runs after step 5. **Hard** under `runStrategy=git-branch`.
 2. The step-4 injection contains nothing about the first repository. **Hard.**
 3. `CwdChanged` does not overrun its 5 s budget.
 
 ## Known-not-bugs
 
-- **One run under `runStrategy=static`.** That is what static means. Only `repo` and the
-  default derivation split here.
+- **One run under `runStrategy=static`.** That is what static means. `git-branch` and
+  `per-directory` are the two that split on a directory change, because both hash the
+  repository root; only `git-branch` also splits on a branch change within one repo.
+- **This scenario used to be configured with `runStrategy=repo`, which is not a strategy.**
+  `lib/runid.mjs:53` allows only `per-directory`, `git-branch`, `per-conversation` and
+  `static`, and `normaliseStrategy` mapped the unrecognised value onto the `per-directory`
+  default with no error and no log line. So every run of this scenario was made under
+  `per-directory`, where switching branch does **not** move the run id, and it would have
+  passed while demonstrating the opposite of its own claim. SC-04 fixed both halves: the
+  value here is now `git-branch`, and the plugin warns once — naming the value and the four
+  legal strategies — the first time a session derives a run id from an unrecognised one.
 
 ## If it fails
 

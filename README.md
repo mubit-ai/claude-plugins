@@ -78,4 +78,4 @@ claude plugin validate .
 
 ## License
 
-Apache-2.0 — see [`integrations/claude-code/LICENSE`](integrations/claude-code/LICENSE).
+Apache-2.0. The plugin is licensed by [`integrations/claude-code/LICENSE`](integrations/claude-code/LICENSE), which is accompanied by [`integrations/claude-code/THIRD_PARTY_NOTICES.md`](integrations/claude-code/THIRD_PARTY_NOTICES.md) attributing the third-party code bundled into the MCP server. The root [`LICENSE`](LICENSE) covers everything else in this repository: this README, the marketplace manifest, and the publishing tooling.

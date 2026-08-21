@@ -101,7 +101,11 @@ const GIT_TIMEOUT_MS = 2000;
  * @property {number} lastSeenAt
  * @property {boolean} linked
  * @property {string} decision    `linked`, `declined`, or `''` for undecided
- * @property {boolean} previous   the run this session was in before a `/clear`
+ * @property {boolean} previous   the run THIS session was in before a `/clear`
+ * @property {boolean} [beforeClear] this run is the pre-reset half of a cleared directory —
+ *   true for `previous`, and also for any *other* project whose directory holds a `-c<n>`
+ *   descendant of this run. Without it a cleared project lists twice under one path with
+ *   nothing to choose between the rows.
  * @property {boolean} sameRemote its `origin` matches this project's
  */
 
@@ -248,6 +252,24 @@ export function listProjects(cfg, current, deps = {}) {
 
   const mineRemote = remoteOf(current.root);
   const projects = [...byRun.values()];
+
+  // A `/clear` leaves one directory holding two runs (`lib/runid.mjs` appends `-c<n>`), and
+  // both are real, both are linkable, and they hold different memory. Collapsing them would
+  // hide the pre-reset run — the one SC-05's own preamble tells the user to reconnect — so
+  // both are listed and the older is named instead.
+  //
+  // Derived from the run ids present rather than from `previous_run_id`, because that field
+  // only ever describes the CURRENT project. Every other cleared project on the machine has
+  // the same two rows and needs the same answer.
+  const clearedFrom = new Set();
+  for (const a of projects) {
+    for (const b of projects) {
+      if (a === b || a.path !== b.path) continue;
+      if (new RegExp(`^${escapeRe(a.runId)}-c\\d+$`).test(b.runId)) { clearedFrom.add(a.runId); break; }
+    }
+  }
+  for (const p of projects) p.beforeClear = p.previous || clearedFrom.has(p.runId);
+
   for (const p of projects) {
     // Both ends must actually have a remote. Two directories that are not repositories both
     // answer `''`, and calling that a match would group every scratch directory on the machine.
@@ -444,10 +466,15 @@ export function renderList(view, opts = {}) {
   return lines.join('\n');
 }
 
+/** A run id is `[a-z0-9-]` by construction, but it reaches a RegExp here, so escape it anyway. */
+function escapeRe(v) {
+  return String(v ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** @param {Project} p */
 function noteFor(p) {
   const notes = [];
-  if (p.previous) notes.push('before /clear');
+  if (p.beforeClear) notes.push('before /clear');
   if (p.sameRemote) notes.push('same remote');
   if (p.decision === 'declined') notes.push('declined');
   return notes.join(' · ');
@@ -467,6 +494,7 @@ function jsonProject(p, opts = {}) {
     linked: p.linked,
     decision: p.decision,
     previous: p.previous,
+    beforeClear: p.beforeClear,
     sameRemote: p.sameRemote,
     lastSeenAt: p.lastSeenAt,
     age: relativeAge(p.lastSeenAt, opts.now ?? Date.now()),

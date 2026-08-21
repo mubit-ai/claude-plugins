@@ -309,7 +309,9 @@ await runHook('session-start', {
     return {
       hookSpecificOutput: {
         hookEventName: 'SessionStart',
-        additionalContext: steerBlock(cfg, runId, lessons, anchor),
+        // §4.3/I5 — `src` is already in hand from the register/heartbeat decision above, so
+        // saying a session was cleared costs a comparison and no round trip.
+        additionalContext: steerBlock(cfg, runId, lessons, anchor, src === 'clear'),
       },
       // §16.2's hint fires once, ever, per install, so on that one session it *takes* the
       // line rather than being appended to it: `systemMessage` is one line by contract, and
@@ -331,24 +333,47 @@ await runHook('session-start', {
  * compaction, and an empty one renders nothing — a session that never compacted has no
  * pre-compaction context, and claiming otherwise is a sentence the model would act on.
  *
+ * §4.3/I5 adds a fourth, on one source only for the same reason. A `/clear` moves the session
+ * to a run with nothing in it (`lib/runid.mjs` appends `-c<n>`), and until this line existed
+ * the block said "Mubit memory is active", named the empty run, and left the model unable to
+ * tell a reset project from one that has never learned anything. Those are different facts.
+ * `resume`, `compact` and `fork` reuse the mapped run and `startup` re-derives it, so on every
+ * other source nothing was reset and saying so would be false — and a paragraph every session
+ * carries is one the single session that needs it cannot be heard over.
+ *
+ * Deliberately only on this block. `offlineBlock`, `unauthenticatedBlock` and
+ * `unconfiguredBlock` have already said no memory is arriving this session for a reason the
+ * user has to fix first, and `/mubit-memory:link` cannot run against an instance that is not
+ * answering: a second explanation there competes with the one that is actionable.
+ *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {{id: string, type: string, content: string}[]} lessons
  * @param {string} [anchor]  §5.6 checkpoint id, or '' when there is nothing to re-anchor to
+ * @param {boolean} [cleared]  §4.3: this SessionStart's source was `clear`
  * @returns {string}
  */
-function steerBlock(cfg, runId, lessons, anchor = '') {
+function steerBlock(cfg, runId, lessons, anchor = '', cleared = false) {
   const lines = [
     '# Mubit memory is active',
     '',
     `Run: ${runId} (${cfg.mode})`,
+  ];
+  if (cleared) {
+    lines.push(
+      'This project\'s memory was reset by /clear, so this run starts empty and nothing '
+      + 'captured before it will be recalled — that is not the same as a project that has '
+      + 'learned nothing. Run /mubit-memory:link to reconnect this run to the one it was '
+      + 'cleared from.');
+  }
+  lines.push(
     'Relevant memory is injected automatically before each of your turns — no need to open a '
       + 'turn by searching for it.',
     'Do search when the injected memory falls short: mubit_recall for a topic, mubit_diagnose '
       + 'when a command has failed, mubit_dereference for a reference_id you already hold.',
     'Save what you learn with mubit_learned, and credit what helped with mubit_outcome. '
       + '/mubit-memory:remember and /mubit-memory:recall are the explicit forms.',
-  ];
+  );
   if (anchor) {
     lines.push('', '## Compacted context',
       `Mubit checkpoint ${anchor} holds this run's context from before the compaction that `

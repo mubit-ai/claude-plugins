@@ -112,7 +112,7 @@ const TOUCH_INTERVAL_MS = 60 * 1000;
  * | --- | --- |
  * | `startup` | derive fresh, overwriting any stale mapping |
  * | `resume` | reuse the mapped run; derive when nothing is mapped |
- * | `clear` | **new run** — the derived run plus an incrementing `-c<n>` |
+ * | `clear` | **new run** — the derived run plus an incrementing `-c<n>`, and the record's `previous_run_id` names the run it left |
  * | `compact`, `fork` | reuse the parent session record's run |
  * | absent / unknown | reuse the mapped run when there is one (a `PostToolUse` after a `/clear` belongs to the cleared run), else derive |
  *
@@ -165,7 +165,8 @@ function resolveRunId(cfg, payload) {
     runId = pinned;
   } else if (source === 'clear') {
     // `per-directory`/`git-branch` are stable per directory, so the counter is
-    // the only thing that can honour "forget the thread".
+    // the only thing that can honour "forget the thread". Where the memory went
+    // is not lost with it: `rememberRun` records `previous_run_id` from `prev`.
     clear = clearCount(prev) + 1;
     runId = `${deriveFresh(cfg, payload, strategy)}-c${clear}`;
   } else if (source === 'startup') {
@@ -435,6 +436,12 @@ function subagentShort(payload) {
  * @property {number} last_seen_at
  * @property {string} mode
  * @property {number} clear_count
+ * @property {string} previous_run_id  the run this session was in immediately before a
+ *   `/clear` moved it to `run_id`, and `''` on every other source. §4.3's `clear` row is the
+ *   only one that abandons a mapping, so it is the only one with a "before" worth naming —
+ *   without it the memory a `/clear` set aside is unreachable, because nothing on disk
+ *   relates the two runs. Absent on records written before it existed, which reads as
+ *   "unknown" and never as "not cleared", exactly as `project_root` does for itself.
  * @property {string} endpoint_hash
  */
 
@@ -516,8 +523,42 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
     last_seen_at: now,
     mode: firstString(cfg.mode) || 'local',
     clear_count: next.clear_count,
+    previous_run_id: previousRunId(prev, next),
     endpoint_hash: endpointHash(cfg.endpoint),
   });
+}
+
+/**
+ * I5: where a `/clear` put the memory it stopped using — or `''`, which means "this run was
+ * not arrived at by clearing".
+ *
+ * Written on every call rather than left to `...inherited`, and that is the whole design.
+ * `rememberRun` spreads the previous record forward, so a value written once would survive
+ * every later write for free; a `previous_run_id` that outlives the run it described is worse
+ * than no field at all, because `/mubit-memory:link` would then reconnect a session to a run
+ * it never came from. So the rule is: the pointer belongs to the run the record currently
+ * names, and it is recomputed whenever that run is.
+ *
+ *   - a clear, and the run really moved → `prev.run_id`, one step back. A second `/clear`
+ *     therefore names the `-c1` run, not the original, because that is where `-c2` came from.
+ *   - a clear under a `static` pin → `''`. The pin is honoured on every source, so `runId`
+ *     did not move and nothing was set aside.
+ *   - the run is unchanged → whatever the record already said, which still describes it.
+ *     This is what survives the `TOUCH_INTERVAL_MS` rewrite an ordinary `PostToolUse` makes
+ *     an hour into a cleared session.
+ *   - anything else — `startup`, a mid-session `cd`, a strategy change → `''`. The run moved
+ *     for a reason that is not a reset, so any stored pointer is now about some other run.
+ *
+ * @param {Record<string, any>|null} prev
+ * @param {{run_id: string, source: string}} next
+ * @returns {string}
+ */
+function previousRunId(prev, next) {
+  if (!isObject(prev)) return '';
+  const prevRun = firstString(prev.run_id);
+  if (prevRun === next.run_id) return firstString(prev.previous_run_id);
+  if (next.source !== 'clear') return '';
+  return prevRun;
 }
 
 /**
@@ -539,6 +580,7 @@ function normaliseRecord(record) {
     last_seen_at: now,
     mode: 'local',
     clear_count: 0,
+    previous_run_id: '',
     endpoint_hash: '',
   };
   if (isObject(record)) {

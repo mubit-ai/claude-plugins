@@ -83,20 +83,42 @@ price must return an int. Fix cart.total to enforce that.
 `sessionEndDetach` at its default `true` the promotion finishes in a detached child a few
 seconds after the CLI returns. Ctrl-C can outrun it.
 
-**5 — Wait for the ingest job to leave `queued`.** This is the step people skip, and skipping
-it turns a working plugin into a failed scenario.
+**5 — Wait for the ingest job to finish.** This is the step people skip, and skipping it
+turns a working plugin into a failed scenario.
+
+Two different facts, from two different places, and conflating them is why this step used to
+be unrunnable:
 
 ```bash
+# (a) spool_pending — a LOCAL fact, and mubit-inspect is the right reader for it
 node "$PLUG/scripts/mubit-inspect.mjs" --data "$DATA" --run tk-w2-01 --json | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);
   console.log("spool pending:", j.spool_pending);
-  console.log("jobs:", JSON.stringify((j.jobs||[]).slice(-3)));
   console.log("reflect:", j.marker.reflect.status, "lessons:", j.marker.reflect.lessons_stored);})'
+
+# (b) job status — a SERVER fact. Ask the server.
+node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const P = process.env.PLUG;
+const { loadConfig }   = await import(pathToFileURL(P + "/lib/config.mjs").href);
+const { getIngestJob } = await import(pathToFileURL(P + "/lib/http.mjs").href);
+const jobs = JSON.parse(readFileSync(process.env.DATA + "/runs/tk-w2-01/jobs.json", "utf8"));
+const last = jobs[jobs.length - 1];
+const r = await getIngestJob(loadConfig(process.env), "tk-w2-01", last.job_id, { timeoutMs: 15000 });
+console.log(r.ok ? `job ${last.job_id.slice(0,8)} -> ${r.body.status}` : `${r.state}: ${r.error}`);'
 ```
 
-Repeat until `spool_pending` is `0` and the newest job is not `queued`. Two minutes is
-normal. Ten means the embedding service behind the instance is down, this scenario cannot
-pass, and the right move is to stop and re-run `lab preflight`.
+Repeat until `spool_pending` is `0` and (b) reports `completed`. Seconds is normal. Ten
+minutes means the embedding service behind the instance is down, this scenario cannot pass,
+and the right move is to stop and re-run `lab preflight`.
+
+> **Do not poll `mubit-inspect` for job status.** It reads `runs/<run>/jobs.json`
+> (`scripts/mubit-inspect.mjs:132`), a snapshot written when the job was *submitted* that
+> nothing ever refreshes. It says `queued` forever. Measured 2026-08-21: the local record
+> read `queued` while the server had finished the same job 322 ms after creating it — so the
+> old version of this step sent the operator to wait out ten minutes and declare a healthy
+> backend down. See `docs/W2-01-baseline-walk.md`.
 
 **6 — Open session 2 in the same directory, with the same environment.**
 
@@ -191,7 +213,8 @@ config: runStrategy, reflectOnEnd, sessionEndDetach, recallRepeatMode, recallAsy
 | Step 7 shows `0 memories` | `--json` → `marker.recall.empty_reason` | `policy_denied` is a cached 24 h denial; `budget_exhausted` means the endpoint is slow, not the plugin |
 | Step 7 shows nothing at all | `grep -c UserPromptSubmit "$TK/s2.log"` | the hook never ran — the plugin did not load; check `plugins[]` in a `--output-format stream-json` init event |
 | `spool_pending` never reaches 0 | `--json` → `marker.state` | breaker open, or a stale `drain.lock` (stolen after 60 s) |
-| Job stays `queued` | — | the embedding service is down. Not a plugin fault; the run is void |
+| Job stays `queued` in `mubit-inspect` | ask the server, step 5 (b) | **expected** — the local record is a submit-time snapshot and never refreshes. Only (b) can answer this |
+| Job stays `queued` **at the server** | — | the embedding service is down. Not a plugin fault; the run is void |
 | Session 2 lands in a different run | `mubit-inspect --runs` | `MUBIT_CC_RUN_ID` was not exported in the second shell |
 
 ## Teardown

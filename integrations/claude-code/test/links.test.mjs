@@ -25,7 +25,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import { lib, makeDataDir, makeProjectDir, readJsonFile, tempDir } from './helpers/harness.mjs';
 
@@ -332,10 +332,12 @@ test('links: a path-climbing run id is flattened, never followed', async () => {
 
   links.recordLink(cfg, side(hostile, '/x/a'), side(B, '/x/b'));
 
+  // The property that matters is that the name stays ONE segment: `safeSegment` flattens the
+  // separators, so a surviving literal `..` inside the filename cannot climb anywhere.
   const written = links.linksPath(cfg, hostile);
-  assert.ok(written.startsWith(join(dataDir, 'links')),
+  assert.equal(dirname(written), join(dataDir, 'links'),
     `the ledger escaped its directory: ${written}`);
-  assert.ok(!written.includes('..'), `a climbing segment survived into the path: ${written}`);
+  assert.equal(resolve(written), written, `the path is not already normalised: ${written}`);
   assert.equal(links.readLinks(cfg, hostile)[0]?.run_id, B,
     'the flattened name still round-trips for the run that owns it');
 });

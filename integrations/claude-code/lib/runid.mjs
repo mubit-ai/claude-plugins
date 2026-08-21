@@ -541,8 +541,11 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
  *
  *   - a clear, and the run really moved → `prev.run_id`, one step back. A second `/clear`
  *     therefore names the `-c1` run, not the original, because that is where `-c2` came from.
- *   - a clear under a `static` pin → `''`. The pin is honoured on every source, so `runId`
- *     did not move and nothing was set aside.
+ *   - a clear under a `static` pin that the record already named → `''` by way of the
+ *     unchanged-run branch above. A pin is honoured on every source, so `runId` did not move
+ *     and nothing was set aside. If the pin was introduced *between* the two writes the run
+ *     did move, and the pointer names where the memory actually is — which is the useful
+ *     answer, not an exception to the rule.
  *   - the run is unchanged → whatever the record already said, which still describes it.
  *     This is what survives the `TOUCH_INTERVAL_MS` rewrite an ordinary `PostToolUse` makes
  *     an hour into a cleared session.

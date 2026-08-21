@@ -29,6 +29,7 @@ import assert from 'node:assert/strict';
 
 import {
   BUILDERS, CODEX_EVENTS, hostSchema, hostSchemaTitles, schemaErrors, schemaSlug,
+  assertOutputAccepted, outputRuleErrors,
   runHook, baseEnv, makeDataDir, makeProjectDir, fakeMubit,
 } from './helpers/codex-fixtures.mjs';
 
@@ -166,6 +167,12 @@ for (const { event, hook, args } of HANDLERS) {
       assert.fail(`${label} wrote unparseable stdout: ${err.message}\n${out.slice(0, 400)}`);
     }
 
+    // § The schema is not the whole contract. Codex re-checks the output against rules the
+    //   generated schema does not carry, and `suppressOutput` -- a declared property of every
+    //   output schema -- is rejected on three events. Validating only against the schema is
+    //   what let `PostToolUse hook returned unsupported suppressOutput` reach a real session.
+    assertOutputAccepted(event, parsed, label);
+
     if (event === 'SessionEnd') {
       // § SessionEnd is the one event with no output schema at all. The universal envelope is
       //   still the contract: a JSON object, and nothing that would steer anything.
@@ -216,4 +223,36 @@ test('PermissionRequest can decide but cannot inform', () => {
   assert.equal(inner.additionalContext, undefined,
     'PermissionRequest has no additionalContext. If that changes, the pre-tool warning path '
     + 'gains a second home and this test should be the thing that says so.');
+});
+
+// ===========================================================================
+// The gap between the schema and the runtime
+// ===========================================================================
+
+test('the output schemas are a superset of what Codex accepts, and the rule table covers the gap', () => {
+  // § The claim this whole file rests on, stated as a test because it cost a user-visible
+  //   failure to learn. `suppressOutput` is a declared property of every output schema and is
+  //   rejected at parse time on three events. Anything that validates a hook's stdout against
+  //   the schema alone is therefore not checking the contract, and will go green while a real
+  //   session prints `PostToolUse hook returned unsupported suppressOutput`.
+  const rejecting = ['PreToolUse', 'PostToolUse', 'PermissionRequest'];
+  for (const event of rejecting) {
+    const schema = hostSchema(`${schemaSlug(event)}.command.output`);
+    assert.ok(schema.properties?.suppressOutput,
+      `${event}'s schema is expected to still declare suppressOutput — that contradiction is `
+      + 'the reason codex-output-rules.json exists. If the extraction no longer shows it, the '
+      + 'host has changed and the rule table needs re-extracting, not deleting.');
+    assert.deepEqual(outputRuleErrors(event, { suppressOutput: true }),
+      [`${event} hook returned unsupported suppressOutput (we sent \`suppressOutput\`)`],
+      `the rule table must reject suppressOutput on ${event}. Without that row nothing in this `
+      + 'suite can see the failure, because the schema says it is fine.');
+  }
+
+  // § The mirror image: on every other event the field is genuinely accepted, and stripping it
+  //   there would be a behaviour change bought for nothing.
+  for (const event of CODEX_EVENTS.filter((e) => !rejecting.includes(e))) {
+    assert.deepEqual(outputRuleErrors(event, { suppressOutput: true }), [],
+      `${event} accepts suppressOutput. Forbidding it everywhere would make the hooks noisier `
+      + 'in the transcript than they need to be.');
+  }
 });

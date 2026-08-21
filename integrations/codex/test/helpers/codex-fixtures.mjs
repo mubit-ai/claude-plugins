@@ -268,6 +268,113 @@ export function assertValid(value, title, what) {
 }
 
 // ---------------------------------------------------------------------------
+// The rules the schemas do not encode
+// ---------------------------------------------------------------------------
+
+/**
+ * `test/fixtures/codex-output-rules.json` — the semantic rules Codex applies to a hook's
+ * stdout *after* the JSON Schema has accepted it.
+ *
+ * This exists because the schemas are a superset of the runtime contract, and we found that
+ * out the expensive way: `suppressOutput` is a declared property of every output schema and
+ * is rejected on three events, so `assertValid` passed on output that made a real session
+ * print `PostToolUse hook returned unsupported suppressOutput`.
+ */
+let _rules = null;
+
+function outputRules() {
+  if (_rules) return _rules;
+  const p = join(CODEX_ROOT, 'test', 'fixtures', 'codex-output-rules.json');
+  if (!existsSync(p)) {
+    throw new Error(
+      `no output-rule table at ${p}\n`
+      + '  It is extracted from the Codex binary; see its own `_provenance` block.');
+  }
+  _rules = JSON.parse(readFileSync(p, 'utf8'));
+  return _rules;
+}
+
+/** Walk a dotted path, returning `{found, value}` so an explicit `undefined` is not a miss. */
+function at(obj, path) {
+  let cur = obj;
+  for (const key of path.split('.')) {
+    if (cur === null || typeof cur !== 'object' || !(key in cur)) return { found: false, value: undefined };
+    cur = cur[key];
+  }
+  return { found: true, value: cur };
+}
+
+/**
+ * Every rule this output breaks, as the sentences Codex itself would print. Empty is a pass.
+ *
+ * @param {string} event   e.g. `'PostToolUse'`
+ * @param {any} value      the parsed stdout object
+ * @returns {string[]}
+ */
+export function outputRuleErrors(event, value) {
+  if (value === null || typeof value !== 'object') return [];
+  const table = outputRules().rules ?? {};
+  const rules = [...(table['*'] ?? []), ...(table[event] ?? [])];
+  const broken = [];
+  for (const rule of rules) {
+    const self = at(value, rule.field);
+    switch (rule.kind) {
+      case 'forbidden':
+        if (self.found) broken.push(`${rule.message} (we sent \`${rule.field}\`)`);
+        break;
+      case 'forbiddenValue':
+        if (self.found && self.value === rule.value) {
+          broken.push(`${rule.message} (we sent \`${rule.field}: ${JSON.stringify(rule.value)}\`)`);
+        }
+        break;
+      case 'requiresField':
+        if (self.found && !at(value, rule.needs).found) {
+          broken.push(`${rule.message} (we sent \`${rule.field}\` and no \`${rule.needs}\`)`);
+        }
+        break;
+      case 'requiresValue': {
+        const needs = at(value, rule.needs);
+        if (self.found && needs.value !== rule.value) {
+          broken.push(`${rule.message} (we sent \`${rule.field}\` with \`${rule.needs}: `
+            + `${JSON.stringify(needs.value)}\`)`);
+        }
+        break;
+      }
+      case 'nonEmptyWhen': {
+        const when = at(value, rule.when);
+        if (when.found && when.value === rule.equals
+            && !(typeof self.value === 'string' && self.value.trim())) {
+          broken.push(`${rule.message} (we sent \`${rule.when}: ${JSON.stringify(rule.equals)}\` `
+            + `with \`${rule.field}: ${JSON.stringify(self.value)}\`)`);
+        }
+        break;
+      }
+      default:
+        throw new Error(`codex-output-rules.json names a rule kind the checker does not `
+          + `implement: "${rule.kind}". Teach outputRuleErrors() about it rather than `
+          + 'dropping it, or the rule silently stops being enforced.');
+    }
+  }
+  return broken;
+}
+
+/**
+ * Assert Codex would accept this output. Complements `assertValid`, which only proves the
+ * *schema* accepts it.
+ *
+ * @param {string} event
+ * @param {any} value
+ * @param {string} what   what produced it, for the message
+ */
+export function assertOutputAccepted(event, value, what) {
+  const broken = outputRuleErrors(event, value);
+  assert.deepEqual(broken, [],
+    `${what} answered ${event} with output Codex rejects at parse time. The schema accepts `
+    + 'it; the runtime does not, and the user sees the hook marked failed in their '
+    + `transcript:\n  ${broken.join('\n  ')}`);
+}
+
+// ---------------------------------------------------------------------------
 // One builder per event
 // ---------------------------------------------------------------------------
 

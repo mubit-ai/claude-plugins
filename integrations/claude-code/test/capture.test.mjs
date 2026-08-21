@@ -27,8 +27,8 @@ import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import {
-  runHook, assertHookContract, assertWithinBudget, fakeMubit, baseEnv, makeDataDir,
-  makeProjectDir, spoolFiles, soleRunId, readJsonFile, tempDir,
+  runHook, assertHookContract, assertWithinBudget, fakeMubit, baseEnv, lib, makeDataDir,
+  makeProjectDir, spoolFiles, soleRunId, readJsonFile, tempDir, waitFor,
 } from './helpers/harness.mjs';
 import {
   postToolUse, postToolUseFailure, postToolUseLegacyOutput, stop, stopFailure, subagentStop,
@@ -978,4 +978,127 @@ test('capture: env_tags name the repo the tool call happened in, not the launch 
     `expected repo:${basename(workingIn)}; got ${JSON.stringify(tags)}`);
   assert.ok(!tags.includes(`repo:${basename(launchedIn)}`),
     'the launch repo is not where this tool call happened');
+});
+
+// ---------------------------------------------------------------------------
+// Tier 1 — a subagent's evidence lands in its own lane (SCOPE.md I4, §6 Tier 1)
+// ---------------------------------------------------------------------------
+
+/** The run id `subagent-start` minted for this payload — `<parent>-sub-<agentShort>`. */
+async function subRunIdFor(payload = subagentStop()) {
+  const runid = await lib('runid.mjs');
+  return runid.deriveSubRunId(RUN_ID, payload);
+}
+
+/** Put the parent↔sub join on record, exactly as `subagent-start` does after a 200. */
+async function seedJoin(dataDir, subId) {
+  const links = await lib('links.mjs');
+  const landed = links.recordLink({ dataDir },
+    { runId: RUN_ID, projectDir: dataDir }, { runId: subId, projectDir: dataDir });
+  assert.equal(landed, true, 'the fixture join must land at both ends or the test proves nothing');
+}
+
+/** `holdDrainLock` for a run other than the parent — a sub-run has its own spool and lock. */
+function holdDrainLockFor(dataDir, runId) {
+  const dir = join(dataDir, 'runs', runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'drain.lock'), JSON.stringify({ pid: process.pid, ts: Date.now() }));
+}
+
+// I4's actual cost: a fan-out of six pours six streams of unrelated work into one run, and
+// next week's recall in that project cannot tell them apart. The sub-run id is the coordinate
+// that separates them, and it is safe to file under now because Tier 1 joins it back.
+test('capture --subagent: files under the sub-run id once the join is on record', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const subId = await subRunIdFor();
+  seedTurn(dataDir);
+  await seedJoin(dataDir, subId);
+  holdDrainLockFor(dataDir, subId);
+
+  const r = await runHook('capture', subagentStop(), {
+    env: staticEnv(dataDir, server), args: ['--subagent'],
+  });
+  assertHookContract(r);
+
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0,
+    'the parent run must not also receive it: one item in two lanes is the fan-out collapse '
+    + 'with extra steps, and it would be ingested twice');
+  const item = soleItem(dataDir, subId);
+  assertRequiredItemFields(item);
+  assert.ok(item.text.startsWith(`Q: ${STAGED_PROMPT}`),
+    `the staged prompt still comes from the PARENT's turn file — nothing was ever written to `
+    + `runs/${subId}/turns — got ${JSON.stringify(item.text.slice(0, 80))}`);
+  assert.ok(item.text.includes('Found three call sites'),
+    'and the answer half is the subagent\'s own last message');
+  assert.ok(JSON.stringify(item).includes('sub_01HZXK8Q9N7M'),
+    `the identity stays in metadata_json too — it is what makes a SubagentStop matchable `
+    + `against the host's own agent_id, independent of which run the item is filed under: `
+    + `${item.metadata_json}`);
+});
+
+// The gate is the point. `subagent-start` links only when `postLinkRun` returns ok, and it
+// does not run at all when recall is off, when the agent is the plugin's own, or when there
+// is no staged parent turn. Filing under a sub-run nothing joined would not isolate that
+// evidence — it would lose it, and §7's sweep deletes an undrained spool item after 24 h.
+test('capture --subagent: an unjoined sub-run falls back to the parent run', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const subId = await subRunIdFor();
+  seedTurn(dataDir);
+
+  const r = await runHook('capture', subagentStop(), {
+    env: staticEnv(dataDir, server), args: ['--subagent'],
+  });
+  assertHookContract(r);
+
+  assert.equal(spoolFiles(dataDir, subId).length, 0,
+    `nothing joined ${subId} to anything, so an item filed there is unreachable from the `
+    + 'parent forever — pooling is a worse outcome than isolation, losing it is worse than both');
+  const item = soleItem(dataDir, RUN_ID);
+  assert.ok(JSON.stringify(item).includes('sub_01HZXK8Q9N7M'),
+    'the metadata attribution is independent of the lane and survives the fallback');
+});
+
+// `deriveSubRunId` answers the parent unchanged when the payload carries no subagent
+// identity, so the fallback is already correct — but only if capture actually asks it rather
+// than assuming a `--subagent` invocation implies a subagent.
+test('capture --subagent: a payload with no subagent identity files under the parent', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedTurn(dataDir);
+
+  const p = subagentStop();
+  delete p.agent_id;
+  const r = await runHook('capture', p, { env: staticEnv(dataDir, server), args: ['--subagent'] });
+  assertHookContract(r);
+
+  const item = soleItem(dataDir, RUN_ID);
+  assert.equal(item.intent, 'task_result',
+    'with nothing to distinguish it this is an ordinary turn result in the parent\'s lane');
+});
+
+// A `SubagentStop` is terminal for its sub-run: nothing will ever be captured under that id
+// again, and neither `--stop` nor `session-end` can see its spool — both drain the run they
+// derived, and the spool is keyed by run id. Without an unconditional drain here the one item
+// a subagent produces sits below the batch trigger until §7 deletes it at 24 h.
+test('capture --subagent: the sub-run\'s own spool is drained, under its own run id', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const subId = await subRunIdFor();
+  seedTurn(dataDir);
+  await seedJoin(dataDir, subId);
+
+  const r = await runHook('capture', subagentStop(), {
+    env: staticEnv(dataDir, server), args: ['--subagent'],
+  });
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0,
+    `capture itself must still issue ZERO HTTP; the drain is a detached child: ${server.summary()}`);
+
+  const ingest = await waitFor(() => server.calls('POST', '/v2/control/ingest').at(-1), 5000);
+  assert.equal(ingest.body.run_id, subId,
+    `the batch went out as ${JSON.stringify(ingest.body.run_id)}; a sub-run's evidence has to `
+    + 'reach the server under the id the parent is linked to, or the join points at an empty run');
+  assert.equal(ingest.body.items.length, 1, 'one SubagentStop is one item');
 });

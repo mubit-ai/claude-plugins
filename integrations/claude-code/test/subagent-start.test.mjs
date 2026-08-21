@@ -49,7 +49,7 @@ import { join } from 'node:path';
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 
 import {
-  assertHookContract, assertWithinBudget, baseEnv, evidence, fakeMubit, makeDataDir,
+  assertHookContract, assertWithinBudget, baseEnv, evidence, fakeMubit, lib, makeDataDir,
   queryResponse, readJsonFile, runHook,
 } from './helpers/harness.mjs';
 import { subagentStart, PROMPT_ID, SESSION_ID } from './helpers/fixtures.mjs';
@@ -352,11 +352,19 @@ test('two siblings on one parent turn leave two distinct records and two distinc
 
     for (const rec of records) {
       assert.equal(rec.parent_run_id, RUN_ID,
-        'the parent run has to be recorded: there is no link-run route on the wire, so this '
-        + 'field is the only thing that can rejoin a sub-run to the run it served');
+        'the parent run has to be recorded: the wire join is a pair of run ids, and this is '
+        + 'the field a re-assertion after a checkpoint loss reads to rebuild the edge');
       assert.ok(rec.sub_run_id.startsWith(`${RUN_ID}-sub-`),
         `a sub-run id must be derivable from its parent, got ${rec.sub_run_id}`);
+      assert.equal(rec.linked, true,
+        'a star is N edges and not one: every sibling needs its own join to the hub, or the '
+        + `sibling that missed out is unreadable from the parent forever (${rec.sub_run_id})`);
     }
+
+    const spokes = server.calls('POST', '/v2/control/runs/link').map((c) => c.body.linked_run_id);
+    assert.equal(new Set(spokes).size, 2,
+      `the fan-out joined ${JSON.stringify(spokes)} to the parent; two siblings are two edges, `
+      + 'and one call covering both would be a link to whichever spawned last');
 
     const agentIds = server.calls('POST', '/v2/control/query').map((c) => c.body.agent_id);
     assert.equal(new Set(agentIds).size, 2,
@@ -478,6 +486,7 @@ test('a payload with no agent_id is still safe: no crash, no invented sibling', 
   delete p.agent_id;
   const r = await runHook('subagent-start', p, { env: env(dir, server) });
   assertHookContract(r);
+  server.assertNotCalled('POST', '/v2/control/runs/link');
   // It still injects — the memory is the point — but there is nothing to isolate it by, so
   // the record must not pretend there is.
   const rec = subRunRecords(dir)[0];
@@ -497,6 +506,10 @@ test('a payload with no agent_id is still safe: no crash, no invented sibling', 
  * fan-out of ten is ten of these — in parallel, but ten processes all the same. The budget
  * covers config load, run-id derivation (which shells out to `git rev-parse`), one loopback
  * request and the record write.
+ *
+ * Tier 1's `link_run` is inside this figure and the figure did not move. That is the point:
+ * the join is fire-and-forget within the budget the hook already had, because a subagent
+ * spawn is on the critical path and a slow link would be paid by every one of them.
  */
 const BUDGET_MS = 1200;
 
@@ -519,10 +532,11 @@ test('a subagent spawn does not pay for a slow hook', async (t) => {
 // The record itself
 // ---------------------------------------------------------------------------
 
-// There is no `link_run` route in `lib/http.mjs`'s ROUTES, so a sub-run cannot be joined to
-// its parent server-side today. This file is the local half of that join, and the only thing
-// that makes the gap recoverable later rather than lost.
-test('the sub-run record carries everything a later link_run would need', async (t) => {
+// `ROUTES` carries `/v2/control/runs/link` now, so this file is no longer an IOU: it is the
+// local half of a join the server actually holds. Every field a re-assertion would need is
+// still here, because the graph lives in `run_scopes` — an in-memory map durable only through
+// a checkpoint — and a pod roll before one drops joins the user still wants.
+test('the sub-run record carries everything a link_run needs, and says the link landed', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dir = makeDataDir();
@@ -540,9 +554,111 @@ test('the sub-run record carries everything a later link_run would need', async 
     'the ids that actually rendered, so this subagent\'s block can be attributed separately '
     + 'from its siblings\'');
   assert.equal(rec.agent_id, 'ab55bb82d19855fbc', 'the host\'s own id, unmodified');
-  assert.equal(rec.linked, false,
-    'stated rather than implied: nothing has joined this sub-run to its parent on the server, '
-    + 'because there is no route that can');
+  assert.equal(rec.linked, true,
+    'the field has to mean what it says or it is worse than absent: a later reader trusts it '
+    + 'to decide whether this sub-run is reachable from the parent, and postLinkRun said ok');
   assert.ok(statSync(join(subRunDir(dir), `${rec.sub_run_id}.json`)).isFile(),
     'the file is named by the sub-run id, so a sibling cannot overwrite it');
+});
+
+// ---------------------------------------------------------------------------
+// Tier 1 — the join, now that there is a route (SCOPE.md I4, §6 Tier 1)
+// ---------------------------------------------------------------------------
+
+// The edge is (parent, sub) and the direction is not cosmetic. §6: a parent with N subagents
+// is a star, every query originates at the hub, and `linked_runs_for(parent)` returns all N
+// in one hop — which is the whole reason this tier needs no mesh and no UX.
+test('a successful link joins the parent to the sub-run on /v2/control/runs/link', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir);
+
+  const r = await runHook('subagent-start', subagentStart(), { env: env(dir, server) });
+  assertHookContract(r);
+
+  const rec = subRunRecords(dir)[0];
+  assert.ok(rec, 'no record was written, so there is nothing the link could have been about');
+
+  server.assertCalled('POST', '/v2/control/runs/link', 1);
+  const body = server.lastCall('POST', '/v2/control/runs/link').body;
+  assert.equal(body.run_id, RUN_ID,
+    'the hub is the parent: a subagent should read everything the parent can, and the parent '
+    + 'is the run every later query is made from');
+  assert.equal(body.linked_run_id, rec.sub_run_id,
+    `the spoke is this subagent's own run, got ${JSON.stringify(body.linked_run_id)} against a `
+    + `record of ${rec.sub_run_id} — a join naming the wrong id is a join to nothing`);
+  assert.equal(rec.linked, true, 'and the record says the call landed');
+});
+
+// The ledger is not a cache of `run_scopes`; it is the plugin's record of what was decided,
+// which is what lets a link be re-asserted after the backend's in-memory graph is lost with a
+// pod. Recording only the parent's end would make `/mubit-memory:link list` disagree with the
+// server the moment it is read from the other side.
+test('the join is written to the local ledger at both ends', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir);
+
+  await runHook('subagent-start', subagentStart(), { env: env(dir, server) });
+
+  const links = await lib('links.mjs');
+  const cfg = { dataDir: dir };
+  const rec = subRunRecords(dir)[0];
+  assert.deepEqual(links.linkedRunIds(cfg, RUN_ID), [rec.sub_run_id],
+    'the parent must be able to answer "what can I reach" offline — a list that needs the '
+    + 'network answers "nothing" on an unreachable instance, which is a lie');
+  assert.deepEqual(links.linkedRunIds(cfg, rec.sub_run_id), [RUN_ID],
+    'and the sub-run end has to hold it too: `capture --subagent` reads this side to decide '
+    + 'whether its evidence has a lane to land in');
+});
+
+// §4.9, and the design rule that makes the field worth reading: a record claiming a link that
+// does not exist is worse than one admitting it does not.
+test('a link the server refuses leaves linked:false and costs the spawn nothing', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/runs/link': { status: 500, json: { error: 'boom' } },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir);
+
+  const r = await runHook('subagent-start', subagentStart(), { env: env(dir, server) });
+  assertHookContract(r);
+  assert.equal(r.code, 0,
+    'exit 2 would surface stderr to the user on every subagent spawn, over a join that is '
+    + 'recoverable from the record on the next attempt');
+  assert.match(injected(r.json), /queued/,
+    'the recall block is the thing this hook exists for; a failed link must not cost it');
+
+  const rec = subRunRecords(dir)[0];
+  assert.equal(rec.linked, false,
+    'the server said 500, so nothing is joined — stamping true here would tell the next '
+    + 'reader that evidence under this sub-run is reachable from the parent when it is not');
+
+  const links = await lib('links.mjs');
+  assert.deepEqual(links.linkedRunIds({ dataDir: dir }, RUN_ID), [],
+    'and the ledger records decisions that landed, not ones that were attempted');
+});
+
+// The same rule one layer down: `postLinkRun` refuses a self-link before dialing, and a
+// payload with no subagent identity derives the parent unchanged. Dialing it anyway would
+// spend a round trip per spawn to be told what the client already knows.
+test('nothing is dialled when there is no sub-run to join', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir);
+
+  const p = subagentStart();
+  delete p.agent_id;
+  const r = await runHook('subagent-start', p, { env: env(dir, server) });
+  assertHookContract(r);
+  server.assertNotCalled('POST', '/v2/control/runs/link');
+
+  const links = await lib('links.mjs');
+  assert.deepEqual(links.linkedRunIds({ dataDir: dir }, RUN_ID), [],
+    'a run already consults its own memory, so an edge to itself adds no reach and would sit '
+    + 'in the ledger as a permanent piece of noise in the Tier 3 picker');
 });

@@ -10,13 +10,42 @@
 // of `../claude-code/lib/`. esbuild inlines all of it, so a shipped Codex bundle contains no
 // reference to a sibling directory that a marketplace install would not have copied.
 
-import { build, context } from 'esbuild';
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const SHARED = resolve(ROOT, '..', 'claude-code');
+
+/**
+ * esbuild, resolved out of the sibling plugin's `node_modules`.
+ *
+ * A bare `import { build } from 'esbuild'` walks up from this file and finds nothing: this
+ * package has no `node_modules` of its own, and the repo root has none either. The sibling
+ * does, and it is the same version — `package.json` here declares the same `^0.28.0` so the
+ * dependency is stated rather than smuggled.
+ *
+ * The alternative was a `node_modules` symlink to the sibling, which works and is invisible:
+ * it is untracked, so a fresh clone has no build at all and the error names a missing package
+ * rather than a missing symlink. Resolving explicitly makes the coupling something you can
+ * read, and the failure below says exactly what to do about it.
+ */
+const require = createRequire(import.meta.url);
+let esbuild;
+try {
+  esbuild = await import(pathToFileURL(require.resolve('esbuild', { paths: [SHARED, ROOT] })).href);
+} catch {
+  console.error(
+    '[esbuild] cannot resolve esbuild.\n'
+    + '  The Codex plugin builds with the sibling plugin`s copy — the two are built from one\n'
+    + '  source tree and pin the same version. Install it there:\n'
+    + `      npm --prefix ${SHARED} install\n`
+    + '  (Do NOT run `npm run verify` or `npm run clean` in that directory: its `clean` deletes\n'
+    + '  mcp/dist/server.js, which is vendored and cannot be rebuilt in this checkout.)');
+  process.exit(1);
+}
+const { build, context } = esbuild;
 const has = (rel) => existsSync(resolve(ROOT, rel));
 const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
 

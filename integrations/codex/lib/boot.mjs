@@ -30,7 +30,7 @@
  * | -------------------- | ------------------------------------- | ----------------------- |
  * | `MUBIT_CC_HOST`      | the constant `codex`                  | declared, never sniffed — see below |
  * | `CLAUDE_PLUGIN_ROOT` | the nearest `.codex-plugin/plugin.json` above this file | Codex sets no plugin root of any spelling |
- * | `CLAUDE_PLUGIN_DATA` | `~/.claude/plugins/data/mubit-memory` | deliberately the **same** directory Claude Code uses |
+ * | `CLAUDE_PLUGIN_DATA` | whichever `~/.claude/plugins/data/mubit-memory*` this machine's Claude Code install uses | deliberately the **same** directory, suffix and all |
  * | `CLAUDE_PROJECT_DIR` | the payload `cwd`, else `process.cwd()` | Codex runs a hook in the project directory |
  *
  * **The host is declared, not detected**, and that is a correctness decision rather than a
@@ -50,17 +50,15 @@
  * cost the memory rather than the turn: every fallible step is caught, and a name it could
  * not resolve is simply left for the shared module's own fallback to answer.
  *
- * Zero dependencies beyond `lib/state.mjs`, which is imported for exactly one thing: the
- * default data-directory path, so this file and the shared resolver cannot disagree about
- * where a Claude Code session would have written. That module reads its environment per call
- * and captures nothing at import time, which is what makes it safe to load this early.
+ * Zero dependencies: Node built-ins only, and nothing imported from the shared plugin. That is
+ * deliberate — this module runs before the shared modules are allowed to load, and importing
+ * one to ask it a question would be the very ordering mistake the file exists to prevent.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-
-import { dataDir as sharedDataDir } from '../../claude-code/lib/state.mjs';
 
 /** The harness this bundle runs under. Asserted, not inferred — see the header. */
 export const HOST = 'codex';
@@ -94,7 +92,7 @@ export function applyCodexEnv(env = process.env, payload = {}) {
 
   set('MUBIT_CC_HOST', HOST);
   set('CLAUDE_PLUGIN_ROOT', pluginRoot());
-  set('CLAUDE_PLUGIN_DATA', defaultDataDir(e));
+  set('CLAUDE_PLUGIN_DATA', claudeCodeDataDir(e));
   set('CLAUDE_PROJECT_DIR', projectDir(e, payload));
 
   return e;
@@ -155,25 +153,95 @@ function climbForMarker(start) {
   return '';
 }
 
+/** Where Claude Code keeps every plugin's data directory. */
+const CC_DATA_ROOT = ['.claude', 'plugins', 'data'];
+/** This plugin's data directory, and the prefix every variant of it shares. */
+const DATA_DIR_PREFIX = 'mubit-memory';
+
 /**
- * Where a Claude Code session in this account would write, computed by the shared resolver
- * rather than restated here.
+ * The data directory a Claude Code session on this machine actually uses.
  *
- * The synthetic environment is the point: passing the real one would let `MUBIT_CC_DATA_DIR`
- * or an existing `CLAUDE_PLUGIN_DATA` answer, and this function's job is specifically to
- * produce the *default*. `applyCodexEnv` never overwrites, so those two keep their
- * precedence exactly as they have it under Claude Code — which is what
- * `codex-boot.test.mjs` pins.
+ * ---------------------------------------------------------------------------
+ * Why this is a search and not a constant
+ * ---------------------------------------------------------------------------
+ * `lib/state.mjs` defaults to `~/.claude/plugins/data/mubit-memory`, and that default is only
+ * ever reached when the host did not set `CLAUDE_PLUGIN_DATA` — which, under Claude Code, it
+ * always does. **The name the host picks carries a suffix**: a marketplace install writes
+ * `mubit-memory-<marketplace>`, a `--plugin-dir` session writes `mubit-memory-inline`, and the
+ * bare name is only one of several. `scripts/mubit-inspect.mjs` has known this for as long as
+ * it has existed; this file did not, and assumed the bare name.
+ *
+ * The consequence was silent and complete. A Codex session derived the *same run id* as the
+ * Claude Code session in the same directory — the sharing worked — and then wrote it into
+ * `…/mubit-memory` while Claude Code read `…/mubit-memory-mubit`. Two memories of one project,
+ * one of them missing the credentials, and nothing anywhere reporting it. Measured on a real
+ * install: both directories held a run named `cc-mubit-plugin-testing-41703b8c`.
+ *
+ * ---------------------------------------------------------------------------
+ * The preference order, and why each rung
+ * ---------------------------------------------------------------------------
+ *   1. **A directory holding `credentials.json`.** `/mubit-memory:auth` writes exactly one of
+ *      these, into the install the user actually authenticated. It is the strongest available
+ *      evidence of which install is live, and it is the one that makes the credentials the
+ *      user already has work under Codex without copying anything.
+ *   2. **The most recently modified.** Every hook touches its data directory, so recency is a
+ *      good proxy for "in use" when nobody has authenticated yet.
+ *   3. **The bare name**, created if absent. A machine with no Claude Code install at all is
+ *      the ordinary case for a Codex-only user, and it wants a directory rather than an error.
+ *
+ * A search is still a guess, so it is a fallback and not the mechanism.
+ * `scripts/setup.mjs` resolves the same thing at install time and **pins** it as
+ * `MUBIT_CC_DATA_DIR` in the registrations it writes, which outranks everything here — so on
+ * a set-up install this function is never consulted at all.
  *
  * @param {Record<string, string|undefined>} env
  * @returns {string}
  */
-function defaultDataDir(env) {
+export function claudeCodeDataDir(env = process.env) {
+  const home = (typeof env?.HOME === 'string' && env.HOME) ? env.HOME : safeHome();
+  if (!home) return '';
+  const root = join(home, ...CC_DATA_ROOT);
+  const bare = join(root, DATA_DIR_PREFIX);
+
+  /** @type {Array<{path: string, creds: boolean, at: number}>} */
+  let candidates = [];
   try {
-    return sharedDataDir({}, { HOME: env.HOME });
+    candidates = readdirSync(root)
+      .filter((n) => n === DATA_DIR_PREFIX || n.startsWith(`${DATA_DIR_PREFIX}-`))
+      .map((n) => join(root, n))
+      .filter((p) => { try { return statSync(p).isDirectory(); } catch { return false; } })
+      .map((p) => ({
+        path: p,
+        creds: existsSync(join(p, 'credentials.json')),
+        at: mtime(p),
+      }));
   } catch {
-    return '';
+    return bare;                       // no ~/.claude at all: a Codex-only machine
   }
+  if (!candidates.length) return bare;
+
+  const withCreds = candidates.filter((c) => c.creds);
+  const pool = withCreds.length ? withCreds : candidates;
+  // Deterministic: newest first, then by path, so two directories with identical timestamps
+  // cannot make this answer differently on two consecutive hooks of the same session.
+  pool.sort((a, b) => (b.at - a.at) || a.path.localeCompare(b.path));
+  return pool[0].path;
+}
+
+/** Latest mtime of a directory or of the files a live install touches. */
+function mtime(dir) {
+  let newest = 0;
+  for (const rel of ['', 'config.json', 'status', 'runs', 'credentials.json']) {
+    try {
+      const t = statSync(rel ? join(dir, rel) : dir).mtimeMs;
+      if (t > newest) newest = t;
+    } catch { /* absent; try the next */ }
+  }
+  return newest;
+}
+
+function safeHome() {
+  try { return homedir(); } catch { return ''; }
 }
 
 /**

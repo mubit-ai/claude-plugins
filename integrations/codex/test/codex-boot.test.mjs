@@ -33,8 +33,10 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
+import { mkdirSync, utimesSync, writeFileSync } from 'node:fs';
+
 import {
-  CODEX_ROOT, codexMod, lib, withEnv, makeDataDir, makeProjectDir,
+  CODEX_ROOT, codexMod, lib, withEnv, makeDataDir, makeProjectDir, tempDir,
 } from './helpers/codex-fixtures.mjs';
 
 /** The three names the shared code reads, and nothing else is synthesised. */
@@ -92,19 +94,90 @@ test('CLAUDE_PLUGIN_ROOT is derived from the shim`s own location, not from the e
   });
 });
 
-test('the data directory is the one Claude Code uses, so memory flows between the two hosts', async () => {
-  await withEnv(codexEnv({ HOME: '/tmp/fake-home' }), async () => {
+test('with no Claude Code install at all, the data directory is the bare default', async () => {
+  const home = tempDir('codex-empty-home-');
+  await withEnv(codexEnv({ HOME: home }), async () => {
     const { applyCodexEnv } = await codexMod('lib/boot.mjs');
-    const env = { HOME: '/tmp/fake-home' };
+    const env = { HOME: home };
     applyCodexEnv(env, { cwd: '/tmp/some/project' });
-    // § This is the decision, not an accident of the default. A Codex-only user does end up
-    //   with a `~/.claude/` directory, and README.md says so — the alternative is two
-    //   disjoint memories of one project, which is the failure the shared run id exists to
-    //   prevent.
+    // § A Codex-only machine is the ordinary case, and it wants a directory rather than an
+    //   error. It does mean such a user ends up with a `~/.claude/` they never asked for,
+    //   which README.md says out loud — the alternative is two disjoint memories of one
+    //   project, which is the failure the shared run id exists to prevent.
     assert.equal(env.CLAUDE_PLUGIN_DATA,
-      join('/tmp/fake-home', '.claude', 'plugins', 'data', 'mubit-memory'),
-      'a Codex session must write where a Claude Code session in the same directory reads. '
-      + 'A separate directory would give one project two memories that never meet.');
+      join(home, '.claude', 'plugins', 'data', 'mubit-memory'),
+      'with nothing to find, the bare default is the answer.');
+  });
+});
+
+test('the data directory is whichever suffixed one Claude Code actually uses', async () => {
+  // § The bug this test exists for, measured on a real install. `lib/state.mjs` defaults to
+  //   the bare `mubit-memory`, and that default is only ever reached when the host did not set
+  //   CLAUDE_PLUGIN_DATA — which under Claude Code it always does, *with a suffix*: a
+  //   marketplace install writes `mubit-memory-<marketplace>`, `--plugin-dir` writes
+  //   `mubit-memory-inline`.
+  //
+  //   Assuming the bare name made a Codex session derive the same run id as the Claude Code
+  //   session in the same directory — the sharing worked — and then write it into a different
+  //   directory. Two memories of one project, one of them without the credentials, and nothing
+  //   anywhere reporting it. Both directories held a run named the same thing.
+  const home = tempDir('codex-cc-home-');
+  const root = join(home, '.claude', 'plugins', 'data');
+  mkdirSync(join(root, 'mubit-memory'), { recursive: true });          // the bare one
+  mkdirSync(join(root, 'mubit-memory-inline'), { recursive: true });   // a --plugin-dir session
+  mkdirSync(join(root, 'mubit-memory-mubit'), { recursive: true });    // the marketplace install
+  writeFileSync(join(root, 'mubit-memory-mubit', 'credentials.json'), '{"apiKey":"mbt_x"}');
+
+  await withEnv(codexEnv({ HOME: home }), async () => {
+    const { applyCodexEnv, claudeCodeDataDir } = await codexMod('lib/boot.mjs');
+    assert.equal(claudeCodeDataDir({ HOME: home }), join(root, 'mubit-memory-mubit'),
+      'the directory holding credentials.json is the install the user authenticated, and the '
+      + 'only one whose key and memory a Codex session can actually use. Picking the bare name '
+      + 'costs the credentials AND every memory the other harness holds.');
+    const env = { HOME: home };
+    applyCodexEnv(env, { cwd: '/tmp/some/project' });
+    assert.equal(env.CLAUDE_PLUGIN_DATA, join(root, 'mubit-memory-mubit'));
+  });
+});
+
+test('with no credentials anywhere, the most recently used directory wins', async () => {
+  const home = tempDir('codex-recency-home-');
+  const root = join(home, '.claude', 'plugins', 'data');
+  mkdirSync(join(root, 'mubit-memory'), { recursive: true });
+  mkdirSync(join(root, 'mubit-memory-mubit', 'runs'), { recursive: true });
+  // Make the suffixed one unambiguously newer.
+  const future = new Date(Date.now() + 60_000);
+  utimesSync(join(root, 'mubit-memory-mubit', 'runs'), future, future);
+
+  await withEnv(codexEnv({ HOME: home }), async () => {
+    const { claudeCodeDataDir } = await codexMod('lib/boot.mjs');
+    // § Recency is a weaker signal than credentials, and it is the right one before anybody
+    //   has authenticated: every hook touches its data directory, so "most recently written"
+    //   is a good proxy for "in use".
+    assert.equal(claudeCodeDataDir({ HOME: home }), join(root, 'mubit-memory-mubit'),
+      'with no credentials to go on, the directory in active use is the better guess than the '
+      + 'bare name — which on this machine is the empty one Codex itself just created.');
+  });
+});
+
+test('the resolution is deterministic across two hooks of one session', async () => {
+  const home = tempDir('codex-stable-home-');
+  const root = join(home, '.claude', 'plugins', 'data');
+  // Two directories, identical timestamps, neither with credentials: the tie-break has to be
+  // total, or two hooks in the same session answer differently and the run splits mid-turn.
+  for (const n of ['mubit-memory-alpha', 'mubit-memory-beta']) mkdirSync(join(root, n), { recursive: true });
+  const t = new Date(Date.now() - 5_000);
+  for (const n of ['mubit-memory-alpha', 'mubit-memory-beta']) utimesSync(join(root, n), t, t);
+
+  await withEnv(codexEnv({ HOME: home }), async () => {
+    const { claudeCodeDataDir } = await codexMod('lib/boot.mjs');
+    const first = claudeCodeDataDir({ HOME: home });
+    for (let i = 0; i < 5; i++) {
+      assert.equal(claudeCodeDataDir({ HOME: home }), first,
+        'the answer moved between calls. A hook that resolves a different data directory than '
+        + 'the one before it splits a single session across two stores, and the turn staged by '
+        + 'stage-prompt is not the one capture --stop goes looking for.');
+    }
   });
 });
 

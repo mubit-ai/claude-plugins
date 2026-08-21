@@ -39,9 +39,23 @@ useful way to *prove* the diagnosis before changing any state.
 ## Step 1 — read the local status marker
 
 At `status/<run_id>.json` under the plugin data dir (`MUBIT_CC_DATA_DIR`, else
-`CLAUDE_PLUGIN_DATA`, else `~/.claude/plugins/data/mubit-memory` — yes, `.claude`, and
-deliberately: a Codex session shares its data directory with a Claude Code session in the
-same project so the two share one memory).
+`CLAUDE_PLUGIN_DATA`, else a search of `~/.claude/plugins/data/mubit-memory*` — yes,
+`.claude`, and deliberately: a Codex session shares its data directory with a Claude Code
+session in the same project so the two share one memory).
+
+**If the user has both plugins and memory looks split, check this first.** Claude Code suffixes
+that directory (`mubit-memory-<marketplace>`, `mubit-memory-inline`), so there is usually more
+than one:
+
+```bash
+ls ~/.claude/plugins/data/
+```
+
+Two directories holding a run with the **same name** is the signature: the run id sharing
+worked and the two harnesses wrote to different stores. The one with `credentials.json` is the
+live Claude Code install. Re-run `mubit-memory:setup` with `--data-dir=<that path>` to pin it,
+and tell the user the Codex-side memory written before the fix is in the other directory —
+recoverable by hand, not automatically.
 
 Free, no network. It carries the last known `state`, `updated_at`, `recall` counts,
 `captured` counts including `pending`, the last `reflect` result, and `last_error`. A marker

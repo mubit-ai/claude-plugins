@@ -122,12 +122,24 @@ use `mubit-memory:doctor` to read `reflect.status` for the last one.
 
 ## Where state lives
 
-`~/.claude/plugins/data/mubit-memory` — yes, `.claude`, and deliberately.
+Under `~/.claude/plugins/data/` — yes, `.claude`, and deliberately. A Codex session shares its
+run id *and* its data directory with a Claude Code session in the same project, because that
+is what makes one memory rather than two.
 
-A Codex session shares its run id *and* its data directory with a Claude Code session in the
-same project, because that is what makes one memory rather than two. A Codex-only user does
-end up with a `~/.claude/` directory they never asked for. `MUBIT_CC_DATA_DIR` moves it, at
-the cost of the sharing.
+**Which directory under there is not a constant.** Claude Code names it with a suffix: a
+marketplace install writes `mubit-memory-<marketplace>`, a `--plugin-dir` session writes
+`mubit-memory-inline`, and the bare `mubit-memory` is only one of several. `setup` resolves
+which one this machine actually uses — preferring the one holding `credentials.json`, since
+that is the install the user authenticated — and **pins it** as `MUBIT_CC_DATA_DIR` in the
+registrations it writes. `lib/boot.mjs` runs the same search at runtime as a fallback.
+
+Check it with `ls ~/.claude/plugins/data/` and pass `--data-dir=<path>` to `setup` if the
+resolution picked wrong. Getting this wrong is quiet and total: the two harnesses derive the
+*same run id* and write it to two different stores, so you get two half-memories of one
+project and no error anywhere.
+
+A Codex-only user ends up with a `~/.claude/` directory they never asked for.
+`MUBIT_CC_DATA_DIR` moves it, at the cost of the sharing.
 
 Which harness wrote an entry is recorded as its agent role — `codex` or `claude-code` — so the
 two are distinguishable where it matters, and count as two actors where something upstream is

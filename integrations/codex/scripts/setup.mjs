@@ -32,7 +32,7 @@
  *
  * `--no-trust` does everything except the `config.toml` write, for anyone who would rather
  * approve the hooks themselves in the TUI's `/hooks` screen. The result is identical; the
- * difference is who decided.
+ * difference is who decided. `--data-dir=<path>` overrides step 0's resolution.
  *
  * Node >= 20 built-ins only, and it shells out to `codex` for the two things Codex owns.
  */
@@ -41,13 +41,16 @@ import { existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { claudeCodeDataDir } from '../lib/boot.mjs';
+
 const root = process.argv[2];
 const withPreTool = process.argv.includes('--with-pre-tool');
 const noTrust = process.argv.includes('--no-trust');
+const dataArg = (process.argv.find((a) => a.startsWith('--data-dir=')) ?? '').slice('--data-dir='.length);
 const HOME = process.env.CODEX_HOME || join(homedir(), '.codex');
 
 if (!root || !existsSync(join(root, 'hooks.json'))) {
-  console.error('usage: node scripts/setup.mjs <plugin-root> [--with-pre-tool] [--no-trust]');
+  console.error('usage: node scripts/setup.mjs <plugin-root> [--data-dir=<path>] [--with-pre-tool] [--no-trust]');
   console.error('  <plugin-root> is the directory containing hooks.json and .mcp.json');
   process.exit(2);
 }
@@ -58,6 +61,26 @@ for (const need of ['hooks/dist/capture.mjs', 'mcp/dist/index.js', 'mcp/dist/ser
   }
 }
 
+// --- 0. resolve the data directory, and PIN it -----------------------------------
+//
+// This is the step whose absence made a Codex session and a Claude Code session in one
+// directory derive the same run id and then write it to two different places. Claude Code
+// names its data directory with a suffix — `mubit-memory-<marketplace>` for a marketplace
+// install, `-inline` for `--plugin-dir` — so the bare default is only one of several, and
+// picking wrong costs the user their credentials and every memory the other harness holds.
+//
+// `lib/boot.mjs` can find it at runtime, and does. But a search is a guess, and this is the
+// one moment where the answer can be resolved once, shown to the user, and written down.
+// Pinning it as MUBIT_CC_DATA_DIR in the registrations outranks every other input on both
+// hosts, so nothing downstream ever has to guess again.
+const dataDir = dataArg || claudeCodeDataDir(process.env);
+const shared = existsSync(join(dataDir, 'credentials.json'));
+console.log(`data directory: ${dataDir}`);
+console.log(shared
+  ? '  shared with your Claude Code install — same run ids, same memory, same credentials.'
+  : '  no credentials.json here yet. If you already use the Claude Code plugin, check this is '
+    + 'the same directory it uses (ls ~/.claude/plugins/data/) and pass --data-dir=<path> if not.');
+
 // --- 1. merge the registrations ------------------------------------------------
 const tpl = JSON.parse(readFileSync(join(root, 'hooks.json'), 'utf8'));
 const target = join(HOME, 'hooks.json');
@@ -67,7 +90,9 @@ if (existsSync(target)) {
   console.log(`backed up ${target} -> ${target}.before-mubit`);
 }
 const isMubit = (h) => String(h?.command ?? '').includes('/hooks/dist/');
-const sub = (s) => s.split('{{PLUGIN_ROOT}}').join(root);
+// Codex runs a hook command as a shell string, so the pin rides in front of `node` — which is
+// also why it is quoted: a data directory with a space in it is otherwise two arguments.
+const sub = (s) => `MUBIT_CC_DATA_DIR=${JSON.stringify(dataDir)} ${s.split('{{PLUGIN_ROOT}}').join(root)}`;
 const merged = { ...existing, hooks: { ...(existing.hooks ?? {}) } };
 let added = 0;
 for (const [event, groups] of Object.entries(tpl.hooks)) {
@@ -87,8 +112,14 @@ if (!withPreTool) console.log('  (PreToolUse omitted: the warnings it exists for
 
 // --- 2. register the MCP server ------------------------------------------------
 spawnSync('codex', ['mcp', 'remove', 'mubit'], { stdio: 'ignore' });
-const add = spawnSync('codex', ['mcp', 'add', 'mubit', '--', 'node', join(root, 'mcp/dist/index.js')],
-  { encoding: 'utf8' });
+// `--env` matters as much here as the pin in the hook commands does. The MCP server derives
+// the run id itself, with the same strategy the hooks use, so a server reading a different
+// data directory would write /mubit-memory:remember into a run pre-prompt recall never reads.
+const add = spawnSync('codex', [
+  'mcp', 'add', 'mubit',
+  '--env', `MUBIT_CC_DATA_DIR=${dataDir}`,
+  '--', 'node', join(root, 'mcp/dist/index.js'),
+], { encoding: 'utf8' });
 console.log((add.stdout || add.stderr || '').trim());
 
 // --- 3. trust ------------------------------------------------------------------
@@ -113,7 +144,7 @@ setTimeout(() => send({ jsonrpc: '2.0', id: 2, method: 'hooks/list', params: {} 
 setTimeout(() => {
   child.kill();
   const hooks = (msgs.find((m) => m.id === 2)?.result?.data?.[0]?.hooks ?? [])
-    .filter((h) => String(h.command ?? '').startsWith(`node "${root}`) || String(h.command ?? '').includes(root));
+    .filter((h) => String(h.command ?? '').includes(join(root, 'hooks', 'dist')));
   if (!hooks.length) {
     console.error('\nno Mubit hooks found by `hooks/list` — nothing trusted. Check the merge above.');
     process.exit(1);

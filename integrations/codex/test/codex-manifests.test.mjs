@@ -437,6 +437,23 @@ test('the setup script exists, and the setup skill points at it', () => {
     + 'themselves in /hooks. Trust is their decision.');
 });
 
+test('the setup script pins the data directory rather than leaving it to be searched for', () => {
+  const src = readOrFail(join(CODEX_ROOT, 'scripts', 'setup.mjs'), 'the setup script.');
+  // § Claude Code names its data directory with a suffix — `mubit-memory-<marketplace>`,
+  //   `mubit-memory-inline` — so the bare default is only one of several. `lib/boot.mjs` can
+  //   find the right one at runtime, but a search is a guess, and install time is the one
+  //   moment the answer can be resolved once and written down. Getting it wrong costs the user
+  //   their credentials and every memory the other harness holds, with nothing reporting it.
+  assert.match(src, /MUBIT_CC_DATA_DIR=/,
+    'setup must pin MUBIT_CC_DATA_DIR into the registrations it writes. It outranks every '
+    + 'other data-dir input on both hosts, so nothing downstream has to guess.');
+  assert.match(src, /'--env'/,
+    'the MCP server needs the pin too: it derives the run id itself, so a server reading a '
+    + 'different data directory writes /mubit-memory:remember into a run recall never reads.');
+  assert.match(src, /--data-dir=/,
+    'there must be an override. The search is a good guess and it is still a guess.');
+});
+
 test('the setup script never trusts a hook that is not this plugin`s', () => {
   const src = readOrFail(join(CODEX_ROOT, 'scripts', 'setup.mjs'), 'the setup script.');
   // § `hooks/list` returns every hook Codex can see, including other tools'. Writing the whole

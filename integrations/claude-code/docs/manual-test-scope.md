@@ -304,10 +304,22 @@ each, neither ever reflected:
    B, linked to A         sources=2  ALPHAFACT=true  BETAFACT=true
 ```
 
-**That is Target C working.** The boundary held before the link and opened only between the
-two runs named — and the items never left `run` scope. Compare §1.4, where one environment
+And revoking it, which is the half that makes a link safe to grant:
+
+```
+5) unlink, both directions
+   still linked           sources=4  ALPHAFACT=true  BETAFACT=true
+   unlink lpha-7c31 -> beta-7c31: ok=true
+   unlink beta-7c31 -> lpha-7c31: ok=true
+   after unlink           sources=2  ALPHAFACT=true  BETAFACT=false
+```
+
+**That is Target C working, in both directions.** The boundary held before the link, opened
+only between the two runs named, and closed again on request — and the items never left `run` scope. Compare §1.4, where one environment
 variable made a single lesson readable by *every* run on the instance: same visibility, a
-blast radius of two runs instead of all of them, and revocable per pair.
+blast radius of two runs instead of all of them, and revocable per pair — measured above,
+not asserted. There is no equivalent of that last line for `MUBIT_MCP_LESSON_SCOPE`: the only
+way to withdraw what it published is to delete the lesson, as §1.5 had to.
 
 ### §4.2 — reflect: the mechanism is in the code, and this probe could not observe it
 

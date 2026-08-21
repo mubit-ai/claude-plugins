@@ -10,13 +10,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 
 import { integrity, noiseFloor, abTable, dropWarmup } from '../lib/report.mjs';
-import { resolvePluginDir, LAB_ROOT } from '../lib/paths.mjs';
+import { resolvePluginDir, KIT_ROOT, LAB_ROOT } from '../lib/paths.mjs';
 import { checkEnvHygiene, checkRecallCanary, renderChecks } from '../lib/preflight.mjs';
 import { buildRun, disableSettings, envLeaks } from '../lib/arms.mjs';
 
@@ -402,6 +402,90 @@ test('N3j — an instance with no ingest-job route is still judged on the read-b
     assert.equal(checks.find((c) => c.id === 'recall-canary')?.ok, true,
       'failing the gate because a diagnostic route is absent blocks every sweep on an instance whose memory works');
   } finally { await server.close(); }
+});
+
+/* -------------------------------------------------------------------------- */
+/* what a recorded run gets stamped with (SCOPE.md §8.3)                       */
+/* -------------------------------------------------------------------------- */
+
+/** The six rows `preflight()` returns on a healthy instance running the shipped default. */
+const shippedChecks = () => ([
+  { id: 'claude-version', title: 'claude CLI version', ok: true, measured: '2.1.237' },
+  { id: 'env', title: 'no ambient MUBIT_*/CLAUDE_PLUGIN_* env', ok: true, measured: 'clean' },
+  { id: 'creds', title: 'credentials resolved', ok: true, measured: 'https://api.mubit.ai from env' },
+  { id: 'health', title: 'backend health', ok: true, measured: '218ms ok' },
+  { id: 'recall-canary', title: 'recall canary: a run reads its own evidence', ok: true, measured: 'sentinel read back in its own run · 1 sources' },
+  {
+    id: 'cross-run-overlay',
+    title: 'cross-run overlay',
+    ok: false,
+    severity: 'info',
+    measured: '0 sources in an unrelated run — instance-wide sharing is off; expected at mcpLessonScope=run',
+  },
+  { id: 'mcp', title: 'MCP server answers mubit_status', ok: true, measured: '640ms' },
+  { id: 'arm-treatment', title: 'treatment arm loads the whole plugin', ok: true, measured: 'plugins=[mubit-memory]' },
+  { id: 'arm-control', title: 'control arm is clean', ok: true, measured: 'plugins=[]' },
+]);
+
+// §8.3: an A/B measured while instance-wide sharing is off is measuring the SHIPPED
+// configuration, and it is trustworthy. `degraded` is `!pre.ok` at bin/lab.mjs:203, :393 and
+// :424, so this is the reduce that decides whether `compare` and `history` trust the run.
+test('a sweep whose only unhappy row is the cross-run overlay is recorded trusted', async () => {
+  const { gateOk } = await import('../lib/preflight.mjs');
+  const checks = shippedChecks();
+  assert.equal(gateOk(checks), true,
+    'every run on a correctly-configured instance would be stamped degraded, and compare would warn about all of them until the warning means nothing');
+
+  const lab = readFileSync(join(KIT_ROOT, 'bin', 'lab.mjs'), 'utf8');
+  assert.equal((lab.match(/degraded: !pre\.ok/g) ?? []).length, 3,
+    'a summary that stops deriving `degraded` from the gate can be stamped from anywhere, and the reduce above stops meaning anything');
+
+  const overlay = checks.find((c) => c.id === 'cross-run-overlay');
+  assert.equal(gateOk(checks.filter((c) => c !== overlay)), true,
+    'dropping the informational row must change nothing about the verdict — if it does, the row is still being counted');
+});
+
+// §8.3: "Keep the hard-coded `degraded: true` at :421 — that is the eval VOID path, where the
+// arm genuinely did not measure what it claims, and it is correct."
+test('the eval VOID path still stamps degraded:true, because that arm measured nothing', () => {
+  const lab = readFileSync(join(KIT_ROOT, 'bin', 'lab.mjs'), 'utf8');
+  const void_ = lab.slice(lab.indexOf('detectedPlugin === false'));
+  assert.match(void_.slice(0, 2000), /appendIndex\(\{[^}]*degraded: true/,
+    'a VOID eval arm detected nothing the plugin does; recording it as trustworthy is the exact lie this kit exists to prevent');
+  assert.equal((lab.match(/degraded: true,/g) ?? []).length, 1,
+    'exactly one call site may stamp degraded unconditionally — a second one is a gate result being overridden by hand');
+});
+
+// §8.3 loose end 2: `KIT_OWNED_ENV` is the list of variables the kit sets deliberately, and
+// the SC-11 B1 experiment exports this one. Without it, B1 blocks its own sweep.
+test('envLeaks does not report MUBIT_MCP_LESSON_SCOPE, which the B1 experiment sets on purpose', () => {
+  const leaks = envLeaks({
+    MUBIT_MCP_LESSON_SCOPE: 'global',
+    MUBIT_LAB_RESULTS: '/Users/x/mubit-lab-results',
+    MUBIT_ENDPOINT: 'http://127.0.0.1:3100',
+  });
+  assert.deepEqual(leaks.map((l) => l.name), ['MUBIT_ENDPOINT'],
+    'B1 exports MUBIT_MCP_LESSON_SCOPE to measure a bounded cross-run window, and reporting it as a leak blocks the experiment it is required by');
+  assert.equal(leaks[0]?.value, 'http://127.0.0.1:3100',
+    'the leak this check was built for is an ambient endpoint silently measuring another instance, and it must still be caught by name and value');
+});
+
+// §8.3 loose end 1: README:112 and bin/lab.mjs:18 both claimed `compare` refuses to place a
+// degraded run beside a trusted one. It does not — :575 WARNs and :627 stamps `trusted` on
+// the index row — and refusing outright would strand a legitimately-degraded overhead
+// measurement, which is a real and useful number.
+test('compare warns about a degraded run rather than refusing it, and both docs say so', () => {
+  const lab = readFileSync(join(KIT_ROOT, 'bin', 'lab.mjs'), 'utf8');
+  const readme = readFileSync(join(KIT_ROOT, 'README.md'), 'utf8');
+
+  assert.ok(!/refuses to place/.test(readme),
+    'the README describes a refusal the code has never performed, and the next operator plans around a guard that is not there');
+  assert.ok(!/refuses to place/.test(lab),
+    'a corrected README beside a stale header comment is worse than either alone — the reader believes the comment');
+  assert.match(lab, /WARN {2}\$\{\[a, b\]/,
+    'losing the warning entirely would put a degraded run in a comparison table with nothing marking it');
+  assert.match(lab, /trusted: !summary\.degraded/,
+    'the index row is where `trusted` is actually decided, and a reader sent to the wrong guard cannot audit it');
 });
 
 /* -------------------------------------------------------------------------- */

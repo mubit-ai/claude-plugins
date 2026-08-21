@@ -202,7 +202,7 @@ file it writes.
 ## Trusting the kit before trusting its numbers
 
 ```bash
-node bin/lab.mjs selftest     # 57 tests, offline, ~3s
+node bin/lab.mjs selftest     # 58 tests, offline, ~3s
 ```
 
 Four negative controls, plus the checks they depend on:

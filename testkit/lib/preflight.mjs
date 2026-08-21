@@ -291,24 +291,38 @@ async function checkSameRunSentinel({ httpMod, recallMod, cfg, budgetMs, landing
   // The job poll is a courtesy: `getIngestJob` has no other caller in the plugin, so an
   // instance that does not serve the route is a real possibility and must not fail the gate
   // on its own. The read-back below is the contract.
+  //
+  // `landed` is therefore claimed only on positive evidence that the write is no longer in
+  // flight — `done: true` says so whatever the status string spells, and an absent or silent
+  // jobs route says nothing at all. Guessing either way is the §8.1 mistake in one direction
+  // or the other: an ingest lag reported as a dead index, or a dead index reported as a queue
+  // to wait out. Where there is no evidence, the read-back decides.
   const jobId = String(ing.body?.job_id || '');
   let jobState = jobId ? String(ing.body?.status || 'queued') : 'no job id returned';
+  let landed = !jobId;
   let polls = 0;
   while (jobId && Date.now() < landBy) {
     const job = await httpMod.getIngestJob(cfg, runId, jobId, { timeoutMs: Math.max(budgetMs, 5000) });
     polls += 1;
-    if (!job.ok) { jobState = `job poll unavailable (${job.status || job.state || '?'})`; break; }
+    if (!job.ok) {
+      jobState = `job poll unavailable (${job.status || job.state || '?'})`;
+      landed = true;
+      break;
+    }
     const st = String(job.body?.status || '');
     if (String(job.body?.error || '') || st === 'failed') {
       return check('recall-canary', CANARY_TITLE, false,
         `the store rejected the sentinel: job ${jobId} is "${st || 'failed'}" — ${String(job.body?.error || '').slice(0, 120)}`,
         'ingest accepted the item and the job then failed, so nothing this kit writes during a sweep will be stored either.');
     }
-    if (job.body?.done === true || st === 'completed' || st === 'succeeded') { jobState = st || 'completed'; break; }
+    if (job.body?.done === true || st === 'completed' || st === 'succeeded') {
+      jobState = st || 'completed';
+      landed = true;
+      break;
+    }
     jobState = st || 'queued';
     await sleep(Math.min(SENTINEL_POLL_MS, landBy - Date.now()));
   }
-  const landed = /^(completed|succeeded)$/.test(jobState) || jobState.startsWith('job poll unavailable');
 
   // Indexing can lag the job, so the read-back is retried inside the same landing budget
   // rather than attempted once.

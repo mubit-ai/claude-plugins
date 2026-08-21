@@ -33,7 +33,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../../lib/config.mjs';
 import { runHook, spawnDetached } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
-import { deriveRunId } from '../../lib/runid.mjs';
+import { deriveRunId, turnKey } from '../../lib/runid.mjs';
 import { spoolStats } from '../../lib/spool.mjs';
 import {
   ensureDir, readJson, resolveDataDir, runDir, safeSegment, writeJsonAtomic,
@@ -93,7 +93,7 @@ await runHook('stage-prompt', {
  */
 function stageTurn(cfg, runId, payload) {
   try {
-    const promptId = safeSegment(payload?.prompt_id, MAX_ID);
+    const promptId = safeSegment(turnKey(payload), MAX_ID);
     if (!promptId) return false;
 
     // Both halves of this path are untrusted: the prompt id comes from the host, the run id

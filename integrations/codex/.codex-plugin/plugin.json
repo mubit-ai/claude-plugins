@@ -1,0 +1,37 @@
+{
+  "name": "mubit-memory",
+  "version": "0.10.0",
+  "description": "Persistent, typed, self-improving memory for OpenAI Codex, backed by Mubit. Captures work involuntarily, recalls relevant lessons before every prompt, and attributes outcomes so memory improves with use. Shares one memory with the Claude Code plugin when both run in the same directory.",
+  "author": {
+    "name": "Mubit AI",
+    "url": "https://mubit.ai"
+  },
+  "homepage": "https://docs.mubit.ai/integrations/codex",
+  "repository": "https://github.com/mubit-ai/claude-plugins",
+  "license": "Apache-2.0",
+  "keywords": [
+    "memory",
+    "mubit",
+    "long-term-memory",
+    "lessons",
+    "recall",
+    "rag"
+  ],
+  "interface": {
+    "displayName": "Mubit Memory",
+    "shortDescription": "Persistent memory for Codex",
+    "longDescription": "Mubit Memory gives Codex a memory that survives the session. Every tool call is captured, relevant lessons are recalled before each prompt, outcomes are attributed back so what helps ranks higher next time, and a reflection at session end promotes what was learned beyond the run it was learned in.",
+    "developerName": "Mubit AI",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://mubit.ai/",
+    "defaultPrompt": [
+      "What do we already know about this codebase?",
+      "Remember that we deploy from the release branch.",
+      "Why did the last attempt at this fail?"
+    ]
+  }
+}

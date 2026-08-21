@@ -59,7 +59,7 @@ import { CONN_STATES } from '../../lib/breaker.mjs';
 import { writeCarry } from '../../lib/carry.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
-import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import { readSeen } from '../../lib/seen.mjs';
 import { safeSegment } from '../../lib/state.mjs';
 
@@ -153,7 +153,7 @@ await runHook('recall-refresh', {
     }
 
     const landed = writeCarry(cfg, runId, outcome, {
-      promptId: safeSegment(payload?.prompt_id, MAX_ID),
+      promptId: safeSegment(turnKey(payload), MAX_ID),
       fetchMs,
     });
     log(cfg, landed ? 'debug' : 'warn',

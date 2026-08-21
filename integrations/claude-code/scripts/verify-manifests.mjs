@@ -491,6 +491,179 @@ if (stamp && entry) {
     + `    current:  [${skillIds.join(', ')}]\n    ${REMEASURE}`);
 }
 
+// --- the sibling Codex plugin (integrations/codex) --------------------------
+//
+// The two plugins are built from one source tree, share `lib/`, `hooks/src/` and `mcp/src/`,
+// and — by design — share a data directory and a run id. Anything that can drift between them
+// drifts silently: two versions of one state machine writing one directory, or a Codex
+// registration pointing at a bundle only the Claude Code build produces.
+//
+// Everything here is skipped, loudly, when `integrations/codex` is absent. That is the state
+// of a checkout that predates the port, and of any downstream copy of this plugin alone; a
+// hard failure there would make this script unusable rather than useful.
+
+const CODEX_ROOT = resolve(REPO_ROOT, 'integrations', 'codex');
+
+/** Codex 0.146.0 dispatches these eleven, and nothing else. */
+const CODEX_EVENTS = [
+  'PreToolUse', 'PermissionRequest', 'PostToolUse', 'PreCompact', 'PostCompact',
+  'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'SubagentStart', 'SubagentStop', 'Stop',
+];
+
+if (!existsSync(CODEX_ROOT)) {
+  console.log('verify-manifests: no integrations/codex in this checkout — skipping the Codex checks');
+} else {
+  const C = {
+    plugin: join(CODEX_ROOT, '.codex-plugin', 'plugin.json'),
+    hooks: join(CODEX_ROOT, 'hooks.json'),
+    mcp: join(CODEX_ROOT, '.mcp.json'),
+    pkg: join(CODEX_ROOT, 'package.json'),
+    marketplace: join(REPO_ROOT, '.agents', 'plugins', 'marketplace.json'),
+    skills: join(CODEX_ROOT, 'skills'),
+  };
+
+  const codexPlugin = readJson(C.plugin, 'integrations/codex/.codex-plugin/plugin.json',
+    'the Codex manifest. Codex reads `.codex-plugin/plugin.json` first.');
+  const codexHooks = readJson(C.hooks, 'integrations/codex/hooks.json',
+    'the eleven Codex registrations, as a template /mubit-memory:setup merges into $CODEX_HOME.');
+  const codexMcp = readJson(C.mcp, 'integrations/codex/.mcp.json',
+    'the MCP server template setup registers from.');
+  const codexPkg = readJson(C.pkg, 'integrations/codex/package.json', 'the Codex package manifest.');
+  const codexMkt = readJson(C.marketplace, '.agents/plugins/marketplace.json',
+    'the repo-local Codex marketplace, beside .claude-plugin/marketplace.json.');
+
+  // Version lockstep across both plugins. They share one data directory; two builds of one
+  // state machine writing it is a bug nothing else would report.
+  if (codexPlugin && codexPkg && pkg) {
+    ok(codexPlugin.version === pkg.version,
+      `version drift: integrations/codex/.codex-plugin/plugin.json is ${codexPlugin.version}, `
+      + `the Claude Code plugin is ${pkg.version}. The two share lib/, hooks/src/ and a data directory.`);
+    ok(codexPkg.version === pkg.version,
+      `version drift: integrations/codex/package.json is ${codexPkg.version}, expected ${pkg.version}.`);
+  }
+
+  // Neither `hooks` nor `mcpServers` may appear in the Codex manifest: a plugin-bundled
+  // hooks.json is inert under Codex, and a plugin-declared MCP server cannot resolve its own
+  // path. Declaring either claims an install path that silently does nothing.
+  if (codexPlugin) {
+    ok(codexPlugin.hooks === undefined,
+      'integrations/codex/.codex-plugin/plugin.json declares `hooks`. Codex ignores a '
+      + 'plugin-bundled hooks.json; /mubit-memory:setup merges it into $CODEX_HOME instead.');
+    ok(codexPlugin.mcpServers === undefined,
+      'integrations/codex/.codex-plugin/plugin.json declares `mcpServers`. Codex resolves no '
+      + 'path in a plugin .mcp.json — not ${VAR}, not a relative path — so the server would '
+      + 'fail to start on every session. setup registers it in the user layer.');
+    ok(codexPlugin.userConfig === undefined,
+      'integrations/codex/.codex-plugin/plugin.json declares `userConfig`, which Codex has no '
+      + 'mechanism for: it exports no CODEX_PLUGIN_OPTION_* variables at all.');
+  }
+
+  // The eleven events, no more and no fewer, every command naming a committed bundle.
+  if (codexHooks) {
+    const events = Object.keys(codexHooks.hooks ?? {}).sort();
+    ok(events.join(',') === [...CODEX_EVENTS].sort().join(','),
+      `integrations/codex/hooks.json registers [${events.join(', ')}], expected the eleven Codex `
+      + `events [${[...CODEX_EVENTS].sort().join(', ')}]. A registration Codex does not dispatch `
+      + 'is dead; an event left unregistered is memory the plugin never sees.');
+
+    const extra = Object.keys(codexHooks).filter((k) => k !== 'hooks' && k !== 'description');
+    ok(extra.length === 0,
+      `integrations/codex/hooks.json has unsupported top-level field(s) [${extra.join(', ')}]. `
+      + 'Codex accepts only `description` and `hooks`, and one unknown key fails the whole file.');
+
+    for (const [event, groups] of Object.entries(codexHooks.hooks ?? {})) {
+      for (const group of groups ?? []) {
+        for (const handler of group.hooks ?? []) {
+          ok(handler.if === undefined,
+            `integrations/codex/hooks.json ${event} carries an \`if:\` predicate, which Codex `
+            + 'ignores — the handler fires on every matching call.');
+          ok(handler.args === undefined,
+            `integrations/codex/hooks.json ${event} uses the Claude Code exec form (\`args\`). `
+            + 'Codex runs `command` as one shell string; the arguments would vanish.');
+          ok(typeof handler.command === 'string' && handler.command.includes('{{PLUGIN_ROOT}}'),
+            `integrations/codex/hooks.json ${event} must carry the {{PLUGIN_ROOT}} placeholder: `
+            + 'Codex exports no plugin-root variable, so setup substitutes an absolute path.');
+          ok(typeof handler.timeout === 'number' && Number.isInteger(handler.timeout),
+            `integrations/codex/hooks.json ${event} needs an integer \`timeout\` in seconds.`);
+          if (event === 'SessionEnd') {
+            ok(handler.timeout <= 3,
+              `integrations/codex/hooks.json SessionEnd asks for ${handler.timeout}s; Codex `
+              + 'clamps it to 3s and warns. Anything larger is a budget the hook never gets.');
+          }
+          const m = /\{\{PLUGIN_ROOT\}\}\/(\S+?\.mjs)/.exec(String(handler.command ?? ''));
+          if (ok(!!m, `integrations/codex/hooks.json ${event} names no .mjs bundle.`)) {
+            ok(existsSync(join(CODEX_ROOT, m[1])),
+              `integrations/codex/hooks.json ${event} points at ${m[1]}, which is not committed. `
+              + 'A Codex install copies files; there is no build step.');
+          }
+        }
+      }
+    }
+  }
+
+  // The server name is the tool prefix the model sees, and every Codex skill's prose depends
+  // on it being `mubit`.
+  if (codexMcp) {
+    const servers = Object.keys(codexMcp.mcpServers ?? {});
+    ok(servers.length === 1 && servers[0] === 'mubit',
+      `integrations/codex/.mcp.json names [${servers.join(', ')}]; the server must be \`mubit\`, `
+      + 'because the model sees each tool as mcp__<server>__<tool> and every Codex skill says '
+      + 'mcp__mubit__.');
+  }
+  ok(existsSync(join(CODEX_ROOT, 'mcp', 'dist', 'index.js')),
+    'integrations/codex/mcp/dist/index.js is not committed.');
+  ok(existsSync(join(CODEX_ROOT, 'mcp', 'dist', 'server.js')),
+    'integrations/codex/mcp/dist/server.js is not committed. Two installable plugins cannot '
+    + 'share a path, so this one carries its own copy of the vendored server bundle.');
+
+  // The marketplace has to point at the Codex tree, and the Claude Code one at its own.
+  if (codexMkt) {
+    const codexEntry = (codexMkt.plugins ?? []).find((e) => e.name === 'mubit-memory');
+    if (ok(!!codexEntry, '.agents/plugins/marketplace.json has no `mubit-memory` entry.')) {
+      ok(codexEntry.source?.path === './integrations/codex',
+        `.agents/plugins/marketplace.json points at ${codexEntry.source?.path}; it must be `
+        + './integrations/codex, or Codex installs a plugin whose hooks it cannot run.');
+      ok(!!codexEntry.policy?.installation && !!codexEntry.policy?.authentication && !!codexEntry.category,
+        '.agents/plugins/marketplace.json entries need policy.installation, '
+        + 'policy.authentication and category.');
+    }
+  }
+
+  // The same seven skills, under both hosts, with the right prefix in the Codex copies.
+  const codexSkills = existsSync(C.skills)
+    ? readdirSync(C.skills, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && existsSync(join(C.skills, d.name, 'SKILL.md')))
+      .map((d) => d.name).sort()
+    : [];
+  const ccSkills = existsSync(P.skills)
+    ? readdirSync(P.skills, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && existsSync(join(P.skills, d.name, 'SKILL.md')))
+      .map((d) => d.name).sort()
+    : [];
+  ok(codexSkills.join(',') === ccSkills.join(','),
+    `the two plugins ship different skills.\n    codex:       [${codexSkills.join(', ')}]\n`
+    + `    claude-code: [${ccSkills.join(', ')}]`);
+
+  for (const skill of codexSkills) {
+    const raw = readFileSync(join(C.skills, skill, 'SKILL.md'), 'utf8');
+    ok(!raw.includes(QUALIFIED_PREFIX),
+      `integrations/codex/skills/${skill}/SKILL.md names ${QUALIFIED_PREFIX}…, which is the `
+      + 'Claude Code prefix. Under Codex the tools are mcp__mubit__<tool>.');
+    for (const key of ['tools:', 'allowed-tools:', 'disable-model-invocation:']) {
+      ok(!raw.startsWith('---') || !raw.slice(0, raw.indexOf('\n---', 4)).includes(key),
+        `integrations/codex/skills/${skill}/SKILL.md carries \`${key}\` in its frontmatter, `
+        + 'which Codex does not read — it claims a guarantee the host does not provide.');
+    }
+  }
+
+  ok(!existsSync(join(CODEX_ROOT, 'agents')),
+    'integrations/codex/agents/ exists. Codex has no plugin-defined subagent types — every '
+    + 'SubagentStart reports agent_type "default" — so a markdown subagent there is a file '
+    + 'nothing reads.');
+  ok(!existsSync(join(CODEX_ROOT, 'bin', 'statusline.mjs')),
+    'integrations/codex/bin/statusline.mjs exists. Codex has no scriptable status line.');
+}
+
 // --- report -----------------------------------------------------------------
 
 if (problems.length) {

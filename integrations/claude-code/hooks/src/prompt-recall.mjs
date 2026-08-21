@@ -83,7 +83,7 @@ import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
 import { redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import { markSeen, readSeen } from '../../lib/seen.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -215,7 +215,7 @@ await runHook('prompt-recall', {
     }
 
     const query = prompt.slice(0, MAX_QUERY_CHARS);
-    const promptId = safeId(payload?.prompt_id);
+    const promptId = safeId(turnKey(payload));
     // Resolved once, from the same rule the run id uses, so the two can never disagree
     // about which repo this prompt belongs to.
     const projectDir = resolveProjectDir(cfg, payload);
@@ -308,7 +308,7 @@ await runHook('prompt-recall', {
  * @returns {Record<string, any>}
  */
 function carryForward(cfg, payload, runId, started) {
-  const promptId = safeId(payload?.prompt_id);
+  const promptId = safeId(turnKey(payload));
   const carry = takeCarry(cfg, runId);
   const rendered = !!(carry && carry.block);
 

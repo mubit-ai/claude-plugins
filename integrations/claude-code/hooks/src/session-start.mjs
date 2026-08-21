@@ -338,6 +338,14 @@ await runHook('session-start', {
  * @returns {string}
  */
 function steerBlock(cfg, runId, lessons, anchor = '') {
+  // How a skill is invoked, which is the one line of this block that is not host-neutral.
+  // Claude Code takes `/mubit-memory:recall` as a slash command; Codex lists the same skill as
+  // `mubit-memory:recall` and has no slash form. Telling a Codex model to type a slash command
+  // it does not have is a small lie in the one place it is most likely to be acted on — this
+  // block is the only Mubit context a Codex session gets before its first turn, because the
+  // MCP server's `instructions` frame does not appear to reach the model there at all.
+  const skill = (name) => (cfg.host === 'codex' ? `mubit-memory:${name}` : `/mubit-memory:${name}`);
+
   const lines = [
     '# Mubit memory is active',
     '',
@@ -347,12 +355,12 @@ function steerBlock(cfg, runId, lessons, anchor = '') {
     'Do search when the injected memory falls short: mubit_recall for a topic, mubit_diagnose '
       + 'when a command has failed, mubit_dereference for a reference_id you already hold.',
     'Save what you learn with mubit_learned, and credit what helped with mubit_outcome. '
-      + '/mubit-memory:remember and /mubit-memory:recall are the explicit forms.',
+      + `${skill('remember')} and ${skill('recall')} are the explicit forms.`,
   ];
   if (anchor) {
     lines.push('', '## Compacted context',
       `Mubit checkpoint ${anchor} holds this run's context from before the compaction that `
-      + 'just happened. Ask /mubit-memory:recall if you need detail that was compacted away.');
+      + `just happened. Ask ${skill('recall')} if you need detail that was compacted away.`);
   }
   if (lessons.length) {
     lines.push('', '## Standing lessons (global)');

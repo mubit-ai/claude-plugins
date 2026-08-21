@@ -106,6 +106,9 @@ function spawnSyncQuiet(cmd, args, cwd) {
  * @param {string} [o.endpoint]    Mubit base URL — usually `server.url`
  * @param {string} [o.apiKey]
  * @param {string} [o.projectDir]  `${CLAUDE_PROJECT_DIR}`
+ * @param {string} [o.pluginRoot]  `${CLAUDE_PLUGIN_ROOT}`; defaults to this plugin. The
+ *   sibling `integrations/codex` suite passes its own root — every other caller wants the
+ *   default, and passing one is the only way the two suites can share this file.
  * @param {Record<string,string>} [o.extra] any MUBIT_CC_* / CLAUDE_PLUGIN_OPTION_* overrides
  * @returns {Record<string,string>}
  */
@@ -117,7 +120,7 @@ export function baseEnv(o) {
     NODE_OPTIONS: '',
     TZ: 'UTC',
 
-    CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT,
+    CLAUDE_PLUGIN_ROOT: o.pluginRoot ?? PLUGIN_ROOT,
     CLAUDE_PLUGIN_DATA: o.dataDir,
     CLAUDE_PROJECT_DIR: o.projectDir ?? o.dataDir,
 
@@ -410,25 +413,32 @@ function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
  * be tested by taking the process away. The kill is best-effort: a hook that already handed
  * its work over and exited is simply not there to receive it, which is the passing case.
  *
+ * `root` names the plugin whose `hooks/` to run, defaulting to this one. It is what lets
+ * the sibling `integrations/codex` suite drive its own two-line entry points through this
+ * function instead of forking it — the spawn, the stdin protocol and the contract assertions
+ * are identical, and a second copy of them would be a second thing to keep true.
+ *
  * @param {string} name  e.g. 'capture', 'prompt-recall'
  * @param {object} payload  the stdin JSON (see fixtures.mjs)
  * @param {{env?: Record<string,string>, args?: string[], timeoutMs?: number,
- *          target?: 'src'|'dist', stdinRaw?: string, killAfterMs?: number}} [opts]
+ *          target?: 'src'|'dist', stdinRaw?: string, killAfterMs?: number,
+ *          root?: string}} [opts]
  * @returns {Promise<HookResult>}
  */
 export async function runHook(name, payload, opts = {}) {
+  const root = opts.root ?? PLUGIN_ROOT;
   const target = opts.target ?? (process.env.MUBIT_CC_TEST_TARGET === 'dist' ? 'dist' : 'src');
   const script = target === 'dist'
-    ? join(PLUGIN_ROOT, 'hooks', 'dist', `${name}.mjs`)
-    : join(PLUGIN_ROOT, 'hooks', 'src', `${name}.mjs`);
+    ? join(root, 'hooks', 'dist', `${name}.mjs`)
+    : join(root, 'hooks', 'src', `${name}.mjs`);
   if (!existsSync(script)) {
     throw new Error(
-      `hooks/${target}/${name}.mjs does not exist yet.\n` +
+      `hooks/${target}/${name}.mjs does not exist yet under ${root}.\n` +
       `That is the red state: write it, then re-run this test.`);
   }
   const started = Date.now();
   const child = spawn(process.execPath, [script, ...(opts.args ?? [])], {
-    env: opts.env ?? baseEnv({ dataDir: makeDataDir() }),
+    env: opts.env ?? baseEnv({ dataDir: makeDataDir(), pluginRoot: root }),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let out = '', err = '';
@@ -570,17 +580,19 @@ export function assertHookContract(r) {
  *
  * @param {{extra?: Record<string,string>, endpoint?: string, dataDir?: string,
  *          runId?: string, steps?: Array<{method: string, params?: any}>,
- *          timeoutMs?: number}} [opts]
+ *          timeoutMs?: number, root?: string}} [opts]
  * @returns {Promise<{init: any, results: Array<{result?: any, error?: any}>, stderr: string}>}
  */
 export async function mcpDrive(opts = {}) {
-  const entry = join(PLUGIN_ROOT, 'mcp', 'dist', 'index.js');
+  const root = opts.root ?? PLUGIN_ROOT;
+  const entry = join(root, 'mcp', 'dist', 'index.js');
   if (!existsSync(entry)) {
     throw new Error(`mcp/dist/index.js does not exist yet: ${entry}\n  Run \`npm run build\`.`);
   }
 
   const env = baseEnv({
     dataDir: opts.dataDir ?? makeDataDir(),
+    pluginRoot: root,
     // No network by default: port 1 is where nothing listens. A caller that needs the
     // server to actually reach something passes a `fakeMubit` url instead.
     endpoint: opts.endpoint ?? 'http://127.0.0.1:1',
@@ -668,8 +680,9 @@ export async function mcpDrive(opts = {}) {
  * launcher only has to find non-empty, and the data dir is a fresh temp tree — a test that
  * resolved the real one would write its fixture config into the developer's own install.
  *
- * @param {{extra?: Record<string,string>, timeoutMs?: number}} [opts]
- *   `extra` overrides env (e.g. `MUBIT_MCP_TOOLS`) for this launch only.
+ * @param {{extra?: Record<string,string>, timeoutMs?: number, root?: string}} [opts]
+ *   `extra` overrides env (e.g. `MUBIT_MCP_TOOLS`) for this launch only; `root` picks which
+ *   plugin's `mcp/dist/index.js` to launch.
  * @returns {Promise<{server: any, tools: any[], names: string[], stderr: string}>}
  */
 export async function mcpListTools(opts = {}) {
@@ -700,7 +713,7 @@ export async function mcpListTools(opts = {}) {
  * @param {string} name  the tool, e.g. `mubit_learned`
  * @param {Record<string, any>} [args]  the tool's arguments
  * @param {{extra?: Record<string,string>, endpoint?: string, dataDir?: string,
- *          runId?: string, timeoutMs?: number}} [opts]
+ *          runId?: string, timeoutMs?: number, root?: string}} [opts]
  * @returns {Promise<{server: any, result: any, error: any, text: string, json: any,
  *                   isError: boolean, stderr: string}>}
  */

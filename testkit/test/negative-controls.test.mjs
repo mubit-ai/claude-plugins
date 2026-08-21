@@ -236,6 +236,37 @@ async function storingInstance({ lesson = '', owningRun = 'tb-full30-a-openssl-s
   return { server, stored, owningRun };
 }
 
+/**
+ * `storingInstance`, but the query lane answers slowly. Models a cold index: the write lands
+ * immediately and the first read back is the expensive one.
+ *
+ * @param {{delayMs: number}} o
+ */
+async function storingInstanceSlowQuery({ delayMs }) {
+  /** @type {Map<string, string[]>} */
+  const stored = new Map();
+  const server = await loopbackInstance({
+    'POST /v2/control/ingest': (r) => {
+      const runId = String(r.body?.run_id ?? '');
+      for (const it of r.body?.items ?? []) {
+        stored.set(runId, [...(stored.get(runId) ?? []), String(it?.text ?? '')]);
+      }
+      return { json: { accepted: true, job_id: 'job_slow_1', status: 'queued' } };
+    },
+    'GET /v2/control/ingest/jobs': { json: { job_id: 'job_slow_1', status: 'completed', done: true } },
+    'POST /v2/control/query': async (r) => {
+      await new Promise((res) => { setTimeout(res, delayMs); });
+      const q = String(r.body?.query ?? '');
+      const hits = q ? (stored.get(String(r.body?.run_id ?? '')) ?? []).filter((t) => t.includes(q)) : [];
+      return { json: { evidence: hits.map((content, i) => ({
+        id: `e${i}`, reference_id: `ref_${i}`, entry_type: 'lesson', score: 0.9, content,
+      })) } };
+    },
+    'POST /v2/control/lessons': { json: { lessons: [] } },
+  });
+  return { server, stored };
+}
+
 // §8, structural constraint 1: `severity` replaces the dead `fatal?` field, and a check that
 // does not declare one must keep blocking. Every check that predates the split declares
 // nothing, so a default of "informational" would silently open all five of them at once.
@@ -496,6 +527,28 @@ test('envLeaks does not report MUBIT_MCP_LESSON_SCOPE, which the B1 experiment s
     'B1 exports MUBIT_MCP_LESSON_SCOPE to measure a bounded cross-run window, and reporting it as a leak blocks the experiment it is required by');
   assert.equal(leaks[0]?.value, 'http://127.0.0.1:3100',
     'the leak this check was built for is an ambient endpoint silently measuring another instance, and it must still be caught by name and value');
+});
+
+// N3i: the read-back is the one call in the sentinel with no budget floor. Ingest already
+// gets `max(budgetMs, 10_000)` and the job poll `max(budgetMs, 5000)`, but the query that
+// decides the check ran on the bare per-prompt budget — and `kit.json` ships 1500 ms, which
+// is a recall budget for a warm index, not for a nonce queried the instant it was written.
+// Measured against api.mubit.ai: the read takes ~3.2 s cold, so the default preflight failed
+// with `aborted after 1457ms` on a backend that was working perfectly.
+test('N3i — a slow first read does not fail the sentinel at the shipped 1500ms budget', async () => {
+  const { server } = await storingInstanceSlowQuery({ delayMs: 2200 });
+  try {
+    const checks = await checkRecallCanary({
+      pluginDir: PLUGIN,
+      query: 'what conventions and constraints apply to this project',
+      budgetMs: 1500,          // kit.json's shipped default
+      landingMs: 12_000,
+      creds: { endpoint: server.url, apiKey: 'tk-fake-key' },
+    });
+    const canary = checks.find((c) => c.id === 'recall-canary');
+    assert.equal(canary?.ok, true,
+      `a cold index answering in 2.2s must not read as an outage at a 1500ms per-prompt budget — that is the gate going red for a backend that works: ${canary?.measured}`);
+  } finally { await server.close(); }
 });
 
 // N3h: the sentinel polls between attempts, and an awaited timer that is `unref()`d does not

@@ -281,9 +281,64 @@ Three consequences:
 3. **It is bounded, which is why the flag is still worth setting.** 60 is the ceiling however
    many runs are linked, and a session with fewer than 140 evidence items loses nothing.
 
-**Still to confirm end to end**, once links exist in a real session: link two runs, end a
-session in one, and check the reflected lessons carry `[linked:…]` provenance. The above is a
-code reading, and a code reading can be wrong about which branch actually executes.
+### §4.1 — the link graph, measured
+
+Run on 2026-08-21 against `api.mubit.ai`, driving `lib/http.mjs` directly. Two runs, one item
+each, neither ever reflected:
+
+```
+1) write one item into each of two unrelated runs
+   ingest tk-link-alpha-7c31: ok=true      ingest tk-link-beta-7c31: ok=true
+   job A completed · job B completed
+
+2) BEFORE any link — A asks about beta's port
+   A, unlinked            sources=1  ALPHAFACT=true  BETAFACT=false
+
+3) link A <-> B (mesh: both directions)
+   tk-link-alpha-7c31 -> tk-link-beta-7c31: ok=true
+   tk-link-beta-7c31 -> tk-link-alpha-7c31: ok=true
+   self-link guard: ok=false state=invalid_request (refused without dialing)
+
+4) AFTER the link — same question, same run
+   A, linked to B         sources=2  ALPHAFACT=true  BETAFACT=true
+   B, linked to A         sources=2  ALPHAFACT=true  BETAFACT=true
+```
+
+**That is Target C working.** The boundary held before the link and opened only between the
+two runs named — and the items never left `run` scope. Compare §1.4, where one environment
+variable made a single lesson readable by *every* run on the instance: same visibility, a
+blast radius of two runs instead of all of them, and revocable per pair.
+
+### §4.2 — reflect: the mechanism is in the code, and this probe could not observe it
+
+Attempted, and worth writing down as a **negative result** so nobody repeats it. `reflect` was
+called on run A twice, `include_linked_runs` false then true, with B holding first a
+lesson-shaped item and then a trace-shaped one:
+
+```
+include_linked_runs=false  lessons=1  BETAFACT=false  linkedMarker=false
+include_linked_runs=true   lessons=1  BETAFACT=false  linkedMarker=false
+```
+
+No observable difference. **This does not show that reflect ignores linked runs**, and reading
+it that way would be wrong on two counts:
+
+1. **The marker was never going to appear.** `[linked:…]` is written into
+   `ReflectionEvidence.content` — the *input* to the reflection model. The response carries
+   *extracted lessons*, not the evidence they were extracted from. Grepping the response for
+   the marker tests nothing.
+2. **The linked branch reads `self.echoes.list(...)`** — the history store — and it is not
+   established that `POST /v2/control/ingest` with `intent: "trace"` populates it. The second
+   attempt above assumed it does; that assumption is untested.
+
+So the honest state: §4's mechanism is read from the source and is not in doubt, and this
+experiment was not capable of confirming or refuting it. A conclusive test needs either
+server-side visibility into the assembled evidence vector, or a linked run whose echoes were
+populated by real session capture rather than by direct ingest — i.e. walk a full session in
+one project, link it, and end a session in the other.
+
+Recorded rather than quietly dropped, because "we measured it and saw nothing" and "we
+measured the wrong thing" are different facts and only one of them is true here.
 
 ---
 

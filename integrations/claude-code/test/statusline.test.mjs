@@ -25,6 +25,7 @@ import { join } from 'node:path';
 
 import {
   PLUGIN_ROOT, makeDataDir, makeProjectDir, tempDir, baseEnv, fakeMubit, lib,
+  assertWithinBudget,
 } from './helpers/harness.mjs';
 
 // ---------------------------------------------------------------------------
@@ -183,21 +184,22 @@ test('makes zero network requests — it only reads local state', async () => {
   }
 });
 
-// §10 — the real budget is 15ms. The ceiling asserted here is deliberately generous
-// (node's own cold start is most of it on CI); it exists to catch an implementation
-// that grew a directory walk, a spawn, or a socket.
+// §10 — the real budget is 15ms of work. The ceiling asserted here is deliberately generous;
+// it exists to catch an implementation that grew a directory walk, a spawn, or a socket.
+//
+// This test already took the best of three samples, which was the right instinct and still not
+// enough: node's own cold start is most of the number, and under a loaded runner that term
+// moves further than the whole budget. `assertWithinBudget` keeps the resampling and subtracts
+// the spawn floor it measures, so the assertion is about the status line rather than the box.
 test('renders well inside its budget (real target < 15ms; ceiling here is generous)', async () => {
   const dataDir = makeDataDir();
   const e = env(dataDir);
   const runId = await derivedRunId(e);
   seedMarker(dataDir, runId);
 
-  const samples = [];
-  for (let i = 0; i < 3; i++) samples.push((await runStatusline({ env: e })).ms);
-  const best = Math.min(...samples);
-  assert.ok(best < 300,
-    `fastest of three status-line renders took ${best}ms including node startup (samples ${samples.join('/')}ms). ` +
-    'The §10 target is <15ms of work; a number this high means it is doing I/O it should not.');
+  const first = (await runStatusline({ env: e })).ms;
+  await assertWithinBudget('status line', 300, first,
+    async () => (await runStatusline({ env: e })).ms);
 });
 
 // §10 — the documented line. Example from the guide:

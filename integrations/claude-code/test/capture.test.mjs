@@ -25,8 +25,8 @@ import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import {
-  runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir, makeProjectDir,
-  spoolFiles, soleRunId, readJsonFile, tempDir,
+  runHook, assertHookContract, assertWithinBudget, fakeMubit, baseEnv, makeDataDir,
+  makeProjectDir, spoolFiles, soleRunId, readJsonFile, tempDir,
 } from './helpers/harness.mjs';
 import {
   postToolUse, postToolUseFailure, stop, subagentStop,
@@ -143,9 +143,16 @@ function assertRequiredItemFields(item) {
     `occurrence_time ${item.occurrence_time} is not a recent unix timestamp in seconds`);
 }
 
-// Wall-clock ceiling. Real target is <40ms (~30ms of which is node startup); this is a
-// guard-rail against something dialing the network, not a stopwatch.
-const BUDGET_MS = 400;
+// What `capture` may cost on top of starting node — `assertWithinBudget` measures that floor
+// rather than assuming it.
+//
+// The §5.4 target is 40 ms of work and the idle measurement is ~53 ms, so 800 is fifteen times
+// the real cost. It is set from the other end: with four suites running at once the figure was
+// seen at 456 ms, because parsing a bundle contends for CPU in a way subtracting the spawn
+// floor cannot fully remove. A budget under that measures the machine. This is a guard-rail
+// against a gross regression — a sleep, a retry loop, a directory walk — and not a stopwatch;
+// the zero-network claim is asserted exactly, by request count, and does not lean on it.
+const BUDGET_MS = 800;
 
 /**
  * A fake Mubit whose listening socket is closed even when the test fails — otherwise an
@@ -173,7 +180,10 @@ test('capture: PostToolUse writes exactly one correctly shaped spool item and is
   assert.deepEqual(r.json, { suppressOutput: true }, 'stdout is {"suppressOutput":true} in every mode');
   assert.equal(server.requests.length, 0,
     `capture must issue ZERO HTTP requests; saw: ${server.summary()}`);
-  assert.ok(r.ms < BUDGET_MS, `capture took ${r.ms}ms; budget is <40ms wall (§5.4)`);
+  await assertWithinBudget('capture', BUDGET_MS, r.ms, async () => (await runHook(
+    'capture', postToolUse(),
+    { env: baseEnv({ dataDir: makeDataDir(), endpoint: server.url, projectDir }) },
+  )).ms);
 
   const item = soleItem(dataDir, soleRunId(dataDir));
   assertRequiredItemFields(item);
@@ -245,7 +255,13 @@ test('capture --stop: task_result carrying both the staged prompt and the assist
 
   assertHookContract(r);
   assert.deepEqual(r.json, { suppressOutput: true });
-  assert.ok(r.ms < BUDGET_MS, `capture --stop took ${r.ms}ms; budget is <40ms wall (§5.4)`);
+  await assertWithinBudget('capture --stop', BUDGET_MS, r.ms, async () => {
+    const d = makeDataDir();
+    holdDrainLock(d);
+    seedTurn(d);
+    return (await runHook('capture', stop(),
+      { env: withSpy(staticEnv(d, server)).env, args: ['--stop'] })).ms;
+  });
 
   const item = soleItem(dataDir, RUN_ID);
   assertRequiredItemFields(item);

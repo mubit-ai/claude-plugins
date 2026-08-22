@@ -443,16 +443,135 @@ export async function runHook(name, payload, opts = {}) {
 }
 
 /**
- * Assert the universal hook contract: exit 0, and stdout is either empty or
- * parseable JSON. Every hook in this plugin satisfies this in every mode,
- * including every failure mode (§4.9).
+ * The cost of starting `node` and doing nothing, measured now. Best of three, because the
+ * quantity wanted is the floor, not the average.
+ *
+ * Every hook budget in this suite is asserted against a *spawned child*, so every measurement
+ * carries this term whether or not anyone accounts for it. Measuring it beats the constant
+ * `failure.test.mjs:53` uses (`NODE_STARTUP_ALLOWANCE_MS = 900`) for the same reason a measured
+ * anything beats a guessed one: it is right on a fast machine and on a loaded one.
+ *
+ * @returns {number} ms
+ */
+function bareSpawnMs() {
+  const samples = [];
+  for (let i = 0; i < 3; i++) {
+    const started = Date.now();
+    spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    samples.push(Date.now() - started);
+  }
+  return Math.min(...samples);
+}
+
+/**
+ * Assert a hook's own cost stayed inside its budget, without letting the test runner's load
+ * cast the deciding vote.
+ *
+ * Two things corrupt a naive `assert.ok(r.ms < BUDGET)` here, and they compound:
+ *
+ *   1. **`npm test` is its own load.** `node --test` takes a glob and runs the suite's files
+ *      concurrently, each spawning hooks of its own. Measured during three concurrent suites,
+ *      one `capture` run ranged 180-957 ms — on identical code that costs 100 ms idle. A single
+ *      sample reports the machine, not the hook.
+ *   2. **Most of the number is not the hook.** Starting `node` costs ~47 ms idle here before
+ *      the hook's first statement. `capture` costs ~100 ms, so its own share is ~53 ms —
+ *      which is the ~40 ms §5.4 actually budgets, plus change.
+ *
+ * So the measurement is the best of a few samples *minus the spawn floor measured under the
+ * same conditions*, and `budgetMs` means "what this hook may add on top of starting node".
+ * Under the 3× load above that difference stayed within 93-310 ms while the raw wall clock
+ * passed 950 ms — noisy, because parsing a bundle contends for CPU differently than spawning
+ * does, but no longer a lottery.
+ *
+ * The fast path costs nothing: a first sample already under budget returns immediately, which
+ * is every run on an idle machine. Only a miss pays for resampling and for measuring the floor.
+ *
+ * This is a guard-rail against a gross regression — a sleep, a retry loop, a directory walk —
+ * and not a stopwatch. It is *not* what stops a hook dialing the network: the tests that care
+ * assert `server.requests.length === 0`, which is exact and cannot be talked out of by a fast
+ * local socket.
+ *
+ * `resample` must run the hook in a *fresh* data dir; the correctness assertions have already
+ * been made against the first run and must not see a second one's writes.
+ *
+ * @param {string} label            e.g. 'capture --stop'
+ * @param {number} budgetMs         allowed cost above a bare `node` spawn
+ * @param {number} firstMs          the run the test already made
+ * @param {() => Promise<number>} resample
+ * @param {number} [extraSamples]
+ */
+export async function assertWithinBudget(label, budgetMs, firstMs, resample, extraSamples = 2) {
+  if (firstMs < budgetMs) return;
+  const samples = [firstMs];
+  for (let i = 0; i < extraSamples; i++) samples.push(await resample());
+
+  const best = Math.min(...samples);
+  const floor = bareSpawnMs();
+  const own = best - floor;
+  assert.ok(own < budgetMs,
+    `${label} cost ${own}ms above a bare node spawn; budget is ${budgetMs}ms. `
+    + `Best of ${samples.length} samples was ${best}ms (${samples.map((m) => `${m}ms`).join(', ')}) `
+    + `against a ${floor}ms spawn floor measured just now. Contention inflates both terms, so a `
+    + 'difference this large is the hook, not the runner.');
+}
+
+/**
+ * Top-level keys Claude Code accepts in hook stdout, and the events for which it accepts a
+ * `hookSpecificOutput` block at all.
+ *
+ * This mirrors an external contract — https://code.claude.com/docs/en/hooks — rather than
+ * anything this repo controls, so it can drift when the host changes. It is written down here
+ * because the alternative was worse: nothing in the suite knew what the host would accept, and
+ * `hooks/src/checkpoint.mjs` shipped a `hookSpecificOutput` for `PostCompact`, an event that
+ * takes universal fields only. The host answered every compaction with
+ * `Hook JSON output validation failed — (root): Invalid input`, and 765 green tests said
+ * nothing, because the test asserted the shape the hook emitted instead of the shape the host
+ * takes.
+ *
+ * Deliberately shallow: this checks that a block is *admissible for its event*, not each
+ * event's inner fields. The bug class worth catching is "this event has no such channel".
+ */
+const HOOK_STDOUT_KEYS = new Set([
+  'continue', 'suppressOutput', 'stopReason', 'decision', 'reason',
+  'systemMessage', 'terminalSequence', 'permissionDecision', 'hookSpecificOutput',
+]);
+
+/** Events that accept a `hookSpecificOutput` block. `PostCompact` is not one of them. */
+const HOOK_SPECIFIC_EVENTS = new Set([
+  'PreToolUse', 'UserPromptSubmit', 'PostToolUse', 'PostToolBatch',
+  'Stop', 'SubagentStop', 'SessionStart',
+]);
+
+/**
+ * Assert the universal hook contract: exit 0, stdout is either empty or parseable JSON, and
+ * what it parses to is a shape the host will actually accept. Every hook in this plugin
+ * satisfies this in every mode, including every failure mode (§4.9).
  * @param {HookResult} r
  */
 export function assertHookContract(r) {
   assert.equal(r.code, 0, `hook must exit 0, got ${r.code}. stderr:\n${r.stderr}`);
-  if (r.stdout.trim()) {
-    assert.notEqual(typeof r.json, 'string',
-      `stdout must be JSON, got:\n${r.stdout}`);
+  if (!r.stdout.trim()) return;
+  assert.notEqual(typeof r.json, 'string',
+    `stdout must be JSON, got:\n${r.stdout}`);
+  if (!r.json || typeof r.json !== 'object') return;
+
+  for (const key of Object.keys(r.json)) {
+    assert.ok(HOOK_STDOUT_KEYS.has(key),
+      `stdout carries \`${key}\`, which is not a key the host accepts; it rejects the whole `
+      + `object and reports the hook as failed. Got:\n${r.stdout}`);
+  }
+
+  const hso = r.json.hookSpecificOutput;
+  if (hso === undefined) return;
+  assert.ok(hso && typeof hso === 'object', '`hookSpecificOutput` must be an object');
+  assert.ok(HOOK_SPECIFIC_EVENTS.has(hso.hookEventName),
+    `\`hookSpecificOutput\` is not accepted for \`${hso.hookEventName}\` — that event takes the `
+    + 'universal fields only (`systemMessage` and friends). Emitting it fails the host\'s schema '
+    + 'validation, so the hook is reported broken and everything it wanted to say is dropped. '
+    + 'See https://code.claude.com/docs/en/hooks.');
+  if (hso.hookEventName === 'UserPromptSubmit') {
+    assert.equal(typeof hso.additionalContext, 'string',
+      'UserPromptSubmit requires `additionalContext` when it emits a `hookSpecificOutput`');
   }
 }
 

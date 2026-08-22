@@ -131,8 +131,8 @@ await runHook('checkpoint', {
 // ---------------------------------------------------------------------------
 
 /**
- * §5.6 steps 1-5. Returns the one `systemMessage` the user ever sees from this plugin, in
- * either its saved or its failed form.
+ * §5.6 steps 1-5. Returns a `systemMessage` in either its saved or its failed form. It is the
+ * user's only notice that a checkpoint happened; `--post` names the same id again afterwards.
  *
  * @param {Record<string, any>} payload
  * @param {Record<string, any>} cfg
@@ -234,9 +234,16 @@ async function precompact(payload, cfg, ctx) {
 // ---------------------------------------------------------------------------
 
 /**
- * §5.6: re-anchor the freshly compacted session to the id `--pre` stored. Reads one file and
+ * §5.6: name the id `--pre` stored, now that the session has been compacted. Reads one file and
  * dials nothing — 800 ms is not a network budget, and a PostCompact that waited on a socket
  * would be a stall on the first turn after every compaction.
+ *
+ * The anchor goes to the **user**, not the model, because the host gives this event no
+ * model-facing channel: `hookSpecificOutput.additionalContext` is accepted for `SessionStart`
+ * and `UserPromptSubmit` only, and PostCompact is documented as showing stderr to the user.
+ * Emitting it anyway is not ignored — it fails schema validation, so the hook is reported as
+ * broken on every single compaction and the anchor is lost with it. This returns the same
+ * universal `systemMessage` `--pre` uses, which is the widest channel the event actually has.
  *
  * @param {Record<string, any>} payload
  * @param {Record<string, any>} cfg
@@ -261,14 +268,7 @@ function postcompact(payload, cfg) {
     return SUPPRESS;
   }
 
-  return {
-    hookSpecificOutput: {
-      hookEventName: 'PostCompact',
-      additionalContext:
-        `Mubit checkpoint ${clamp(checkpointId, MAX_ID_CHARS)} holds the pre-compaction context `
-        + `for run ${runId}. Ask /mubit-memory:recall if you need detail that was compacted away.`,
-    },
-  };
+  return { systemMessage: anchorMessage(checkpointId, runId) };
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +598,22 @@ function failedMessage(state) {
 function savedMessage(id, tokens) {
   const size = tokens > 0 ? ` (${formatTokens(tokens)})` : '';
   return `mubit: checkpoint ${clamp(id, MAX_ID_CHARS)} saved${size} before compaction`;
+}
+
+/**
+ * §5.6 after the compaction: `mubit: checkpoint ckpt_01HZ… holds the pre-compaction context for
+ * run cc-…; /mubit-memory:recall retrieves detail that was compacted away`.
+ *
+ * Addressed to the person reading the terminal, because that is who receives it. The two ids
+ * are what make the anchor actionable — the checkpoint id to ask for, the run it belongs to —
+ * so neither is elided.
+ * @param {string} id
+ * @param {string} runId
+ * @returns {string}
+ */
+function anchorMessage(id, runId) {
+  return `mubit: checkpoint ${clamp(id, MAX_ID_CHARS)} holds the pre-compaction context for run `
+    + `${runId}; /mubit-memory:recall retrieves detail that was compacted away`;
 }
 
 /** `3400` -> `3.4k tok`. @param {number} n @returns {string} */

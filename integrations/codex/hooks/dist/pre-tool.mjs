@@ -4,7 +4,7 @@ var major = parseInt(String(process.versions.node).split(".")[0], 10);
 if (!(major >= 20)) {
   try {
     writeSync(2, "mubit-memory requires Node >= 20 (package.json engines); found v" + process.versions.node + ". hook pre-tool is disabled for this session.\n");
-    writeSync(1, '{"suppressOutput":true}');
+    writeSync(1, "{}");
   } catch (e) {
   }
   process.exit(0);
@@ -13,7 +13,7 @@ globalThis.__mubitLauncherEntry = "./impl/pre-tool.mjs";
 import("./impl/pre-tool.mjs").catch(function(err) {
   try {
     writeSync(2, "mubit-memory: hook pre-tool failed to load: " + (err && err.message ? err.message : String(err)) + "\n");
-    writeSync(1, '{"suppressOutput":true}');
+    writeSync(1, "{}");
   } catch (e) {
   }
   process.exit(0);

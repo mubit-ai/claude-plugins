@@ -548,6 +548,64 @@ export function sessionEnd(over = {}) {
   };
 }
 
+/**
+ * The rollout line Codex writes when a tool call finishes — recorded verbatim from a live
+ * `codex exec` run, not invented.
+ *
+ * This is the only place the outcome of a shell call exists at `PostToolUse` time. The hook
+ * payload carries `tool_response` and nothing else, and for `Bash` that is just the aggregated
+ * output: a command exiting 9 with `out` on stdout sends `"out\n"`, byte-for-byte what the
+ * same command would have sent had it succeeded. No exit code, no status, and no `Exit code:`
+ * preamble — that preamble is an `apply_patch` shape, not a shell one. The transcript is where
+ * the host records what actually happened:
+ *
+ *     {"type":"event_msg","payload":{"type":"item_completed","item":{
+ *        "type":"CommandExecution","id":"<the payload's tool_use_id>",
+ *        "status":"failed","exit_code":9,"stdout":"out\n","aggregated_output":"out\n",
+ *        "duration":{"secs":0,"nanos":2375}}}}
+ *
+ * `item.id` is the `tool_use_id` the payload carries, which is what makes the two joinable.
+ *
+ * @param {{toolUseId: string, exitCode?: number, status?: string, secs?: number,
+ *          nanos?: number, command?: string[], stdout?: string, stderr?: string}} o
+ * @returns {string} one JSONL line, no trailing newline
+ */
+export function rolloutCommandCompleted(o) {
+  const stdout = o.stdout ?? '';
+  const exitCode = o.exitCode ?? 0;
+  return JSON.stringify({
+    timestamp: '2026-08-21T16:32:10.831Z',
+    ordinal: 13,
+    type: 'event_msg',
+    payload: {
+      type: 'item_completed',
+      thread_id: SESSION_ID,
+      turn_id: TURN_ID,
+      item: {
+        type: 'CommandExecution',
+        id: o.toolUseId,
+        process_id: '71027',
+        command: o.command ?? ['/bin/zsh', '-c', 'sh -c "echo out; exit 9"'],
+        cwd: 'file:///tmp/codex/proj',
+        parsed_cmd: [{ type: 'unknown', cmd: 'sh -c "echo out; exit 9"' }],
+        source: 'unified_exec_startup',
+        status: o.status ?? (exitCode === 0 ? 'completed' : 'failed'),
+        stdout,
+        stderr: o.stderr ?? '',
+        aggregated_output: stdout,
+        exit_code: exitCode,
+        duration: { secs: o.secs ?? 0, nanos: o.nanos ?? 2375 },
+        formatted_output: stdout,
+      },
+      started_at_ms: 1787329930831,
+      completed_at_ms: 1787329930831,
+    },
+  });
+}
+
+/** The `tool_use_id` the turn-scoped builders use, so a rollout line can be joined to them. */
+export const FIXTURE_TOOL_USE_ID = TOOL_USE_ID;
+
 /** Every builder, by event name — so a test can table-drive all eleven. */
 export const BUILDERS = Object.freeze({
   SessionStart: sessionStart,

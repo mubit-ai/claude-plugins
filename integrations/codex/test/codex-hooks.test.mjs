@@ -112,13 +112,18 @@ test('UserPromptSubmit: prompt-recall injects under the right event name', async
     { env: env(dataDir, projectDir, server.url) });
 
   assertHookContract(r);
+  // § The recall hook is allowed to inject nothing — an empty memory is a real answer. But the
+  //   fake server above HAS memory to return, so on this path it must inject, and the check
+  //   below has to run. Guarding it with `if (hso)` made it vacuous: a hook that silently
+  //   stopped injecting altogether passed this test, which is the failure it exists to catch.
   const hso = r.json?.hookSpecificOutput;
-  if (hso) {
-    assert.equal(hso.hookEventName, 'UserPromptSubmit',
-      'the envelope must name the event Codex dispatched, not the one Claude Code would have.');
-  }
-  // § The recall hook is allowed to inject nothing — an empty memory is a real answer — but it
-  //   is never allowed to answer with something the host cannot parse.
+  assert.ok(hso,
+    'prompt-recall injected nothing against a server that returned memory. Either recall is '
+    + `broken or the fixture stopped returning evidence.\n  stdout: ${r.stdout}`);
+  assert.equal(hso.hookEventName, 'UserPromptSubmit',
+    'the envelope must name the event Codex dispatched, not the one Claude Code would have.');
+  assert.ok(typeof hso.additionalContext === 'string' && hso.additionalContext.trim(),
+    'the envelope is there and carries no context, which injects an empty block.');
   assert.equal(typeof r.json, 'object', 'stdout must be a JSON object on every path.');
 });
 
@@ -312,18 +317,27 @@ test('PostCompact answers without a hookSpecificOutput either', async (t) => {
 
 test('SubagentStart injects under its own event name', async (t) => {
   const { server, dataDir, projectDir } = await harness(t);
-  const r = await runHook('subagent-start', subagentStart(),
-    { env: env(dataDir, projectDir, server.url) });
+  const e = env(dataDir, projectDir, server.url);
+
+  // § The parent's turn, staged first. `subagent-start` reads it for the query — SubagentStart
+  //   carries no task text of its own — and returns early when it is absent. Without this the
+  //   hook injected nothing, the `if (hso)` below never ran, and the test passed while
+  //   asserting nothing at all.
+  await runHook('stage-prompt', userPromptSubmit(), { env: e });
+
+  const r = await runHook('subagent-start', subagentStart(), { env: e });
 
   assertHookContract(r);
   const hso = r.json?.hookSpecificOutput;
-  if (hso) {
-    // § A subagent sees neither the SessionStart steer nor per-turn recall, and under Codex it
-    //   does not see the MCP server's instructions either. This event is the only memory a
-    //   Codex subagent will ever be given.
-    assert.equal(hso.hookEventName, 'SubagentStart',
-      'the envelope must name SubagentStart; subagent-start.command.output validates it.');
-  }
+  assert.ok(hso,
+    'subagent-start injected nothing with a parent turn staged and a server holding memory. '
+    + 'This event is the only memory a Codex subagent will ever be given: it sees neither the '
+    + 'SessionStart steer nor per-turn recall, and under Codex not the MCP server`s '
+    + `instructions either.\n  stdout: ${r.stdout}`);
+  assert.equal(hso.hookEventName, 'SubagentStart',
+    'the envelope must name SubagentStart; subagent-start.command.output validates it.');
+  assert.ok(typeof hso.additionalContext === 'string' && hso.additionalContext.trim(),
+    'the envelope is there and carries no context.');
 });
 
 test('SubagentStop attributes the result to the subagent, not to the parent', async (t) => {

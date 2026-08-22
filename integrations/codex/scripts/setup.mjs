@@ -39,11 +39,13 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { claudeCodeDataDir } from '../lib/boot.mjs';
 
-const root = process.argv[2];
+// Resolved, because everything downstream compares against it: the merge decides which
+// handlers are ours by matching this prefix, and a relative `../codex` would match nothing.
+const root = process.argv[2] ? resolve(process.argv[2]) : process.argv[2];
 const withPreTool = process.argv.includes('--with-pre-tool');
 const noTrust = process.argv.includes('--no-trust');
 const dataArg = (process.argv.find((a) => a.startsWith('--data-dir=')) ?? '').slice('--data-dir='.length);
@@ -62,7 +64,7 @@ for (const need of ['hooks/dist/capture.mjs', 'mcp/dist/index.js', 'mcp/dist/ser
 }
 
 /**
- * `config.toml` with every `[hooks.state."…"]` table removed, body and all.
+ * `config.toml` with **the named** `[hooks.state."…"]` tables removed, bodies and all.
  *
  * Line-based rather than a TOML parse, because this file is the user's: it carries their
  * project trust levels, their model choice, their notify hook. Round-tripping it through a
@@ -72,14 +74,45 @@ for (const need of ['hooks/dist/capture.mjs', 'mcp/dist/index.js', 'mcp/dist/ser
  * A `[hooks.state]` table's body is a single `trusted_hash` line, so the state machine only
  * has to survive that and the blank lines between tables; anything else ends the skip.
  *
+ * ---------------------------------------------------------------------------
+ * Why it takes a set, and not simply "everything"
+ * ---------------------------------------------------------------------------
+ * It used to remove every `[hooks.state.*]` table and write ours back. Every *other* tool's
+ * hook trust went with them — and Codex skips an untrusted hook in silence, so the other tool
+ * simply stopped working on our re-run, with nothing anywhere saying why.
+ *
+ * The obvious fix — keep the tables whose key is not under this plugin root — cannot be
+ * written, because a trust key is `<sourcePath>:<event>:<group>:<index>` and carries no
+ * command. Ours and another vendor's handler in the same `$CODEX_HOME/hooks.json` have the
+ * same `sourcePath`, differing only in an index. The key alone cannot tell you whose it is.
+ *
+ * What can is `hooks/list`: the host reports every live handler with its key *and* its
+ * command, so the caller resolves ours there and passes the keys down. Two kinds go:
+ *
+ *   1. **Ours**, which are about to be written back with a current hash.
+ *   2. **Keys naming the file we rewrite that the host no longer lists at all** — provably
+ *      dead, since a key is a position and the host just enumerated every position in that
+ *      file. Without this, a reinstall at a new path leaves its old tables behind forever.
+ *
+ * Everything else is preserved byte-for-byte, including a live foreign handler's trust and
+ * any key belonging to another file entirely.
+ *
  * @param {string} text
+ * @param {(key: string) => boolean} shouldRemove
  * @returns {string}
  */
-function stripHookState(text) {
+function stripHookState(text, shouldRemove) {
   const out = [];
   let skipping = false;
   for (const line of text.split('\n')) {
-    if (/^\[hooks\.state\./.test(line)) { skipping = true; continue; }
+    if (/^\[hooks\.state[.[]/.test(line)) {
+      // A table header we cannot parse is one we do not own: keep it, and stop skipping so
+      // its body survives with it. Deleting what we failed to understand is how the last
+      // version of this function revoked other tools' trust.
+      const table = /^\[hooks\.state\."(.+)"\]\s*$/.exec(line);
+      skipping = !!table && shouldRemove(table[1]);
+      if (skipping) continue;
+    }
     if (skipping) {
       if (/^trusted_hash\s*=/.test(line)) continue;
       if (/^\s*$/.test(line)) continue;
@@ -122,7 +155,26 @@ if (existsSync(target)) {
   copyFileSync(target, `${target}.before-mubit`);
   console.log(`backed up ${target} -> ${target}.before-mubit`);
 }
-const isMubit = (h) => String(h?.command ?? '').includes('/hooks/dist/');
+/**
+ * Is this handler one of ours, and therefore ours to replace?
+ *
+ * It used to be `command.includes('/hooks/dist/')`, which is not a fact about this plugin at
+ * all — it is a fact about a directory layout, and a common one. Any other vendor who ships
+ * `<their-root>/hooks/dist/*.mjs` had their registration deleted from the user's own
+ * `hooks.json` the first time this script ran.
+ *
+ * Two things count as ours, and nothing else does:
+ *
+ *   1. A command under **this** install root.
+ *   2. A command carrying the `MUBIT_CC_DATA_DIR=` pin that this script itself writes — which
+ *      is what still recognises the registrations of a previous install at a *different* path,
+ *      so upgrading in place replaces them rather than stacking a second copy.
+ */
+const OUR_DIST = `${join(root, 'hooks', 'dist')}/`;
+const isMubit = (h) => {
+  const command = String(h?.command ?? '');
+  return command.includes(OUR_DIST) || command.startsWith('MUBIT_CC_DATA_DIR=');
+};
 // Codex runs a hook command as a shell string, so the pin rides in front of `node` — which is
 // also why it is quoted: a data directory with a space in it is otherwise two arguments.
 const sub = (s) => `MUBIT_CC_DATA_DIR=${JSON.stringify(dataDir)} ${s.split('{{PLUGIN_ROOT}}').join(root)}`;
@@ -176,8 +228,8 @@ setTimeout(() => send({ jsonrpc: '2.0', method: 'initialized', params: {} }), 50
 setTimeout(() => send({ jsonrpc: '2.0', id: 2, method: 'hooks/list', params: {} }), 900);
 setTimeout(() => {
   child.kill();
-  const hooks = (msgs.find((m) => m.id === 2)?.result?.data?.[0]?.hooks ?? [])
-    .filter((h) => String(h.command ?? '').includes(join(root, 'hooks', 'dist')));
+  const listed = msgs.find((m) => m.id === 2)?.result?.data?.[0]?.hooks ?? [];
+  const hooks = listed.filter((h) => isMubit(h));
   if (!hooks.length) {
     console.error('\nno Mubit hooks found by `hooks/list` — nothing trusted. Check the merge above.');
     process.exit(1);
@@ -195,18 +247,48 @@ setTimeout(() => {
   // stops parsing and Codex refuses to start at all: "failed to load bootstrap configuration".
   //
   // Not hypothetical. This is what the first version of this script did on its second run.
-  const kept = stripHookState(before);
-  let toml = '\n# Mubit Memory — hook trust, rewritten in full by scripts/setup.mjs.\n';
-  toml += '# Every [hooks.state] table below is regenerated on each run; edits here are lost.\n';
-  for (const h of hooks) toml += `[hooks.state."${h.key}"]\ntrusted_hash = "${h.currentHash}"\n`;
-  writeFileSync(cfg, `${kept}${toml}`);
+  //
+  // Replace **ours**, though, and not the file's. `hooks/list` has just enumerated every live
+  // handler in every source file, so the two removable classes can be named exactly: the keys
+  // we are about to rewrite, and keys naming a file we rewrite that the host no longer lists
+  // at all. Another tool's trust entry is neither, and survives untouched.
+  const ourKeys = new Set(hooks.map((h) => h.key));
+  const liveKeys = new Set(listed.map((h) => h.key));
+  const ourSources = new Set(hooks.map((h) => h.sourcePath).filter(Boolean));
+  const isStale = (key) => {
+    if (liveKeys.has(key)) return false;
+    // `<sourcePath>:<event>:<group>:<index>` — the path is everything before the last three.
+    const source = key.split(':').slice(0, -3).join(':');
+    return ourSources.has(source);
+  };
+  const preserved = [...(before.matchAll(/^\[hooks\.state\."(.+)"\]\s*$/gm))]
+    .map((m) => m[1]).filter((k) => !ourKeys.has(k) && !isStale(k));
 
-  const dupes = (`${kept}${toml}`.match(/^\[hooks\.state\./gm) ?? []).length;
-  if (dupes !== hooks.length) {
-    console.error(`\nrefusing to leave ${dupes} trust tables for ${hooks.length} hooks — restoring.`);
+  const kept = stripHookState(before, (key) => ourKeys.has(key) || isStale(key));
+  let toml = '\n# Mubit Memory — hook trust, rewritten in full by scripts/setup.mjs.\n';
+  toml += '# Only the [hooks.state] tables below are ours; any other tool`s are left alone.\n';
+  for (const h of hooks) toml += `[hooks.state."${h.key}"]\ntrusted_hash = "${h.currentHash}"\n`;
+  const after = `${kept}${toml}`;
+  writeFileSync(cfg, after);
+
+  // The self-check. It used to be a bare count against `hooks.length`, which cannot survive
+  // preserving a foreign entry — and, worse, could only ever have passed by deleting one.
+  // What actually has to hold is: no key twice (TOML would refuse the file), every key of ours
+  // present, and nothing preserved that went missing.
+  const finalKeys = [...after.matchAll(/^\[hooks\.state\."(.+)"\]\s*$/gm)].map((m) => m[1]);
+  const dupes = finalKeys.filter((k, i) => finalKeys.indexOf(k) !== i);
+  const missing = [...ourKeys].filter((k) => !finalKeys.includes(k));
+  const lost = preserved.filter((k) => !finalKeys.includes(k));
+  if (dupes.length || missing.length || lost.length) {
+    console.error('\nrefusing to leave config.toml in this state — restoring:');
+    if (dupes.length) console.error(`  defined twice: ${dupes.join(', ')}`);
+    if (missing.length) console.error(`  ours, not written: ${missing.join(', ')}`);
+    if (lost.length) console.error(`  another tool's, dropped: ${lost.join(', ')}`);
     writeFileSync(cfg, before);
     process.exit(1);
   }
-  console.log(`\nrecorded ${hooks.length}. Start a NEW Codex session — hooks and MCP servers are read at session start.`);
+  console.log(`\nrecorded ${hooks.length}.${preserved.length ? ` Left ${preserved.length} other trust entr`
+    + `${preserved.length === 1 ? 'y' : 'ies'} alone.` : ''}`
+    + ' Start a NEW Codex session — hooks and MCP servers are read at session start.');
   process.exit(0);
 }, 3000);

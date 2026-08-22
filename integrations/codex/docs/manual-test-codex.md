@@ -417,3 +417,102 @@ never had a chance to be otherwise: `CODEX_HOME` was redirected in §1 before an
 - **A real Mubit.** Everything above is against a loopback fake. Point `MUBIT_ENDPOINT` at
   `https://api.mubit.ai` with a real key and the same assertions hold, minus the request log —
   use `mubit-memory:doctor` and `mubit-inspect` instead.
+
+---
+
+# Re-run — 2026-08-21, `codex-cli 0.149.0`
+
+Executed after the `suppressOutput` fixes, and structured around the one thing the earlier
+probe got wrong: **it concluded from a quiet stderr.** Codex does not report a rejected hook
+on stderr. It marks the hook failed in the session, which is where the user saw
+`• PostToolUse hook (failed)` twice per tool call while `npm test` reported 251/251.
+
+So this run reads the **hook status out of the session** — the `codex exec --json` event
+stream and the rollout transcript — and treats stderr as worth nothing either way.
+
+## The shape of the run
+
+`test/helpers/` supplies the fake Mubit, so the runbook's hand-rolled server is replaced by
+`fakeMubit()` from the suite. Otherwise it is the procedure above: an isolated `CODEX_HOME`, a
+throwaway data directory pinned with `--data-dir`, `scripts/setup.mjs` run **for real** (not
+simulated), and one turn that makes both a successful and a failing shell call.
+
+```
+codex exec --json --skip-git-repo-check -C $PROJ \
+  'Read README.md with the shell tool, then run `ls /nope-not-here` once (do not retry),
+   then reply with one short sentence.'
+```
+
+> **Use `spawn`, not `spawnSync`, if you drive this from node.** `spawnSync` blocks the event
+> loop of the process hosting the loopback server, so the fake Mubit cannot answer a single
+> request while codex runs — and every hook then records `not_responding` against a server that
+> is perfectly healthy. The first attempt at this re-run reported exactly that, and it was an
+> artefact of the harness, not a finding about the plugin.
+
+## What happened
+
+`scripts/setup.mjs` exited 0, merged 11 handlers across 10 events (`PreToolUse` omitted, as
+designed), registered the MCP server with the `--env MUBIT_CC_DATA_DIR` pin, and recorded trust
+for all 11 — each command carrying the quoted pin in front of `node`.
+
+**Hook status: clean.** Zero occurrences of the string `hook` in the `codex exec --json` event
+stream, and zero in the 28-line rollout transcript. No `hook (failed)`, no
+`returned unsupported`, nothing marked in the session at all.
+
+```
+=== hook mentions in the exec stream ===
+=== rollout files: 1 ===
+  rollout-2026-08-21T19-58-09-….jsonl  28 lines
+```
+
+**The status marker, at the end of the session:**
+
+```json
+{"state":"ready","recall":{"sources":3,"tokens":51,"ms":39,"rung":1,"dry_streak":0},
+ "captured":{"ingested":3},"lessons":{"global":1,"injected_ids":["les_g1"]}}
+```
+
+**`$MUBIT_CC_DATA_DIR/logs/mubit-cc.log` was empty** — not one warning on any hook path.
+
+**Every route the plugin uses was exercised, once each:**
+
+```
+GET  /v2/core/health              1
+POST /v2/control/agents/register  1
+POST /v2/control/lessons          1
+POST /v2/control/query            1
+POST /v2/control/ingest           1
+POST /v2/control/outcome          1
+POST /v2/control/reflect          1
+POST /v2/control/agents/heartbeat 1
+```
+
+## The three items it stored, and why they are the point
+
+```
+cc-exec-11ec877f…  "Bash(command=sed -n '1,240p' README.md) -> hello live repo\n"
+cc-exec-3c0c2fe5…  "Bash(command=ls /nope-not-here) FAILED: ls: /nope-not-here: No such file or directory\n"
+cc-stop-01a025b0…  "Q: Read README.md with the shell tool, … turn_number:1, model:gpt-5.6-sol"
+```
+
+The middle one is the whole of Tier 2 in one line. Before this branch **every** tool call on
+this host was stored `outcome: 'ok'`, because Codex has no `PostToolUseFailure` and nothing
+else in the payload says a command failed — `tool_response` for that call is
+`"ls: /nope-not-here: No such file or directory\n"`, which is exactly the shape a *successful*
+command's output takes. The failure is recovered from the rollout transcript, under the same
+`tool_use_id`, and it survives to the server: `mubit_diagnose` now has something to match.
+
+The `Stop` item carries `turn_number: 1` (Codex sends no `turn_number` on any event; it is
+staged at `UserPromptSubmit`) and `model: "gpt-5.6-sol"` (required on ten of the eleven events,
+and recorded nowhere until now).
+
+The `flushed-<session>.marker` exists, and it was written **after** the drain, the outcome
+flush and the reflect — not before them, which is what used to mark a killed session flushed
+with none of its work done.
+
+## Still not covered
+
+Unchanged from the list above: `PreCompact`/`PostCompact` and a real `PermissionRequest`
+denial have still never been observed on a live host. A subagent fan-out has not been observed
+either — `agent_transcript_path` pairing is asserted against a rollout built from the recorded
+envelope, not against a live subagent.

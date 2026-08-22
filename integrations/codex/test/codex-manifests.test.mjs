@@ -437,55 +437,59 @@ test('the setup script exists, and the setup skill points at it', () => {
     + 'themselves in /hooks. Trust is their decision.');
 });
 
-test('the setup script pins the data directory rather than leaving it to be searched for', () => {
+test('the setup script does not reserialise the user`s config.toml', () => {
   const src = readOrFail(join(CODEX_ROOT, 'scripts', 'setup.mjs'), 'the setup script.');
-  // § Claude Code names its data directory with a suffix — `mubit-memory-<marketplace>`,
-  //   `mubit-memory-inline` — so the bare default is only one of several. `lib/boot.mjs` can
-  //   find the right one at runtime, but a search is a guess, and install time is the one
-  //   moment the answer can be resolved once and written down. Getting it wrong costs the user
-  //   their credentials and every memory the other harness holds, with nothing reporting it.
-  assert.match(src, /MUBIT_CC_DATA_DIR=/,
-    'setup must pin MUBIT_CC_DATA_DIR into the registrations it writes. It outranks every '
-    + 'other data-dir input on both hosts, so nothing downstream has to guess.');
-  assert.match(src, /'--env'/,
-    'the MCP server needs the pin too: it derives the run id itself, so a server reading a '
-    + 'different data directory writes /mubit-memory:remember into a run recall never reads.');
-  assert.match(src, /--data-dir=/,
-    'there must be an override. The search is a good guess and it is still a guess.');
-});
-
-test('the setup script rewrites the trust tables rather than appending them', () => {
-  const src = readOrFail(join(CODEX_ROOT, 'scripts', 'setup.mjs'), 'the setup script.');
-  // § This one was live and destructive, so it gets a test rather than a comment.
+  // § Almost everything this script does is now asserted by *running* it, in
+  //   `codex-setup.test.mjs`: the merge, the pin, the trust rewrite, idempotency over three
+  //   runs, restore-on-mismatch. What used to stand here were five `assert.match(src, /…/)`
+  //   greps over 212 lines, which prove the file contains a string — not that running it does
+  //   anything in particular, and not that it leaves another tool's config intact.
   //
-  //   A hook's trust key is `<sourcePath>:<event>:<group>:<index>` and does NOT change when
-  //   its command does. So re-running setup after any edit — a plugin upgrade, a changed data
-  //   directory — produced a second `[hooks.state."<same key>"]` table. TOML forbids
-  //   redefining a table, so `config.toml` stopped parsing and Codex refused to start at all:
-  //   "failed to load bootstrap configuration ... duplicate key". Not the plugin degrading —
-  //   the whole CLI down, over a file the plugin appended to.
-  assert.match(src, /function stripHookState/,
-    'setup must strip the existing [hooks.state] tables before writing its own. Appending a '
-    + 'second table for the same key is a TOML duplicate-key error that stops Codex starting.');
-  assert.match(src, /refusing to leave/,
-    'and it must verify the count afterwards and restore the backup if it does not match — a '
-    + 'config.toml this script has broken is not something to discover at the next session.');
-  // The strip has to be line-based: config.toml is the user's, carrying their project trust
-  // levels and their notify hook. A parse-and-reserialise would reformat all of it.
-  assert.ok(!/TOML\.parse|parseToml/i.test(src),
-    'the strip must be line-based. Round-tripping the user`s config.toml through a serialiser '
-    + 'to rewrite eleven tables would reformat every setting they own.');
+  //   This is the one constraint left that is about the *approach* rather than the outcome,
+  //   so it stays a source assertion: config.toml is the user's, carrying their project trust
+  //   levels, their model choice and their notify hook, and round-tripping it through a parser
+  //   and a serialiser to rewrite eleven tables would reformat every setting they own.
+  assert.ok(!/TOML\.parse|parseToml|@iarna|smol-toml/i.test(src),
+    'the [hooks.state] strip must stay line-based.');
+  assert.deepEqual(
+    JSON.parse(readOrFail(join(CODEX_ROOT, 'package.json'), 'the package manifest.')).dependencies, {},
+    'and the plugin stays dependency-free, which is the other half of the same promise.');
 });
 
-test('the setup script never trusts a hook that is not this plugin`s', () => {
-  const src = readOrFail(join(CODEX_ROOT, 'scripts', 'setup.mjs'), 'the setup script.');
-  // § `hooks/list` returns every hook Codex can see, including other tools'. Writing the whole
-  //   result into config.toml would silently approve someone else's hook on the user's behalf
-  //   — which is precisely the control the trust mechanism exists to be.
-  assert.match(src, /\.filter\(/,
-    'the hooks/list result must be filtered before anything is written to config.toml.');
-  assert.match(src, /before-mubit/,
-    'the script must back up hooks.json and config.toml before it edits them.');
+test('the published package carries the install procedure it documents', () => {
+  const pkg = JSON.parse(readOrFail(join(CODEX_ROOT, 'package.json'), 'the package manifest.'));
+  // § The setup skill's central instruction is `node <root>/scripts/setup.mjs`, and that file
+  //   imports `../lib/boot.mjs`. An `npm publish` with neither in `files` ships a plugin whose
+  //   only install procedure is absent — and it fails on someone else's machine, with a
+  //   MODULE_NOT_FOUND naming a path that was never in the tarball.
+  for (const dir of ['scripts', 'lib']) {
+    assert.ok(pkg.files.includes(dir),
+      `package.json "files" omits ${dir}/, which the setup skill cannot work without.`);
+  }
+  assert.ok(existsSync(join(CODEX_ROOT, 'scripts', 'setup.mjs')));
+  assert.ok(existsSync(join(CODEX_ROOT, 'lib', 'boot.mjs')));
+});
+
+test('the setup skill`s by-hand fallback pins the data directory too', () => {
+  const skill = readOrFail(join(P.skills, 'setup', 'SKILL.md'), 'the setup skill.');
+  // § The skill offers a fallback for "an older install" where scripts/setup.mjs is missing.
+  //   It used to show `codex mcp add mubit -- node …` and call the result "identical" to the
+  //   script's — which passes `--env MUBIT_CC_DATA_DIR=…`. It is not identical, and the MCP
+  //   bundle gets no boot.mjs, so nothing else supplies the pin: the server derives its own run
+  //   id and writes /mubit-memory:remember into a run recall never reads, or fails auth outright
+  //   on a machine whose credentials live in the directory it did not look in.
+  const mcpAdd = /codex mcp add mubit[\s\S]{0,400}?```/.exec(skill);
+  assert.ok(mcpAdd, 'the skill no longer shows a `codex mcp add mubit` command at all.');
+  assert.match(mcpAdd[0], /--env/,
+    'the documented `codex mcp add` has no --env, so a reader following the fallback registers '
+    + `a server pointed at the wrong data directory:\n${mcpAdd[0]}`);
+  assert.match(mcpAdd[0], /MUBIT_CC_DATA_DIR/, 'the --env must name MUBIT_CC_DATA_DIR.');
+
+  assert.doesNotMatch(skill, /the results are identical/,
+    'the skill claimed the by-hand path and the script produce identical results. They do not, '
+    + 'and that sentence is what stops a reader noticing the missing pin.');
+  assert.match(skill, /MUBIT_CC_DATA_DIR/,
+    'the hook registrations the fallback describes need the pin as well.');
 });
 
 test('.gitignore re-includes the committed artifact directories', () => {

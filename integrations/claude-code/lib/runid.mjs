@@ -49,7 +49,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
-import { dataDir, readJson, writeJsonAtomic } from './state.mjs';
+import { dataDir, readJson, runDir, safeSegment, writeJsonAtomic } from './state.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -386,6 +386,40 @@ export function turnKey(payload) {
   if (prompt) return prompt;
   const turn = typeof payload.turn_id === 'string' ? payload.turn_id.trim() : '';
   return turn;
+}
+
+/**
+ * The turn's ordinal within its run: 1 for the first turn, 2 for the second.
+ *
+ * **Two sources, in this order.** `payload.turn_number` when the host sends one — Claude Code
+ * does, and nothing about that path changes. Otherwise the ordinal `stage-prompt` stamped into
+ * `runs/<run_id>/turns/<prompt_id>.json` when the turn was first seen.
+ *
+ * The fallback exists because `turn_number` is in none of Codex's eleven input schemas. Every
+ * item that host ever stored recorded `turn_number: 0`, so the order of turns within a run was
+ * not merely approximate, it was absent — and `0` is indistinguishable from "the host said
+ * zero", which is the shape of the bug rather than a gap in it.
+ *
+ * `0` still comes back when neither source has an answer, which is what a caller reading a
+ * payload from before any of this was staged will see.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {Record<string, any>} payload
+ * @returns {number}
+ */
+export function turnNumber(cfg, runId, payload) {
+  const direct = Number(payload?.turn_number);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  try {
+    const id = safeSegment(turnKey(payload));
+    if (!id) return 0;
+    const staged = readJson(join(runDir(cfg, runId), 'turns', `${id}.json`), null);
+    const n = Number(staged?.turn_number);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
 }
 
 // ---------------------------------------------------------------------------

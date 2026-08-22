@@ -137,10 +137,34 @@ test -f $PROBE/out/hooks.jsonl && wc -l $PROBE/out/hooks.jsonl || echo "NOT WRIT
 
 **Expect** `NOT WRITTEN`.
 
-That is answer 1. The bundled `plugin-creator` reference is right that plugin manifests should
-not carry `hooks`, and its own field guide (which documents `hooks` as a manifest path, and says
-`hooks` is "supplemented on top of default component discovery") is wrong about this build.
-`hooks.json` in a plugin is inert.
+That is answer 1, **and it is wrong as a generalisation.** See the correction below before
+building anything on it.
+
+### Correction — plugin hooks are not inert; this probe tested the one layout that fails
+
+Re-tested on 0.149.0 by installing three plugins into one throwaway `CODEX_HOME`, each
+differing only in where its hook manifest sits, and asking `codex app-server` for `hooks/list`:
+
+| layout | discovered? |
+| --- | --- |
+| bare `hooks.json` at the plugin root, manifest silent about it | **no** |
+| `hooks/hooks.json` | **yes** — `source: "plugin"`, `pluginId: "<name>@<marketplace>"` |
+| root `hooks.json` plus `"hooks": "./hooks.json"` in `plugin.json` | **yes** |
+
+The first row is what §3 above tested, and the conclusion drawn from it — "`hooks.json` in a
+plugin is inert" — is the premise under `scripts/setup.mjs`, the `{{PLUGIN_ROOT}}` templating
+and the `config.toml` trust write. It holds only for a manifest that does not declare its
+hooks and does not put them where the default discovery looks. The bundled `plugin-creator`
+field guide, which §3 calls wrong about this build, is right.
+
+`test/codex-oracle.test.mjs` pins all three rows, so this cannot quietly drift back.
+
+**Not acted on here.** Moving this plugin to a declared manifest would delete the user-layer
+merge and two of the install defects with it, and that is a change of its own. One fact is
+still missing before anyone makes it: whether `PLUGIN_ROOT` / `PLUGIN_DATA` actually reach a
+plugin-*sourced* hook process. §4 below concluded they never do, but it reached that conclusion
+without ever getting a plugin hook to load — the same shape of error as this one — so it needs
+a live turn against a plugin whose hooks are discovered.
 
 ---
 

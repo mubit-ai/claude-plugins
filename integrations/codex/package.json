@@ -13,8 +13,9 @@
     "lint": "node --check hooks/src/*.mjs lib/*.mjs bin/*.mjs",
     "version:check": "node ../claude-code/scripts/set-version.mjs --check"
   },
+  "_files": "scripts/ and lib/ are load-bearing, not tooling: the setup skill's central instruction is `node <root>/scripts/setup.mjs`, and that file imports ../lib/boot.mjs. Publishing without them ships a plugin whose only install procedure is absent.",
   "files": [".codex-plugin", "hooks.json", "hooks/dist", "mcp/dist", "skills",
-            "bin", ".mcp.json", "README.md", "LICENSE"],
+            "scripts", "lib", "bin", ".mcp.json", "README.md", "LICENSE"],
   "dependencies": {},
   "devDependencies": { "esbuild": "^0.28.0" }
 }

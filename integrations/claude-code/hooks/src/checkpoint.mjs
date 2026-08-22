@@ -80,7 +80,7 @@ import { runHook } from '../../lib/hook.mjs';
 import { postCheckpoint } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir, turnNumber } from '../../lib/runid.mjs';
 import { clearSeen } from '../../lib/seen.mjs';
 import { appendItem } from '../../lib/spool.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
@@ -230,7 +230,8 @@ async function precompact(payload, cfg, ctx) {
     context_snapshot: snap.text,
     metadata_json: safeJson({
       session_id: str(payload.session_id),
-      turn_number: finiteOr(payload.turn_number, 0),
+      // Codex sends no `turn_number`; the staged turn file is where it comes from there.
+      turn_number: attempt(() => turnNumber(cfg, runId, payload), 0),
       source: 'PreCompact',
       trigger: str(payload.trigger),
       label,
@@ -599,7 +600,7 @@ function messageText(content, depth = 0) {
  * @param {string} label
  */
 function spoolSummary(cfg, runId, payload, snap, label) {
-  const turn = finiteOr(payload.turn_number, 0);
+  const turn = attempt(() => turnNumber(cfg, runId, payload), 0);
   const head = `PreCompact checkpoint ${label}`
     + `${turn ? ` at turn ${turn}` : ''} (${snap.messages} message${snap.messages === 1 ? '' : 's'}, `
     + `${snap.bytes} bytes). Transcript tail before compaction:`;

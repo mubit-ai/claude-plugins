@@ -11,12 +11,19 @@ runs installers is a trust failure.
 It does have more to do under Codex than under Claude Code, and the reason is worth stating
 before you start, because it decides the whole shape of the work:
 
-> **Codex does not read a plugin's `hooks.json`, and cannot resolve a plugin's `.mcp.json`
-> entry point.** A `hooks.json` bundled in a plugin is copied into the install cache and then
-> ignored — `hooks/list` reports every hook it *does* see as `source: "user"` with
-> `pluginId: null`. And a plugin-declared MCP server gets no path substitution of any kind:
-> `${CLAUDE_PLUGIN_ROOT}/x.mjs`, `./x.mjs` and `x.mjs` all fail to start, because a relative
-> path resolves against the *project* directory and there is no variable layer at all.
+> **Codex does not read the `hooks.json` this plugin ships, and cannot resolve a plugin's
+> `.mcp.json` entry point.** A bare `hooks.json` at a plugin's root is copied into the install
+> cache and then ignored — the manifest has to name it (`"hooks": "./hooks.json"`), or it has
+> to be at `hooks/hooks.json`, and this plugin's is neither. And a plugin-declared MCP server
+> gets no path substitution of any kind: `${CLAUDE_PLUGIN_ROOT}/x.mjs`, `./x.mjs` and `x.mjs`
+> all fail to start, because a relative path resolves against the *project* directory and
+> there is no variable layer at all.
+
+So the file this plugin ships is **data**, and this skill installs it into the user layer,
+where `hooks/list` reports it as `source: "user"` with `pluginId: null`. (A plugin whose
+manifest *did* declare its hooks is discovered and reported against its own `pluginId`;
+`test/codex-oracle.test.mjs` pins that, and changing this plugin to that shape is a change
+nobody has made yet. Until someone does, the procedure below is the one that works.)
 
 So the plugin ships both files as **templates** and this skill installs them into the user
 layer with the paths resolved. Skipping this step gives a plugin that installs perfectly, lists
@@ -52,17 +59,48 @@ user's decision, not yours. Pass `--no-trust` to do everything except that, and
 overwrites, backs up both files it touches, and trusts only hooks under this plugin root.
 
 What follows is what it does, and what to tell the user about each part. If the script is
-missing — an older install — do it by hand as described; the results are identical.
+missing — an older install — do it by hand as described. It is the same install, with one
+thing that is easy to leave out and has no fallback: **the `MUBIT_CC_DATA_DIR` pin in step
+0a**, which both later steps carry. The MCP bundle gets no `boot.mjs`, so if you omit it there
+is nothing downstream to recover it from.
+
+## Step 0a — resolve the data directory, and pin it
+
+Both halves below need one answer: which directory holds this user's Mubit state. Get it wrong
+and `/mubit-memory:remember` writes into a run that recall never reads, or fails auth on a
+machine that is already authenticated.
+
+It is **not** reliably `~/.claude/plugins/data/mubit-memory`. Claude Code suffixes that name
+with the marketplace it installed from — `mubit-memory-<marketplace>`, or `-inline` for
+`--plugin-dir` — so the bare name is only one of several. Look:
+
+```bash
+ls -d ~/.claude/plugins/data/mubit-memory*
+```
+
+Prefer the one holding `credentials.json`: that is the user's existing Claude Code memory, and
+sharing it is the point — a Codex session and a Claude Code session in one project derive the
+same run id on purpose. Tell the user which you chose. Every command below carries it as
+`MUBIT_CC_DATA_DIR`, which outranks every other input on both hosts.
 
 ## Step 1 — merge the hook registrations
 
-Read `<plugin-root>/hooks.json`, replace every `{{PLUGIN_ROOT}}` with the resolved path, and
-merge the result into `$CODEX_HOME/hooks.json` (`~/.codex/hooks.json` unless `CODEX_HOME` says
-otherwise).
+Read `<plugin-root>/hooks.json`, replace every `{{PLUGIN_ROOT}}` with the resolved path, prefix
+each command with the pin from step 0a, and merge the result into `$CODEX_HOME/hooks.json`
+(`~/.codex/hooks.json` unless `CODEX_HOME` says otherwise). A command ends up looking like:
+
+```
+MUBIT_CC_DATA_DIR="/Users/you/.claude/plugins/data/mubit-memory-mubit" node "<plugin-root>/hooks/dist/capture.mjs"
+```
+
+Codex runs a hook command as a shell string, which is what makes that prefix work — and why the
+path is quoted: a data directory with a space in it is otherwise two arguments.
 
 **Merge, do not overwrite.** That file is the user's, and other tools register there too.
 Read what is present, keep every entry that is not Mubit's, and replace only the handlers whose
-command names this plugin's `hooks/dist/`.
+command names **this plugin's own** `hooks/dist/` — the absolute path resolved in step 0, not
+the bare substring `/hooks/dist/`. Other vendors lay their bundles out the same way, and
+matching on the substring deletes their registrations from the user's file.
 
 Two things about that file that will bite otherwise:
 
@@ -80,8 +118,16 @@ turned the warnings on**, and say that you did.
 ## Step 2 — register the MCP server
 
 ```bash
-codex mcp add mubit -- node "<plugin-root>/mcp/dist/index.js"
+codex mcp add mubit \
+  --env MUBIT_CC_DATA_DIR="<data-dir from step 0a>" \
+  -- node "<plugin-root>/mcp/dist/index.js"
 ```
+
+`--env` is not optional. The server derives the run id itself, with the same strategy the hooks
+use, so a server reading a different data directory writes `/mubit-memory:remember` into a run
+that pre-prompt recall never reads — and on an authenticated machine it fails auth instead,
+because the credentials live in that directory too. Nothing else supplies it: unlike a hook,
+the MCP bundle has no `boot.mjs` to synthesise it.
 
 The server must be named `mubit`: the model sees each tool as `mcp__<server>__<tool>`, and
 every skill in this plugin names `mcp__mubit__…`. Confirm with `codex mcp list`.

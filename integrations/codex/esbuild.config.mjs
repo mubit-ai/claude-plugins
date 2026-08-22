@@ -47,6 +47,12 @@ try {
 }
 const { build, context } = esbuild;
 const has = (rel) => existsSync(resolve(ROOT, rel));
+
+// Where the build WRITES; inputs always come from `ROOT`. Same knob, same reason, as the
+// sibling's: the freshness gate rebuilds into a temp directory and compares byte-for-byte with
+// what is committed, because `npm test` runs `hooks/src` and Codex runs `hooks/dist`.
+const OUT = process.env.MUBIT_CC_BUILD_OUTDIR ? resolve(process.env.MUBIT_CC_BUILD_OUTDIR) : ROOT;
+const out = (rel) => resolve(OUT, rel);
 const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
 
 const shared = {
@@ -103,13 +109,30 @@ const MCP_VERSION = existsSync(resolve(SHARED, '..', 'mcp', 'package.json'))
 const MIN_NODE_MAJOR = 20;
 const LAUNCHER_TARGET = 'node12.20';   // >= 12.20, or esbuild rewrites import() into require()
 
+// `{}`, where the sibling's launcher writes `{"suppressOutput":true}`. This is the one place
+// the two guards differ, and it is a fact about Codex.
+//
+// Codex rejects `suppressOutput` at parse time on PreToolUse, PostToolUse and
+// PermissionRequest, and shows `• PostToolUse hook (failed)` in place of whatever the hook
+// said. Both branches below exist to put a diagnostic in front of the user, and both were
+// destroying it — on the two paths where a diagnostic is the only thing still working.
+//
+// It cannot be fixed downstream. The launcher writes this *before* `impl/` loads, so it never
+// reaches `lib/hook.mjs` and the `forHost()` filter never sees it. `{}` satisfies all ten
+// output schemas (not one has a required property) and breaks no rule in
+// `test/fixtures/codex-output-rules.json`.
+//
+// stdout stays JSON either way: Codex injects non-JSON stdout into the model's context as
+// developer context, so the diagnostic goes to stderr and stdout carries only this.
+const QUIET_OK = "'{}'";
+
 const launcher = (rel, what) => `import { writeSync } from 'fs';
 var major = parseInt(String(process.versions.node).split('.')[0], 10);
 if (!(major >= ${MIN_NODE_MAJOR})) {
   try {
     writeSync(2, 'mubit-memory requires Node >= ${MIN_NODE_MAJOR} (package.json engines); found v'
       + process.versions.node + '. ${what} is disabled for this session.\\n');
-    writeSync(1, '{"suppressOutput":true}');
+    writeSync(1, ${QUIET_OK});
   } catch (e) { /* a closed pipe is not worth failing a session over */ }
   // 0, never 1: Codex reads a non-zero exit as a hook error, and 2 as a block.
   process.exit(0);
@@ -119,7 +142,7 @@ import('${rel}').catch(function (err) {
   try {
     writeSync(2, 'mubit-memory: ${what} failed to load: '
       + ((err && err.message) ? err.message : String(err)) + '\\n');
-    writeSync(1, '{"suppressOutput":true}');
+    writeSync(1, ${QUIET_OK});
   } catch (e) { /* ditto */ }
   process.exit(0);
 });
@@ -127,7 +150,7 @@ import('${rel}').catch(function (err) {
 
 const launcherTarget = (contents, sourcefile, outfile) => ({
   stdin: { contents, sourcefile, loader: /** @type {const} */ ('js'), resolveDir: ROOT },
-  outfile,
+  outfile: out(outfile),
   bundle: false,              // the one dynamic import must stay a runtime import, not inlined
   platform: /** @type {const} */ ('node'),
   format: /** @type {const} */ ('esm'),
@@ -142,7 +165,7 @@ const targets = [
   // `capture.mjs`. Every hook silently becomes a dead path.
   {
     entryPoints: HOOKS.map((n) => `hooks/src/${n}.mjs`),
-    outdir: 'hooks/dist/impl', outbase: 'hooks/src',
+    outdir: out('hooks/dist/impl'), outbase: 'hooks/src',
     outExtension: { '.js': '.mjs' },
     ...shared,
   },
@@ -152,14 +175,14 @@ const targets = [
   // The auth binary. `/mubit-memory:auth` is the one skill that calls no MCP tool — it runs
   // this to obtain the credential every other tool needs — so a Codex plugin without it has
   // no first-run story at all.
-  { entryPoints: [resolve(SHARED, 'bin', 'auth.src.mjs')], outfile: 'bin/auth.mjs', ...shared },
+  { entryPoints: [resolve(SHARED, 'bin', 'auth.src.mjs')], outfile: out('bin/auth.mjs'), ...shared },
   // No status line target. Codex's status line is a declarative list of built-in item ids:
   // there is no command hook and nothing scriptable to render into, so `bin/statusline.mjs`
   // here would be dead weight in every marketplace bundle. `lib/config.mjs` defaults
   // `statusLine` to false under this host for the same reason.
   {
     entryPoints: [resolve(SHARED, 'mcp', 'src', 'launch.mjs')],
-    outfile: 'mcp/dist/index.js',
+    outfile: out('mcp/dist/index.js'),
     ...shared,
     external: ['./server.js'],
     define: { __MUBIT_MCP_VERSION__: JSON.stringify(MCP_VERSION) },
@@ -199,6 +222,6 @@ if (!existsSync(VENDORED_SERVER)) {
     + '  Build the sibling plugin first, or restore its committed mcp/dist/server.js.');
   process.exit(1);
 }
-mkdirSync(resolve(ROOT, 'mcp', 'dist'), { recursive: true });
-copyFileSync(VENDORED_SERVER, resolve(ROOT, 'mcp', 'dist', 'server.js'));
+mkdirSync(out('mcp/dist'), { recursive: true });
+copyFileSync(VENDORED_SERVER, out('mcp/dist/server.js'));
 console.log('[esbuild] copied mcp/dist/server.js from the shared plugin');

@@ -23,6 +23,12 @@
  * built-ins only, synchronous, and importable by absolute `file://` URL from a
  * detached child.
  *
+ * The `cc-` prefix is not a claim about the host. It reads as "Claude Code" for historical
+ * reasons and means "the run for this directory" — which is what lets a Codex session and a
+ * Claude Code session in the same directory be one run, and therefore one memory. Renaming it
+ * would strand every run already stored under it. The *agent role* is what distinguishes the
+ * two harnesses; see `AGENT_ROLES`.
+ *
  * `deriveRunId` is deliberately **not pure**: `SessionStart.source === "clear"`
  * has to remember how many times a session was cleared, so it persists
  * `clear_count` back to the session map on its way out.
@@ -43,7 +49,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
-import { dataDir, readJson, writeJsonAtomic } from './state.mjs';
+import { dataDir, readJson, runDir, safeSegment, writeJsonAtomic } from './state.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -76,8 +82,37 @@ const FORBIDDEN_RUN_IDS = new Set(['default', 'cc-', 'cc']);
  *
  * A role is what this value is for. The session is not lost: it is the run id, the session
  * map under `sessions/`, and the `session_id` the tool surface carries.
+ *
+ * ---------------------------------------------------------------------------
+ * Why there are two of them
+ * ---------------------------------------------------------------------------
+ * The Codex plugin shares this file, and a Codex session shares its **run** with a Claude
+ * Code session in the same directory — that is the whole point of the port. What it does not
+ * share is its identity, and by the same argument as above: a lesson that both harnesses
+ * reached independently is genuinely better attested than one either reached twice, and only
+ * a distinct role makes that visible to whatever is counting.
+ *
+ * The host is *declared*, never sniffed. A Codex session launched from a Claude Code terminal
+ * inherits `CLAUDECODE=1` and a dozen `CLAUDE_CODE_*` variables; a Codex session started from
+ * a plain shell has none of them. Detection gets both cases wrong in the direction that is
+ * hardest to notice. `integrations/codex/lib/boot.mjs` sets `MUBIT_CC_HOST=codex` before any
+ * of this loads, and it can do so unconditionally because that bundle exists nowhere else.
+ * @type {Readonly<Record<string, string>>}
  */
-const AGENT_ROLE = 'claude-code';
+const AGENT_ROLES = Object.freeze({ 'claude-code': 'claude-code', codex: 'codex' });
+const DEFAULT_AGENT_ROLE = 'claude-code';
+
+/**
+ * This process's agent role. Read per call rather than captured at module scope so a test can
+ * drive both hosts in one process; the lookup is a string compare against a two-entry table.
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {string}
+ */
+function agentRole(env = process.env) {
+  const host = typeof env?.MUBIT_CC_HOST === 'string' ? env.MUBIT_CC_HOST.trim().toLowerCase() : '';
+  return AGENT_ROLES[host] ?? DEFAULT_AGENT_ROLE;
+}
+
 /** `-sub-<agentShort>` for a subagent identity. */
 const AGENT_SHORT = 12;
 
@@ -322,6 +357,72 @@ function assertUsableRunId(id) {
 }
 
 // ---------------------------------------------------------------------------
+// turnKey
+// ---------------------------------------------------------------------------
+
+/**
+ * The id of the turn a payload belongs to — Claude Code's `prompt_id`, or Codex's `turn_id`.
+ *
+ * It names a file: `runs/<run_id>/turns/<turnKey>.json`, which `stage-prompt.mjs` writes,
+ * `prompt-recall.mjs` adds the recalled reference ids to, `capture --stop` pairs with the
+ * assistant's answer, `drain --with-outcome` posts the attribution from, and `session-end`
+ * sweeps whatever is left. **Six readers, one key.** A disagreement anywhere costs
+ * attribution silently: every turn is staged, none is ever found, recall keeps injecting and
+ * nothing is ever credited — with no error on any path, because "no staged turn" is a
+ * legitimate state that the code already handles gracefully.
+ *
+ * `prompt_id` wins when a payload carries both. It is what the stored turns on an existing
+ * install are named after, and switching keys mid-run would orphan every one of them.
+ *
+ * Returns `''` rather than throwing when there is no turn: `SessionStart` and `SessionEnd`
+ * genuinely have none, and every caller is on a hook's critical path.
+ *
+ * @param {Record<string, any>|null|undefined} payload
+ * @returns {string}
+ */
+export function turnKey(payload) {
+  if (!isObject(payload)) return '';
+  const prompt = typeof payload.prompt_id === 'string' ? payload.prompt_id.trim() : '';
+  if (prompt) return prompt;
+  const turn = typeof payload.turn_id === 'string' ? payload.turn_id.trim() : '';
+  return turn;
+}
+
+/**
+ * The turn's ordinal within its run: 1 for the first turn, 2 for the second.
+ *
+ * **Two sources, in this order.** `payload.turn_number` when the host sends one — Claude Code
+ * does, and nothing about that path changes. Otherwise the ordinal `stage-prompt` stamped into
+ * `runs/<run_id>/turns/<prompt_id>.json` when the turn was first seen.
+ *
+ * The fallback exists because `turn_number` is in none of Codex's eleven input schemas. Every
+ * item that host ever stored recorded `turn_number: 0`, so the order of turns within a run was
+ * not merely approximate, it was absent — and `0` is indistinguishable from "the host said
+ * zero", which is the shape of the bug rather than a gap in it.
+ *
+ * `0` still comes back when neither source has an answer, which is what a caller reading a
+ * payload from before any of this was staged will see.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {Record<string, any>} payload
+ * @returns {number}
+ */
+export function turnNumber(cfg, runId, payload) {
+  const direct = Number(payload?.turn_number);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  try {
+    const id = safeSegment(turnKey(payload));
+    if (!id) return 0;
+    const staged = readJson(join(runDir(cfg, runId), 'turns', `${id}.json`), null);
+    const n = Number(staged?.turn_number);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // deriveAgentId
 // ---------------------------------------------------------------------------
 
@@ -329,14 +430,15 @@ function assertUsableRunId(id) {
  * §4.3/§5.1: the stable role `claude-code`, plus `-sub-<agentShort>` when the payload
  * belongs to a subagent — two subagents working at the same time must never share an
  * identity, or their work cannot be told apart. That distinctness is the only thing this
- * value has to provide; see `AGENT_ROLE` for why the parent half is not per-session.
+ * value has to provide; see `AGENT_ROLES` for why the parent half is not per-session.
  * @param {Record<string, any>} [payload]
  * @returns {string}
  */
 export function deriveAgentId(payload = {}) {
   const p = isObject(payload) ? payload : {};
+  const role = agentRole();
   const sub = subagentShort(p);
-  return sub ? `${AGENT_ROLE}-sub-${sub}` : AGENT_ROLE;
+  return sub ? `${role}-sub-${sub}` : role;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,8 +498,14 @@ export function deriveSubRunId(runId, payload = {}) {
 function subagentShort(payload) {
   const raw = typeof payload.agent_id === 'string' ? payload.agent_id.trim() : '';
   // A payload echoing an already-derived agent id is not a subagent. The parent is now the
-  // bare role, so the equality case matters as much as the prefix one.
-  if (!raw || raw === AGENT_ROLE || raw.startsWith(`${AGENT_ROLE}-`)) return '';
+  // bare role, so the equality case matters as much as the prefix one — and the test is
+  // against EVERY known role, not just this process's. The two plugins share a data
+  // directory, so a record written by one host is read back by the other, and a `codex`
+  // agent id arriving at a Claude Code hook must not be mistaken for a subagent's.
+  if (!raw) return '';
+  for (const role of Object.values(AGENT_ROLES)) {
+    if (raw === role || raw.startsWith(`${role}-`)) return '';
+  }
   const short = raw
     .replace(/^(sub_?agent|subagent|sub|agent)[-_]/i, '')
     .toLowerCase()
@@ -495,7 +603,7 @@ function rememberRun(cfg, payload, sessionId, prev, next) {
     run_id: next.run_id,
     // The session's agent is the parent, even when a SubagentStop is what
     // happened to trigger this derivation.
-    agent_id: AGENT_ROLE,
+    agent_id: agentRole(),
     strategy: next.strategy,
     project_dir: dir,
     // Resolved here rather than left for a reader to work out: `sameProject` has to be able

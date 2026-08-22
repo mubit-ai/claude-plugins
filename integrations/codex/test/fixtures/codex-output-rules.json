@@ -1,0 +1,156 @@
+{
+  "_comment": [
+    "The semantic rules Codex applies to a hook's stdout AFTER its JSON Schema has accepted it.",
+    "",
+    "These are not in codex-hook-schemas/. The schemas are generated from the wire types and",
+    "are a strict SUPERSET of what the runtime accepts: `suppressOutput` is a declared property",
+    "of every single output schema, and is rejected at parse time on three events. One schema",
+    "comment says so outright -- 'we enforce that semantic rule during output parsing rather",
+    "than in the JSON schema'. A gate that validates only against the schemas therefore passes",
+    "on output the host will reject, which is exactly how `PostToolUse hook returned unsupported",
+    "suppressOutput` reached a user.",
+    "",
+    "`message` is the literal string Codex shows, so a failing assertion quotes what the user",
+    "would have seen rather than a paraphrase of it.",
+    "",
+    "One honest limit: `forbidden` is asserted on the PRESENCE of the key, not on its value. The",
+    "host may well accept `suppressOutput: false`; we did not test that, because the fix removes",
+    "the key outright and the distinction cannot change the implementation."
+  ],
+  "_provenance": {
+    "codex_version": "codex-cli 0.149.0",
+    "binary": "@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex",
+    "recipe": "strings -n 2 <binary> | perl -nle 'while (/((?:PreToolUse|PostToolUse|PermissionRequest|SessionStart|SessionEnd|UserPromptSubmit|SubagentStart|SubagentStop|Stop|PreCompact|PostCompact) hook (?:returned|denied) .*?)(?=(?:PreToolUse|PostToolUse|PermissionRequest|SessionStart|SessionEnd|UserPromptSubmit|SubagentStart|SubagentStop|Stop|PreCompact|PostCompact) hook |$)/g) { print $1 }' | sort -u",
+    "extracted": "2026-08-21",
+    "note": "`-n 2` and not `-n 8`: see docs/harness-probe.md, Appendix. The event name in the decision:block rule is interpolated at runtime, which is why it is filed under `*`.",
+    "recipe_note": "The previous recipe ended the match at [a-zA-Z:.,= ], which silently TRUNCATED every message containing a hyphen -- including `PreToolUse hook returned permissionDecision:deny without a non-empty permissionDecisionReason`, which lost everything from `non-` onwards. Widening the class is not the fix: these strings are packed contiguously in the binary with no separator, so a permissive class swallows the whole blob into one match. The terminator has to be the start of the NEXT message, which is what the lookahead does. Three extracted lines still carry trailing bytes from the string that follows them; the `message` fields below are those lines cleaned, so a check asserts each message is a PREFIX of some extracted line.",
+    "extracted_messages": 20,
+    "rule_count": 20,
+    "rule_count_named_events": 19
+  },
+  "rules": {
+    "*": [
+      {
+        "kind": "nonEmptyWhen",
+        "field": "reason",
+        "when": "decision",
+        "equals": "block",
+        "message": "<Event> hook returned decision:block without a non-empty reason"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "kind": "forbidden",
+        "field": "suppressOutput",
+        "message": "PreToolUse hook returned unsupported suppressOutput"
+      },
+      {
+        "kind": "forbidden",
+        "field": "stopReason",
+        "message": "PreToolUse hook returned unsupported stopReason"
+      },
+      {
+        "kind": "forbiddenValue",
+        "field": "continue",
+        "value": false,
+        "message": "PreToolUse hook returned unsupported continue:false"
+      },
+      {
+        "kind": "forbiddenValue",
+        "field": "decision",
+        "value": "approve",
+        "message": "PreToolUse hook returned unsupported decision:approve"
+      },
+      {
+        "kind": "forbiddenValue",
+        "field": "hookSpecificOutput.permissionDecision",
+        "value": "ask",
+        "message": "PreToolUse hook returned unsupported permissionDecision:ask"
+      },
+      {
+        "kind": "forbiddenValue",
+        "field": "hookSpecificOutput.permissionDecision",
+        "value": "allow",
+        "message": "PreToolUse hook returned unsupported permissionDecision:allow"
+      },
+      {
+        "kind": "requiresField",
+        "field": "reason",
+        "needs": "decision",
+        "message": "PreToolUse hook returned reason without decision"
+      },
+      {
+        "kind": "requiresField",
+        "field": "hookSpecificOutput.permissionDecisionReason",
+        "needs": "hookSpecificOutput.permissionDecision",
+        "message": "PreToolUse hook returned permissionDecisionReason without permissionDecision"
+      },
+      {
+        "kind": "requiresValue",
+        "field": "hookSpecificOutput.updatedInput",
+        "needs": "hookSpecificOutput.permissionDecision",
+        "value": "allow",
+        "message": "PreToolUse hook returned updatedInput without permissionDecision:allow"
+      },
+      {
+        "kind": "nonEmptyWhen",
+        "field": "hookSpecificOutput.permissionDecisionReason",
+        "when": "hookSpecificOutput.permissionDecision",
+        "equals": "deny",
+        "message": "PreToolUse hook returned permissionDecision:deny without a non-empty permissionDecisionReason"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "kind": "forbidden",
+        "field": "suppressOutput",
+        "message": "PostToolUse hook returned unsupported suppressOutput"
+      },
+      {
+        "kind": "forbidden",
+        "field": "hookSpecificOutput.updatedMCPToolOutput",
+        "message": "PostToolUse hook returned unsupported updatedMCPToolOutput"
+      },
+      {
+        "kind": "requiresField",
+        "field": "reason",
+        "needs": "decision",
+        "message": "PostToolUse hook returned reason without decision"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "kind": "forbidden",
+        "field": "suppressOutput",
+        "message": "PermissionRequest hook returned unsupported suppressOutput"
+      },
+      {
+        "kind": "forbidden",
+        "field": "stopReason",
+        "message": "PermissionRequest hook returned unsupported stopReason"
+      },
+      {
+        "kind": "forbiddenValue",
+        "field": "continue",
+        "value": false,
+        "message": "PermissionRequest hook returned unsupported continue:false"
+      },
+      {
+        "kind": "forbidden",
+        "field": "hookSpecificOutput.decision.updatedInput",
+        "message": "PermissionRequest hook returned unsupported updatedInput"
+      },
+      {
+        "kind": "forbidden",
+        "field": "hookSpecificOutput.decision.updatedPermissions",
+        "message": "PermissionRequest hook returned unsupported updatedPermissions"
+      },
+      {
+        "kind": "forbiddenValue",
+        "field": "hookSpecificOutput.decision.interrupt",
+        "value": true,
+        "message": "PermissionRequest hook returned unsupported interrupt:true"
+      }
+    ]
+  }
+}

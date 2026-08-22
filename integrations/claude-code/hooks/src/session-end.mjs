@@ -84,7 +84,7 @@ import { readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { readBreaker } from '../../lib/breaker.mjs';
-import { loadConfig } from '../../lib/config.mjs';
+import { host, loadConfig } from '../../lib/config.mjs';
 import { ROUTES, heartbeat, postIngest, postOutcome, request } from '../../lib/http.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
@@ -92,8 +92,8 @@ import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import {
-  acquireDrainLock, batchIdempotencyKey, claimOnce, commitBatch, readBatch, releaseDrainLock,
-  spoolStats,
+  acquireDrainLock, batchIdempotencyKey, claimHeld, claimOnce, commitBatch, readBatch,
+  releaseDrainLock, spoolStats,
 } from '../../lib/spool.mjs';
 import {
   pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
@@ -113,11 +113,28 @@ import {
  * unaffected — it binds the parent, and the parent is gone within milliseconds.
  */
 const DETACHED = process.env.MUBIT_CC_DETACHED === '1';
-const HARNESS_BUDGET_MS = DETACHED ? 58_000 : 7200;
-const BUDGET_MS = DETACHED ? 55_000 : 6800;
 
-/** §5.7 step 2: "until empty or 3500 ms elapse". */
-const DRAIN_MS = 3500;
+/**
+ * The inline ceiling is not the same number on both hosts.
+ *
+ * `hooks.json` asks for 8 s and Claude Code grants it. **Codex clamps SessionEnd to 3 s**
+ * whatever the manifest says — recorded in `docs/harness-probe.md` §4, and `codex-oracle`
+ * has the host itself reporting the timeout it will enforce. 6800 ms is 2.4x that, and the
+ * sub-budgets nested inside it are each larger than the whole clamp (`REFLECT_MS` alone is
+ * 4000), so the arithmetic that carves the deadline up hands the drain a window that has
+ * already expired and the process is killed mid-reflect with the captures still on disk.
+ *
+ * Scaled rather than disabled, and scaled around the drain: a lost reflect costs scope
+ * promotion, a lost drain costs the session. This binds only the `sessionEndDetach: false`
+ * path — the default hands the whole body to a detached child that no host ceiling reaches,
+ * which is precisely why it is the default on this host.
+ */
+const CODEX_INLINE = !DETACHED && host() === 'codex';
+const HARNESS_BUDGET_MS = DETACHED ? 58_000 : (CODEX_INLINE ? 2500 : 7200);
+const BUDGET_MS = DETACHED ? 55_000 : (CODEX_INLINE ? 2300 : 6800);
+
+/** §5.7 step 2: "until empty or 3500 ms elapse" — or as much of that as the clamp allows. */
+const DRAIN_MS = CODEX_INLINE ? 1100 : 3500;
 /**
  * §5.7 step 4: the reflect is LLM-backed, so it gets the largest single slice — and inside a
  * detached child that slice is what the extra headroom above is *for*. Measured against a
@@ -130,9 +147,9 @@ const DRAIN_MS = 3500;
  * server was still answering. It now dials wide enough that the LLM, not the client, decides
  * when to give up — which is also why this call opts out of the breaker (see the call site).
  */
-const REFLECT_MS = DETACHED ? 45_000 : 4000;
-const OUTCOME_MS = 1500;
-const HEARTBEAT_MS = 1000;
+const REFLECT_MS = DETACHED ? 45_000 : (CODEX_INLINE ? 700 : 4000);
+const OUTCOME_MS = CODEX_INLINE ? 400 : 1500;
+const HEARTBEAT_MS = CODEX_INLINE ? 300 : 1000;
 
 /** §5.7: bounds the reflection to the recent tail (`control.proto`). */
 const REFLECT_LAST_N = 200;
@@ -173,9 +190,18 @@ await runHook('session-end', {
       return SUPPRESS;
     }
 
-    // §5.7 step 1. `false` means another path already flushed this session.
+    // §5.7 step 1, split into two halves: the claim is READ here and RECORDED after the work
+    // it claims, at the end of this body.
+    //
+    // It used to be a single `claimOnce` on this line, which marked the session flushed before
+    // the drain, the outcome flush and the reflect had happened. Under Codex this hook is
+    // killed at a 3-second ceiling, so a session could be marked flushed with none of it done
+    // — and the marker is exactly what makes every later attempt stand down, so nothing ever
+    // retried. The user lost the captures *and* the reflect, which is the only path that
+    // promotes a lesson beyond its own run.
     const sessionId = safeSegment(payload?.session_id) || 'nosession';
-    if (!claimOnce(cfg, runId, `flushed-${sessionId}`)) {
+    const claim = `flushed-${sessionId}`;
+    if (claimHeld(cfg, runId, claim)) {
       log(cfg, 'debug', 'session-end: this session was already flushed; standing down',
         { run_id: runId, session_id: sessionId });
       return SUPPRESS;
@@ -233,6 +259,12 @@ await runHook('session-end', {
       reflect: { at: reflect.at, lessons_stored: reflect.lessons, status: reflect.status },
       ...(reflect.error ? { last_error: reflect.error.slice(0, 200) } : {}),
     });
+
+    // §5.7 step 1, second half. The work above is done, so record the claim that says so —
+    // and only now. A hook killed anywhere above this line leaves no marker, which is what
+    // lets the next SessionEnd, or a later drain, pick the session up instead of standing
+    // down in front of work that never happened.
+    claimOnce(cfg, runId, claim);
 
     // §7's TTL sweep runs only from here and from `drain.mjs` — never on a blocking hook's
     // critical path — and is itself gated to at most once an hour.

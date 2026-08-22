@@ -1,0 +1,9 @@
+node_modules
+
+# hooks/dist, mcp/dist and bin/ carry committed build artifacts on purpose: a Codex
+# marketplace install is a file copy, not a build, so whatever is committed is what runs.
+# The three negations below are what make that true — remove one and the plugin installs
+# with a manifest pointing at files that are not there.
+!hooks/dist/
+!mcp/dist/
+!bin/

@@ -28,12 +28,13 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { loadConfig } from '../../lib/config.mjs';
 import { runHook, spawnDetached } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
-import { deriveRunId } from '../../lib/runid.mjs';
+import { deriveRunId, turnKey } from '../../lib/runid.mjs';
 import { spoolStats } from '../../lib/spool.mjs';
 import {
   ensureDir, readJson, resolveDataDir, runDir, safeSegment, writeJsonAtomic,
@@ -93,7 +94,7 @@ await runHook('stage-prompt', {
  */
 function stageTurn(cfg, runId, payload) {
   try {
-    const promptId = safeSegment(payload?.prompt_id, MAX_ID);
+    const promptId = safeSegment(turnKey(payload), MAX_ID);
     if (!promptId) return false;
 
     // Both halves of this path are untrusted: the prompt id comes from the host, the run id
@@ -107,6 +108,16 @@ function stageTurn(cfg, runId, payload) {
     const prev = readJson(file, null);
     const base = isObject(prev) ? prev : {};
 
+    // The turn's ordinal within its run, derived here because this is where a turn is first
+    // seen and `turns/` is therefore the only thing that counts them.
+    //
+    // Claude Code sends `turn_number` on the payload and everything downstream still prefers
+    // it. **Codex sends it on none of its eleven events**, so every item it ever stored read
+    // `turn_number: 0` and the order of turns within a run could not be reconstructed at all.
+    //
+    // Kept when already present: `prompt-recall` may have created this file first (the same
+    // race `recalled` below is guarding), and re-staging a turn must not renumber it.
+
     const { text, truncated } = clampPrompt(payload?.prompt);
     /** @type {Record<string, any>} */
     const next = {
@@ -117,6 +128,9 @@ function stageTurn(cfg, runId, payload) {
       started_at: Number.isFinite(base.started_at) ? base.started_at : Date.now(),
       // The other half of the §5.3 race: never overwrite ids `prompt-recall` already staged.
       recalled: Array.isArray(base.recalled) ? base.recalled : [],
+      turn_number: Number.isFinite(base.turn_number) && base.turn_number > 0
+        ? base.turn_number
+        : ordinalFor(dir, !!prev),
     };
     if (truncated) next.prompt_truncated = true;
 
@@ -124,6 +138,30 @@ function stageTurn(cfg, runId, payload) {
   } catch (err) {
     log(cfg, 'warn', `stage-prompt: could not stage the turn (${messageOf(err)})`, { run_id: runId });
     return false;
+  }
+}
+
+/**
+ * How many turns this run has had, counting this one.
+ *
+ * One file per turn, so the directory is the count. `mine` says whether this turn's file is
+ * already among them — it is when `prompt-recall` won the race — so it is counted once either
+ * way.
+ *
+ * A TTL sweep that prunes old turn files restarts the numbering, which is the honest limit of
+ * deriving an ordinal from state rather than being handed one. It stays a correct *ordering*
+ * of what is still on disk, which is what the number is read for.
+ *
+ * @param {string} dir   `runs/<run_id>/turns`
+ * @param {boolean} mine is this turn's file already in it
+ * @returns {number} 1-based, and 1 on any error — a wrong ordinal beats a thrown hook
+ */
+function ordinalFor(dir, mine) {
+  try {
+    const n = readdirSync(dir).filter((f) => f.endsWith('.json')).length;
+    return Math.max(1, mine ? n : n + 1);
+  } catch {
+    return 1;
   }
 }
 

@@ -484,13 +484,24 @@ function envGlobs() {
 // ---------------------------------------------------------------------------
 
 /**
- * Our own MCP tools arrive under the plugin-qualified prefix. A bare
+ * Our own MCP tools arrive under a host-qualified prefix. A bare
  * `startsWith('mcp__')` test — or a substring test on `mubit` — silently
  * deletes every other MCP server's output from the user's memory, and nothing
  * surfaces the loss. Foreign MCP output is exactly the cross-tool memory this
  * plugin exists to keep.
+ *
+ * There are two prefixes because the two hosts qualify differently. Claude Code namespaces a
+ * plugin's server as `mcp__plugin_<plugin>_<server>__`; Codex uses `mcp__<server>__`, and the
+ * server is named `mubit` in both plugins' `.mcp.json`. Both are listed rather than detected,
+ * because the cost of getting it wrong is asymmetric: miss the right one and the plugin
+ * records its own recall output, recalls that, and records the recall.
+ *
+ * `mcp__mubit__` is exact enough to be safe on either host. It matches a server literally
+ * named `mubit`, which is this plugin's, and nothing else — a third party would have to name
+ * their server `mubit` to collide, and at that point the user has two Mubits.
+ * @type {readonly string[]}
  */
-const OWN_MCP_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
+const OWN_MCP_PREFIXES = Object.freeze(['mcp__plugin_mubit-memory_mubit__', 'mcp__mubit__']);
 
 /** Keys a tool_input may carry that name a file on disk. */
 const PATH_KEYS = ['file_path', 'filePath', 'path', 'notebook_path', 'notebookPath', 'target_file'];
@@ -534,8 +545,8 @@ export function isSelfReference(toolName, toolInput, cfg = {}) {
     const name = typeof toolName === 'string' ? toolName : '';
     const input = (toolInput && typeof toolInput === 'object') ? toolInput : {};
 
-    // 1. Our own MCP tools — and only ours.
-    if (name.startsWith(OWN_MCP_PREFIX)) return true;
+    // 1. Our own MCP tools — and only ours, under either host's qualification.
+    for (const prefix of OWN_MCP_PREFIXES) if (name.startsWith(prefix)) return true;
 
     const roots = selfRoots(cfg);
 

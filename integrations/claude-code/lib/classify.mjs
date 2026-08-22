@@ -43,6 +43,11 @@ const CONTENT_TYPE = 'text';
  * not in §4.5, but §1.5 admits no exceptions, and a named row is always better than the
  * fallback: `AskUserQuestion` in particular is genuine `feedback` — the one entry type
  * that records what the human, not the model, decided.
+ *
+ * The last block is Codex's tool set, for the sibling plugin that shares this file. The two
+ * hosts' names live in one table on purpose: they also share a data directory, so one run can
+ * hold items from both, and a run whose `apply_patch`es grade differently from its `Edit`s is
+ * a run that reads inconsistently to whatever retrieves it.
  * @type {Record<string, [string, string]>}
  */
 const TOOL_TABLE = {
@@ -76,6 +81,41 @@ const TOOL_TABLE = {
   SlashCommand: ['trace', 'low'],
   Skill: ['trace', 'low'],
   AskUserQuestion: ['feedback', 'medium'],
+
+  // -------------------------------------------------------------------------
+  // Codex CLI, for the sibling `integrations/codex` plugin.
+  // -------------------------------------------------------------------------
+  // `FALLBACK` already covers every one of these, so nothing here is about avoiding a
+  // crash — an unported classifier is perfectly safe and perfectly useless. What these rows
+  // recover is the **mutation-vs-read signal**, which is the one distinction the table above
+  // exists to draw at all.
+  //
+  // Codex renames its shell tool to `Bash` in hook payloads, with this file's exact
+  // `tool_input: {command}` shape, so the `Bash` row above already serves it. `shell` is here
+  // anyway: that is the name Codex uses everywhere else, and the payload rename is a
+  // compatibility shim this plugin neither controls nor can see.
+  shell: ['tool_output', 'low'],
+  exec_command: ['tool_output', 'low'],
+  write_stdin: ['tool_output', 'low'],
+
+  // The row this block is for. `apply_patch` is Codex's `Edit`/`Write`: the change IS the
+  // episode. Left on the fallback it grades `tool_output`/`low`, sinks below every file read
+  // in retrieval, and a run reads as a sequence of reads that somehow ended with the code
+  // different.
+  apply_patch: ['trace', 'medium'],
+
+  // Codex's `TodoWrite`, and graded identically — the plan that matters is in the turn.
+  update_plan: ['trace', 'low'],
+
+  // Reads: a path plus a capped result.
+  view_image: ['tool_output', 'low'],
+  web_search: ['tool_output', 'low'],
+
+  // Subagent dispatch — Codex's `Task`, and an episode for the same reason: the output
+  // arrives later, at that subagent's `SubagentStop`. The namespace is glued to the tool
+  // name with no separator, which is how it arrives in the payload.
+  collaborationspawn_agent: ['trace', 'medium'],
+  collaborationassign_agent_task: ['trace', 'medium'],
 };
 
 /** §1.5: the fallback for anything unrecognised. A real intent, never `unclassified`. */

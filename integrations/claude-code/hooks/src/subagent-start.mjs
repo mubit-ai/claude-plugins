@@ -84,7 +84,7 @@ import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
-import { deriveAgentId, deriveRunId, deriveSubRunId, resolveProjectDir } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, deriveSubRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import { readJson, runDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
 /**
@@ -229,7 +229,7 @@ await runHook('subagent-start', {
  */
 function parentQuery(cfg, runId, payload) {
   try {
-    const promptId = safeSegment(payload?.prompt_id, MAX_ID);
+    const promptId = safeSegment(turnKey(payload), MAX_ID);
     if (!promptId) return '';
     const file = join(runDir(cfg, runId), 'turns', `${promptId}.json`);
     const turn = readJson(file, null);
@@ -290,7 +290,7 @@ function persistSubRun(cfg, o) {
       session_id: str(o.payload?.session_id),
       // The parent's, and shared with every sibling. Kept precisely because it is the
       // coordinate that collapses: without it here, nothing records which turn fanned out.
-      prompt_id: str(o.payload?.prompt_id),
+      prompt_id: turnKey(o.payload),
       at: Date.now(),
       recall: {
         rung: numOr(o.outcome?.rung, 0),

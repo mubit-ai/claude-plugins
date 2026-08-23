@@ -176,6 +176,14 @@ const targets = [
   // this to obtain the credential every other tool needs — so a Codex plugin without it has
   // no first-run story at all.
   { entryPoints: [resolve(SHARED, 'bin', 'auth.src.mjs')], outfile: out('bin/auth.mjs'), ...shared },
+  // The dashboard binary, built from the same shared source as the Claude Code copy. Two
+  // installable plugins cannot share a path — the same reason this tree carries its own
+  // `mcp/dist/server.js` — so the bundle is emitted here rather than referenced across.
+  //
+  // `bin/dashboard.html` is *not* an entry point: the server reads it at runtime as a sibling
+  // of the bundle, which keeps `bin/dashboard.src.mjs` loadable by Node for the suite and keeps
+  // 42 KB of markup out of the inline sourcemap. It ships as the tracked copy in this `bin/`.
+  { entryPoints: [resolve(SHARED, 'bin', 'dashboard.src.mjs')], outfile: out('bin/dashboard.mjs'), ...shared },
   // No status line target. Codex's status line is a declarative list of built-in item ids:
   // there is no command hook and nothing scriptable to render into, so `bin/statusline.mjs`
   // here would be dead weight in every marketplace bundle. `lib/config.mjs` defaults
@@ -225,3 +233,20 @@ if (!existsSync(VENDORED_SERVER)) {
 mkdirSync(out('mcp/dist'), { recursive: true });
 copyFileSync(VENDORED_SERVER, out('mcp/dist/server.js'));
 console.log('[esbuild] copied mcp/dist/server.js from the shared plugin');
+
+// The dashboard's page, copied for the same reason and on the same terms as the server bundle
+// above: `bin/dashboard.mjs` reads it at runtime as a sibling of itself, two installable
+// plugins cannot share a path, and a hand-maintained second copy is a UI that drifts from the
+// one the tests cover. Copying it makes the codex copy build output rather than a tracked
+// duplicate, so `codex-dist.test.mjs` catches divergence instead of tolerating it.
+const SHARED_PAGE = resolve(SHARED, 'bin', 'dashboard.html');
+if (!existsSync(SHARED_PAGE)) {
+  console.error(
+    `[esbuild] ${SHARED_PAGE} does not exist.\n`
+    + '  The Codex dashboard serves the Claude Code plugin`s page; there is no second copy to\n'
+    + '  fall back to. Restore it in the sibling plugin.');
+  process.exit(1);
+}
+mkdirSync(out('bin'), { recursive: true });
+copyFileSync(SHARED_PAGE, out('bin/dashboard.html'));
+console.log('[esbuild] copied bin/dashboard.html from the shared plugin');

@@ -151,9 +151,6 @@ const REFLECT_MS = DETACHED ? 45_000 : (CODEX_INLINE ? 700 : 4000);
 const OUTCOME_MS = CODEX_INLINE ? 400 : 1500;
 const HEARTBEAT_MS = CODEX_INLINE ? 300 : 1000;
 
-/** §5.7: bounds the reflection to the recent tail (`control.proto`). */
-const REFLECT_LAST_N = 200;
-
 /** §7: `runs/<run_id>/jobs.json` keeps the last 20, for the doctor skill. */
 const JOBS_KEEP = 20;
 
@@ -601,7 +598,10 @@ async function maybeReflect(cfg, o) {
     // `include_step_outcomes` folds outcome signals into the evidence
     // (`control.proto`) — the NEGATIVE ones produce the highest-value lessons.
     include_step_outcomes: true,
-    last_n_items: REFLECT_LAST_N,
+    // No `last_n_items`. The field bounds the request to a tail of the run, and nothing in
+    // the contract says that tail is the session this hook just watched — so bounding it
+    // risks spending the one reflect a session gets on evidence that is not this session's.
+    // This call already dials wide (`REFLECT_MS`); the bound bought no headroom worth that.
     // `record: false`, because a deadline this client chose is not evidence about the server.
     // `lib/http.mjs` already exempts callers who dial *tighter* than the configured default;
     // this one is the mirror image and the exemption misses it — the reflect is LLM-backed

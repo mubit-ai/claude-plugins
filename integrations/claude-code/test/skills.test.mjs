@@ -39,15 +39,19 @@ const SERVER_BUNDLE = join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js');
 /** §3.2 matcher note — `.mcp.json` names the server `mubit`. */
 const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
-/** §2/§9 — the skills the plugin ships. `auth` is the seventh. */
-const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth'];
+/** §2/§9 — the skills the plugin ships. `auth` is the seventh and `dashboard` the eighth. */
+const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth', 'dashboard'];
 
 /**
- * `auth` is the one skill that calls no MCP tool: it runs `bin/auth.mjs` to obtain a
- * credential, which is precisely the thing that has to exist before any MCP tool works.
- * Every tool-surface assertion below therefore skips it by name rather than by accident.
+ * The two skills that call no MCP tool, and cannot.
+ *
+ * `auth` runs `bin/auth.mjs` to obtain a credential, which is precisely the thing that has to
+ * exist before any MCP tool works. `dashboard` runs `bin/dashboard.mjs`, a local HTTP server
+ * that proxies the control API itself — an MCP grant would be a second, weaker path to the
+ * same data. Both are skipped by name rather than by accident.
  */
-const MCP_SKILLS = SKILLS.filter((s) => s !== 'auth');
+const NO_MCP_SKILLS = ['auth', 'dashboard'];
+const MCP_SKILLS = SKILLS.filter((s) => !NO_MCP_SKILLS.includes(s));
 
 // ---------------------------------------------------------------------------
 // Local helpers
@@ -120,7 +124,8 @@ function skillFile(name) {
 
 function loadSkill(name) {
   const text = readOrFail(skillFile(name), `skills/${name}/SKILL.md`,
-    'Build-guide §9 defines the skill set: recall, remember, reflect, forget, doctor, setup, auth.');
+    'The plugin ships one skill each for recall, remember, reflect, forget, doctor, setup, auth '
+    + 'and dashboard.');
   return parseFrontmatter(text, `skills/${name}/SKILL.md`);
 }
 
@@ -460,6 +465,67 @@ test('auth/SKILL.md prefers the browser flow and says why', () => {
   assert.match(body, /browser/i);
   assert.match(body, /transcript|conversation|paste/i,
     'the skill must say why the browser route is preferred, or the model will pick either');
+});
+
+// ---------------------------------------------------------------------------
+// §9 — dashboard
+// ---------------------------------------------------------------------------
+
+/**
+ * Like `auth`, this skill runs a bundled script rather than calling an MCP tool, so its grant
+ * is `allowed-tools` (a Bash permission rule) and not `tools` (the MCP grant). The two are
+ * easy to confuse and the failure is silent: a `tools:` entry naming a Bash command matches
+ * nothing, and the host then prompts for approval on every run.
+ */
+test('dashboard/SKILL.md grants exactly the Bash permission it needs, and no MCP tools', () => {
+  const { fm } = loadSkill('dashboard');
+
+  const allowed = fm['allowed-tools'];
+  assert.ok(allowed, 'dashboard must declare allowed-tools so the host does not prompt on every run');
+  const text = Array.isArray(allowed) ? allowed.join(' ') : String(allowed);
+
+  assert.match(text, /Bash\(/, 'the grant is a Bash permission rule');
+  assert.match(text, /bin\/dashboard\.mjs/, 'the rule must name the script, not hand the skill a shell');
+  assert.match(text, /\$\{CLAUDE_PLUGIN_ROOT\}/,
+    'the plugin is installed at a path nobody can predict — a relative path resolves elsewhere');
+
+  assert.equal(toolsOf(fm), undefined,
+    'the dashboard proxies the control API itself; an MCP grant would be a second, weaker path to it');
+});
+
+/**
+ * The one skill in the set that the model may not invoke.
+ *
+ * Opening a web page is a thing a person decides to do. It is also what makes this skill free:
+ * a `disable-model-invocation: true` skill's description is not loaded into context, so the
+ * eighth skill costs nothing until somebody types it.
+ */
+test('dashboard/SKILL.md is user-invocable but never model-invocable', () => {
+  const { fm } = loadSkill('dashboard');
+  assert.equal(fm['disable-model-invocation'], true,
+    'nothing in a conversation should decide on its own to open a browser window');
+});
+
+// The three facts a user will otherwise misread off the page. Each one is a number that looks
+// authoritative and is not, and the skill is where the model learns to say so.
+test('dashboard/SKILL.md states what the page cannot measure', () => {
+  const { body } = loadSkill('dashboard');
+  assert.match(body, /no per-prompt latency|not recorded|last-write-wins/i,
+    'per-prompt latency is not recorded anywhere; the skill must say so rather than let the absence read as a gap');
+  assert.match(body, /not measurable|never "not used"|proxy/i,
+    'a blank in the used column is unmeasurable, not unused — the false negatives dominate');
+  assert.match(body, /pruned|starts empty|cannot reconstruct/i,
+    'the rollup accrues from first launch; a sparse first session is by construction, not a fault');
+});
+
+// The posture is the reason this is safe to ship, and the model is what a user asks about it.
+test('dashboard/SKILL.md states the loopback bind, the token and the key boundary', () => {
+  const { body } = loadSkill('dashboard');
+  assert.match(body, /127\.0\.0\.1/, 'the bind address is the whole network story');
+  assert.match(body, /token/i, 'every request needs one');
+  assert.match(body, /never leaves|proxied/i, 'the API key does not reach the browser');
+  assert.match(body, /never\s+(attempt\s+to\s+)?install|do not install|don't install/i,
+    'a memory plugin running installers is a trust failure (§9.3)');
 });
 
 // §9.3 — setup is the diagnostic; auth is the fix. Setup pointing at the console alone

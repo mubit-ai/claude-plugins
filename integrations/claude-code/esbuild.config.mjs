@@ -170,6 +170,16 @@ const targets = [
     'statusline.launcher.mjs', 'bin/statusline.mjs',
   ),
   { entryPoints: ['bin/auth.src.mjs'], outfile: out('bin/auth.mjs'), ...shared },
+  // No launcher, for the same reason `bin/auth.mjs` has none: launchers exist for the entries
+  // the *host* execs on its own (`hooks.json`, `settings.json`), where a parse error on an old
+  // Node would be silent. A skill-invoked script is run by a person who is watching, and the
+  // runtime floor is already reported by the command they typed.
+  //
+  // `bin/dashboard.html` is read at runtime rather than imported as a text module, so it does
+  // not appear here: importing it would make `bin/dashboard.src.mjs` unloadable by Node, and
+  // the suite drives `main()` by importing that file. It also keeps 20 KB of markup out of
+  // this bundle's inline sourcemap. The page ships as the tracked sibling it already is.
+  { entryPoints: ['bin/dashboard.src.mjs'], outfile: out('bin/dashboard.mjs'), ...shared },
   // The launcher hands the server its own version, because the server cannot read it once
   // relocated: it does `require("../package.json")`, which resolves inside @mubit-ai/mcp and
   // not inside this plugin. Inlined from the tracked sibling manifest, so the value is

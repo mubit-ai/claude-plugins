@@ -1,0 +1,1071 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Mubit memory</title>
+<style>
+/* Brand tokens. Dark is the base, so an install with no expressed preference gets dark;
+   light is opted into by the system setting or by the toggle. */
+:root {
+  --bg: hsl(28 9% 8%);
+  --panel: hsl(28 10% 10%);
+  --panel-2: hsl(28 10% 13%);
+  --border: hsl(28 9% 21%);
+  --text: hsl(32 10% 85%);
+  --muted: hsl(30 9% 60%);
+  --accent: hsl(16 100% 55%);
+  --accent-dim: hsl(16 100% 55% / 0.14);
+  --success: hsl(142 50% 50%);
+  --danger: hsl(0 72% 58%);
+  --danger-dim: hsl(0 72% 58% / 0.12);
+
+  --r-sm: 2px;
+  --r-md: 4px;
+  --r-card: 8px;
+
+  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: hsl(32 36% 97%);
+    --panel: hsl(36 50% 99%);
+    --panel-2: hsl(32 30% 95%);
+    --border: hsl(30 18% 84%);
+    --text: hsl(30 22% 14%);
+    --muted: hsl(30 10% 42%);
+    --accent: hsl(16 100% 50%);
+    --accent-dim: hsl(16 100% 50% / 0.12);
+    --success: hsl(149 70% 33%);
+    --danger: hsl(0 82% 54%);
+    --danger-dim: hsl(0 82% 54% / 0.10);
+  }
+}
+:root[data-theme="light"] {
+  --bg: hsl(32 36% 97%);
+  --panel: hsl(36 50% 99%);
+  --panel-2: hsl(32 30% 95%);
+  --border: hsl(30 18% 84%);
+  --text: hsl(30 22% 14%);
+  --muted: hsl(30 10% 42%);
+  --accent: hsl(16 100% 50%);
+  --accent-dim: hsl(16 100% 50% / 0.12);
+  --success: hsl(149 70% 33%);
+  --danger: hsl(0 82% 54%);
+  --danger-dim: hsl(0 82% 54% / 0.10);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/19px var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+a { color: var(--accent); }
+
+.app { display: grid; grid-template-rows: auto auto 1fr; height: 100%; }
+
+/* ---- header ---------------------------------------------------------- */
+header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--panel);
+}
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: -0.01em; }
+.brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+.spacer { flex: 1; }
+.endpoint { font: 11px/16px var(--mono); color: var(--muted); }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border);
+  font-size: 11px; color: var(--muted); background: var(--panel-2);
+}
+.pill .led { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.pill.ok .led { background: var(--success); }
+.pill.bad .led { background: var(--danger); }
+.iconbtn {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 3px 9px; cursor: pointer; font-size: 12px;
+}
+.iconbtn:hover { border-color: var(--accent); }
+
+/* ---- banner ---------------------------------------------------------- */
+.banner {
+  display: none; gap: 10px; align-items: baseline;
+  padding: 7px 14px; border-bottom: 1px solid var(--border);
+  background: var(--danger-dim); color: var(--text); font-size: 12px;
+}
+.banner.show { display: flex; }
+.banner code { font: 11px/16px var(--mono); color: var(--muted); }
+
+/* ---- layout ---------------------------------------------------------- */
+.body { display: grid; grid-template-columns: 268px 1fr; min-height: 0; }
+aside {
+  border-right: 1px solid var(--border); background: var(--panel);
+  overflow-y: auto; padding: 10px; min-height: 0;
+}
+main { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0; }
+
+.rail-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); margin: 10px 2px 6px;
+}
+select, input[type="text"], input[type="search"] {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 4px 7px;
+}
+input:focus, select:focus, button:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+
+.run { display: block; width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 1px solid transparent; border-radius: var(--r-md);
+  padding: 6px 8px; margin-bottom: 2px; }
+.run:hover { background: var(--panel-2); }
+.run[aria-current="true"] { background: var(--accent-dim); border-color: var(--accent); }
+.run .id { font: 12px/17px var(--mono); overflow-wrap: anywhere; }
+.run .meta { font-size: 11px; color: var(--muted); }
+
+/* ---- tabs ------------------------------------------------------------ */
+nav.tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-bottom: 1px solid var(--border); }
+nav.tabs button {
+  background: none; border: 1px solid transparent; border-bottom: none;
+  border-radius: var(--r-md) var(--r-md) 0 0; padding: 6px 14px; cursor: pointer;
+  color: var(--muted); margin-bottom: -1px;
+}
+nav.tabs button[aria-selected="true"] {
+  color: var(--text); background: var(--bg);
+  border-color: var(--border); border-bottom-color: var(--bg);
+}
+.tabpanel { display: none; min-height: 0; overflow: auto; padding: 12px; }
+.tabpanel.active { display: block; }
+
+/* ---- shared ---------------------------------------------------------- */
+.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.toolbar > * { flex: 0 0 auto; }
+.toolbar .grow { flex: 1 1 220px; min-width: 160px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
+.seg button { background: var(--panel-2); border: none; padding: 4px 11px; cursor: pointer; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--accent-dim); color: var(--text); }
+.btn {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 4px 11px; cursor: pointer;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-dim); }
+
+.split { display: grid; grid-template-columns: minmax(240px, 380px) 1fr; gap: 12px; align-items: start; }
+/* The turns table carries seven columns plus a prompt that has to stay readable, so it takes
+   the larger half rather than the master-detail rail width. */
+.split.wide { grid-template-columns: minmax(0, 1.7fr) minmax(260px, 1fr); }
+@media (max-width: 1100px) { .split, .split.wide { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-card); }
+.list { max-height: calc(100vh - 210px); overflow: auto; }
+.item {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  background: none; border: none; border-bottom: 1px solid var(--border);
+  padding: 8px 10px;
+}
+.item:last-child { border-bottom: none; }
+.item:hover { background: var(--panel-2); }
+.item[aria-current="true"] { background: var(--accent-dim); }
+.item .line1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .line2 { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.tag {
+  display: inline-block; padding: 0 6px; border-radius: var(--r-sm);
+  border: 1px solid var(--border); font-size: 11px; color: var(--muted);
+  margin-right: 4px; background: var(--panel-2);
+}
+.tag.leak { color: var(--accent); border-color: var(--accent); }
+.tag.ok { color: var(--success); border-color: var(--success); }
+.tag.bad { color: var(--danger); border-color: var(--danger); }
+
+.detail { padding: 14px; }
+.detail h2 { font-size: 14px; margin: 0 0 8px; }
+.detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 12px 0 0; }
+.detail dt { color: var(--muted); font-size: 12px; }
+.detail dd { margin: 0; font: 12px/18px var(--mono); overflow-wrap: anywhere; }
+.prose { white-space: pre-wrap; overflow-wrap: anywhere; }
+.empty { color: var(--muted); padding: 22px 14px; text-align: center; }
+
+/* ---- tables ---------------------------------------------------------- */
+.scroll-x { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { text-align: left; padding: 5px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+td.num, th.num { text-align: right; font-family: var(--mono); }
+td.prompt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 1px; width: 100%; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--panel-2); }
+tbody tr[aria-current="true"] { background: var(--accent-dim); }
+
+/* ---- tiles ----------------------------------------------------------- */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 10px; }
+.tile { padding: 10px 12px; }
+.tile .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.tile .v { font: 600 21px/28px var(--mono); }
+.tile .s { font-size: 11px; color: var(--muted); }
+.tile svg { display: block; width: 100%; height: 30px; margin-top: 4px; }
+.note { color: var(--muted); font-size: 11px; margin: 10px 2px 0; }
+
+.confirm { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
+.confirm input { font-family: var(--mono); }
+.row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <span class="brand"><span class="dot"></span>Mubit memory</span>
+    <span class="endpoint" id="endpoint"></span>
+    <span class="spacer"></span>
+    <span class="pill" id="conn"><span class="led"></span><span id="conn-text">connecting</span></span>
+    <button class="iconbtn" id="theme" title="Switch between light and dark">theme</button>
+  </header>
+
+  <div class="banner" id="banner">
+    <strong id="banner-title"></strong>
+    <span id="banner-text"></span>
+    <code id="banner-code"></code>
+  </div>
+
+  <div class="body">
+    <aside>
+      <div class="rail-label">Data directory</div>
+      <select id="dirs" aria-label="Data directory"></select>
+
+      <div class="rail-label">Runs</div>
+      <div id="runs"></div>
+    </aside>
+
+    <main>
+      <nav class="tabs" role="tablist">
+        <button role="tab" id="tab-memory" aria-selected="true" aria-controls="panel-memory">Memory</button>
+        <button role="tab" id="tab-turns" aria-selected="false" aria-controls="panel-turns">Turns</button>
+        <button role="tab" id="tab-analytics" aria-selected="false" aria-controls="panel-analytics">Analytics</button>
+      </nav>
+
+      <!-- ---------------- Memory ---------------- -->
+      <section class="tabpanel active" id="panel-memory" role="tabpanel" aria-labelledby="tab-memory">
+        <div class="toolbar">
+          <span class="seg">
+            <button id="mode-lessons" aria-pressed="true">Lessons</button>
+            <button id="mode-activity" aria-pressed="false">Activity</button>
+          </span>
+          <input class="grow" type="search" id="filter" placeholder="Filter what is loaded (instant)" aria-label="Filter loaded entries">
+          <select id="scope-filter" style="width:auto" aria-label="Scope filter">
+            <option value="">Every scope</option>
+            <option value="run">Only run scope</option>
+            <option value="leak">Visible outside its own run</option>
+          </select>
+          <button class="btn" id="do-search" title="Ask the instance, rather than filtering what is already loaded">Search instance</button>
+        </div>
+
+        <div class="split">
+          <div class="card list" id="memory-list"></div>
+          <div class="card detail" id="memory-detail"><p class="empty">Select an entry.</p></div>
+        </div>
+      </section>
+
+      <!-- ---------------- Turns ---------------- -->
+      <section class="tabpanel" id="panel-turns" role="tabpanel" aria-labelledby="tab-turns">
+        <div class="toolbar">
+          <input class="grow" type="search" id="turn-filter" placeholder="Filter prompts" aria-label="Filter turns">
+          <span class="pill"><span id="turn-count">0</span>&nbsp;turns on disk</span>
+        </div>
+        <div class="split wide">
+          <div class="card scroll-x list">
+            <table>
+              <thead><tr>
+                <th>Prompt</th><th class="num">rung</th><th class="num">src</th>
+                <th class="num">tok</th><th class="num">ptr</th><th>used</th><th>outcome</th>
+              </tr></thead>
+              <tbody id="turn-rows"></tbody>
+            </table>
+          </div>
+          <div class="card detail" id="turn-detail"><p class="empty">Select a turn.</p></div>
+        </div>
+        <p class="note">
+          Turn files are pruned six hours after they are written, so this table is the recent
+          past only. There is no per-prompt latency column because per-prompt latency is not
+          recorded anywhere: the timing on the status marker describes the last prompt, not each one.
+        </p>
+      </section>
+
+      <!-- ---------------- Analytics ---------------- -->
+      <section class="tabpanel" id="panel-analytics" role="tabpanel" aria-labelledby="tab-analytics">
+        <div class="tiles" id="tiles"></div>
+        <p class="note" id="analytics-note"></p>
+
+        <div class="rail-label">Ingest health</div>
+        <div class="tiles" id="health-tiles"></div>
+        <p class="note" id="health-note"></p>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // -------------------------------------------------------------------------
+  // Transport
+  // -------------------------------------------------------------------------
+
+  // The token arrives in the launch URL because a browser navigating to a page cannot set a
+  // header. It is lifted out immediately and the address bar is rewritten, so it does not sit
+  // in history or in whatever the user pastes into a bug report. Every call after this one
+  // carries it as an Authorization header instead.
+  const params = new URLSearchParams(location.search);
+  const AUTH = params.get('token') || '';
+  if (AUTH) history.replaceState({}, '', location.pathname);
+
+  const state = {
+    meta: null,
+    dir: '',
+    run: '',
+    mode: 'lessons',
+    tab: 'memory',
+    lessons: [],
+    activity: [],
+    turns: [],
+    selectedEntry: null,
+    selectedTurn: null,
+    searchResults: null,
+    lastRemoteAt: 0,
+  };
+
+  async function api(path, init) {
+    const res = await fetch(path, Object.assign({}, init, {
+      headers: Object.assign(
+        { authorization: 'Bearer ' + AUTH },
+        init && init.body ? { 'content-type': 'application/json' } : {},
+        (init && init.headers) || {},
+      ),
+    }));
+    const text = await res.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
+    if (!res.ok) {
+      const err = new Error((body && body.error && body.error.message) || ('HTTP ' + res.status));
+      err.code = (body && body.error && body.error.code) || 'bad_request';
+      err.status = res.status;
+      throw err;
+    }
+    return body;
+  }
+
+  const post = (path, payload) => api(path, { method: 'POST', body: JSON.stringify(payload) });
+
+  // -------------------------------------------------------------------------
+  // Rendering helpers
+  // -------------------------------------------------------------------------
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  };
+  const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
+  const num = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
+  const short = (id, n) => (id ? String(id).slice(0, n || 8) : '—');
+  const clock = (ms) => (ms ? new Date(ms).toLocaleTimeString() : '—');
+  const day = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? String(iso) : d.toLocaleDateString();
+  };
+
+  function tag(text, cls) {
+    return el('span', 'tag' + (cls ? ' ' + cls : ''), text);
+  }
+
+  /**
+   * A sparkline, drawn by hand because a charting library is a dependency and this is six
+   * lines of arithmetic. A flat series still draws a line rather than collapsing to nothing.
+   */
+  function sparkline(values) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 100 30');
+    svg.setAttribute('preserveAspectRatio', 'none');
+    svg.setAttribute('aria-hidden', 'true');
+    if (!values.length) return svg;
+
+    const lo = Math.min.apply(null, values);
+    const hi = Math.max.apply(null, values);
+    const span = hi - lo || 1;
+    const step = values.length > 1 ? 100 / (values.length - 1) : 0;
+    const points = values.map((v, i) => {
+      const x = values.length > 1 ? i * step : 50;
+      const y = 28 - ((v - lo) / span) * 26;
+      return x.toFixed(2) + ',' + y.toFixed(2);
+    }).join(' ');
+
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    line.setAttribute('points', points);
+    line.setAttribute('fill', 'none');
+    line.setAttribute('stroke', 'currentColor');
+    line.setAttribute('stroke-width', '1.5');
+    line.setAttribute('vector-effect', 'non-scaling-stroke');
+    svg.appendChild(line);
+    svg.style.color = 'var(--accent)';
+    return svg;
+  }
+
+  function tile(key, value, sub, series) {
+    const card = el('div', 'card tile');
+    card.appendChild(el('div', 'k', key));
+    card.appendChild(el('div', 'v', value));
+    if (sub) card.appendChild(el('div', 's', sub));
+    if (series && series.length > 1) card.appendChild(sparkline(series));
+    return card;
+  }
+
+  // -------------------------------------------------------------------------
+  // Banner
+  // -------------------------------------------------------------------------
+
+  const BANNER_TEXT = {
+    upstream_unreachable: ['Instance unreachable',
+      'Lessons, activity and search are unavailable. Everything on disk — turns, analytics and '
+      + 'ingest health — is still live below.'],
+    auth_failed: ['Instance rejected the key',
+      'The stored API key is wrong, revoked, or issued for a different instance. Run '
+      + '/mubit-memory:auth in Claude Code to replace it.'],
+    bad_request: ['Request refused', 'The dashboard refused its own request rather than sending it.'],
+    unauthorized: ['Token expired',
+      'This page was opened with a token from an earlier launch. Run /mubit-memory:dashboard again.'],
+    not_found: ['Nothing there', 'The route or entry asked for does not exist.'],
+  };
+
+  let bannerCode = '';
+  function showBanner(code, detail) {
+    if (bannerCode === code) return;
+    bannerCode = code;
+    const copy = BANNER_TEXT[code] || ['Something went wrong', ''];
+    $('banner-title').textContent = copy[0];
+    $('banner-text').textContent = copy[1];
+    $('banner-code').textContent = detail ? String(detail).slice(0, 220) : '';
+    $('banner').classList.add('show');
+  }
+  function hideBanner() {
+    bannerCode = '';
+    $('banner').classList.remove('show');
+  }
+  function setConn(ok, text) {
+    const pill = $('conn');
+    pill.classList.toggle('ok', ok === true);
+    pill.classList.toggle('bad', ok === false);
+    $('conn-text').textContent = text;
+  }
+
+  // -------------------------------------------------------------------------
+  // Rail
+  // -------------------------------------------------------------------------
+
+  function renderDirs(dirs) {
+    const sel = $('dirs');
+    if (sel.dataset.count === String(dirs.length) && sel.value === state.dir) return;
+    sel.dataset.count = String(dirs.length);
+    clear(sel);
+    dirs.forEach((d) => {
+      const o = el('option', null, d.name + '  (' + d.runCount + ' runs)');
+      o.value = d.path;
+      sel.appendChild(o);
+    });
+    sel.value = state.dir;
+  }
+
+  function renderRuns(runs) {
+    const box = $('runs');
+    clear(box);
+    if (!runs.length) {
+      box.appendChild(el('p', 'empty', 'No runs in this directory yet.'));
+      return;
+    }
+    runs.forEach((r) => {
+      const b = el('button', 'run');
+      b.setAttribute('aria-current', String(r.runId === state.run));
+      b.appendChild(el('div', 'id', r.runId));
+      b.appendChild(el('div', 'meta',
+        r.state + ' · ' + r.turnCount + ' turns · spool ' + r.spoolDepth));
+      b.addEventListener('click', () => {
+        state.run = r.runId;
+        state.selectedEntry = null;
+        state.selectedTurn = null;
+        state.searchResults = null;
+        state.lastRemoteAt = 0;
+        refreshLocal();
+        refreshAnalytics();
+        refreshRemote();
+      });
+      box.appendChild(b);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Memory tab
+  // -------------------------------------------------------------------------
+
+  function currentEntries() {
+    if (state.searchResults) return state.searchResults;
+    return state.mode === 'lessons' ? state.lessons : state.activity;
+  }
+
+  function filteredEntries() {
+    const q = $('filter').value.trim().toLowerCase();
+    const scope = $('scope-filter').value;
+    return currentEntries().filter((e) => {
+      if (scope === 'run' && e.scope !== 'run') return false;
+      if (scope === 'leak' && !e.leaksScope) return false;
+      if (!q) return true;
+      return (e.content + ' ' + (e.scope || '') + ' ' + (e.lessonType || e.entry_type || '')
+        + ' ' + (e.sourceRunId || e.run_id || '')).toLowerCase().indexOf(q) >= 0;
+    });
+  }
+
+  function renderMemoryList() {
+    const box = $('memory-list');
+    clear(box);
+    const rows = filteredEntries();
+    if (!rows.length) {
+      box.appendChild(el('p', 'empty', state.mode === 'lessons'
+        ? 'No lessons match.' : 'No activity matches.'));
+      return;
+    }
+    rows.forEach((e) => {
+      const b = el('button', 'item');
+      b.setAttribute('aria-current', String(state.selectedEntry && state.selectedEntry.id === e.id));
+      b.appendChild(el('div', 'line1', e.content || '(no content)'));
+
+      const meta = el('div', 'line2');
+      if (e.lessonType || e.entry_type) meta.appendChild(tag(e.lessonType || e.entry_type));
+      if (e.scope) meta.appendChild(tag(e.scope, e.leaksScope ? 'leak' : null));
+      if (e.importance) meta.appendChild(tag(e.importance));
+      meta.appendChild(document.createTextNode(day(e.createdAt || e.created_at)));
+      b.appendChild(meta);
+
+      b.addEventListener('click', () => { state.selectedEntry = e; renderMemory(); });
+      box.appendChild(b);
+    });
+  }
+
+  function renderMemoryDetail() {
+    const box = $('memory-detail');
+    clear(box);
+    const e = state.selectedEntry;
+    if (!e) {
+      box.appendChild(el('p', 'empty', 'Select an entry.'));
+      return;
+    }
+
+    box.appendChild(el('h2', null, e.lessonType || e.entry_type || 'entry'));
+    box.appendChild(el('p', 'prose', e.content || ''));
+
+    if (e.rationale) {
+      box.appendChild(el('div', 'rail-label', 'Rationale'));
+      box.appendChild(el('p', 'prose', e.rationale));
+    }
+    if (e.conditions && e.conditions.length) {
+      box.appendChild(el('div', 'rail-label', 'Conditions'));
+      box.appendChild(el('p', 'prose', e.conditions.join(', ')));
+    }
+
+    const dl = el('dl');
+    const pair = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, v)); };
+    pair('id', e.id || '—');
+    pair('scope', e.scope || '—');
+    pair('importance', e.importance || '—');
+    pair('written by', e.sourceRunId || e.run_id || '—');
+    pair('source', e.source || '—');
+    pair('created', e.createdAt || e.created_at || 'not recorded');
+    box.appendChild(dl);
+
+    if (e.leaksScope) {
+      const p = el('p', 'note',
+        'This entry is above run scope, so it is visible to runs other than the one that wrote '
+        + 'it. That is by design for a rule meant to follow you; it is a surprise for anything '
+        + 'that was only ever about one project.');
+      box.appendChild(p);
+    }
+
+    if (state.mode !== 'lessons' || !e.id) return;
+
+    const actions = el('div', 'row');
+    actions.appendChild(actionButton('Worked', () => outcome(e, true)));
+    actions.appendChild(actionButton('Did not work', () => outcome(e, false)));
+    actions.appendChild(actionButton('Archive', () => archive(e)));
+    box.appendChild(actions);
+
+    box.appendChild(deleteConfirm(e));
+  }
+
+  function actionButton(label, fn) {
+    const b = el('button', 'btn', label);
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      const original = b.textContent;
+      try {
+        await fn();
+        b.textContent = 'done';
+      } catch (err) {
+        showBanner(err.code, err.message);
+        b.textContent = 'failed';
+      }
+      setTimeout(() => { b.textContent = original; b.disabled = false; }, 1400);
+    });
+    return b;
+  }
+
+  /**
+   * Deletion has no undo, so the gesture is typing the id rather than clicking twice. The
+   * server enforces the same match independently — a confirmation that lives only here is one
+   * that a replayed request skips.
+   */
+  function deleteConfirm(e) {
+    const box = el('div', 'confirm');
+    box.appendChild(el('div', 'rail-label', 'Delete permanently'));
+    box.appendChild(el('p', 'note',
+      'There is no undo and no dry run. For a lesson that is merely wrong rather than unwanted, '
+      + '"Did not work" above down-weights it instead. To delete, type the id exactly.'));
+
+    const input = el('input');
+    input.type = 'text';
+    input.placeholder = e.id;
+    input.setAttribute('aria-label', 'Type the lesson id to confirm deletion');
+
+    const row = el('div', 'row');
+    const btn = el('button', 'btn danger', 'Delete');
+    btn.disabled = true;
+    input.addEventListener('input', () => { btn.disabled = input.value.trim() !== e.id; });
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        await post('/api/forget', { lessonId: e.id, confirm: input.value.trim() });
+        state.lessons = state.lessons.filter((l) => l.id !== e.id);
+        state.selectedEntry = null;
+        renderMemory();
+      } catch (err) {
+        showBanner(err.code, err.message);
+        btn.disabled = false;
+      }
+    });
+
+    row.appendChild(input);
+    row.appendChild(btn);
+    box.appendChild(row);
+    return box;
+  }
+
+  function outcome(e, success) {
+    return post('/api/outcome', {
+      run: state.run,
+      referenceId: e.id,
+      success: success,
+      entryIds: [e.id],
+    });
+  }
+
+  function archive(e) {
+    return post('/api/archive', {
+      run: state.run,
+      content: e.content,
+      artifactKind: 'note',
+      metadataJson: JSON.stringify({ archived_from: e.id, via: 'dashboard' }),
+    });
+  }
+
+  function renderMemory() {
+    renderMemoryList();
+    renderMemoryDetail();
+  }
+
+  // -------------------------------------------------------------------------
+  // Turns tab
+  // -------------------------------------------------------------------------
+
+  function renderTurns() {
+    const q = $('turn-filter').value.trim().toLowerCase();
+    const rows = state.turns.filter((t) => !q
+      || (t.promptPreview + ' ' + t.outcomeState).toLowerCase().indexOf(q) >= 0);
+
+    $('turn-count').textContent = String(state.turns.length);
+
+    const body = $('turn-rows');
+    clear(body);
+    if (!rows.length) {
+      const tr = el('tr');
+      const td = el('td', 'empty', 'No turns on disk for this run. They are pruned after six hours.');
+      td.colSpan = 7;
+      tr.appendChild(td);
+      body.appendChild(tr);
+      return;
+    }
+
+    rows.forEach((t) => {
+      const tr = el('tr');
+      tr.setAttribute('aria-current', String(state.selectedTurn && state.selectedTurn.promptId === t.promptId));
+
+      const prompt = el('td', 'prompt', t.promptPreview || '(empty prompt)');
+      prompt.title = t.promptPreview || '';
+      tr.appendChild(prompt);
+      tr.appendChild(el('td', 'num', t.rung || '—'));
+      tr.appendChild(el('td', 'num', t.sources));
+      tr.appendChild(el('td', 'num', t.tok));
+      tr.appendChild(el('td', 'num', t.ptr));
+
+      // Not "no": absent means the signal could not be measured, and rendering it as a count
+      // of nothing ("0/0") reads as a measured zero. A bare question mark cannot.
+      const used = el('td');
+      if (t.used && t.used.used === true) used.appendChild(tag(t.used.matched + '/' + t.used.candidates, 'ok'));
+      else if (t.used && t.used.used === false) used.appendChild(tag(t.used.matched + '/' + t.used.candidates));
+      else {
+        const q = tag('?');
+        q.title = 'Not measurable for this turn'
+          + (t.used && t.used.reason ? ' (' + t.used.reason + ')' : '') + ' — not "unused".';
+        used.appendChild(q);
+      }
+      tr.appendChild(used);
+
+      tr.appendChild(el('td', null, t.outcomeState || '—'));
+      tr.addEventListener('click', () => selectTurn(t));
+      body.appendChild(tr);
+    });
+  }
+
+  async function selectTurn(t) {
+    state.selectedTurn = t;
+    renderTurns();
+    try {
+      const body = await api('/api/turn?dir=' + encodeURIComponent(state.dir)
+        + '&run=' + encodeURIComponent(state.run)
+        + '&prompt=' + encodeURIComponent(t.promptId));
+      renderTurnDetail(body.turn);
+    } catch (err) {
+      renderTurnDetail(t);
+    }
+  }
+
+  function renderTurnDetail(t) {
+    const box = $('turn-detail');
+    clear(box);
+    if (!t) {
+      box.appendChild(el('p', 'empty', 'Select a turn.'));
+      return;
+    }
+    box.appendChild(el('h2', null, 'Prompt ' + short(t.promptId, 8)));
+    box.appendChild(el('p', 'prose', t.prompt || t.promptPreview || ''));
+
+    const dl = el('dl');
+    const pair = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, v)); };
+    pair('started', clock(t.startedAt));
+    pair('recall', t.sources + ' memories · ' + t.tok + ' tok · ' + t.chars + ' chars');
+    pair('repeats', t.ptr + ' rendered as a pointer');
+    pair('rung', t.rung || '—');
+    if (t.emptyReason) pair('empty because', t.emptyReason);
+    pair('outcome', t.outcomeState || '—');
+    pair('session', short(t.sessionId, 8));
+    box.appendChild(dl);
+
+    if (t.recalled && t.recalled.length) {
+      box.appendChild(el('div', 'rail-label', 'Injected memories'));
+      const ul = el('div');
+      t.recalled.forEach((id) => ul.appendChild(tag(id)));
+      box.appendChild(ul);
+    }
+
+    const u = t.used || {};
+    box.appendChild(el('div', 'rail-label', 'Used signal'));
+    box.appendChild(el('p', 'note', u.used === null || u.used === undefined
+      ? 'Not measurable for this turn' + (u.reason ? ' (' + u.reason + ')' : '')
+      + '. A blank here is not "unused".'
+      : u.label + ' — a term-echo proxy: it asks whether the reply carried vocabulary from the '
+      + 'injected block that was not already in the prompt. False negatives dominate, so treat '
+      + 'a "no" as weak evidence and a "yes" as strong.'));
+  }
+
+  // -------------------------------------------------------------------------
+  // Analytics tab
+  // -------------------------------------------------------------------------
+
+  function renderAnalytics(a, health) {
+    const box = $('tiles');
+    clear(box);
+
+    const series = a.series || [];
+    const tok = series.map((r) => num(r.tok));
+    const src = series.map((r) => num(r.sources));
+    const ptr = series.map((r) => num(r.ptr));
+
+    const over = a.points === 1 ? 'over 1 prompt' : 'over ' + a.points + ' prompts';
+    box.appendChild(tile('Recall cost', String(a.averages ? a.averages.tok : 0),
+      'tokens per prompt, mean ' + over, tok));
+    box.appendChild(tile('Memories per prompt', String(a.averages ? a.averages.sources : 0),
+      'injected, mean', src));
+    box.appendChild(tile('Pointer ratio', Math.round(num(a.pointerRatio) * 100) + '%',
+      'repeats rendered as a one-line pointer', ptr));
+    box.appendChild(tile('Characters', String(a.averages ? a.averages.chars : 0),
+      'per prompt, mean', series.map((r) => num(r.chars))));
+
+    $('analytics-note').textContent = a.points
+      ? 'The series covers ' + a.points + (a.points === 1 ? ' prompt' : ' prompts') + ' recorded since '
+        + clock(a.firstSampleAt) + '. It is the dashboard’s own rollup rather than the raw '
+        + 'turn files, which are pruned after six hours — so it accrues from the first launch '
+        + 'and cannot reconstruct anything from before that.'
+      : 'Nothing recorded yet. The rollup starts empty and grows one row per prompt while this '
+        + 'page is open, so the first session here is sparse by construction.';
+
+    if (!health) return;
+    const hb = $('health-tiles');
+    clear(hb);
+
+    const marker = health.marker || {};
+    const captured = marker.captured || {};
+    const b = health.breaker || {};
+
+    hb.appendChild(tile('Spool depth', String(num(health.spoolDepth)),
+      health.rejectedCount ? health.rejectedCount + ' rejected' : 'captures waiting to ship'));
+    hb.appendChild(tile('Ingested', String(num(captured.ingested)),
+      num(captured.pending) + ' pending · ' + num(captured.tools) + ' tools'));
+    hb.appendChild(tile('Breaker', b.phase || 'closed',
+      (b.state || 'ready') + (b.cooldownLeftMs
+        ? ' · ' + Math.ceil(b.cooldownLeftMs / 1000) + 's left' : '')));
+    hb.appendChild(tile('Run state', marker.state || 'unknown',
+      marker.mode ? marker.mode + ' · updated ' + clock(marker.updated_at) : ''));
+
+    const reflect = marker.reflect || {};
+    const recall = marker.recall || {};
+    $('health-note').textContent =
+      'Last recall on the marker: ' + num(recall.sources) + ' memories, ' + num(recall.tokens)
+      + ' tok, rung ' + num(recall.rung)
+      + (recall.empty_reason ? ', empty because ' + recall.empty_reason : '')
+      + ', dry streak ' + num(recall.dry_streak) + '. '
+      + 'Reflection: ' + (reflect.status || 'never run') + ', ' + num(reflect.lessons_stored)
+      + ' lessons stored. The marker is last-write-wins, so this row describes the most recent '
+      + 'prompt only — the table on the Turns tab is the per-prompt series.';
+  }
+
+  // -------------------------------------------------------------------------
+  // Polling
+  // -------------------------------------------------------------------------
+
+  async function refreshLocal() {
+    try {
+      const meta = await api('/api/meta?dir=' + encodeURIComponent(state.dir)
+        + '&run=' + encodeURIComponent(state.run));
+      state.meta = meta;
+      if (!state.dir) state.dir = meta.dir;
+      if (!state.run) state.run = meta.run;
+      $('endpoint').textContent = meta.configured ? meta.endpoint : 'no endpoint configured';
+      renderDirs(meta.dirs || []);
+
+      const q = 'dir=' + encodeURIComponent(state.dir) + '&run=' + encodeURIComponent(state.run);
+      const [runs, turns] = await Promise.all([
+        api('/api/runs?' + q),
+        api('/api/turns?' + q + '&limit=100'),
+      ]);
+
+      renderRuns(runs.runs || []);
+      state.turns = turns.turns || [];
+      renderTurns();
+      if (bannerCode === 'unauthorized') hideBanner();
+    } catch (err) {
+      if (err.status === 401) showBanner('unauthorized', err.message);
+    }
+  }
+
+  /**
+   * The analytics half, on a slower clock than the rest of the disk poll.
+   *
+   * The rollup is a whole file that has to be read and parsed, and it is a *trend* — nothing on
+   * it can visibly change between one second and the next, because it grows one row per prompt.
+   * Polling it at the turn cadence would parse half a megabyte a second to redraw four
+   * identical tiles.
+   */
+  async function refreshAnalytics() {
+    if (!state.dir || !state.run) return;
+    try {
+      const q = 'dir=' + encodeURIComponent(state.dir) + '&run=' + encodeURIComponent(state.run);
+      const [analytics, health] = await Promise.all([
+        api('/api/analytics?' + q),
+        api('/api/health/local?' + q),
+      ]);
+      renderAnalytics(analytics, health);
+    } catch (err) {
+      if (err.status === 401) showBanner('unauthorized', err.message);
+    }
+  }
+
+  async function refreshRemote(force) {
+    if (!state.meta) return;
+    if (!state.meta.configured) {
+      setConn(false, 'not configured');
+      showBanner('upstream_unreachable', 'No endpoint is configured for this install.');
+      state.lessons = [];
+      state.activity = [];
+      renderMemory();
+      return;
+    }
+    const now = Date.now();
+    if (!force && now - state.lastRemoteAt < (state.meta.pollMs || {}).remote) return;
+    state.lastRemoteAt = now;
+
+    try {
+      const body = await api('/api/lessons?run=' + encodeURIComponent(state.run) + '&limit=200');
+      state.lessons = body.lessons || [];
+      // `joined` says the activity call worked; `dated` says it produced timestamps. They come
+      // apart on an instance that stores lessons without a creation time, and a green light
+      // over a column of dashes is the version of that a user reads as a bug in this page.
+      const dated = state.lessons.length === 0 || body.dated > 0;
+      setConn(true, dated ? 'connected' : 'connected · this instance records no lesson dates');
+      hideBanner();
+    } catch (err) {
+      setConn(false, err.code === 'auth_failed' ? 'key rejected' : 'unreachable');
+      showBanner(err.code, err.message);
+      state.lessons = [];
+      renderMemory();
+      return;
+    }
+
+    try {
+      const body = await api('/api/activity?run=' + encodeURIComponent(state.run) + '&limit=200');
+      state.activity = body.entries || [];
+    } catch (err) {
+      state.activity = [];
+    }
+    renderMemory();
+  }
+
+  async function searchInstance() {
+    const q = $('filter').value.trim();
+    if (!q) { state.searchResults = null; renderMemory(); return; }
+    const btn = $('do-search');
+    btn.disabled = true;
+    btn.textContent = 'searching…';
+    try {
+      const body = await post('/api/search', { run: state.run, query: q, limit: 30 });
+      state.searchResults = (body.evidence || []).map((e) => ({
+        id: e.reference_id || e.id || '',
+        content: e.content || '',
+        entry_type: e.entry_type || '',
+        scope: '',
+        importance: '',
+        source: e.source || '',
+        run_id: e.run_id || '',
+        leaksScope: false,
+        createdAt: '',
+      }));
+      state.selectedEntry = null;
+      renderMemory();
+      hideBanner();
+    } catch (err) {
+      showBanner(err.code, err.message);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Search instance';
+  }
+
+  // -------------------------------------------------------------------------
+  // Wiring
+  // -------------------------------------------------------------------------
+
+  function selectTab(name) {
+    state.tab = name;
+    ['memory', 'turns', 'analytics'].forEach((n) => {
+      $('tab-' + n).setAttribute('aria-selected', String(n === name));
+      $('panel-' + n).classList.toggle('active', n === name);
+    });
+  }
+
+  ['memory', 'turns', 'analytics'].forEach((n) => {
+    $('tab-' + n).addEventListener('click', () => selectTab(n));
+  });
+
+  $('mode-lessons').addEventListener('click', () => {
+    state.mode = 'lessons';
+    state.searchResults = null;
+    state.selectedEntry = null;
+    $('mode-lessons').setAttribute('aria-pressed', 'true');
+    $('mode-activity').setAttribute('aria-pressed', 'false');
+    renderMemory();
+  });
+  $('mode-activity').addEventListener('click', () => {
+    state.mode = 'activity';
+    state.searchResults = null;
+    state.selectedEntry = null;
+    $('mode-lessons').setAttribute('aria-pressed', 'false');
+    $('mode-activity').setAttribute('aria-pressed', 'true');
+    renderMemory();
+  });
+
+  // Instant, over what is already loaded. The instance is only asked when the button is
+  // pressed, because a semantic search on every keystroke is a bill.
+  $('filter').addEventListener('input', renderMemory);
+  $('scope-filter').addEventListener('change', renderMemory);
+  $('do-search').addEventListener('click', searchInstance);
+  $('filter').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') searchInstance();
+    if (e.key === 'Escape') { state.searchResults = null; $('filter').value = ''; renderMemory(); }
+  });
+  $('turn-filter').addEventListener('input', renderTurns);
+
+  $('dirs').addEventListener('change', (e) => {
+    state.dir = e.target.value;
+    state.run = '';
+    state.selectedTurn = null;
+    state.lastRemoteAt = 0;
+    refreshLocal().then(() => { refreshAnalytics(); refreshRemote(true); });
+  });
+
+  const THEME_KEY = 'mubit-dashboard-theme';
+  function applyTheme(value) {
+    if (value) document.documentElement.setAttribute('data-theme', value);
+    else document.documentElement.removeAttribute('data-theme');
+  }
+  try { applyTheme(localStorage.getItem(THEME_KEY)); } catch (e) { /* private mode */ }
+  // Toggle from what the viewer is *seeing*, not from the attribute. With no stored choice
+  // there is no attribute, so a naive toggle picks a constant — and the first click on a
+  // machine already in dark mode sets dark, which reads as a dead button.
+  function effectiveTheme() {
+    const explicit = document.documentElement.getAttribute('data-theme');
+    if (explicit) return explicit;
+    try {
+      return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    } catch (e) {
+      return 'dark';
+    }
+  }
+  $('theme').addEventListener('click', () => {
+    const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* private mode */ }
+  });
+
+  // Disk is cheap and changes with every prompt; the instance is neither. The two cadences are
+  // set by the server so the page and the server cannot drift into disagreeing about them.
+  setConn(null, 'connecting');
+  renderMemory();
+  refreshLocal().then(() => {
+    refreshAnalytics();
+    refreshRemote(true);
+    const local = (state.meta && state.meta.pollMs && state.meta.pollMs.local) || 1000;
+    setInterval(refreshLocal, local);
+    setInterval(refreshAnalytics, local * 5);
+    // Cheap, and gated inside on the remote cadence the server publishes.
+    setInterval(refreshRemote, 1000);
+  });
+})();
+</script>
+</body>
+</html>

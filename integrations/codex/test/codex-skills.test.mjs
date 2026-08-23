@@ -27,10 +27,14 @@ import { join } from 'node:path';
 import { CODEX_ROOT, SHARED_ROOT } from './helpers/codex-fixtures.mjs';
 
 const SKILLS_DIR = join(CODEX_ROOT, 'skills');
-const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth'];
+const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth', 'dashboard'];
 
-/** `auth` is the one skill that calls no MCP tool — it runs `bin/auth.mjs` to get a key. */
-const MCP_SKILLS = SKILLS.filter((s) => s !== 'auth');
+/**
+ * The two skills that call no MCP tool: `auth` runs `bin/auth.mjs` to get a key, and
+ * `dashboard` runs `bin/dashboard.mjs` to open a local page. Both talk to the instance
+ * themselves rather than through a tool the model holds.
+ */
+const MCP_SKILLS = SKILLS.filter((s) => s !== 'auth' && s !== 'dashboard');
 
 /** The prefix a Codex model actually sees, from `.mcp.json`'s server name. */
 const PREFIX = 'mcp__mubit__';
@@ -93,12 +97,12 @@ function fencedBlocks(raw) {
 // Frontmatter
 // ===========================================================================
 
-test('the seven skills are exactly the seven directories', () => {
+test('the eight skills are exactly the eight directories', () => {
   const dirs = existsSync(SKILLS_DIR)
     ? readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()
     : [];
   assert.deepEqual(dirs, [...SKILLS].sort(),
-    'the Codex plugin ships the same seven skills as the Claude Code one; a missing one is a '
+    'the Codex plugin ships the same eight skills as the Claude Code one; a missing one is a '
     + 'command the user types and nothing answers.');
 });
 
@@ -289,7 +293,7 @@ test('forget: refuses to delete without confirming first', () => {
 // Drift against the Claude Code skills
 // ===========================================================================
 
-test('the two plugins ship the same seven skill names', () => {
+test('the two plugins ship the same eight skill names', () => {
   const ccDirs = readdirSync(join(SHARED_ROOT, 'skills'), { withFileTypes: true })
     .filter((d) => d.isDirectory()).map((d) => d.name).sort();
   const codexDirs = readdirSync(SKILLS_DIR, { withFileTypes: true })

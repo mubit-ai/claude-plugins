@@ -1,8 +1,8 @@
 # What may not be published from this repository
 
-This repository is public and it is a **mirror**: it is the distribution point for a plugin
-whose source lives elsewhere. Two consequences follow, and they are the whole reason this
-policy exists.
+This repository is public, and it is both where the plugin is developed and the point it is
+distributed from. Every commit here is a publication. Two consequences follow, and they are
+the whole reason this policy exists.
 
 **Nothing here can be unpublished.** A blob that was pushed stays reachable, a merged pull
 request keeps its diff, and forks and clones are made within minutes of a push. Deleting a

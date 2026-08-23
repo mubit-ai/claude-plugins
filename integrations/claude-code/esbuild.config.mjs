@@ -54,9 +54,9 @@ const MCP_SERVER_BUILD = 'npm --prefix ../mcp ci && npm --prefix ../mcp run buil
  * The version stamped into the launcher as `__MUBIT_MCP_VERSION__`.
  *
  * The sibling manifest is the authority: it is the package `mcp/dist/server.js` was bundled
- * from. In the generated `claude-plugins` mirror that sibling does not exist — the mirror
- * carries this one plugin and vendors the server bundle — and reading it there threw at
- * module scope, which made `npm run build` unusable for every other target too.
+ * from. In a checkout that carries only this plugin that sibling does not exist — the server
+ * bundle is vendored there instead — and reading it threw at module scope, which made
+ * `npm run build` unusable for every other target too.
  *
  * This plugin's own version is the right fallback rather than a guess: the two ship in
  * lockstep (release tooling holds them together, and `manifests.test.mjs` enforces
@@ -206,7 +206,7 @@ const targets = [
 // that proves nothing, in precisely the place a stale server bundle already shipped once.
 //
 // The one exception is a checkout where the sibling is not merely uncompiled but absent:
-// the generated `claude-plugins` mirror vendors `mcp/dist/server.js` and has no `../mcp` to
+// a checkout carrying only this plugin vendors `mcp/dist/server.js` and has no `../mcp` to
 // build from, so the target is structurally unbuildable there and the refusal above blocks
 // every *other* target with it. `MUBIT_CC_BUILD_SKIP_SERVER=1` opts out explicitly — which
 // is the honest shape for this, where a silent skip would not be: the operator states that
@@ -220,8 +220,8 @@ if (!has(MCP_SERVER_ENTRY) && process.env.MUBIT_CC_BUILD_SKIP_SERVER !== '1') {
     + `      ${MCP_SERVER_BUILD}\n`
     + '  Refusing to continue: skipping this target would leave the committed server bundle in\n'
     + '  place and report success.\n'
-    + '  If this checkout has no ../mcp at all (the generated claude-plugins mirror vendors the\n'
-    + '  server bundle instead), say so: MUBIT_CC_BUILD_SKIP_SERVER=1.');
+    + '  If this checkout has no ../mcp at all (it vendors the server bundle instead), say so:\n'
+    + '      MUBIT_CC_BUILD_SKIP_SERVER=1');
   process.exit(1);
 }
 

@@ -31,33 +31,26 @@ Opens the [Mubit console](https://console.mubit.ai), signs you in, and stores a 
 machine after checking it against your instance. No browser — over SSH, say — is covered in the
 plugin README.
 
-## This is a generated repository — do not edit it here
+## Contributing
 
-Contents are published from Mubit's source repository on release. Any commit made directly here
-is overwritten by the next publish.
-
-```
-source repository
-  ├── .claude-plugin/marketplace.json ──┐
-  └── integrations/claude-code/ ────────┤ published on release
-                                        ▼
-mubit-ai/claude-plugins (this repo)  →  git clone by Claude Code  →  a user's plugin dir
-```
+**This repository is where the plugin is developed.** Open pull requests here; `main` is
+protected and takes them through review. There is no other tree that this one is generated
+from, and nothing here is regenerated on release — an edit made here is the edit that ships.
 
 Claude Code fetches a GitHub marketplace with `git clone --depth 1`, using your own git
 credentials — there is no separate plugin token. If your git is configured for SSH only, run
 `gh auth setup-git` first; the clone URL is always HTTPS, even for sources written as `git@`.
 
-The `integrations/claude-code` path is preserved deliberately: the marketplace entry's `source`
-is the marketplace-relative path `./integrations/claude-code`, which resolves inside whichever
-repository served the catalog. Keeping the same path means `marketplace.json` needs no rewriting
-when it is published here, so there is nothing that can drift between the two copies.
+The `integrations/claude-code` path is load-bearing: the marketplace entry's `source` is the
+marketplace-relative path `./integrations/claude-code`, which resolves inside whichever
+repository served the catalog. Moving the plugin to the repository root would mean rewriting
+`marketplace.json`, so the path stays where it is.
 
-What is published is the plugin's tracked files, minus development-only scripts and QA
-transcripts written against a developer's own checkout. What
-runs on your machine is exactly what you see here — Claude Code executes this directory as
-fetched, with no build step, which is why `hooks/dist/`, `mcp/dist/` and `bin/statusline.mjs`
-are committed artifacts rather than build output.
+What runs on your machine is exactly what you see here — Claude Code executes this directory
+as fetched, with no build step and no `npm install`. That is why `hooks/dist/`, `mcp/dist/`
+and `bin/statusline.mjs` are committed artifacts rather than build output, and why a change
+to a hook or to `lib/` has to be committed together with the bundle it rebuilds. CI rebuilds
+and runs `git diff --exit-code`, so the two cannot drift.
 
 ## Verifying what you are about to run
 

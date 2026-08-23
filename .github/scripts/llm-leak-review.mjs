@@ -136,7 +136,7 @@ for (const a of added) {
 const policyPath = join(REPO, '.github/leakcheck/POLICY.md');
 const policy = existsSync(policyPath) ? readFileSync(policyPath, 'utf8') : '';
 
-const SYSTEM = `You review changes to a PUBLIC repository that mirrors a plugin for a closed-source
+const SYSTEM = `You review changes to a PUBLIC repository holding a plugin for a closed-source
 product called Mubit. Your single job is to find text that publishes something the policy below
 keeps private. You are not a code reviewer: ignore bugs, style, naming and test coverage.
 

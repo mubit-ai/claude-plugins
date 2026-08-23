@@ -320,7 +320,7 @@ health and stuck ingest jobs — and reports the connection state by name.
 
 ---
 
-## Part 5 — The six commands
+## Part 5 — The seven commands
 
 You will not need most of these day to day. Capture is automatic; these are for the moments it
 is not enough.
@@ -333,6 +333,7 @@ is not enough.
 | `/mubit-memory:remember` | Something should outlive this session |
 | `/mubit-memory:reflect` | You want lessons extracted **now** rather than at session end |
 | `/mubit-memory:forget` | A stored lesson is wrong |
+| `/mubit-memory:dashboard` | You want to *look* at any of the above rather than ask about it |
 
 ### Saving something worth keeping
 
@@ -369,6 +370,44 @@ Reports each lesson with its id, type and scope. An empty result is a real answe
 
 There is no dry run and no undo. For a lesson that is merely *wrong* rather than harmful,
 prefer letting outcome attribution down-weight it.
+
+### Looking at all of it
+
+```
+/mubit-memory:dashboard
+```
+
+Opens a page on `127.0.0.1` — a random port, a token minted for that launch, and nothing on
+your network can reach it. Three tabs:
+
+- **Memory** — every lesson your instance holds. Filter instantly, or press *Search instance*
+  to ask it properly. There is a filter for lessons **visible outside the run that wrote
+  them**, which is the question nothing else here answers: a rule saved at global scope follows
+  you into every project, and one saved at run scope dies with the session.
+- **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
+  they cost, and how many were repeats rendered as a one-line pointer. This is read from disk,
+  so it works with the network off.
+- **Analytics** — those numbers as a trend, plus spool depth, ingest counts and breaker state.
+
+Three things it deliberately does not claim:
+
+- **No per-prompt latency.** The recall timing on the status marker is last-write-wins — it
+  describes the most recent prompt, not each one — so there is no honest per-prompt series to
+  plot and the page does not invent one.
+- **A blank in the `used` column means "could not be measured", not "was not used".** It is a
+  term-echo proxy, and its false negatives dominate.
+- **The Analytics trend starts empty.** Turn files are pruned six hours after they are written,
+  so the series is something the dashboard accumulates while it is open.
+
+It shuts itself down after about half an hour of no traffic. To stop it sooner:
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/bin/dashboard.mjs" --stop
+```
+
+This is the one command Claude cannot run for you — opening a browser window is a decision a
+person makes. It is also why it costs nothing until you type it: its description is not loaded
+into the model's context.
 
 ### The subagent, for bigger questions
 

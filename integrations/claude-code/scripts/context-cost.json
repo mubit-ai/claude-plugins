@@ -1,8 +1,8 @@
 {
-  "measuredAt": "2026-08-19T15:03:18.737Z",
-  "value": 3672,
+  "measuredAt": "2026-08-23T15:40:03.121Z",
+  "value": 3725,
   "cached": 0,
-  "curatedValue": 3672,
+  "curatedValue": 3725,
   "allowlistHonoured": true,
   "method": "word/number/symbol segmentation; see the header of scripts/measure-context-cost.mjs",
   "surface": {
@@ -32,6 +32,7 @@
     ],
     "skills": [
       "auth",
+      "dashboard",
       "doctor",
       "forget",
       "recall",
@@ -60,9 +61,9 @@
       "count": 10
     },
     "skillFrontmatter": {
-      "tokens": 347,
-      "chars": 1165,
-      "count": 7
+      "tokens": 400,
+      "chars": 1340,
+      "count": 8
     },
     "agentFrontmatter": {
       "tokens": 62,

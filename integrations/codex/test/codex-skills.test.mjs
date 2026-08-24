@@ -208,7 +208,7 @@ for (const skill of MCP_SKILLS) {
 
 test('auth: no runnable command interpolates ${CLAUDE_PLUGIN_ROOT}', () => {
   const { body, fenced } = read('auth');
-  // § docs/harness-probe.md §4: Codex exports no plugin-root variable of any spelling, and
+  // § Observed against a live host: Codex exports no plugin-root variable of any spelling, and
   //   there is no ${...} substitution layer. The Claude Code skill's
   //   `node ${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs` expands to `node /bin/auth.mjs` in the login
   //   shell Codex runs commands in — a path that does not exist, failing with ENOENT on the
@@ -384,7 +384,7 @@ test('memory-health: states the store/connection split against mubit_status', ()
 
 test('activity: no runnable command interpolates ${CLAUDE_PLUGIN_ROOT}', () => {
   const { body, fenced } = read('activity');
-  // § docs/harness-probe.md §4: Codex exports no plugin-root variable of any spelling. The
+  // § Observed against a live host: Codex exports no plugin-root variable of any spelling. The
   //   Claude Code copy's `node ${CLAUDE_PLUGIN_ROOT}/bin/activity.mjs` expands to
   //   `node /bin/activity.mjs` in the login shell Codex runs commands in — ENOENT, on the one
   //   command whose entire job is to prove the plugin can show its work.

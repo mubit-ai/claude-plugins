@@ -7,7 +7,7 @@
  * hook pointing at a bundle the build no longer produces, a version that drifted from the
  * Claude Code plugin, an event name Codex has never heard of.
  *
- * Four Codex facts, all recorded in `docs/harness-probe.md`, decide what is asserted here:
+ * Four Codex facts, all recorded against a live host, decide what is asserted here:
  *
  *   1. **Eleven events, not thirteen.** No `CwdChanged`, no `PostToolUseFailure`, no
  *      `StopFailure`. Registering one is not an error Codex reports — it parses the file and
@@ -141,13 +141,13 @@ test('plugin.json carries no `mcpServers` key either, for the same reason as `ho
 
 test('plugin.json carries no `hooks` key', () => {
   const m = readJsonOrFail(P.plugin, 'see above.');
-  // § docs/harness-probe.md §3: a plugin-bundled `hooks.json` is inert under Codex 0.146.0 —
+  // § Observed against a live host: a plugin-bundled `hooks.json` is inert under Codex 0.146.0 —
   //   copied into the install cache and never read. `hooks/list` reports `source: "user"` and
   //   `pluginId: null` for every hook it does see. Pointing the manifest at ours would say the
   //   opposite of what actually happens, and the bundled plugin-creator reference says
   //   validation rejects the field outright.
   assert.equal(m.hooks, undefined,
-    'plugin-bundled hooks do not run under Codex (docs/harness-probe.md §3). `hooks.json` '
+    'plugin-bundled hooks do not run under Codex (observed against a live host). `hooks.json` '
     + 'ships as a template that /mubit-memory:setup merges into $CODEX_HOME/hooks.json; '
     + 'naming it here would claim an install path that silently does nothing.');
 });
@@ -170,8 +170,8 @@ test('plugin.json declares no userConfig', () => {
 test('hooks.json registers exactly the eleven events Codex dispatches', () => {
   const { doc } = handlers();
   const got = Object.keys(doc.hooks ?? {}).sort();
-  // § docs/harness-probe.md, the table: Codex's HookEventsToml lists eleven names. An event
-  //   outside that set parses fine and never fires.
+  // § Recorded against a live host: Codex dispatches eleven event names. An event outside
+  //   that set parses fine and never fires.
   assert.deepEqual(got, [...CODEX_EVENTS].sort(),
     'a registration Codex does not dispatch is silently dead, and a Codex event left '
     + 'unregistered is memory the plugin never sees. Both look identical from outside.');
@@ -190,7 +190,7 @@ test('hooks.json registers none of the three Claude-Code-only events', () => {
 
 test('hooks.json has only the two top-level fields Codex accepts', () => {
   const doc = readJsonOrFail(P.hooks, 'see the header.');
-  // § docs/harness-probe.md §6: writing anything else is a hard parse error that takes the
+  // § Observed against a live host: writing anything else is a hard parse error that takes the
   //   whole file down — "unknown field `state`, expected `description` or `hooks`" — and with
   //   it every registration, not just the offending one.
   const extra = Object.keys(doc).filter((k) => k !== 'hooks' && k !== 'description');
@@ -231,7 +231,7 @@ test('every handler is a `command` type with a shell string', () => {
 test('every handler command is a template naming an absolute-path placeholder', () => {
   const { all } = handlers();
   for (const { event, handler } of all) {
-    // § docs/harness-probe.md §4: none of PLUGIN_ROOT / CLAUDE_PLUGIN_ROOT / PLUGIN_DATA /
+    // § Observed against a live host: none of PLUGIN_ROOT / CLAUDE_PLUGIN_ROOT / PLUGIN_DATA /
     //   CLAUDE_PLUGIN_DATA is exported to a Codex hook, and there is no `${...}` substitution
     //   layer — `$PLUGIN_ROOT` in a command is expanded by the shell, to the empty string.
     //   So the shipped file is a template whose placeholder /mubit-memory:setup replaces with
@@ -270,7 +270,7 @@ test('every timeout is an integer number of seconds, and SessionEnd asks for at 
     assert.ok(Number.isInteger(handler.timeout) && handler.timeout > 0,
       `${event}: timeout must be a positive whole number of seconds, got ${handler.timeout}.`);
     if (event === 'SessionEnd') {
-      // § docs/harness-probe.md §4, recorded verbatim: "clamping SessionEnd hook timeout to 3s".
+      // § Recorded verbatim from a live host: "clamping SessionEnd hook timeout to 3s".
       //   Asking for 8 as Claude Code does is not an error — Codex clamps it and warns on a
       //   stderr nobody reads. Writing 3 here is the honest number, and it is why
       //   sessionEndDetach stops being optional under this host.
@@ -303,7 +303,7 @@ test('.mcp.json names the server `mubit`, so tools are mcp__mubit__*', () => {
     + 'itself — see the plugin.json test above — but it is the single place the server name '
     + 'and entry point are written down, and what setup copies into the user layer.');
   const names = Object.keys(m.mcpServers ?? {});
-  // § docs/harness-probe.md §5: a live PreToolUse payload showed `mcp__probe__probe_ping` for
+  // § Observed against a live host: a live PreToolUse payload showed `mcp__probe__probe_ping` for
   //   a server named `probe`. The prefix is mcp__<server>__<tool>, full stop — and it is the
   //   same whether the server is declared by a plugin or added to the user layer, which was
   //   probed separately because the whole install story turns on it. So the server name here

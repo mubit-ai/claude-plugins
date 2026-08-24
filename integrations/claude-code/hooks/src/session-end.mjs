@@ -118,8 +118,8 @@ const DETACHED = process.env.MUBIT_CC_DETACHED === '1';
  * The inline ceiling is not the same number on both hosts.
  *
  * `hooks.json` asks for 8 s and Claude Code grants it. **Codex clamps SessionEnd to 3 s**
- * whatever the manifest says — recorded in `docs/harness-probe.md` §4, and `codex-oracle`
- * has the host itself reporting the timeout it will enforce. 6800 ms is 2.4x that, and the
+ * whatever the manifest says — recorded against a live host, and `codex-oracle` has the host
+ * itself reporting the timeout it will enforce. 6800 ms is 2.4x that, and the
  * sub-budgets nested inside it are each larger than the whole clamp (`REFLECT_MS` alone is
  * 4000), so the arithmetic that carves the deadline up hands the drain a window that has
  * already expired and the process is killed mid-reflect with the captures still on disk.

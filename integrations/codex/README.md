@@ -30,7 +30,7 @@ node ~/.codex/plugins/cache/mubit/mubit-memory/0.10.0/scripts/setup.mjs \
 
 **That second step is not optional, and skipping it gives you a plugin that installs
 perfectly and captures nothing.** Two facts about Codex 0.146.0 make it necessary, both
-recorded against a live host in [`docs/harness-probe.md`](docs/harness-probe.md):
+recorded against a live host:
 
 - **A `hooks.json` bundled in a plugin is inert.** Codex copies it into the install cache and
   never reads it. `hooks/list` reports every hook it *does* see as `source: "user"` with
@@ -193,7 +193,7 @@ rather than regenerating it.
 Every change to `../claude-code/lib` or `../claude-code/hooks/src` changes both plugins. Run
 both suites: this one, and the 1067 next door.
 
-[`docs/harness-probe.md`](docs/harness-probe.md) is the record of what Codex actually does —
-every **Expect** block is a recorded transcript, not a prediction — and is the reason most of
-the decisions above are what they are. Read it before assuming a Codex behaviour matches
-Claude Code's.
+[`test/fixtures/observed/`](test/fixtures/observed/README.md) is the record of what Codex
+actually does — payloads the host wrote to a recorder hook during a real session, and its
+verdicts on what a hook answered — and is the reason several of the decisions above are what
+they are. Read it before assuming a Codex behaviour matches Claude Code's.

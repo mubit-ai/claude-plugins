@@ -12,7 +12,7 @@
  * *after* the shared module is imported is indistinguishable from a value never set at all.
  *
  * Codex exports none of the names those modules read. Probed against a live 0.146.0 hook
- * process (`docs/harness-probe.md` §4), all four of `PLUGIN_ROOT`, `CLAUDE_PLUGIN_ROOT`,
+ * process, all four of `PLUGIN_ROOT`, `CLAUDE_PLUGIN_ROOT`,
  * `PLUGIN_DATA` and `CLAUDE_PLUGIN_DATA` arrive unset — the strings exist in the binary, but
  * are only ever populated for plugin-sourced hooks, and plugin-sourced hooks do not load.
  * There is no `${...}` substitution layer either: a `$PLUGIN_ROOT` written into a hook
@@ -249,7 +249,7 @@ function safeHome() {
  *
  * On the real path there is no payload — this module runs before stdin is read — and
  * `process.cwd()` is the right answer there, because Codex runs a hook in the project
- * directory (recorded, `docs/harness-probe.md` §4) and `payload.cwd` says the same thing.
+ * directory (recorded against a live host) and `payload.cwd` says the same thing.
  * The overload exists for callers that re-derive later; `lib/runid.mjs` already prefers a
  * payload `cwd` over the environment for its own reasons, and this keeps the two agreeing.
  *

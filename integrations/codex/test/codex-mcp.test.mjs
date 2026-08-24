@@ -134,8 +134,8 @@ test('the initialize frame carries the instructions block', async () => {
   //   the rollout records no tool catalogue to check against. That is a Codex-side question
   //   this suite cannot settle — but the frame is still emitted, because the day Codex starts
   //   surfacing it is not a day anyone will remember to come back and add it. What the plugin
-  //   *relies* on instead is SessionStart's additionalContext, which docs/harness-probe.md §7
-  //   proves lands.
+  //   *relies* on instead is SessionStart's additionalContext, which a live probe proved
+  //   lands.
   assert.ok(String(init?.instructions ?? '').trim(),
     'the launcher stopped filling in `instructions`. It costs nothing to emit and is the only '
     + 'thing that would work if Codex starts surfacing it.');

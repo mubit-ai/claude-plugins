@@ -68,7 +68,7 @@ test('SessionStart steers the model, and names itself correctly', async (t) => {
     { env: env(dataDir, projectDir, server.url) });
 
   assertHookContract(r);
-  // § docs/harness-probe.md §7 proved this channel reaches the model: a string injected here
+  // § A live probe proved this channel reaches the model: a string injected here
   //   came back out of the model's answer verbatim. It is also the *only* channel that does —
   //   the MCP server's `instructions` frame is not surfaced under Codex — so everything the
   //   model needs to know about Mubit rides on this one field.
@@ -261,7 +261,7 @@ test('PostToolUse survives a string tool_response, which is what Codex sends', a
     'apply_patch is Codex`s Edit/Write: the change IS the episode. On the fallback it grades '
     + '`tool_output`/`low` and sinks below every file read in retrieval.');
   // § Claude Code sends `{stdout, stderr, interrupted}`; Codex sends a bare string
-  //   (docs/harness-probe.md §5). A reader that only understands the object shape stores
+  //   (observed live). A reader that only understands the object shape stores
   //   `apply_patch(...) -> ` with nothing after the arrow — it records that a patch was
   //   applied and never what it did.
   assert.match(String(items[0].text ?? ''), /Success\. Updated/,

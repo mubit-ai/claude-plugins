@@ -264,7 +264,7 @@ test('a plugin-bundled hooks.json IS discovered — under two of three layouts',
     const got = byTag(layout);
     assert.ok(got,
       `the \`${layout}\` layout was not discovered either, so plugin hooks really are inert and `
-      + 'the user-layer merge is load-bearing. Say so in docs/harness-probe.md.');
+      + 'the user-layer merge is load-bearing. Say so in the README.');
     assert.equal(got.source, 'plugin');
     assert.match(got.pluginId, /@mubit-probe-mkt$/,
       'a discovered plugin hook is attributed to its plugin, which is the field that would let '

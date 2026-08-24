@@ -6,7 +6,7 @@
  * The shared modules capture their configuration at **module scope**: `lib/config.mjs`
  * resolves `CLAUDE_PROJECT_DIR` and `CLAUDE_PLUGIN_DATA` when `loadConfig` first runs, and
  * `lib/state.mjs` resolves the data directory the same way. So under Codex — which exports
- * none of those names (docs/harness-probe.md §4) — something has to put them there *before*
+ * none of those names (probed against a live hook process) — something has to put them there *before*
  * the shared module is imported, not after. Setting them afterwards is indistinguishable from
  * not setting them at all.
  *
@@ -83,7 +83,7 @@ test('CLAUDE_PLUGIN_ROOT is derived from the shim`s own location, not from the e
     const { applyCodexEnv } = await codexMod('lib/boot.mjs');
     const env = {};
     applyCodexEnv(env, { cwd: '/tmp/some/project' });
-    // § docs/harness-probe.md §4: PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, PLUGIN_DATA and
+    // § Observed against a live host: PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, PLUGIN_DATA and
     //   CLAUDE_PLUGIN_DATA all arrive unset, and there is no ${...} substitution layer either.
     //   The module's own URL is the one thing that is always right — including inside the
     //   bundle, where it is the path Codex actually invoked.
@@ -198,7 +198,7 @@ test('with no payload cwd it falls back to the process cwd, which is where Codex
     const { applyCodexEnv } = await codexMod('lib/boot.mjs');
     const env = {};
     applyCodexEnv(env, {});
-    // § docs/harness-probe.md §4, recorded: the hook process's cwd is the project directory.
+    // § Recorded against a live host: the hook process's cwd is the project directory.
     //   The shim runs before stdin is read, so on the real path this is the only answer
     //   available — the cwd-carrying overload exists for the modules that re-derive later.
     assert.equal(env.CLAUDE_PROJECT_DIR, process.cwd());

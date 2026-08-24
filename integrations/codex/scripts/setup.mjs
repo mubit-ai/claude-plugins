@@ -15,7 +15,7 @@
  * ---------------------------------------------------------------------------
  * Codex ignores a `hooks.json` bundled in a plugin, and cannot resolve a path in a plugin's
  * `.mcp.json` — no `${VAR}` layer, and a relative path resolves against the project
- * directory. Both are recorded against a live host in `docs/harness-probe.md` §3-§4. So the
+ * directory. Both are recorded against a live host. So the
  * plugin ships both files as templates carrying `{{PLUGIN_ROOT}}`, and this substitutes the
  * real install path and writes them where Codex actually reads.
  *

@@ -444,7 +444,7 @@ function buildToolItem(payload, cfg, mode) {
  *
  * When the user **allows** the call, `PostToolUse` fires and records the whole episode, so
  * this item is redundant and cheap. When the user **denies** it, no `PostToolUse` ever
- * fires — observed live, `docs/harness-probe.md` §5 — and this is the only trace anywhere
+ * fires — observed live against a real session — and this is the only trace anywhere
  * that the attempt happened. "We tried this and were not allowed to" is precisely the class
  * of fact a model cannot re-derive by reading the codebase, and without this mode a coding
  * agent rediscovers the same forbidden operation once a session, forever.

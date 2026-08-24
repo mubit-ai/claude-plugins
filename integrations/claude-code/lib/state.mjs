@@ -152,8 +152,11 @@ export function writeJsonAtomic(p, value, opts = {}) {
  * `session-end.mjs` — never on a blocking hook's critical path — and gated to
  * at most once an hour by an `O_EXCL` `prune.lock`.
  *
- * The sweep is a scalpel: `config.json`, `breaker/*` and `policy/*` are owned by
- * their own TTL logic and are never touched here.
+ * The sweep is a scalpel: `config.json`, `actor.json`, `breaker/*` and `policy/*`
+ * are owned by their own TTL logic and are never touched here. `actor.json` is
+ * `lib/actor.mjs`'s 30-day record of the detected actor id, and it is written only
+ * by `drain.mjs`; expiring it from here on a different schedule would un-attribute
+ * every capture between the sweep and the next drain.
  *
  * @param {Record<string, any>} [cfg]
  * @returns {void}

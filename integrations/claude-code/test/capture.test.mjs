@@ -277,6 +277,104 @@ test('capture: every recorded tool_response shape renders something after the ar
   }
 });
 
+// ---------------------------------------------------------------------------
+// The actor rides in metadata, never in user_id
+// ---------------------------------------------------------------------------
+
+// THE regression for `lib/actor.mjs`, and the reason that module exists in the shape it does.
+//
+// Server-side, `user_id` is not an attribution tag: on capture it is stamped into the entry's
+// metadata, and on query it is **enforced as a filter**, defaulting to `actor::<accountId>`
+// when a client sends nothing. `lib/recall.mjs` never sends one — so an actor written into
+// `user_id` would scope every newly captured entry into a bucket recall never looks in, and
+// the memory would go silently invisible the moment attribution started working.
+//
+// Attribution therefore lives in `metadata_json`, which is free-form and rides on every
+// ingest item, and `cfg.userId` keeps the meaning it has always had.
+test('capture: the actor rides in metadata_json.actor and never touches user_id', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUse(), {
+    env: staticEnv(dataDir, server, {
+      MUBIT_CC_ACTOR_ID: 'ada',
+      // Set alongside, and to something else, so "the actor leaked into the scope" and
+      // "the scope was left alone" are distinguishable outcomes rather than one value.
+      MUBIT_CC_USER_ID: 'team-scope',
+    }),
+  });
+
+  assertHookContract(r);
+  const item = soleItem(dataDir, RUN_ID);
+  assertRequiredItemFields(item);
+
+  const meta = JSON.parse(item.metadata_json);
+  assert.equal(meta.actor, 'ada', 'the actor must reach the wire in metadata_json');
+  assert.equal(item.user_id, 'team-scope',
+    'user_id is a retrieval scope and belongs to cfg.userId alone — the actor must not have overwritten it');
+});
+
+// The same claim with nothing to hide behind: no `userId` configured means no `user_id` on
+// the wire at all, actor or no actor. Sending one here would scope the entry out of the
+// `actor::<accountId>` default that every recall query runs under.
+test('capture: an actor alone never puts a user_id on the wire', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUse(), {
+    env: staticEnv(dataDir, server, { MUBIT_CC_ACTOR_ID: 'ada' }),
+  });
+
+  assertHookContract(r);
+  const item = soleItem(dataDir, RUN_ID);
+  assert.equal(JSON.parse(item.metadata_json).actor, 'ada');
+  assert.ok(!('user_id' in item),
+    `an actor must not mint a user_id: ${JSON.stringify(item.user_id)}`);
+});
+
+// The production path. `MUBIT_CC_ACTOR_ID` is rung 1 of the ladder and almost nobody sets
+// it; what everyone actually gets is the value `drain` detected and cached. Capture reads
+// that cache and does nothing else — no `git`, no network — because it runs on every single
+// tool call.
+//
+// Proven behaviourally rather than by watching for a spawn: the repo this hook is pointed at
+// has `user.email = test@example.com`, so a capture that ran the detection ladder itself
+// would answer `test`. Only a cache read answers `grace`.
+test('capture: the actor is read from the cache, never detected on the hot path', async (t) => {
+  const dataDir = makeDataDir();
+  const projectDir = makeProjectDir({ git: true });
+  const server = await mubit(t);
+  writeFileSync(join(dataDir, 'actor.json'),
+    JSON.stringify({ v: 1, at: Date.now(), actor: 'grace', source: 'git-email' }));
+
+  const r = await runHook('capture', postToolUse(), {
+    env: baseEnv({
+      dataDir,
+      endpoint: server.url,
+      projectDir,
+      extra: { MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: RUN_ID },
+    }),
+  });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0, `capture must still issue ZERO HTTP; saw: ${server.summary()}`);
+  assert.equal(JSON.parse(soleItem(dataDir, RUN_ID).metadata_json).actor, 'grace',
+    'the hot path must answer from the cache, not from the ladder');
+});
+
+// A fresh data dir has no cache and no configured actor, and the answer is the absence of
+// the key — not `"actor": ""`, which would put an empty field on every item ever captured.
+test('capture: with no actor known the key is absent rather than empty', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUse(), { env: staticEnv(dataDir, server) });
+
+  assertHookContract(r);
+  const meta = JSON.parse(soleItem(dataDir, RUN_ID).metadata_json);
+  assert.ok(!('actor' in meta), `expected no actor key at all, got ${JSON.stringify(meta.actor)}`);
+});
+
 // §5.4 — "item_id is stable per tool call so a retried drain deduplicates."
 test('capture: item_id is derived from tool_use_id and stable across invocations', async (t) => {
   const dataDir = makeDataDir();

@@ -73,6 +73,7 @@
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { readActor } from '../../lib/actor.mjs';
 import { clearCarry } from '../../lib/carry.mjs';
 import { classifyTurn } from '../../lib/classify.mjs';
 import { envTags } from '../../lib/config.mjs';
@@ -550,6 +551,13 @@ function spoolSummary(cfg, runId, payload, snap, label) {
     () => classifyTurn('', '', { event: 'PreCompact', trigger: str(payload.trigger) }),
     { intent: 'checkpoint', importance: 'medium', contentType: 'text' });
 
+  // The anchor is an ingest item like any other, so it wears the actor like any other —
+  // otherwise the one memory that survives a compaction is the one nobody is attributed for.
+  // A pure cache read (`lib/actor.mjs`); the detection ladder lives in `drain`. And as
+  // everywhere else it goes in `metadata_json`, never in `user_id`: that field is a
+  // retrieval scope the server enforces as a query filter, and recall sends none.
+  const actor = attempt(() => readActor(cfg), '');
+
   appendItem(cfg, runId, {
     // §1.3: `item_id` and `content_type` are REQUIRED — a missing one is a 422 for the whole
     // batch. Derived from (session, counter) and never from a clock, so a retried drain
@@ -578,6 +586,9 @@ function spoolSummary(cfg, runId, payload, snap, label) {
       snapshot_bytes: snap.bytes,
       redactions: snap.redactions + num(body.redactions),
       truncated: snap.truncated || !!body.truncated,
+      // Omitted entirely when unknown — `"actor": ""` is a field that is always there and
+      // never says anything.
+      ...(actor ? { actor } : {}),
     }),
     ...(str(cfg?.userId) ? { user_id: str(cfg.userId) } : {}),
   });

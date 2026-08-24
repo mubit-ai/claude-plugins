@@ -44,13 +44,14 @@
 import { renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
+import { resolveActor } from '../../lib/actor.mjs';
 import { readBreaker } from '../../lib/breaker.mjs';
 import { loadConfig } from '../../lib/config.mjs';
 import { postIngest, postOutcome } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
-import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
 import {
   acquireDrainLock, batchIdempotencyKey, commitBatch, readBatch, releaseDrainLock, spoolStats,
 } from '../../lib/spool.mjs';
@@ -225,6 +226,23 @@ async function main() {
   } finally {
     clearTimeout(hardStop);
     letGo();
+  }
+
+  // Who the work belongs to, refreshed at most once every 30 days (`lib/actor.mjs`).
+  //
+  // This is the one caller of the detection ladder, and this is the only place in the plugin
+  // that can afford it: the ladder shells out to `git` twice on a cache miss, and every other
+  // hook is either blocking or on the per-tool-call path. `capture` and `checkpoint` only
+  // ever *read* the cache this writes.
+  //
+  // It sits here, in the same unbudgeted tail as the TTL sweep, rather than up beside
+  // `loadConfig`: the drainer's job is shipping memory, and a once-a-month cache miss must
+  // not put up to two 2000 ms `git` timeouts in front of the ingest that a user is waiting
+  // to see land. The cost of running late is one uncredited item on a fresh install.
+  try {
+    resolveActor(cfg, resolveProjectDir(cfg, payload));
+  } catch {
+    // §4.9: a name is never worth a drain. The items ship either way.
   }
 
   // §7's TTL sweep runs only from here and from `session-end` — never on a blocking hook's

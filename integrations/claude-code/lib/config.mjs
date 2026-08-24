@@ -443,8 +443,8 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // rule off; `balanced` is reachable only from here, because a two-way rule cannot justify
   // a third class from prompt text alone.
   //
-  // Note: this is inert under `recallAssemble: "server"`. `ContextRequest` has no `rank_by`
-  // field at all, so rung 3 always ranks at the server's defaults.
+  // Note: this is inert under `recallAssemble: "server"`. `/context` accepts no `rank_by`
+  // field at all, so rung 3 always ranks at the service's defaults.
   const recallRankBy = enumOf(pick('recallRankBy', 'MUBIT_CC_RECALL_RANK_BY'),
     ['auto', 'relevance', 'balanced', 'freshness'], 'auto');
   // §5.2 — carry-forward recall. On, `prompt-recall` renders the block the PREVIOUS turn's

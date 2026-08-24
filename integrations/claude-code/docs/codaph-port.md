@@ -143,8 +143,8 @@ The cost scales with **the instance's** corpus rather than yours, which is why t
 measured 378 ms on 2026-08-19 and ~2.0 s five days later with no plugin change.
 
 **Fix.** `prefer_current_run: true` on the blocking rung-1 body in `lib/recall.mjs`, with the
-cross-run overlay moved to `recall-refresh` or session start. Confirmed reachable: the vendored
-client passes it straight through on `AgentQueryRequest` beside `rank_by` and `env_tags`, so this
+wider lesson search moved to `recall-refresh` or session start. Confirmed reachable: the vendored
+client passes it straight through on the `/query` body beside `rank_by` and `env_tags`, so this
 is a request-body change and not a server one.
 
 - **Do not "fix" this by raising `recallBudgetMs`.** The harness stop is
@@ -264,12 +264,11 @@ with `sections`, `entry_types`, `include_working_memory` and `max_token_budget`.
 It also generates a per-session summary for its browse view.
 
 > **Correction (2026-08-24).** An earlier draft of this section listed `lane_filter` among those
-> fields. It is not one: `lane_filter` exists on `AgentQueryRequest` and **not** on
-> `ContextRequest`. Read it off the vendored client — `mcp/dist/server.js:47366` is the only
-> occurrence in the whole bundle and it sits inside `query()`, while `getContext()` at
-> `:47398-47415` carries exactly eleven fields and no `lane_filter` among them. The same list
-> has no ranking field of any kind, which is why the shipped implementation sends no `rank_by`
-> either and cannot use `lib/rank.mjs`'s `where_were_we` rule on this path.
+> fields. It is not one: `lane_filter` belongs to `/query`, and `/context` does not accept it.
+> Read it off the vendored client, where the only occurrence of the field sits in the `/query`
+> call and the `/context` one does not carry it. `/context` accepts no ranking field either,
+> which is why the shipped implementation sends no `rank_by` and cannot use `lib/rank.mjs`'s
+> `where_were_we` rule on this path.
 
 We already call `/v2/control/context`, but only as the `recallAssemble: server` variant of
 per-prompt recall. SessionStart injects recalled memory; it does not inject *here is where you
@@ -324,45 +323,11 @@ section explaining that the plugin looks broken before its first session. It dou
 path for hook gaps. And the parser is half-written: `hooks/src/checkpoint.mjs` already reads
 `transcript_path` and parses that same JSONL, just only the last 200 KB of one file.
 
-> **Gate: fix the redactor first.** Verified live against this branch's `lib/redact.mjs`. Real key
-> shapes are caught (`sk-ant-…`, `mbt_…`, `ghp_…`) and a bare `DATABASE_PASSWORD=hunter2` is
-> redacted, but the assignment rule misses whenever the assignment is not at a line start. Both
-> `env: DATABASE_PASSWORD=hunter2` and an indented `  DATABASE_URL=postgres://u:p@h/db` pass
-> through unredacted. On live capture that is a handful of turns. On a bulk import of every
-> transcript on the machine, it is every indented env block anyone has ever pasted into a session.
->
-> > **Correction (2026-08-24), re-probed against `lib/redact.mjs` on the merged branch.** The
-> > diagnosis above — *"the assignment rule misses whenever the assignment is not at a line
-> > start"* — is **wrong**, and acting on it would fix nothing. Indentation is irrelevant:
-> > `  DATABASE_PASSWORD=hunter2` redacts correctly, at a line start or on a later line. The two
-> > leaks above have two *different* causes, and only one of them is the assignment rule.
-> >
-> > **(a) Shadowing, not position.** `ASSIGNMENT_RE` is global, and its value group is `\S+`.
-> > Given `env: DATABASE_PASSWORD=hunter2` the first match takes name `env`, separator `: `, and
-> > value `DATABASE_PASSWORD=hunter2` — the whole secret. `env` contains no keyword, so the
-> > match is returned unchanged, and `lastIndex` has already moved past the secret, which is
-> > therefore never examined. Any word plus `:` or `=` plus whitespace does it, not `env:`
-> > specifically: `foo: A_TOKEN=x` leaks identically. It consumes **exactly one** assignment —
-> > `env: A_TOKEN=aaa B_SECRET=bbb` redacts the second and leaks the first — so this is a
-> > swallowed-token bug, not a skipped line. The fix is in `scrubAssignments`, not in the anchor:
-> > re-scan the shadow's own value, or make the value group stop at the next separator.
-> >
-> > **(b) URL credentials have no rule at all.** `DATABASE_URL=postgres://admin:Tr0ub4dor@h/db`
-> > leaks in *every* position, prose included, because `DATABASE_URL` contains none of the eight
-> > `ASSIGNMENT_KEYWORDS` and there is no `user:pass@host` pattern in `RULES`. This is a missing
-> > rule, and it is the one a database URL in a pasted `.env` will hit.
-> >
-> > **What bounds the blast radius, and what does not.** The `high-entropy` backstop (length ≥ 32,
-> > charset `[A-Za-z0-9+/=_-]`, entropy ≥ 4.0) catches a shadowed secret whose *value* is a real
-> > random key: `env: API_SECRET=Xk29…Ae57` redacts as `high-entropy`. What survives both is
-> > therefore the **short, low-entropy** secret — a human-chosen password, a staging token, a
-> > database URL's password field. Which is precisely the population a pasted `.env` block is
-> > made of, so the gate stands.
-> >
-> > Probe both shapes and the entropy boundary in whatever test lands with the fix; the four
-> > cases that matter are `env: X_TOKEN=short`, `env: X_TOKEN=<32-char random>`,
-> > `DATABASE_URL=postgres://u:p@h/db`, and `A=b X_TOKEN=short` (which already passes, and is the
-> > control that proves the fix did not just widen the anchor).
+> **Gate: the redactor was fixed first.** Bulk import multiplies whatever capture leaks by
+> every transcript on the machine, so this item was held until `lib/redact.mjs` covered the
+> two shapes a pasted `.env` block is made of. It does now, and `test/redact.test.mjs` holds
+> the cases. Re-probe before starting: this gate is about the redactor as it is on the day
+> the importer lands, not as it was when the item was written.
 
 - **Also needs** ingest rate limiting, idempotency keys, progress reporting, a
   `/mubit-memory:import` skill
@@ -640,11 +605,11 @@ Wave 2 fixed the caller (`refreshPins` is gated on the breaker reading `ready`) 
 mechanic. An importer making thousands of successful ingest calls will erase every failure signal
 the plugin has, which makes this a Wave 3 prerequisite rather than a curiosity.
 
-### Two request fields that are not what the proto says
+### Two request fields that are not what the contract says
 
-- **`limit` on `ContextRequest` is not per-section.** It is the total on one internal query, and
-  `get_context`'s overlay lanes add their own caps *outside* it. Only `max_token_budget` bounds
-  the response.
+- **`limit` on `/context` is not per-section.** It bounds one query's worth of candidates in
+  total, and what the route layers on top is not counted against it. Only `max_token_budget`
+  bounds the response.
 - **`user_id` is a retrieval filter, not a label** (item 1's correction). Still the single most
   expensive mistake available in this codebase: filling it on ingest makes new entries invisible
   to a recall that omits it.
@@ -668,7 +633,7 @@ Three, none of them blocking, all of them cheaper to settle before Wave 3 than d
 
 | | Decision | Recommendation |
 | --- | --- | --- |
-| **A** | **Item 0: `prefer_current_run` on the rung-1 body.** | Do it. Recall returns nothing today; this is a one-line request-body change with a measured 2.05 s → 0.25 s. The only open question is where the cross-run overlay moves to — `recall-refresh` or session start. |
+| **A** | **Item 0: `prefer_current_run` on the rung-1 body.** | Do it. Recall returns nothing today; this is a one-line request-body change with a measured 2.05 s → 0.25 s. The only open question is where the wider lesson search moves to — `recall-refresh` or session start. |
 | **B** | **Item 4: swap the resume block off `/context`.** | Swap it, to `postQuery{mode:'direct_bypass', rank_by:'freshness', entry_types, limit}` assembled client-side. `/context` cannot rank a temporal question and spends the budget on the wrong sections first. The cost is a bulleted list instead of a prose briefing. Note it inherits the same lesson-lane latency as item 0 — tolerably, since it runs detached at 20 s — so **A makes B better** and should land first. |
 | **C** | **`plugin-scope-fix`: merge, carve up, or abandon.** | Decide before committing Wave 3 capacity to item 7, which is the only remaining item gated on it. PR #11 was closed with *"specific fixes will be carved out into their own PRs when asked for"*, and nothing has been carved out since. |
 

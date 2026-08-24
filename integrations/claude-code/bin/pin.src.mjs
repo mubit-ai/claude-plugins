@@ -60,7 +60,7 @@ import { MAX_PIN_CHARS, MAX_PINS, writePinsLocal } from '../lib/pins.mjs';
 import { scanRunMarkers } from '../lib/runid.mjs';
 import { deleteVariable, listVariables, PIN_NAMESPACE, setVariable } from '../lib/variables.mjs';
 
-/** §4.3 / F21: the run id that must never be written to, from any surface. */
+/** The run id that must never be written to, from any surface. */
 const POISONED_RUN_ID = 'default';
 
 /** How far back a marker may have been touched and still name "the run I am in". */

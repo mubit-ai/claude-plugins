@@ -111,7 +111,7 @@ const LADDER = [
   {
     rung: 1,
     what: 'cfg.actorId (MUBIT_CC_ACTOR_ID)',
-    git: { 'github.user': 'gh-login', 'user.email': 'ada@example.com', 'user.name': 'Ada Lovelace' },
+    git: { 'github.user': 'gh-login', 'user.email': 'user@example.com', 'user.name': 'Ada Lovelace' },
     env: { USER: 'shell-login' },
     cfg: { actorId: 'explicit-actor' },
     want: 'explicit-actor',
@@ -236,7 +236,7 @@ test('readActor: a corrupt, wrong-version or empty record is a miss, never a thr
 test('resolveActor: a cache hit answers without shelling out', async () => {
   const actor = await lib('actor.mjs');
   const dataDir = makeDataDir();
-  const projectDir = repoWith({ 'user.email': 'someone-else@example.com' });
+  const projectDir = repoWith({ 'user.email': 'test@example.com' });
   seedCache(dataDir, { v: 1, at: Date.now(), actor: 'cached-one', source: 'git-email' });
 
   const got = withEnv(gitJail(dataDir, { PATH: '' }),

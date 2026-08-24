@@ -55,11 +55,9 @@
  * ---------------------------------------------------------------------------
  * `/v2/control/context`, and the two fields that are not on it
  * ---------------------------------------------------------------------------
- * `ContextRequest` carries eleven fields and no ranking field of any kind. `lane_filter` is
- * **not** one of them — it exists only on `AgentQueryRequest` (`mcp/dist/server.js:47366`
- * against the `getContext` body at `:47398-47415`), which is why `docs/codaph-port.md`'s
- * description of this feature is corrected on this branch. `entry_types` *is* real here and
- * is worth sending. `theRequestBodyIsTheResumeRequest` asserts all four absences by name,
+ * `/context` accepts no ranking field of any kind, and `lane_filter` is not one of its
+ * fields either — that one belongs to `/query`. `entry_types` *is* accepted here and is worth
+ * sending. `theRequestBodyIsTheResumeRequest` asserts all four absences by name,
  * each with the reason, because a field the server silently ignores while sitting in a
  * request log looking like a choice is a bug with no symptom.
  *
@@ -389,16 +387,14 @@ test('the resume request body is a sections context request, with four fields de
 
     // --- the four absences.
     assert.equal('rank_by' in body, false,
-      'ContextRequest has NO ranking field of any kind — its eleven fields do not include '
-      + 'one. Sending `rank_by` here would be ignored by the server while sitting in the '
-      + 'request log looking like a choice somebody made, which is a bug with no symptom');
+      '/context accepts NO ranking field of any kind. Sending `rank_by` here would be '
+      + 'ignored while sitting in the request log looking like a choice somebody made, '
+      + 'which is a bug with no symptom');
     assert.equal('lane_filter' in body, false,
-      '`lane_filter` exists on AgentQueryRequest and NOT on ContextRequest — mcp/dist/'
-      + 'server.js:47366 against the getContext body at :47398-47415. docs/codaph-port.md '
-      + 'said otherwise and is corrected on this branch');
+      '`lane_filter` is a /query field and /context does not accept it');
     assert.equal('env_tags' in body, false,
-      'same gap, one field further on: `env_tags` is an AgentQueryRequest field. Version-aware '
-      + 'tag scoring is a capability rungs 1-2 have and this path does not');
+      'same gap, one field further on: `env_tags` is a /query field. Version-aware tag '
+      + 'scoring is a capability rungs 1-2 have and this path does not');
     assert.equal('user_id' in body, false,
       '`user_id` is a retrieval FILTER the server enforces, not a label: filling it narrows '
       + 'the briefing to entries captured under the same id and returns nothing on every '

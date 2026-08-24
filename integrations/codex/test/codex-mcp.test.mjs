@@ -145,8 +145,8 @@ test('the initialize frame carries the instructions block', async () => {
 
 test('the server refuses to start rather than write into the poisoned default run', async () => {
   // § The facade maps `session_id` onto the control-plane `run_id`, and the upstream server
-  //   defaults it to the literal "default" — which collapses every user, project and machine
-  //   into one shared run. An unset `static` pin is the realistic way to reach it. Starting
+  //   defaults it to the literal "default" — a fallback rather than a run of anyone's. An
+  //   unset `static` pin is the realistic way to reach it. Starting
   //   anyway would be worse than not starting: the hooks in the same session fail the same
   //   derivation and capture nothing, so the MCP writes would be the only thing landing, and
   //   landing in the wrong place.

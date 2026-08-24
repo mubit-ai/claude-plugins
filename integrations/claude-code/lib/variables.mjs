@@ -76,9 +76,11 @@ export const VARIABLE_ROUTES = Object.freeze({
 export const PIN_NAMESPACE = 'cc.pin.';
 
 /**
- * §4.3 / F21: the one run id that must never reach the wire. `MUBIT_DEFAULT_SESSION_ID`
- * defaults to this literal on the MCP server, and a *pin* written under it would render as a
- * standing constraint in a stranger's session.
+ * The one run id that must never reach the wire.
+ *
+ * It is the value a run id falls back to when nothing configured one, so it names no project
+ * in particular — and a *pin* is a standing constraint, which is the last thing to file under
+ * an address that is not yours.
  */
 const POISONED_RUN_ID = 'default';
 
@@ -239,9 +241,9 @@ function refuseRun(run, op) {
   if (!run) return `${op}Variable: run_id is required — a variable is run-scoped state and has nowhere else to live`;
   // Exact match only. A project legitimately called `default-config` must still have a run.
   if (run === POISONED_RUN_ID) {
-    return `${op}Variable: refusing run_id "${POISONED_RUN_ID}" — the MCP server's `
-      + 'MUBIT_DEFAULT_SESSION_ID default collapses every user, project and machine into one '
-      + 'run, and a pin written there would render in a stranger\'s session (§4.3)';
+    return `${op}Variable: refusing run_id "${POISONED_RUN_ID}" — that is the fallback a run `
+      + 'id takes when nothing configured one, not a run of yours. Set a real run id: a pin '
+      + 'written under the fallback is not guaranteed to come back to this project';
   }
   return '';
 }

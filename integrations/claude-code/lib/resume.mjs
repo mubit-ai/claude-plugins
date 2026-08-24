@@ -158,7 +158,7 @@ export function takeResume(cfg, runId) {
       fetchMs: int(raw.fetch_ms, 0),
     };
   } catch {
-    // §4.9/§12.1-F14: an unreadable ${CLAUDE_PLUGIN_DATA} costs the briefing, nothing else.
+    // An unreadable ${CLAUDE_PLUGIN_DATA} costs the briefing, nothing else.
     return null;
   }
 }

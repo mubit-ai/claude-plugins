@@ -169,7 +169,7 @@ function flagValue(argv, name) {
 /**
  * The same refusal `lib/runid.mjs` applies to a `static` pin, for a run id that arrived on
  * argv instead. `''` means "not a run id", and the caller briefs nothing — `"default"` is the
- * value that would collapse every user and project into one shared run (§4.3).
+ * value a run id falls back to when nothing configured one, and it names no project of yours.
  * @param {string} raw @returns {string}
  */
 function usableRunId(raw) {

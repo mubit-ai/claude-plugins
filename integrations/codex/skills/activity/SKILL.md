@@ -65,7 +65,7 @@ payload goes to stdout and the summary to stderr, so a pipe gets only the data.
 
 ```bash
 node <plugin-root>/bin/activity.mjs --export
-node <plugin-root>/bin/activity.mjs --export --out ~/mubit-audit.jsonl
+node <plugin-root>/bin/activity.mjs --export --out ~/memory-audit.jsonl
 ```
 
 Without `--out` the JSONL goes to stdout, which is the whole point: it composes, and it leaves

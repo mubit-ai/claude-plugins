@@ -309,7 +309,7 @@ test('export: an upstream error never carries the API key back to the caller', a
  * exactly. Errors are still scrubbed; the record is not.
  */
 test('export: the content is not re-redacted on the way out', async (t) => {
-  const content = '{"id":"a","content":"AKIAIOSFODNN7EXAMPLE and eldar@mubit.ai"}';
+  const content = '{"id":"a","content":"AKIAIOSFODNN7EXAMPLE and you@example.com"}';
   const { cfg, mod } = await setup(t, { routes: { [EXPORT_ROUTE]: exportBody(content) } });
 
   const r = await mod.exportActivity(cfg, { run: RUN });

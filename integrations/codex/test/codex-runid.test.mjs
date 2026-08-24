@@ -172,8 +172,8 @@ for (const source of CODEX_SOURCES) {
     //   is not safe is a source Codex sends that the table has never seen, so each is driven.
     assert.ok(runId && runId !== 'default' && runId !== 'cc-',
       `source=${source} produced ${JSON.stringify(runId)}. The MCP server defaults its session `
-      + 'id to the literal "default", which collapses every user, project and machine into one '
-      + 'shared run — no input may ever make this module emit it.');
+      + 'id to the literal "default", which is a fallback rather than a run — no input may ever '
+      + 'make this module emit it.');
   });
 }
 

@@ -172,8 +172,8 @@ function detect(projectDir) {
   const ghUser = clean(gitConfig(dir, 'github.user'));
   if (ghUser) return { actor: ghUser, source: 'git-github-user' };
 
-  // Rung 3 — the local-part of the commit email. `ada@example.com` is `ada`; the domain says
-  // where they work, not who they are, and it is the same on every colleague's machine.
+  // Rung 3 — the local-part of the commit email. `user@example.com` is `user`; the domain
+  // says where they work, not who they are, and it is the same on every colleague's machine.
   const email = gitConfig(dir, 'user.email');
   const local = clean(email.includes('@') ? email.slice(0, email.indexOf('@')) : email);
   if (local) return { actor: local, source: 'git-email' };

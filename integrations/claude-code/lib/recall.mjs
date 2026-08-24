@@ -186,9 +186,9 @@ export const RESUME_SECTIONS = Object.freeze([
  * asymmetry is the single most likely way this pair drifts, which is why the test names it
  * rather than skipping it.
  *
- * `entry_types` IS a real `ContextRequest` field — one of the eleven — unlike `rank_by`,
- * `lane_filter` and `env_tags`, and it is worth sending: without it the briefing competes for
- * a 1000-token budget against every `observation` and `tool_output` the run has produced.
+ * `entry_types` is a field `/context` does accept, unlike `rank_by`, `lane_filter` and
+ * `env_tags`, and it is worth sending: without it the briefing competes for a 1000-token
+ * budget against every `observation` and `tool_output` the run has produced.
  */
 export const RESUME_ENTRY_TYPES = Object.freeze([
   'trace', 'task_result', 'mental_model', 'rule', 'lesson',
@@ -212,15 +212,11 @@ export const RESUME_QUERY = 'Where did the work on this project leave off; '
  * *session* rather than once per prompt, and because five sections cannot be filled from six
  * candidates.
  *
- * **What `limit` actually counts, read off the backend rather than the proto.** `control.proto`
- * calls it "maximum number of evidence items per section" and that is wrong. `GetContext`
- * clamps it to `min(limit, 50)` and forwards it as the *total* limit on one internal
- * `AgentQueryRequest`, where it becomes a single `take(limit)` over the fused candidate list —
- * there is no per-section application anywhere in the handler. Worse for anyone budgeting
- * against it, `get_context`'s own overlay lanes sit **outside** it and add their own hardcoded
- * caps on top: up to 6 lesson/rule overlay items, 3 archive blocks, 2 workflow hints and 1
- * supplemental fact. So a `limit` of 12 can return up to 24 sources, and the only true bound
- * on the response is `max_token_budget`.
+ * **What `limit` actually counts, measured rather than taken from the contract.** It is not a
+ * per-section cap, and it is not a cap on the response: it bounds one query's worth of
+ * candidates in total, and the extra material `/context` layers on top is not counted against
+ * it. A `limit` of 12 can come back with roughly twice that many sources, so the only bound
+ * worth budgeting against is `max_token_budget`.
  *
  * `evidence_candidates_considered` is the observable that shows it: it is the merged, deduped
  * candidate count *before* budget truncation, and `evidence_dropped_by_budget` is that count
@@ -325,8 +321,8 @@ async function ladder(cfg, o) {
     // in — the same reason the run id reads the payload. A recall scored against `repo:`
     // tags from the wrong repo is worse than one scored against none.
     env_tags: envTags(cfg, o.projectDir),
-    // §5.2: `rank_by` is the same trap as `env_tags` above, one field further on.
-    // `ContextRequest` has no ranking field of ANY kind — its 12 fields do not include one —
+    // `rank_by` is the same trap as `env_tags` above, one field further on. `/context`
+    // accepts no ranking field of ANY kind,
     // which makes freshness the second capability rungs 1-2 gain over rung 3 rather than
     // something they give up. What makes it a trap rather than a limitation: turning rung 3
     // on (`recallAssemble: "server"`) does not fail, warn, or fall back: it silently reverts
@@ -410,8 +406,8 @@ async function ladder(cfg, o) {
  * assembled the block, so it is injected verbatim: re-assembling what two LLM calls just
  * paid for would be pure waste.
  *
- * `rank_by` does not reach it either, and cannot: `ContextRequest` has no ranking field, so
- * this rung always fuses at the server's default weights. See the note beside the rung-1
+ * `rank_by` does not reach it either, and cannot: `/context` accepts no ranking field, so
+ * this rung always ranks at the service's defaults. See the note beside the rung-1
  * body — it is the one cost of `recallAssemble: "server"` that nothing at runtime reports.
  *
  * The seen-set does not reach this rung, and cannot: the block is the server's rendering and
@@ -497,13 +493,12 @@ export async function resumeContext(cfg, o) {
       format: 'structured',
       // Four fields are deliberately absent and each is absent for its own reason:
       //
-      //   `rank_by`     — `ContextRequest` has no ranking field of ANY kind. Sending one is
-      //                   ignored server-side while sitting in the request log looking like a
-      //                   choice somebody made, which is a bug with no symptom. It is also the
-      //                   real cost of this path: `lib/rank.mjs` has a `where_were_we` rule
-      //                   that would resolve this query to `freshness`, and it cannot be used.
-      //   `lane_filter` — an `AgentQueryRequest` field, not a `ContextRequest` one
-      //                   (`mcp/dist/server.js:47366` against `getContext` at :47398-47415).
+      //   `rank_by`     — `/context` accepts no ranking field of ANY kind. Sending one is
+      //                   ignored while sitting in the request log looking like a choice
+      //                   somebody made, which is a bug with no symptom. It is also the real
+      //                   cost of this path: `lib/rank.mjs` has a `where_were_we` rule that
+      //                   would resolve this query to `freshness`, and it cannot be used.
+      //   `lane_filter` — a `/query` field. `/context` does not accept it.
       //   `env_tags`    — the same gap, one field further on. Version-aware tag scoring is a
       //                   capability rungs 1-2 have and this endpoint does not.
       //   `user_id`     — a retrieval FILTER the server enforces, not a label. Filling it
@@ -620,7 +615,7 @@ function tokenBudgetOf(cfg, o) {
  * The query's fusion weights: the caller's, then the config's, then nothing.
  *
  * "Nothing" is a real answer here and the reason this is not modelled with a default: the
- * field is optional on `AgentQueryRequest`, and absent means exactly what `relevance` means.
+ * field is optional on `/query`, and absent means exactly what `relevance` means.
  * `auto` lands here as `''` — by then a caller was supposed to have resolved it
  * (`lib/rank.mjs`, `rankForRecall`), and if one did not, ranking at the server's defaults is
  * the same recall the plugin has always done rather than a new failure mode. Sending the

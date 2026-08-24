@@ -11,8 +11,8 @@
  *
  *   - A missing `run_id` is a 422 that names nothing useful; a missing `name` writes a
  *     variable called `""`.
- *   - `run_id: "default"` is accepted, and collapses every user, project and machine on the
- *     instance into one run (§4.3).
+ *   - `run_id: "default"` is accepted rather than refused, so nothing upstream stops a
+ *     variable being filed under the fallback run id.
  *   - `value_json` is parsed server-side with `serde_json::from_str`, so a value that is not
  *     valid JSON is an `invalid_argument` after a full round trip.
  *   - `list` returns *every* variable in the run, including ones written by other clients.
@@ -102,10 +102,9 @@ test('variables: a missing run_id or name is refused before a socket exists', as
 });
 
 /**
- * §4.3 / F21. `MUBIT_DEFAULT_SESSION_ID` defaults to the literal `"default"` on the MCP
- * server, so a variable written under it lands in a run every user, project and machine on
- * the instance shares — and a *pin* written there would render as a standing constraint in
- * somebody else's session.
+ * `MUBIT_DEFAULT_SESSION_ID` defaults to the literal `"default"` on the MCP server, so a
+ * variable written under it is filed against no project in particular — and a *pin* is a
+ * standing constraint, which is the last thing to leave at an address that is not yours.
  *
  * `lib/http.mjs` refuses it too, on the body. This is the belt: the guard has to hold for
  * `list` and `delete`, which carry a run id in a body that guard does not inspect the same

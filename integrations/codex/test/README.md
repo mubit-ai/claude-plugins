@@ -62,7 +62,7 @@ Re-extract per `docs/harness-probe.md`, Appendix.
 | `codex-classify.test.mjs` | `shell`, `apply_patch`, `update_plan`, `view_image`, `web_search`, `collaborationspawn_agent`, `mcp__mubit__*` → real intents, never `unclassified` |
 | `codex-skills.test.mjs` | Codex frontmatter (`name`, `description`, and none of the keys Codex does not read), `mcp__mubit__` prefixes, and the content guards |
 | `codex-mcp.test.mjs` | real stdio `tools/list` against the committed bundle, the `instructions` frame, and that the two copies of the vendored server are byte-identical |
-| `codex-failure.test.mjs` | F1–F15: unparseable stdin, absent env, unwritable data dir, a misbehaving endpoint, hostile payloads, the three-second SessionEnd → exit 0, a JSON object on stdout, **never exit 2** |
+| `codex-failure.test.mjs` | unparseable stdin, absent env, unwritable data dir, a misbehaving endpoint, hostile payloads, the three-second SessionEnd → exit 0, a JSON object on stdout, **never exit 2** |
 
 ## `codex-failure.test.mjs` is the important one
 
@@ -78,8 +78,8 @@ and both are silent:
   a hook can defend against — but the plugin must not be confusable with "capture is off", so
   every path leaves a local marker and `mubit-memory:doctor` reads it.
 - **`SessionEnd` gets three seconds**, clamped by the host whatever the registration says, where
-  the same hook asks for eight under Claude Code. `F11` asserts the hook *returns* inside it and
-  `F12` asserts the detached child finishes the work after the hook process is killed.
+  the same hook asks for eight under Claude Code. One case asserts the hook *returns* inside it
+  and another that the detached child finishes the work after the hook process is killed.
 
 ## The harness
 

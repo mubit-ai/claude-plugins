@@ -256,6 +256,7 @@ describe('stage 1 — pattern scrub (§4.4)', () => {
       assert.equal(r.redactions, 0);
     });
 
+    // leakcheck-allow: personal-data — a connection string, not an address; the shape is the fixture.
     it('redacts the credentials in a connection string', async () => {
       const { redactText } = await R();
       const r = redactText('DATABASE_URL=postgres://admin:Tr0ub4dor@db.internal:5432/app', cfg(), 'output');
@@ -265,6 +266,7 @@ describe('stage 1 — pattern scrub (§4.4)', () => {
       assert.ok(r.text.includes('db.internal'), `the host is not a secret and must survive:\n${r.text}`);
     });
 
+    // leakcheck-allow: personal-data — a connection string, not an address; the shape is the fixture.
     it('redacts URL credentials in prose, where no assignment rule can reach', async () => {
       const { redactText } = await R();
       const r = redactText('try psql postgres://admin:Tr0ub4dor@db.internal/app and report back', cfg(), 'output');

@@ -224,14 +224,15 @@ test('rung 1 request body matches §5.2 exactly', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// §5.2 — `prefer_current_run`, the cross-run overlay opt-out
+// `prefer_current_run` — asking recall to stay inside this run
 // ---------------------------------------------------------------------------
 
-// The bug this closes: `entry_types` carries `lesson`, which silently enrols every recall in
-// a SECOND retrieval lane — an unscoped search for lessons from other runs. Unscoped means
-// unbounded by a run id, so it costs what the whole instance costs and grows as one fills up.
-// Measured on a hosted instance it was ~1.7s of a ~2.0s call, against a 1500ms budget: recall
-// timed out on every prompt, and no budget could fix it because the host caps the hook at 3s.
+// The bug this closes: `entry_types` carries `lesson`, and asking for lessons puts a second,
+// wider search behind every prompt — one that is not bounded by this run, so what it costs
+// grows with everything the instance holds rather than with this project. On the blocking
+// path that is most of what a recall spends, and no budget setting buys it back, because the
+// host caps the hook below what it costs. Declining it is what keeps this rung inside its
+// budget.
 test('rung 1 declines the cross-run lesson overlay on the blocking path', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
@@ -384,15 +385,14 @@ test('rung 2 carries the same rank_by as rung 1', async (t) => {
 /*
  * THE caveat, pinned as a test because it is invisible everywhere else.
  *
- * `/v2/control/context` — rung 3, `recallAssemble:"server"` — has **no `rank_by` field at
- * all**. `ContextRequest` lists 12 fields and ranking is not among them, the same way
- * `env_tags` exists on `AgentQueryRequest` and not on `ContextRequest`. So an operator who
+ * `/v2/control/context` — rung 3, `recallAssemble:"server"` — accepts **no `rank_by` field at
+ * all**, the same way it does not accept `env_tags` and `/query` does. So an operator who
  * turns rung 3 on to buy a server-assembled block silently gives up freshness ranking, and
  * nothing tells them. This asserts the field is absent rather than sent-and-ignored, so the
- * day it is added to the proto this test fails and points at the README row that says it is
- * missing.
+ * day the route starts accepting one this test fails and points at the README row that says
+ * it is missing.
  */
-test('rung 3 sends no rank_by, because ContextRequest has no such field', async (t) => {
+test('rung 3 sends no rank_by, because /context has no such field', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
 

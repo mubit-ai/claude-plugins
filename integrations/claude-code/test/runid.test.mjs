@@ -2,15 +2,15 @@
 /**
  * `lib/runid.mjs`.
  *
- * Protects build-guide §4.3 (the four strategies, the `SessionStart.source`
- * table, `SessionRecord`) and §12.3, plus spec §7 (identity and session model).
+ * Protects the four run-id strategies, the `SessionStart.source` table and
+ * `SessionRecord` (§4.3, §12.3), plus spec §7 (identity and session model).
  *
  * The run id is the data scope: get it wrong and a user's memory either leaks
  * across projects or is silently written somewhere they will never read it
  * from. The single most important rule in this file is that no input — no
- * matter how hostile — may ever produce the literal `"default"`, the value
- * the MCP server still defaults `MUBIT_DEFAULT_SESSION_ID` to, which collapses
- * every user and project into one shared run.
+ * matter how hostile — may ever produce the literal `"default"`. That is the bundled
+ * server's placeholder, and it identifies nothing: a run id has to name one project on
+ * one machine.
  */
 
 import { test } from 'node:test';
@@ -365,8 +365,8 @@ const HOSTILE = [
 ];
 
 for (const strategy of ['per-directory', 'git-branch', 'per-conversation', 'static']) {
-  // §4.3/§12.3: no strategy can ever emit "default" — the MCP server's poisoned
-  // default is what collapses every project on a machine into one run.
+  // §4.3/§12.3: no strategy can ever emit "default" — it is the bundled server's
+  // placeholder, and it identifies nothing: a run id has to name one project on one machine.
   test(`${strategy}: no input can produce "default" or an empty run id`, async () => {
     const config = await lib('config.mjs');
     const runid = await lib('runid.mjs');
@@ -534,7 +534,7 @@ test('loadSessionMap(): an unknown session returns null', async () => {
   assert.equal(got, null);
 });
 
-// §4.3 + §12.1-F14: a corrupt record is treated as "no record", never a throw.
+// §4.3 + §12.1: a corrupt record is treated as "no record", never a throw.
 test('loadSessionMap(): a corrupt session file returns null', async () => {
   const runid = await lib('runid.mjs');
   const dataDir = makeDataDir();

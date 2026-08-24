@@ -51,7 +51,7 @@ export function log(cfg, level, msg, fields = {}) {
     rotateIfNeeded(dir, file);
     appendFileSync(file, `${line}\n`, 'utf8');
   } catch {
-    // §4.9/§12.1-F14: a log that cannot be written costs the log, nothing else.
+    // §4.9/§12.1: a log that cannot be written costs the log, nothing else.
   }
 }
 

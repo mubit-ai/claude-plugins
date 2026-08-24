@@ -1,24 +1,22 @@
 // @ts-check
 /**
- * What an MCP write actually puts on the wire — the plugin's one un-guarded egress.
+ * What an MCP write actually puts on the wire.
  *
  * Every other outbound call in this plugin goes through `lib/http.mjs`, which refuses a
  * poisoned run id (§4.3) and scrubs the body first (§7). The MCP server is the exception:
  * it is a vendored bundle that dials the endpoint itself, and nothing in this repo saw the
- * request. Two things went out through that gap.
+ * request. Two things used to go out through that gap.
  *
  *   1. **Scope.** `mubit_learned` is the only write tool a default install exposes, and the
- *      bundled SDK hard-codes `lesson_scope: "session"` on it. Server-side, the cross-run
- *      overlay admits every lesson whose scope is not `"run"` — so a `session` lesson is
- *      read by *other runs*, exactly as a `global` one is. The plugin promises the opposite
- *      in two places a user reads: `plugin.json` (`reflectOnEnd` — "the only path that
- *      promotes a lesson beyond its own run") and `skills/remember/SKILL.md`. A benchmark
- *      harness found this the expensive way: lessons one task wrote were injected into five
- *      unrelated ones.
+ *      bundled SDK hard-codes `lesson_scope: "session"` on it. `"session"` is not the
+ *      per-run scope its name suggests — only `"run"` is — while the plugin promises the
+ *      opposite in two places a user reads: `plugin.json` (`reflectOnEnd` — "the only path
+ *      that promotes a lesson beyond its own run") and `skills/remember/SKILL.md`. The
+ *      guard makes the wire match the promise.
  *
- *   2. **The run id.** Every write tool takes an optional `session_id` and the server
- *      prefers it over the run the launcher derived, so an agent can write into any run it
- *      can name.
+ *   2. **The run id.** Every write tool takes an optional `session_id`, so without the guard
+ *      the run a write lands in is whatever the caller passed rather than the one the
+ *      launcher derived.
  *
  * These tests assert on the **wire**, never on the mechanism: `mcpCallTool` runs the shipped
  * `mcp/dist/index.js` for real against a `fakeMubit` and hands back what it sent. A future
@@ -68,19 +66,18 @@ const wrote = (server) => {
 };
 
 // ---------------------------------------------------------------------------
-// The leak itself
+// What the guard pins
 // ---------------------------------------------------------------------------
 
-// The headline regression. `session` is not "narrower than global" — on the read side it is
-// the same cross-run lane, so this is the assertion the harness's per-task isolation rests on.
+// The headline regression. `session` is not "narrower than global" — only `run` keeps a
+// lesson inside the run that wrote it, so this is the assertion per-task isolation rests on.
 test('mubit_learned writes lesson_scope "run", not "session"', async (t) => {
   const { server } = await call(t, 'mubit_learned', { text: LESSON });
   const { item } = wrote(server);
 
   assert.equal(item.lesson_scope, 'run',
-    'the bundled SDK hard-codes "session" here, and any scope but "run" is read by other '
-    + 'runs (control service: "Only surface session-scoped, global-scoped, and org-scoped '
-    + `lessons"). Got ${JSON.stringify(item.lesson_scope)}.`);
+    'the bundled SDK hard-codes "session" here, and "session" is not the per-run scope its '
+    + `name suggests — only "run" is. Got ${JSON.stringify(item.lesson_scope)}.`);
 });
 
 // The tool still has to work. A guard that silently dropped the lesson would pass the test
@@ -95,9 +92,9 @@ test('the lesson itself still reaches the wire intact', async (t) => {
   assert.equal(item.source, 'agent');
 });
 
-// §4.3 — the launcher exists to stop the server defaulting the run id. It derives one, and
-// then hands the caller a `session_id` parameter that overrides it. Closing the second hole
-// is what makes the first one worth closing.
+// §4.3 — the launcher exists to derive the run id rather than let it be defaulted. The tool
+// schema then hands the caller a `session_id` parameter that would override it. Closing the
+// second hole is what makes the first one worth closing.
 test('a caller-supplied session_id does not move the write out of the derived run', async (t) => {
   const { server } = await call(t, 'mubit_learned',
     { text: LESSON, session_id: 'someone-elses-run' });

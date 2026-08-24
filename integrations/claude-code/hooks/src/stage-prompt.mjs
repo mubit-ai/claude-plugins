@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `hooks/src/stage-prompt.mjs` — UserPromptSubmit, the fast path. Build-guide §5.3.
+ * `hooks/src/stage-prompt.mjs` — UserPromptSubmit, the fast path.
  *
  * **Budget < 25 ms. Zero network.** It runs on the same event as `prompt-recall`, which is
  * allowed 1500 ms and a round trip; this one is allowed neither, because everything it does
@@ -101,7 +101,7 @@ function stageTurn(cfg, runId, payload) {
     // can be pinned by hand. This join used to sanitise only the first, which put the turn
     // file somewhere no sibling hook would ever read it.
     const dir = join(runDir(cfg, runId), 'turns');
-    // §12.1-F14: a read-only ${CLAUDE_PLUGIN_DATA} costs this Q&A pair and nothing else.
+    // §12.1: a read-only ${CLAUDE_PLUGIN_DATA} costs this Q&A pair and nothing else.
     if (!ensureDir(dir)) return false;
 
     const file = join(dir, `${promptId}.json`);

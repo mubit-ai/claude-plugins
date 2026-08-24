@@ -47,8 +47,8 @@
  *   1. **When searching is wasted, and when it is the only option.** The steer block's own
  *      balance, and its recorded defect: it once said only "do not search for it
  *      preemptively", a negative with no positive beside it, and the trained behaviour was
- *      to never call a memory tool at all (audit C1, `session-start.mjs`). The subagent
- *      clause is the half the steer block cannot state, because it never reaches one.
+ *      to never call a memory tool at all (`session-start.mjs`). The subagent clause is the
+ *      half the steer block cannot state, because it never reaches one.
  *   2. **Which retrieval tool for which shape of question.** Four of the curated ten read
  *      from memory and the choice between them is deferred with their descriptions.
  *   3. **What `mubit_learned` is for.** Its own description says what belongs in a lesson and

@@ -277,12 +277,12 @@ test('drain: a 2xx unlinks the batch, advances the marker, and records the job_i
   assert.ok(captured.reduce((a, b) => a + b, 0) >= 3, `marker.captured did not advance: ${JSON.stringify(marker.captured)}`);
 });
 
-// §5.5 step 6 / F1 — a transport failure records a breaker failure and LEAVES the spool alone.
+// §5.5 step 6 — a transport failure records a breaker failure and LEAVES the spool alone.
 // The spool is keyed by run_id, not session, so nothing is lost by waiting.
 test('drain: a network failure leaves every spool file in place', async (t) => {
   const dataDir = makeDataDir();
   seedSpool(dataDir, 4);
-  // Nothing is listening on port 1 — ECONNREFUSED, the F1 scenario.
+  // Nothing is listening on port 1 — ECONNREFUSED, the nothing-listening scenario.
   const r = await runHook('drain', stop(), { env: envFor(dataDir, 'http://127.0.0.1:1') });
 
   assertHookContract(r);
@@ -295,7 +295,7 @@ test('drain: a network failure leaves every spool file in place', async (t) => {
     `recordFailure did not run: ${JSON.stringify(breakers[0].json)}`);
 });
 
-// §5.5 step 6 / F16 — a non-retryable 4xx means the payload is bad, not the server.
+// §5.5 step 6 — a non-retryable 4xx means the payload is bad, not the server.
 // Retrying a 422 forever is how a spool becomes unbounded.
 test('drain: a 422 quarantines the batch under spool/rejected/ and never retries it', async (t) => {
   const dataDir = makeDataDir();
@@ -354,7 +354,7 @@ test('drain --with-outcome: posts one outcome carrying the turn\'s recalled entr
   const body = server.lastCall('POST', '/v2/control/outcome').body;
   assert.equal(body.run_id, RUN_ID);
   assert.equal(body.reference_id, 'global');
-  assert.ok(body.reference_id.length > 0, 'RecordOutcomeRequest.reference_id must be non-empty (§1.3)');
+  assert.ok(body.reference_id.length > 0, 'reference_id must be non-empty on an outcome (§1.3)');
   assert.equal(body.outcome, 'success');
   assert.equal(body.signal, 0.2);
   assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);

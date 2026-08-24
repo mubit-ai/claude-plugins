@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `hooks/src/pre-tool.mjs` — PreToolUse, **warnings only** (HS-7 stage 1).
+ * `hooks/src/pre-tool.mjs` — PreToolUse, **warnings only** (stage 1: warn, never deny).
  *
  * ---------------------------------------------------------------------------
  * What this gate is for
@@ -17,29 +17,25 @@
  * ---------------------------------------------------------------------------
  * There are TWO ways to deny, and both are pinned below
  * ---------------------------------------------------------------------------
- * Read out of the Claude Code 2.1.235 binary itself (`strings -a`, the technique
- * `hook-output.test.mjs:80-88` documents), not from the published reference:
+ * Both were established against a running Claude Code 2.1.235, the way
+ * `hook-output.test.mjs` establishes its constants, rather than taken from the published
+ * reference:
  *
- *   1. **stdout.** The host's own "Expected schema:" block for this event reads
- *      `hookSpecificOutput:{"for PreToolUse":{hookEventName:'"PreToolUse"',
- *      permissionDecision:'"allow" | "deny" | "ask" | "defer" (optional)',
- *      permissionDecisionReason:"string (optional)", updatedInput:…, additionalContext:…}}`.
- *      Four decision values, plus `updatedInput` — which rewrites the tool's arguments and is
- *      a *larger* power than denying, since the call still runs and runs as something else.
- *      None of the five may ever appear.
+ *   1. **stdout.** The "Expected schema:" block the host prints for this event admits a
+ *      `hookSpecificOutput.permissionDecision` of `allow`, `deny`, `ask` or `defer`, with a
+ *      `permissionDecisionReason` beside it — and an `updatedInput`, which rewrites the
+ *      tool's arguments and is a *larger* power than denying, since the call still runs and
+ *      runs as something else. None of the five may ever appear.
  *
- *   2. **The exit code.** The host's hook registry entry reads, verbatim:
- *        `PreToolUse:{summary:"Before tool execution",description:`Input to command is JSON of
- *         tool call arguments.
- *         Exit code 0 - stdout/stderr not shown
- *         Exit code 2 - show stderr to model and block tool call
- *         Other exit codes - show stderr to user only but continue with tool call`}`
- *      **Exit 2 blocks the call.** Note the asymmetry: every *other* non-zero code continues
- *      through the normal permission flow, so the dangerous value is specifically 2 — which
- *      is exactly what a naive `process.exit(2)` on an error path would pick. `lib/hook.mjs`
- *      pins `process.exitCode = 0` on every path out, and `assertHookContract` checks exit 0
- *      as hygiene everywhere else in this suite; here it is the security property, so it is
- *      asserted explicitly and by name.
+ *   2. **The exit code.** The host documents three bands for this event: exit 0 shows
+ *      neither stdout nor stderr, exit 2 shows stderr to the model *and blocks the tool
+ *      call*, and every other exit code shows stderr to the user only and continues with the
+ *      call. **Exit 2 blocks the call.** Note the asymmetry: every *other* non-zero code
+ *      continues through the normal permission flow, so the dangerous value is specifically
+ *      2 — which is exactly what a naive `process.exit(2)` on an error path would pick.
+ *      `lib/hook.mjs` pins `process.exitCode = 0` on every path out, and
+ *      `assertHookContract` checks exit 0 as hygiene everywhere else in this suite; here it
+ *      is the security property, so it is asserted explicitly and by name.
  *
  * ---------------------------------------------------------------------------
  * And zero network, necessarily
@@ -220,7 +216,7 @@ const PATHS = [
   },
   {
     name: 'the data dir is a regular file, so every read fails',
-    why: '§12.1-F14: an unwritable ${CLAUDE_PLUGIN_DATA} costs the memory, nothing else',
+    why: '§12.1: an unwritable ${CLAUDE_PLUGIN_DATA} costs the memory, nothing else',
     setup: () => {
       const f = join(tempDir('mubit-cc-notadir-'), 'data');
       writeFileSync(f, 'this is a file where a directory should be');
@@ -345,7 +341,7 @@ test('pre-tool makes no HTTP call at all, on the path that speaks', async (t) =>
 // ===========================================================================
 
 // Nothing changes for an existing user until they opt in — which is also what makes the
-// "measure how often it fires" step of HS-7 safe to run.
+// "measure how often it fires" step of the rollout safe to run.
 test('with preToolWarnings unset the hook emits exactly {"suppressOutput":true}', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
@@ -580,7 +576,7 @@ test('rules.mjs never throws on an unwritable data dir', async () => {
 
   assert.doesNotThrow(() => rules.recordRules(cfg, RUN_ID, [
     { reference_id: 'ref_a', entry_type: 'rule', content: FORCE_PUSH_RULE },
-  ]), '§12.1-F14: an unwritable ${CLAUDE_PLUGIN_DATA} costs the rule store, nothing else');
+  ]), '§12.1: an unwritable ${CLAUDE_PLUGIN_DATA} costs the rule store, nothing else');
   assert.deepEqual(rules.readRules(cfg, RUN_ID), []);
 });
 
@@ -672,6 +668,6 @@ test('a rule recalled on one prompt is still warned about on a later tool call',
 
   assert.ok((pre.json?.hookSpecificOutput?.additionalContext ?? '').includes(FORCE_PUSH_RULE),
     'end to end, a rule that came back from recall did not surface at the moment it applied. '
-    + 'That round trip — server to rules.json to the tool call — is the whole of HS-7 stage 1: '
+    + 'That round trip — server to rules.json to the tool call — is the whole of stage 1: '
     + `${pre.stdout}`);
 });

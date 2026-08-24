@@ -1,17 +1,17 @@
 // @ts-check
 /**
- * `mcp/src/launch.mjs` — build-guide §8.3 (and §8.1 for the upstream allowlist patch).
+ * `mcp/src/launch.mjs` — the MCP entry point (§8.3, and §8.1 for the upstream allowlist patch).
  *
  * The launcher is bundled to `mcp/dist/index.js`, which is the `.mcp.json` entry point.
  * It exists for one reason: the MCP server reads its configuration from `process.env` at
- * MODULE SCOPE, and one of those reads has a poisoned default — in effect:
+ * MODULE SCOPE, and one of those reads falls back to a placeholder — in effect:
  *
  *     const DEFAULT_SESSION_ID = process.env.MUBIT_DEFAULT_SESSION_ID || "default";
  *
- * The literal `"default"` collapses every user, every project and every machine into a
- * single Mubit run. The launcher's job is to overwrite that with the same run id the
- * hooks derive, *before* importing the server — after the import it is too late, because
- * the constant has already been captured.
+ * `"default"` is the bundled server's placeholder, and it identifies nothing: a run id has
+ * to name one project on one machine. The launcher's job is to overwrite it with the same
+ * run id the hooks derive, *before* importing the server — after the import it is too late,
+ * because the constant has already been captured.
  *
  * These tests import the launcher in a child process with a module-resolution hook that
  * swaps `./server.js` for a stub. The stub snapshots `process.env` at the instant it is
@@ -45,7 +45,7 @@ function launcherScript() {
   if (existsSync(dist)) return dist;
   return assert.fail(
     `mcp/src/launch.mjs does not exist yet (nor the bundled mcp/dist/index.js) under ${PLUGIN_ROOT}.\n` +
-    '  Build-guide §8.3 defines it: loadConfig() → deriveRunId() → set env → await import("./server.js").');
+    '  §8.3 defines it: loadConfig() → deriveRunId() → set env → await import("./server.js").');
 }
 
 const STUB_SERVER = `
@@ -169,8 +169,9 @@ test('never leaves MUBIT_DEFAULT_SESSION_ID as the literal "default"', async () 
   assert.ok(r.importedServer,
     `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
   assert.notEqual(r.envAtImport.MUBIT_DEFAULT_SESSION_ID, 'default',
-    'MUBIT_DEFAULT_SESSION_ID was still "default" when the server was imported — that literal ' +
-    'collapses every user, project and machine into one Mubit run (§4.3)');
+    'MUBIT_DEFAULT_SESSION_ID was still "default" when the server was imported — that is the ' +
+    'bundled server\'s placeholder, and it identifies nothing: a run id has to name one ' +
+    'project on one machine (§4.3)');
   assert.ok((r.envAtImport.MUBIT_DEFAULT_SESSION_ID ?? '').length > 0,
     'MUBIT_DEFAULT_SESSION_ID must be set to a derived run id, not blanked');
 });

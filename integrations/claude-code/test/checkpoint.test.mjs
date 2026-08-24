@@ -87,7 +87,7 @@ const preCompactPayload = (transcriptPath, over = {}) =>
 // ---------------------------------------------------------------------------
 
 // §5.6 — the PreCompact request body, verbatim. `run_id` is the only mandatory field
-// on StateCheckpointPayload (§1.3), but the label is what makes the anchor findable.
+// on a `POST /v2/control/checkpoint` body (§1.3), but the label is what makes the anchor findable.
 test('--pre posts /v2/control/checkpoint with run_id, agent_id, label, snapshot and metadata', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());

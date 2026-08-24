@@ -2,7 +2,7 @@
 /**
  * `lib/config.mjs` — the one resolution function that sees every setting.
  *
- * Build-guide §4.1 (module API + the frozen `Config`), §6.1 (environment
+ * The module API and the frozen `Config`, the environment
  * variables and defaults), §6.2 (`userConfig` keys and the env var each maps
  * to), §6.3 (the `CLAUDE_PLUGIN_OPTION_*` injection guard) and §7
  * (`config.json`, 300 s TTL).
@@ -161,7 +161,7 @@ export const MODE = 'hosted';
 
 /**
  * §1.2: `Authorization: Bearer <key>`. Absent — not empty — when no key is
- * configured, so §12.1-F3's 401 is unambiguous.
+ * configured, so the 401 that follows is unambiguous.
  * @param {Record<string, any>} cfg
  * @returns {Record<string, string>}
  */
@@ -491,7 +491,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // through some other front end can turn it back on with `MUBIT_CC_STATUSLINE=1` — which is
   // what keeps this a default rather than a hard-coded answer.
   const statusLine = bool(pick('statusLine', 'MUBIT_CC_STATUSLINE'), host(e) !== 'codex');
-  // HS-7 stage 1 — `PreToolUse`, warnings only. **Default false, and deliberately so.**
+  // `PreToolUse`, warnings only. **Default false, and deliberately so.**
   //
   // Every other setting here changes what the plugin costs or what it remembers. This one
   // changes what it is allowed to put in front of a tool call, which is the only surface
@@ -500,8 +500,8 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // one — but an unasked-for warning in front of `rm` is still an unasked-for warning, and it
   // would be blamed on the plugin rather than on the lesson that produced it.
   //
-  // Off by default is also what makes the next step of HS-7 runnable: an operator can turn it
-  // on for one run, measure how often it fires and on what, and decide from data whether the
+  // Off by default is also what makes the next step runnable: an operator can turn it on for
+  // one run, measure how often it fires and on what, and decide from data whether the
   // matching is good enough to be worth anyone's attention.
   const preToolWarnings = bool(pick('preToolWarnings', 'MUBIT_CC_PRE_TOOL_WARNINGS'), false);
   // The resume briefing. On, `SessionStart` spawns a detached child that asks
@@ -517,12 +517,10 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const resumeBlock = bool(pick('resumeBlock', 'MUBIT_CC_RESUME_BLOCK'), true);
   const mcpToolsRaw = pick('mcpTools', 'MUBIT_MCP_TOOLS');
   const mcpTools = list(mcpToolsRaw, DEFAULT_MCP_TOOLS);
-  // §8.2 — the ceiling on what an MCP write may claim for itself. The bundled SDK
-  // hard-codes `lesson_scope: "session"` on `mubit_learned`, and the control plane surfaces
-  // every lesson whose scope is not `run` to other runs, so the shipped default was a
-  // cross-run write dressed as a session-local one. `mcp/src/egress.mjs` clamps it to this.
-  // `org` is deliberately absent: it is promotion-only (§1.6), and a client that could name
-  // it could write a tenant-wide rule.
+  // §8.2 — the ceiling on what an MCP write may claim for itself. The bundled SDK stamps a
+  // fixed `lesson_scope` on `mubit_learned` regardless of the caller, and that default is
+  // wider than a run-local write, so `mcp/src/egress.mjs` holds it down to this. The widest
+  // scope is deliberately absent from the list: it is not a value a client sets for itself.
   const mcpLessonScope = enumOf(pick('mcpLessonScope', 'MUBIT_MCP_LESSON_SCOPE'),
     ['run', 'session', 'global'], 'run');
   // Pinned context. On (the default), a constraint the user pins for this run with
@@ -697,7 +695,7 @@ function readUserFileRaw(projectDir) {
   }
 }
 
-/** §12.1-F14: a malformed project file falls through to the default. */
+/** §12.1: a malformed project file falls through to the default. */
 function parseUserFile(raw) {
   if (!raw || !raw.trim()) return {};
   try {

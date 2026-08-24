@@ -1,0 +1,81 @@
+#!/bin/sh
+#
+# pre-push — the only check in this repository that runs BEFORE anything is public.
+#
+# `mubit-ai/claude-plugins` is a public repository, so `git push` is publication: by the time a
+# workflow starts, GitHub is already serving the commit, and a later force-push does not
+# un-publish a blob that anyone can still fetch by SHA. CI here is a detector. This is the gate.
+#
+# It scans **the commits being pushed**, not the working tree, because pushing a branch you are
+# not standing on is ordinary and scanning the wrong tree would pass.
+#
+# Install (once per clone; it covers every worktree):
+#
+#     git config core.hooksPath .githooks
+#
+# Bypass, when you have read the findings and decided they are wrong:
+#
+#     git push --no-verify
+#
+# stdin is one line per ref: <local ref> <local sha> <remote ref> <remote sha>
+
+set -u
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+SCANNER="$ROOT/.github/scripts/leakcheck.mjs"
+ZERO='0000000000000000000000000000000000000000'
+
+# A branch that predates the gate has no scanner to run. Say so rather than pass in silence —
+# a quiet skip is how a security check stops existing without anyone noticing.
+if [ ! -f "$SCANNER" ]; then
+  printf '\033[33mleakcheck: no scanner on this branch (%s) — push not checked.\033[0m\n' \
+    "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" >&2
+  exit 0
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  printf '\033[31mleakcheck: node is not on PATH, so this push cannot be checked.\033[0m\n' >&2
+  printf 'Install node, or push with --no-verify if you are certain.\n' >&2
+  exit 1
+fi
+
+status=0
+checked=''
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${local_sha:-}" ] || continue
+  [ "$local_sha" = "$ZERO" ] && continue          # deleting a remote branch
+
+  # Several refs in one push often share a tip; scan each commit once.
+  case " $checked " in *" $local_sha "*) continue ;; esac
+  checked="$checked $local_sha"
+
+  short=$(git rev-parse --short "$local_sha" 2>/dev/null || echo "$local_sha")
+  printf 'leakcheck: scanning %s (%s)\n' "$short" "${local_ref##*/}" >&2
+
+  if ! node "$SCANNER" --strict --quiet --rev "$local_sha" --no-annotations >&2; then
+    status=1
+  fi
+done
+
+if [ "$status" -ne 0 ]; then
+  cat >&2 <<'EOF'
+
+────────────────────────────────────────────────────────────────────────────
+Push stopped: this commit publishes something the leak policy keeps private.
+
+  Why each rule exists:  .github/leakcheck/POLICY.md
+  Re-run on your tree:   node .github/scripts/leakcheck.mjs --strict
+
+This repository is public, so the push IS the publication — there is no
+window in which to take it back. Fix the finding, or, if the rule is wrong
+and the line is right, annotate it:
+
+  // leakcheck-allow: <rule-id> — why this one is fine
+
+Overriding the gate entirely: git push --no-verify
+────────────────────────────────────────────────────────────────────────────
+EOF
+fi
+
+exit "$status"

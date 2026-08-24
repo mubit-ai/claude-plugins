@@ -14,11 +14,10 @@
  *    parent's. So `prompt-recall` — the entire recall path — is inert inside the Agent tool,
  *    and every subagent a user spawns works with no injected memory at all. That is not a
  *    tuning problem; the hook that would have injected simply never runs for them.
- * 2. **`SubagentStart` can inject.** The host registry says "Exit code 0 - JSON
- *    additionalContext shown to subagent", the dispatch reads
- *    `u.additionalContext = e.hookSpecificOutput.additionalContext`, and a live subagent
- *    asked where it saw an injected token answered: a system message of its own, prefixed by
- *    the host with `SubagentStart hook additional context: `.
+ * 2. **`SubagentStart` can inject.** The host documents "Exit code 0 - JSON
+ *    additionalContext shown to subagent", it carries that `additionalContext` through to the
+ *    subagent, and a live subagent asked where it saw an injected token answered: a system
+ *    message of its own, prefixed by the host with `SubagentStart hook additional context: `.
  *
  * The host supplies that label, so the block must not restate it.
  *

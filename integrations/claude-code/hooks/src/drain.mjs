@@ -178,8 +178,8 @@ async function main() {
     // than making it unlikely.
     //
     // It is still checked: a run id names a directory under the data dir as well as a run,
-    // and `"default"` is the value that collapses every user and project into one shared
-    // run (§4.3). An unusable pin drains nothing — the spool waits.
+    // and `"default"` is the placeholder that names no project (§4.3). An unusable pin
+    // drains nothing — the spool waits.
     runId = usableRunId(pinnedRun);
     if (!runId) {
       log(cfg, 'error', `drain: refusing the pinned run id ${JSON.stringify(pinnedRun)}`);
@@ -342,7 +342,7 @@ async function drainSpool(cfg, runId, agentId, promptId, started) {
     }
 
     if (isRejectedPayload(res)) {
-      // §5.5 step 6 / F16: the payload is bad, not the server. Quarantine and never retry.
+      // §5.5 step 6: the payload is bad, not the server. Quarantine and never retry.
       quarantine(cfg, runId, batch, res);
       rejected += batch.length;
       continue;

@@ -78,8 +78,8 @@ test('the instructions on the wire are the launcher\'s own constant', async () =
 
 // The preamble's own balance, minus the run-specific parts: recall is injected, so opening a
 // turn with a search is pure cost — but a negative with no positive beside it trains a model
-// to never call a memory tool at all (`hooks/src/session-start.mjs`, "audit C1"). Both halves
-// have to be here, and the subagent case is the half the preamble cannot state.
+// to never call a memory tool at all (see the steer in `hooks/src/session-start.mjs`). Both
+// halves have to be here, and the subagent case is the half the preamble cannot state.
 test('instructions say when searching is wasted and when it is the only option', async () => {
   const { init } = await handshake();
   const text = String(init.instructions);

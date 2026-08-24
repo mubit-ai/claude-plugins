@@ -18,12 +18,12 @@
  * the server captures both handles as it starts, so either one installed after the import
  * would sit on a handle nobody is holding.
  *
- * **The literal `"default"` is the bug being fixed.** The facade maps `session_id` onto
- * the control-plane `run_id`, so today every MCP user writes every project on every machine
- * into one shared run. This launcher derives the run id with **the same strategy the hooks
- * use** (`lib/runid.mjs`), which is what makes an MCP-tool write and a hook capture land in
- * one run — one query then returns evidence from both. If the two derivations diverged,
- * `/mubit-memory:remember` would save into a run that pre-prompt recall never reads.
+ * **The literal `"default"` is what this replaces.** It is the bundled server's placeholder
+ * `session_id`, and it identifies no project. This launcher derives the run id with **the
+ * same strategy the hooks use** (`lib/runid.mjs`), which is what makes an MCP-tool write and
+ * a hook capture land in one run — one query then returns evidence from both. If the two
+ * derivations diverged, `/mubit-memory:remember` would save into a run that pre-prompt recall
+ * never reads.
  *
  * Runs its work at module scope on purpose: `.mcp.json` executes this file as the entry
  * point, and the launch tests import it directly. An `import.meta.url === process.argv[1]`
@@ -172,8 +172,8 @@ function prepare(env) {
   //
   // `pinRun: true` because this server was launched by the plugin, which already derived
   // the run — the same `runId` published on the line above, so the guard and the server
-  // cannot disagree about which run this session writes into. A caller-supplied
-  // `session_id` would otherwise move an agent's write into any run it could name.
+  // cannot disagree about which run this session writes into. Without it, a caller-supplied
+  // `session_id` would decide that instead.
   const ceiling = resolveCeiling(cfg.mcpLessonScope);
   installFetchGuard({ ceiling, runId, pinRun: true });
 

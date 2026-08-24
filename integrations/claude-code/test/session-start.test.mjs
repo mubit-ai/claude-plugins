@@ -6,7 +6,7 @@
  *   §5.1  flow, sub-budgets (health 400 ms / register 600 ms / lessons 900 ms), exact stdout
  *   §4.3  the `source` table: startup | resume | clear | compact | fork
  *   §1.2  `GET /v2/core/health` returns the bare string `OK`, not JSON
- *   §1.3  `ListLessonsRequest.run_id` is optional — empty means all runs
+ *   §1.3  `run_id` is optional on a lessons request — empty means all runs
  *   §4.7  cold-start grace: `marker.cold_start_until = now + coldStartGraceMs`
  *   §4.9  the hook never blocks and never exits non-zero
  *
@@ -118,15 +118,15 @@ test('register body carries run_id, agent_id, role, status and capabilities', as
   assert.equal(body.role, 'worker');
   assert.equal(body.status, 'active');
   assert.deepEqual(body.capabilities, ['code', 'shell', 'edit', 'search']);
-  // §1.3 — run_id and agent_id are mandatory on StateAgentRegisterRequestPayload.
+  // §1.3 — run_id and agent_id are mandatory on the register request body.
   assert.match(body.run_id, /^cc-/);
   assert.equal(body.agent_id, 'claude-code');
-  // §4.3 — the MCP server's `MUBIT_DEFAULT_SESSION_ID` default collapses every
-  // project into one run. No strategy may ever emit it.
+  // §4.3 — `"default"` is the bundled server's placeholder, and it identifies nothing: a
+  // run id has to name one project on one machine. No strategy may ever emit it.
   assert.notEqual(body.run_id, 'default');
 });
 
-// §1.3 / control.proto — ListLessonsRequest.run_id is optional; empty means
+// §1.3 / control.proto — `run_id` is optional on a lessons request; empty means
 // all runs, which is exactly what "global lessons" wants. Scoping it to this run
 // would return nothing on a brand-new run.
 test('lessons request is {scope:"global", limit:5} with no run_id', async (t) => {
@@ -168,9 +168,9 @@ test('stdout is a SessionStart steer block plus a one-line systemMessage', async
   // §5.1 — the steer must carry BOTH halves, and the pair is the contract. This test used to
   // assert only `/do not search/i`, which is how the plugin shipped a steer that told the
   // model memory existed and never to reach for it: a negative with no positive beside it,
-  // against tool descriptions that said nothing about when to use them either (audit C1,
-  // C2). Between them the trained behaviour was to call no memory tool at all — so every
-  // measurement of those tools was really a measurement of this paragraph.
+  // against tool descriptions that said nothing about when to use them either. Between them
+  // the trained behaviour was to call no memory tool at all — so every measurement of those
+  // tools was really a measurement of this paragraph.
   assert.match(ctx, /injected automatically/i);
   assert.match(ctx, /no need to open a turn by searching/i,
     `the steer must say recall is already injected, so turn one need not search:\n${ctx}`);
@@ -469,8 +469,8 @@ test('source=compact with no stored checkpoint steers normally and names no anch
  * This is a regression test for a session that got nothing at all. `hooks/hooks.json` matched
  * `startup|resume|clear|compact`; Claude Code reported `fork` from v2.1.214 onward and
  * `resume` before it, so the four-source matcher used to catch a fork by accident and then
- * stopped. Verified live on 2.1.235 in `docs/manual-test-hs-1.md` §5: a match-all SessionStart
- * group logged `{"source":"fork"}` while a four-source group beside it logged nothing. Since
+ * stopped. Verified live on 2.1.235: a match-all SessionStart group logged
+ * `{"source":"fork"}` while a four-source group beside it logged nothing. Since
  * this hook is the one that derives the run id, arms the cold-start window, writes the marker
  * and injects the steer, the miss cost the whole feature — in exactly the sessions a user
  * branched *because* the work mattered.
@@ -521,8 +521,7 @@ test('source=fork reuses the parent run and heartbeats instead of registering', 
  * The shape a *live* fork actually arrives in, which the mapped case above does not cover.
  *
  * A real `--fork-session` payload carries a brand-new `session_id` and no pointer whatsoever
- * back to the parent — captured verbatim from Claude Code 2.1.235 in
- * `docs/manual-test-hs-1.md` §5:
+ * back to the parent — captured verbatim from a live fork on Claude Code 2.1.235:
  *
  *     {"session_id":"e8303836-739a-45da-a09a-5861b96df5d1","transcript_path":"…","cwd":"…",
  *      "hook_event_name":"SessionStart","source":"fork"}
@@ -581,11 +580,10 @@ test('an unmapped fork session id still lands on the run its parent derived', as
 // §5.1 step 4: health not ok -> skip register and lessons, but STILL steer, so the
 // model knows memory is offline instead of inventing recall it never received.
 /**
- * The gap health cannot close. `GET /v2/core/health` is allowlisted before authentication —
- * it answers `OK` for a wrong key, an expired key, and no key at all — so a session whose
- * credential is rejected used to open with "Mubit memory is active" and then silently recall
- * nothing all session. The first authenticated call of the session is the one that knows,
- * and now it is the one that decides.
+ * The gap health cannot close. Health reports whether the instance is reachable, not whether
+ * your key is good — so a session whose credential is rejected used to open with "Mubit memory
+ * is active" and then silently recall nothing all session. The first authenticated call of the
+ * session is the one that knows, and now it is the one that decides.
  */
 test('a rejected key produces the unauthenticated block, not "memory is active"', async (t) => {
   const server = await fakeMubit({

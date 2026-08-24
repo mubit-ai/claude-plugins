@@ -10,16 +10,14 @@
  * other half — the one that notices the move at the moment it happens, so the run the session
  * is leaving is drained instead of orphaned.
  *
- * Three host facts this file is written against, all read out of the shipping binary
- * (2.1.235) rather than the docs:
+ * Three host facts this file is written against, all established against the shipping host
+ * (2.1.235) rather than taken from the docs:
  *
- *   1. `CwdChanged` passes the output schema's zod union but is **absent from the dispatch
- *      switch** — it has no `hookSpecificOutput` channel at all, the same class as `PreCompact`
- *      and `SessionEnd`. Every path here returns `{suppressOutput: true}`.
- *   2. The payload names are `old_cwd` and `new_cwd`:
- *      `{...Ly(e,Vt()), hook_event_name:"CwdChanged", old_cwd:t, new_cwd:r}`.
- *   3. It is dispatched with no `matchQuery`, so it supports no matcher, and it fires *after*
- *      the change, so it cannot block.
+ *   1. `CwdChanged` passes the output schema's validation but is then **never acted on** — it
+ *      has no `hookSpecificOutput` channel at all, the same class as `PreCompact` and
+ *      `SessionEnd`. Every path here returns `{suppressOutput: true}`.
+ *   2. The payload names are `old_cwd` and `new_cwd`, not `previous_cwd`.
+ *   3. It supports no matcher at all, and it fires *after* the change, so it cannot block.
  */
 
 import test from 'node:test';

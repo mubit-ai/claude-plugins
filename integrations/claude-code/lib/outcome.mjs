@@ -3,7 +3,7 @@
  * `lib/outcome.mjs` — a staged turn -> the one implicit `/v2/control/outcome` record it
  * deserves, or a clear "post nothing".
  *
- * Build-guide §5.5 step 7 (the outcome call and its four cases), §5.7 step 3 (the flush of
+ * The outcome call and its four cases, the flush of
  * turns the drain never reached), §1.3 (`reference_id` must be non-empty), §6.1
  * (`outcomeMode`).
  *
@@ -52,9 +52,9 @@ export const SIGNAL_FAILURE = -0.3;
  *   - not a penalty, because the signal behind it is dominated by false negatives (see
  *     `capture.mjs`); punishing a memory the model may well have followed silently would make
  *     the store worse in the name of measuring it;
- *   - **and with an empty `entry_ids[]`** — see `decideOutcome`. Attributed reinforcement
- *     counts any signal at or above zero as one reinforcement, so naming the entries here
- *     would credit precisely the ones we have no evidence were read.
+ *   - **and with an empty `entry_ids[]`** — see `decideOutcome`. Naming entries on this path
+ *     would credit precisely the ones we have no evidence were read, which is the opposite
+ *     of what attribution is for.
  *
  * `neutral` is one of the four outcomes the endpoint accepts (success, failure, partial,
  * neutral); anything else is a 400 for the whole call.
@@ -66,7 +66,7 @@ export const OUTCOME_SUCCESS = 'success';
 export const OUTCOME_FAILURE = 'failure';
 
 /**
- * §1.3: `RecordOutcomeRequest.reference_id` must be non-empty, so run-level attribution uses
+ * `reference_id` must be non-empty on an outcome, so run-level attribution uses
  * this sentinel and puts the real ids in `entry_ids[]` — where each one is reinforced
  * individually (`control.proto`).
  */
@@ -92,7 +92,7 @@ export const MAX_OUTCOME_ATTEMPTS = 3;
  * The turn-file key `capture --stop-failure` stamps when the host reports the turn ended on
  * an API error, and the fifth row of the table below.
  *
- * It is a key of its own rather than `outcome: "failure"` — which is what build-guide §5.5
+ * It is a key of its own rather than `outcome: "failure"` — which is what the original design
  * originally prescribed ("On a StopFailure turn: outcome: 'failure', signal: -0.3") — because
  * the two mean opposite things about the memory. `outcome: "failure"` says the work went
  * badly, which is weak evidence against whatever was recalled. `api_error` says the turn
@@ -226,9 +226,9 @@ export function decideOutcome(turn) {
     post: true,
     outcome: unused ? OUTCOME_UNUSED : (failed ? OUTCOME_FAILURE : OUTCOME_SUCCESS),
     signal: unused ? SIGNAL_UNUSED : (failed ? SIGNAL_FAILURE : SIGNAL_SUCCESS),
-    // Empty on the neutral record only: attributed reinforcement counts any signal >= 0 as
-    // one reinforcement, so naming the entries here would credit exactly the memories nothing
-    // showed were read. The cost is that the record says a turn was injected-and-unused
+    // Empty on the neutral record only: naming entries here would credit exactly the
+    // memories nothing showed were read, which is the opposite of what attribution is for.
+    // The cost is that the record says a turn was injected-and-unused
     // without saying which entries were ignored — a real limitation, and the honest side of
     // the trade.
     entryIds: unused ? [] : entryIds,
@@ -252,7 +252,7 @@ export function outcomeIdempotencyKey(runId, promptId) {
 }
 
 /**
- * The `RecordOutcomeRequest` body, built once for both hooks.
+ * The outcome request body, built once for both hooks.
  *
  * The decision decides *what* is claimed; this decides how it is addressed — and addressing
  * is the half that was never in dispute and would drift anyway, because `reference_id` and

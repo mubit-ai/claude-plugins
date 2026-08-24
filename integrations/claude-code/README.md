@@ -210,11 +210,10 @@ Authorization: Bearer abc123def456...     ->  Authorization: [REDACTED:bearer]
 ```
 
 The keyword list for `assignment` (`secret`, `token`, `password`, `credential`, `assertion`,
-`signature`, `apikey`, `api_key`) matches the terms Mubit itself treats as secret, so client
-and server agree on what counts as one. A final `high-entropy` rule catches
-anything else: a run of 32+ base64/hex characters with Shannon entropy >= 4.0 becomes
-`[REDACTED:high-entropy]`. Git SHAs cannot trip it — entropy over a 16-symbol alphabet is
-bounded by exactly 4.0 — and `idempotency-key` values are exempted by name so you can still
+`signature`, `apikey`, `api_key`) covers the terms that name a secret in practice. A final
+`high-entropy` rule catches anything else: a long enough run of random-looking characters
+becomes `[REDACTED:high-entropy]`. A hex-only string cannot trip it, so git SHAs survive
+— and a small set of routing values is exempt by name so you can still
 tell whether a batch was sent twice.
 
 ### Stage 2 — path denylist
@@ -537,4 +536,4 @@ safe to attach to an issue.
 
 - Documentation: <https://docs.mubit.ai/integrations/claude-code>
 - Source: <https://github.com/mubit-ai/claude-plugins>
-- License: Apache-2.0
+- License: Apache-2.0 — [`LICENSE`](LICENSE); third-party code bundled into the MCP server is attributed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)

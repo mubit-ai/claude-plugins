@@ -266,7 +266,7 @@ test('clearSeen: clearing a run that never had a roll-up is not an error', async
 // §4.9 — never throws, on any path
 // ---------------------------------------------------------------------------
 
-// §12.1-F14: an unwritable ${CLAUDE_PLUGIN_DATA} costs the saving and nothing else. The
+// §12.1: an unwritable ${CLAUDE_PLUGIN_DATA} costs the saving and nothing else. The
 // prompt still goes out, with every entry rendered in full.
 test('markSeen: an unwritable run directory costs the roll-up, never the prompt', async (t) => {
   if (process.getuid?.() === 0) return t.skip('root ignores mode bits');

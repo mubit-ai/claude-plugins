@@ -10,10 +10,10 @@
  *   | query{mode:"agent_routed",  evidence_only}    |     1     |  ← rung 2, only on a 403
  *   | context{mode:"sections"}                      |     2     |  ← rung 3, opt-in only
  *
- * `/v2/control/context` is NOT an LLM-free assembly path: `GetContext` re-enters `query()`
- * as `AgentRouted` with `evidence_only` left `false`, pays both calls,
- * then throws the synthesized answer away. So the recall hook is query-first and treats
- * `context` as the last rung — the inverse of what the endpoint names suggest.
+ * `/v2/control/context` is not the cheap assembly path its name implies: it is the most
+ * expensive of the three requests above, and the synthesized answer it pays for is one the
+ * recall hook throws away. So the hook is query-first and treats `context` as the last rung
+ * — the inverse of what the endpoint names suggest.
  *
  * These tests are written before the implementation. Failing with
  * "hooks/src/prompt-recall.mjs does not exist yet" is the expected red state.
@@ -85,7 +85,7 @@ test('rung 1 only: one direct_bypass query, and NO /v2/control/context at all', 
   const body = server.lastCall('POST', '/v2/control/query').body;
   assert.equal(body.mode, 'direct_bypass',
     'only "direct_bypass" and "direct" reach the direct lane; ' +
-    'every other value silently falls through to AgentRouted and costs an LLM call');
+    'every other value is answered by the slower path, with no error anywhere to say so');
   assert.equal(body.evidence_only, true,
     'evidence_only:true skips answer synthesis — the second LLM call');
 });
@@ -210,7 +210,7 @@ test('rung 1 request body matches §5.2 exactly', async (t) => {
   assert.equal(body.limit, 8);
   assert.deepEqual(body.entry_types, ['mental_model', 'rule', 'lesson', 'fact', 'trace']);
   assert.equal(body.include_working_memory, true);
-  assert.ok(Array.isArray(body.env_tags), 'env_tags exists on AgentQueryRequest but not on ContextRequest');
+  assert.ok(Array.isArray(body.env_tags), 'env_tags exists on a /v2/control/query body but not on a /v2/control/context one');
   assert.ok(body.env_tags.includes('tool:claude-code'));
   assert.ok(body.env_tags.includes('ci:test'), 'MUBIT_CC_ENV_TAGS extras are appended verbatim');
   assert.ok(body.env_tags.length <= 8, 'env_tags is capped at 8 (§4.1)');
@@ -497,7 +497,7 @@ test('a rung-1 denial is cached to policy/<endpoint_hash>.json with a 24h TTL', 
   assert.ok(v.observed_at >= before && v.observed_at <= Date.now() + 1000);
 });
 
-// §5.2 / F23: on the NEXT prompt, rung 1 is not probed at all. This is the whole point of
+// §5.2: on the NEXT prompt, rung 1 is not probed at all. This is the whole point of
 // caching the verdict — one wasted round trip per day, not one per prompt.
 test('a cached denial routes the next prompt straight to rung 2', async (t) => {
   const server = await fakeMubit({
@@ -521,7 +521,7 @@ test('a cached denial routes the next prompt straight to rung 2', async (t) => {
     'rung 1 must not be re-probed while the verdict is valid');
 });
 
-// §5.2 / F27: "A 'granted' verdict is not cached: rung 1 succeeding is self-evident and
+// §5.2: "A 'granted' verdict is not cached: rung 1 succeeding is self-evident and
 // caching it would only add a stale-state failure mode."
 test('a successful rung 1 writes nothing to policy/', async (t) => {
   const server = await fakeMubit();
@@ -535,7 +535,7 @@ test('a successful rung 1 writes nothing to policy/', async (t) => {
     'grants are never cached — only denials are');
 });
 
-// §5.2 / F24: an operator who flips the instance's direct-search policy back on gets the free
+// §5.2: an operator who flips the instance's direct-search policy back on gets the free
 // path back within a day, with no reinstall.
 test('an expired denial re-probes rung 1 exactly once', async (t) => {
   const server = await fakeMubit({
@@ -589,7 +589,7 @@ test('policy verdicts are per endpoint, not global', async (t) => {
     'the denial belongs to the first endpoint only');
 });
 
-// §5.2 / F25: "Only a 401/403 on a rung the plugin did not deliberately probe means auth is
+// §5.2: "Only a 401/403 on a rung the plugin did not deliberately probe means auth is
 // broken." A 401 is auth_failed — not a policy denial, never cached, and no rung-2 retry.
 test('401 on rung 1 is auth_failed, never a cached policy verdict', async (t) => {
   const server = await fakeMubit({
@@ -673,7 +673,7 @@ test('a cached denial issues no request at all by default', async (t) => {
   server.assertCalled('POST', '/v2/control/query', 0);
 });
 
-// A policy denial is not a transport fault (§5.2/F22), so it must not colour the status line
+// A policy denial is not a transport fault (§5.2), so it must not colour the status line
 // with a failure state — but it must be distinguishable from "the store had nothing".
 test('a policy denial records a reason without claiming a connection fault', async (t) => {
   const server = await fakeMubit({ 'POST /v2/control/query': [DENIED, { json: queryResponse() }] });
@@ -689,7 +689,7 @@ test('a policy denial records a reason without claiming a connection fault', asy
 });
 
 // ---------------------------------------------------------------------------
-// MUB-2 — a permanently dead recall path has to be visible somewhere
+// A permanently dead recall path has to be visible somewhere
 // ---------------------------------------------------------------------------
 
 // The failure this closes: every hook fires, every recall returns nothing, the marker says
@@ -755,7 +755,7 @@ test('recallAssemble:"server" issues rung 3 with the documented sections body', 
   assertHookContract(r);
   server.assertCalled('POST', '/v2/control/context', 1);
 
-  // The decision phase-2-recall.md leaves open, now recorded: server mode SUBSTITUTES rung 3
+  // The question the design left open, now settled here: server mode SUBSTITUTES rung 3
   // for the ladder, it does not append itself to the end of it. §5.2's pseudocode reads as a
   // sequential fallback, which would make rung 3 reachable only after rungs 1 and 2 had both
   // failed — so the option would almost never take effect. plugin.json describes it as "how
@@ -835,7 +835,7 @@ test('a prompt starting with "/" issues zero HTTP requests', async (t) => {
   assert.equal(server.requests.length, 0, `saw: ${server.summary()}`);
 });
 
-// §5.2 step 0 / §4.7 / F7: an open breaker short-circuits before dialing. A blocking hook
+// §5.2 step 0 / §4.7: an open breaker short-circuits before dialing. A blocking hook
 // in front of every prompt must not pay a connect timeout to a server known to be down.
 test('an open breaker issues zero HTTP requests', async (t) => {
   const server = await fakeMubit({
@@ -857,7 +857,7 @@ test('an open breaker issues zero HTTP requests', async (t) => {
     `breaker open must short-circuit without dialing; saw: ${server.summary()}`);
 });
 
-// §5.2 step 3 / F28: rung 2 costs an LLM call and the whole path is bounded at 1500 ms.
+// §5.2 step 3: rung 2 costs an LLM call and the whole path is bounded at 1500 ms.
 // Starting a 1-LLM-call request with 300 ms left buys nothing but a visible stall.
 test('rung 2 is skipped when less than 500 ms of budget remains', async (t) => {
   const server = await fakeMubit({

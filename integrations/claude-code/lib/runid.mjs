@@ -11,9 +11,9 @@
  * | `per-conversation`        | `cc-<host_session_id>`       | the host session id |
  * | `static`                  | `MUBIT_CC_RUN_ID`            | pinned; a config error when unset — never a silent default |
  *
- * The single most important rule in this file: the MCP server defaults
- * `MUBIT_DEFAULT_SESSION_ID` to the literal `"default"`, which collapses
- * every user, project and machine into one shared run. **No input may ever make
+ * The single most important rule in this file: `"default"` is the bundled server's
+ * placeholder for `MUBIT_DEFAULT_SESSION_ID`, and it identifies nothing — a run id has to
+ * name one project on one machine. **No input may ever make
  * this module emit `"default"`** — not a blank session id, not a missing project
  * dir, not that variable sitting in the surrounding shell (which this module
  * never reads). Where an honest answer is impossible, `deriveRunId` throws a
@@ -246,8 +246,8 @@ function staticRunId(cfg) {
   }
   if (FORBIDDEN_RUN_IDS.has(pinned.toLowerCase())) {
     throw new Error(
-      `MUBIT_CC_RUN_ID is ${JSON.stringify(pinned)}, which collapses every user and project `
-      + 'into one shared Mubit run. Pin a real run id.');
+      `MUBIT_CC_RUN_ID is ${JSON.stringify(pinned)}, which identifies no project. `
+      + 'Pin a real run id.');
   }
   // The run id names a directory as well as a run. A pin carrying a path separator or a dot
   // segment would mean two different things at once — one value on the wire, another after
@@ -559,7 +559,7 @@ export function saveSessionMap(sessionId, record) {
 
 /**
  * §4.3: the mapped record, or `null`. A missing file, an empty file and a file
- * truncated by a SIGKILL are all "no record" — never a throw (§12.1-F14), because
+ * truncated by a SIGKILL are all "no record" — never a throw (§12.1), because
  * the caller's answer to `null` is simply to derive.
  * @param {string} sessionId
  * @returns {(SessionRecord & Record<string, any>)|null}

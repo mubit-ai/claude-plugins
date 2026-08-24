@@ -1,29 +1,27 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * `scripts/scope-audit.mjs` — the server-side ledger for cross-run lesson scope.
+ * `scripts/scope-audit.mjs` — a census of stored lesson scope, by author.
  *
  * `scripts/mubit-inspect.mjs` reads what a run was *given*. This reads what runs have
- * *written*: the census of stored lessons by scope and by author, which is the only place
- * the cross-run leak is visible as a number rather than an anecdote.
+ * *written*: how many lessons are stored at each scope and which kind of author wrote them.
+ * It is the only place the answer is a number rather than an anecdote.
  *
- * The defect it exists to measure: the bundled SDK hard-codes `lesson_scope: "session"` on
- * `mubit_learned`, and the server surfaces every lesson whose scope is not `run` to *other*
- * runs — session, global and org scope are all cross-run by design. So an agent-written
- * lesson followed its author into unrelated projects. `mcp/src/egress.mjs` clamps that at the wire; this script is how
- * you tell whether the clamp held.
+ * The plugin's promise is that an agent-written lesson stays in the run that wrote it unless
+ * a user widens it deliberately, and `mcp/src/egress.mjs` is what holds a write to that.
+ * This script is how you check the promise against what is actually stored.
  *
  * Three numbers, in the order they matter:
  *
- *   1. **agent-authored lessons at cross-run scope** — the direct count of the defect. It
- *      must stop growing. A run of this before the guard lands and one after is the whole
- *      measurement; without the first, the second means nothing.
- *   2. **distinct originating runs among them** — the blast radius. One noisy run and
- *      twenty leaking runs are different problems.
+ *   1. **agent-authored lessons above `run` scope** — the headline. It should not grow. A
+ *      reading before a change and one after is the whole measurement; without the first,
+ *      the second means nothing.
+ *   2. **distinct originating runs among them** — the spread. One noisy run and twenty
+ *      quiet ones are different problems.
  *   3. **reflection-authored lessons at each scope** — the control. Reflection is the
- *      sanctioned path that widens a lesson beyond its run, so this row answers the
- *      question the headline cannot: did we break memory to fix isolation? It must be
- *      unchanged.
+ *      sanctioned path that widens a lesson beyond its run, so this row answers the question
+ *      the headline cannot: did tightening the write path cost the memory anything? It
+ *      should be unchanged.
  *
  * **Read-only, and deliberately not via `lib/http.mjs`.** `postLessons` would be the
  * obvious reuse, but `request()` records breaker state by default — a "read-only" audit
@@ -45,9 +43,8 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 /**
- * The four scopes a lesson can carry. `run` is the control: it is the one scope the
- * cross-run overlay skips, so it belongs in the table as the denominator even though it is
- * never part of the headline.
+ * The four scopes a lesson can carry. `run` is the control: it is the narrowest, so it
+ * belongs in the table as the denominator even though it is never part of the headline.
  */
 const SCOPES = ['run', 'session', 'global', 'org'];
 
@@ -67,18 +64,18 @@ const CROSS_RUN = SCOPES.filter((s) => s !== 'run');
 const AGENT_SOURCES = ['agent', 'mcp-agent'];
 const REFLECTION_SOURCES = ['reflection', 'auto-reflect'];
 
-/** `ListLessons` clamps `limit` to 200 server-side; asking for more is silently capped. */
+/** Rows requested per scope. Asking for more than this is capped, so it is the ceiling. */
 const MAX_LIMIT = 200;
 
 /* -------------------------------------------------------------------------- */
 /* args                                                                        */
 /* -------------------------------------------------------------------------- */
 
-const HELP = `scope-audit — what is stored at cross-run scope, and who wrote it
+const HELP = `scope-audit — what is stored above run scope, and who wrote it
 
   --data <dir>       pin one data dir (default: every ~/.claude/plugins/data/mubit-memory*)
-  --user <id>        filter to one logical user (default: no filter — the whole tenant)
-  --limit N          lessons to request per scope (default ${MAX_LIMIT}, the server's cap)
+  --user <id>        filter to one logical user (default: no filter)
+  --limit N          lessons to request per scope (default ${MAX_LIMIT}, the ceiling)
   --json             machine-readable output
   -h, --help         this
 
@@ -186,9 +183,9 @@ async function listLessons(c, scope, opts) {
 /* -------------------------------------------------------------------------- */
 
 /**
- * The author family: `source` on a stored lesson is `<family>:<source_run_id>`, and
- * `source_run_id` is itself a `state::<tenant>::<run>` triple, so the split has to be on
- * the FIRST colon only.
+ * The author family: `source` on a stored lesson is `<family>:<source_run_id>`, and the run
+ * id may itself be namespaced with `::` separators, so the split has to be on the FIRST
+ * colon only.
  */
 function family(source) {
   return String(source || '').split(':')[0].trim().toLowerCase() || '(none)';
@@ -269,9 +266,9 @@ function table(rows, cols) {
 
 function render(a, meta) {
   const out = [];
-  out.push('mubit scope-audit — what is stored at cross-run scope, and who wrote it');
+  out.push('mubit scope-audit — what is stored above run scope, and who wrote it');
   out.push(`endpoint  ${meta.endpoint}  (from ${meta.from})`);
-  out.push(`user      ${meta.user || '(no filter — the whole tenant)'}`);
+  out.push(`user      ${meta.user || '(no filter)'}`);
   out.push('');
 
   out.push(`lessons scanned                        ${a.scanned}`);

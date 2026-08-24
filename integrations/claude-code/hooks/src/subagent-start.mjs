@@ -16,21 +16,20 @@
  * a user spawned worked with no injected memory whatsoever. Not a small block: none.
  *
  * The other half is that this event can do something about it. The host's own registry says
- * "Exit code 0 - JSON additionalContext shown to subagent", its dispatch reads
- * `u.additionalContext = e.hookSpecificOutput.additionalContext`, and a live subagent asked
- * where it had seen an injected token answered: in a system message of its own, **prefixed
- * by the host with `SubagentStart hook additional context: `**, delivered in the same
- * envelope as the deferred-tool and skills listings.
+ * "Exit code 0 - JSON additionalContext shown to subagent", and a live subagent asked where
+ * it had seen an injected token answered: in a system message of its own, **prefixed by the
+ * host with `SubagentStart hook additional context: `**, delivered in the same envelope as
+ * the deferred-tool and skills listings.
  *
  * That prefix is the host's. `wrap()` below does not repeat it.
  *
  * ---------------------------------------------------------------------------
  * One caveat that can make this hook buy nothing
  * ---------------------------------------------------------------------------
- * The host drops the collected context when the agent has an isolated context —
- * `if (mr.length > 0 && !d?.isolatedContext)`. Budget spent on such an agent is spent and
- * discarded. Nothing here can detect it, so the honest handling is to say so in the guide
- * rather than to pretend otherwise in code.
+ * The host drops the collected context outright when the agent runs with its own isolated
+ * context. Budget spent on such an agent is spent and discarded. Nothing in the payload
+ * distinguishes those agents, so the honest handling is to say so in the guide rather than
+ * to pretend otherwise in code.
  *
  * ---------------------------------------------------------------------------
  * Three ways this is NOT `prompt-recall` with a different event name

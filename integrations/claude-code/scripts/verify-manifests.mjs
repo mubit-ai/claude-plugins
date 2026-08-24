@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Manifest lint — build-guide §12.7. Run by `npm run verify` and by CI.
+ * Manifest lint. Run by `npm run verify` and by CI.
  *
  * The same data assertions as test/manifests.test.mjs, in a form that does not need a test
  * runner: nothing here starts a process, opens a socket, or needs the plugin runtime. It
@@ -75,12 +75,12 @@ const resolvePluginPath = (s) => s
 
 // --- every manifest parses (§3) --------------------------------------------
 
-const plugin = readJson(P.plugin, '.claude-plugin/plugin.json', 'build-guide §3.1');
-const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
-const mcp = readJson(P.mcp, '.mcp.json', 'build-guide §3.3');
-const settings = readJson(P.settings, 'settings.json', 'build-guide §3.4');
-const pkg = readJson(P.pkg, 'package.json', 'build-guide §11.1');
-const market = readJson(P.marketplace, '.claude-plugin/marketplace.json', 'build-guide §3.5');
+const plugin = readJson(P.plugin, '.claude-plugin/plugin.json', 'the plugin manifest');
+const hooks = readJson(P.hooks, 'hooks/hooks.json', 'the hook manifest');
+const mcp = readJson(P.mcp, '.mcp.json', 'the MCP server manifest');
+const settings = readJson(P.settings, 'settings.json', 'the shipped settings');
+const pkg = readJson(P.pkg, 'package.json', 'the package manifest');
+const market = readJson(P.marketplace, '.claude-plugin/marketplace.json', 'the marketplace catalog');
 
 // --- version lockstep (§12.7) ----------------------------------------------
 
@@ -100,12 +100,11 @@ if (plugin && entry) {
 }
 if (entry) {
   /*
-   * The plugin ships in the same repo as this catalog, so a marketplace-relative path resolves
-   * inside the copy the host already fetched, in both this repo and the published mirror — which
-   * is why `marketplace.json` is byte-identical in the two and the mirror job rewrites nothing.
-   * An explicit {source:"github"} entry would make the host clone a second time and re-resolve
-   * the path against that clone, which is a slower way to reach the same files and one more
-   * thing to keep in step. See the matching note in test/manifests.test.mjs.
+   * The plugin ships in the same repository as this catalog, so a marketplace-relative path
+   * resolves inside the copy the host has already fetched. An explicit {source:"github"} entry
+   * would make the host clone a second time and re-resolve the path against that clone, which is
+   * a slower way to reach the same files and one more thing to keep in step. See the matching
+   * note in test/manifests.test.mjs.
    */
   ok(entry.source === './integrations/claude-code',
     `marketplace.json source must be the marketplace-relative string "./integrations/claude-code" — the plugin `
@@ -179,7 +178,7 @@ if (hooks) {
   // alternation plus `^mcp__.*` — and it dropped every tool the alternation had not been
   // updated for. It is one group now rather than two match-all ones because a second group
   // would fire capture.mjs twice for every tool call. What to capture is decided in
-  // capture.mjs, where the tool table already lives (§3.2, audit F2).
+  // capture.mjs, where the tool table already lives (§3.2).
   const postToolUse = hooks.hooks?.PostToolUse ?? [];
   ok(postToolUse.length === 1,
     `PostToolUse must declare exactly one match-all group (§3.2); found ${postToolUse.length}`);
@@ -328,7 +327,7 @@ if (existsSync(P.agents)) {
     if (f.endsWith('.md')) markdown.push({ file: join(P.agents, f), rel: `agents/${f}` });
   }
 }
-ok(markdown.length > 0, 'no skills/*/SKILL.md or agents/*.md exist — build-guide §9 defines six skills and one agent');
+ok(markdown.length > 0, 'no skills/*/SKILL.md or agents/*.md exist — the plugin ships seven skills and one agent');
 
 for (const { file, rel } of markdown) {
   const text = readFileSync(file, 'utf8');
@@ -392,15 +391,14 @@ if (existsSync(P.readme)) {
     'README.md mentions /reload-plugins but never names SessionStart — the reason the reload is not enough');
 
   /*
-   * The published README documents a hosted instance and nothing else. Self-hosting is not a
-   * documented path.
+   * The README documents a hosted instance and nothing else. Self-hosting is not a documented
+   * path.
    *
    * This asserts what the README must contain rather than listing components it must not name.
-   * A denylist has to spell out the internals in order to forbid them, so the guard becomes
-   * the disclosure the moment it ships — and it only catches terms someone thought to
-   * enumerate. Pinning setup to the two hosted settings leaves no room for a local-stack
-   * walkthrough to be correct, without naming one. The denylist still exists, in
-   * `scripts/check-mirror-clean.mjs`, which runs against the built mirror and is not published.
+   * A rule written the other way round — an enumerated list of terms the README may not use —
+   * has to spell the internals out in order to forbid them, and it still only catches the
+   * terms someone thought to enumerate. Pinning setup to the two hosted settings leaves no
+   * room for a local-stack walkthrough to be correct, without naming one.
    */
   ok(/\bendpoint\b/i.test(readme) && /\bapiKey\b|\bAPI key\b/i.test(readme),
     'README.md must document the two settings a hosted instance takes — `endpoint` and `apiKey`. '
@@ -447,7 +445,7 @@ if (existsSync(P.readme)) {
     + 'which is a stronger guarantee than the pattern scrub and is invisible if unstated');
 } else {
   fail(`README.md does not exist: ${P.readme}\n`
-    + '    Build-guide §2: install, configure, troubleshoot. The release guard treats it as part of the '
+    + '    The README covers install, configure and troubleshoot. The release guard treats it as part of the '
     + 'release surface (§13), and it is the only documentation a marketplace installer sees.');
 }
 
@@ -464,7 +462,7 @@ if (existsSync(P.readme)) {
  */
 const REMEASURE = 'Re-measure: node scripts/measure-context-cost.mjs --write';
 const stamp = existsSync(P.contextCost)
-  ? readJson(P.contextCost, 'scripts/context-cost.json', `build-guide §3.5. ${REMEASURE}`)
+  ? readJson(P.contextCost, 'scripts/context-cost.json', `the marketplace catalog. ${REMEASURE}`)
   : (fail(`scripts/context-cost.json does not exist (§3.5) — marketplace.json declares a contextCost that `
     + `nobody measured.\n    ${REMEASURE}`), null);
 
@@ -668,7 +666,7 @@ if (!existsSync(CODEX_ROOT)) {
 // --- report -----------------------------------------------------------------
 
 if (problems.length) {
-  console.error(`verify-manifests: ${problems.length} problem${problems.length === 1 ? '' : 's'} (build-guide §12.7)\n`);
+  console.error(`verify-manifests: ${problems.length} problem${problems.length === 1 ? '' : 's'}\n`);
   for (const p of problems) console.error(`  ✖ ${p}`);
   console.error('');
   process.exit(1);

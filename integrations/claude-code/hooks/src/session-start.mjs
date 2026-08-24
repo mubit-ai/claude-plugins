@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `hooks/src/session-start.mjs` — SessionStart (blocking, injection only). Build-guide §5.1.
+ * `hooks/src/session-start.mjs` — SessionStart (blocking, injection only).
  *
  * Matchers `startup|resume|clear|compact|fork`. **Budget 2500 ms internal against a 5 s hook
  * timeout**, with three sub-budgets: health half the envelope, register 600 ms, lessons
@@ -27,7 +27,7 @@
  *   5. `POST /v2/control/agents/register` @600 ms — or `/heartbeat` on `resume` and `fork`,
  *      because re-registering an agent that never left is noise the control plane reconciles.
  *   6. `POST /v2/control/lessons {scope:"global", limit:5}` @900 ms. **No `run_id`**:
- *      `ListLessonsRequest.run_id` is optional and empty means all runs, which is exactly what
+ *      `run_id` is optional on a lessons request and empty means all runs, which is exactly what
  *      "global lessons" wants — scoping it to this run returns nothing on a brand-new one.
  *   7. Assemble `additionalContext`, update the marker, emit — and, on `startup` and `resume`
  *      only, spawn the detached `session-resume` that assembles the resume briefing the first
@@ -40,9 +40,9 @@
  *
  * That balance is the fix for a defect this block used to carry on its own. It said only "do
  * not search for it preemptively" — a negative with no positive beside it — while the MCP tool
- * descriptions said nothing about when to use them either (audit C1). Between them the trained
- * behaviour was to never call any memory tool at all, which made every measurement of those
- * tools a measurement of this paragraph. Change the two together or neither.
+ * descriptions said nothing about when to use them either. Between them the trained behaviour
+ * was to never call any memory tool at all, which made every measurement of those tools a
+ * measurement of this paragraph. Change the two together or neither.
  */
 
 import { join } from 'node:path';
@@ -198,8 +198,8 @@ await runHook('session-start', {
     // §5.1 step 5 — register, or heartbeat on a resume.
     //
     // This is also the first call of the session that proves anything about the key. Health
-    // is allowlisted before authentication — it answers `OK` for a wrong key, an expired key
-    // and no key at all — so on its own it cannot support the claim the steer block makes.
+    // reports reachability, not credentials, so on its own it cannot support the claim the
+    // steer block makes.
     // A failure here that names the credential is therefore not just logged: it decides
     // which block the model gets.
     let authError = '';
@@ -244,11 +244,11 @@ await runHook('session-start', {
         { timeoutMs: lessonBudget });
       if (lres.ok) {
         lessons = readLessons(lres.body);
-        // HS-7 — the `rule`-typed ones also go to `runs/<run_id>/rules.json`, for
-        // `pre-tool.mjs` to read in front of a matching tool call. That hook may not dial, so
-        // its only supply is a hook that has already paid for a round trip; this is one of
-        // the two, and it is a pure side effect of a call that was made anyway. `recordRules`
-        // never throws and never blocks (`lib/rules.mjs`).
+        // The `rule`-typed ones also go to `runs/<run_id>/rules.json`, for `pre-tool.mjs`
+        // to read in front of a matching tool call. That hook may not dial, so its only
+        // supply is a hook that has already paid for a round trip; this is one of the two,
+        // and it is a pure side effect of a call that was made anyway. `recordRules` never
+        // throws and never blocks (`lib/rules.mjs`).
         //
         // The RAW array, not `lessons` above: `readLessons` renames `lesson_type` to `type`
         // on the way through, and the store reads the wire names so that one normaliser can

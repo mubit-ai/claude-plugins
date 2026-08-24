@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * `hooks/src/pre-tool.mjs` — PreToolUse, **warnings only** (HS-7 stage 1).
+ * `hooks/src/pre-tool.mjs` — PreToolUse, **warnings only**.
  *
  * ---------------------------------------------------------------------------
  * What this hook is allowed to do, and what it will never do
@@ -21,10 +21,9 @@
  *      Neither key is emitted on any path here, and `test/pre-tool.test.mjs` asserts their
  *      absence over every branch *and* over the built bundle — because the branch that would
  *      grow one is an error branch nobody drives by hand.
- *   2. **Exit code 2 blocks the call**, from the host's own registry entry:
- *      "Exit code 0 - stdout/stderr not shown / Exit code 2 - show stderr to model and block
- *      tool call / Other exit codes - show stderr to user only but continue with tool call".
- *      Note the asymmetry — every other non-zero code lets the call through. `lib/hook.mjs`
+ *   2. **Exit code 2 blocks the call.** Exit 0 shows nothing; exit 2 shows stderr to the
+ *      model and blocks the tool call; any other non-zero code shows stderr to the user and
+ *      lets the call proceed. Note the asymmetry — every other non-zero code lets it through. `lib/hook.mjs`
  *      pins `process.exitCode = 0` on every path out, including the uncaught-exception and
  *      blown-budget paths, and that is what makes this stage total rather than usually safe.
  *

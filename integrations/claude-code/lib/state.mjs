@@ -2,7 +2,7 @@
 /**
  * `lib/state.mjs` — the durable surface under `${CLAUDE_PLUGIN_DATA}`.
  *
- * Build-guide §4.8 (module API) and §7 (state layout + TTL table).
+ * The module API, the on-disk state layout and its TTL table.
  *
  * Every hook is a short-lived process, so anything that must survive a process
  * boundary goes through here. Three rules hold everywhere in this file:
@@ -237,7 +237,7 @@ export function pruneStale(cfg = {}) {
       }
     }
   } catch {
-    // §12.1-F14: an unusable DATA dir costs the sweep, nothing else.
+    // §12.1: an unusable DATA dir costs the sweep, nothing else.
   }
 }
 

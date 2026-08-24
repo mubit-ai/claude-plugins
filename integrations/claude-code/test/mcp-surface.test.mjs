@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * What the model is actually handed — build-guide §8.1, §8.2, §3.5.
+ * What the model is actually handed — §8.1, §8.2, §3.5.
  *
  * Every other MCP test in this suite stubs the server out. `test/launch.test.mjs` swaps
  * `./server.js` for a module that snapshots `process.env`, which proves the launcher sets
@@ -67,8 +67,8 @@ const PROSE_REMEDY = '\n  Descriptions are authored in `../mcp/src/tools.ts` and
 
 /**
  * Phrases that tell a model *when* to act, rather than what the call does. Copied verbatim
- * from the surface probe that scores this plugin (`probes/mcp-surface.mjs`) so the gate and
- * the score cannot disagree about what counts as guidance.
+ * from the surface probe that scores this plugin, so the gate and the score cannot disagree
+ * about what counts as guidance.
  */
 const TRIGGER = /\buse (this )?(tool )?(when|for|after|before|if)\b|\bcall (this|it) (when|after|before)\b|\bwhen (you|the user|a )\b/i;
 
@@ -134,9 +134,9 @@ test('a user-supplied MUBIT_MCP_TOOLS is honoured verbatim', async () => {
 //
 // The expected value comes from the plugin's own package.json, not the bundled server's,
 // which lives outside PLUGIN_ROOT and is absent from a published checkout — the same trap
-// `realToolNames()` in launch.test.mjs documents. The two are held equal by
-// `scripts/set-version.mjs` and asserted by manifests.test.mjs ('version lockstep'), so
-// reading the local one costs nothing and works everywhere this test can run.
+// `realToolNames()` in launch.test.mjs documents. The two are held equal at release time and
+// asserted by manifests.test.mjs ('version lockstep'), so reading the local one costs nothing
+// and works everywhere this test can run.
 // §3.5 — `skills.test.mjs` already holds every SKILL.md to this bar: the description "is
 // what the model reads when deciding whether to invoke the skill; it is always loaded and
 // counts against contextCost, so it must actually describe the trigger". Tool descriptions

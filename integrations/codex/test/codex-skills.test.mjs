@@ -27,14 +27,30 @@ import { join } from 'node:path';
 import { CODEX_ROOT, SHARED_ROOT } from './helpers/codex-fixtures.mjs';
 
 const SKILLS_DIR = join(CODEX_ROOT, 'skills');
-const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth', 'dashboard'];
+/**
+ * One name per line: four branches add to this list in parallel, and a merge resolving a
+ * single long line resolves it by picking one side — silently dropping the other's skill.
+ */
+const SKILLS = [
+  'recall',
+  'remember',
+  'reflect',
+  'forget',
+  'doctor',
+  'setup',
+  'auth',
+  'dashboard',
+  'pin',
+];
 
 /**
- * The two skills that call no MCP tool: `auth` runs `bin/auth.mjs` to get a key, and
- * `dashboard` runs `bin/dashboard.mjs` to open a local page. Both talk to the instance
- * themselves rather than through a tool the model holds.
+ * The skills that call no MCP tool: `auth` runs `bin/auth.mjs` to get a key, `dashboard` runs
+ * `bin/dashboard.mjs` to open a local page, and `pin` runs `bin/pin.mjs` because the bundled
+ * server has no variables tool to call. All three talk to the instance themselves rather than
+ * through a tool the model holds.
  */
-const MCP_SKILLS = SKILLS.filter((s) => s !== 'auth' && s !== 'dashboard');
+const NO_MCP_SKILLS = ['auth', 'dashboard', 'pin'];
+const MCP_SKILLS = SKILLS.filter((s) => !NO_MCP_SKILLS.includes(s));
 
 /** The prefix a Codex model actually sees, from `.mcp.json`'s server name. */
 const PREFIX = 'mcp__mubit__';
@@ -97,12 +113,12 @@ function fencedBlocks(raw) {
 // Frontmatter
 // ===========================================================================
 
-test('the eight skills are exactly the eight directories', () => {
+test('the shipped skills are exactly the skill directories', () => {
   const dirs = existsSync(SKILLS_DIR)
     ? readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()
     : [];
   assert.deepEqual(dirs, [...SKILLS].sort(),
-    'the Codex plugin ships the same eight skills as the Claude Code one; a missing one is a '
+    'the Codex plugin ships the same skills as the Claude Code one; a missing one is a '
     + 'command the user types and nothing answers.');
 });
 
@@ -293,7 +309,7 @@ test('forget: refuses to delete without confirming first', () => {
 // Drift against the Claude Code skills
 // ===========================================================================
 
-test('the two plugins ship the same eight skill names', () => {
+test('the two plugins ship the same skill names', () => {
   const ccDirs = readdirSync(join(SHARED_ROOT, 'skills'), { withFileTypes: true })
     .filter((d) => d.isDirectory()).map((d) => d.name).sort();
   const codexDirs = readdirSync(SKILLS_DIR, { withFileTypes: true })
@@ -303,4 +319,50 @@ test('the two plugins ship the same eight skill names', () => {
   //   other is a gap somebody meant to fill and forgot.
   assert.deepEqual(codexDirs, ccDirs,
     'the skill sets have diverged. The files differ by host; the set should not.');
+});
+
+// ===========================================================================
+// pin
+// ===========================================================================
+
+/**
+ * Codex reads a skill's `name` and `description` and nothing else, so the description IS the
+ * routing decision — and this is the one skill where routing wrongly does damage rather than
+ * nothing. When the user says "for the rest of this, don't touch the vendored server", the
+ * alternative to reaching `pin` is writing a *lesson*: a durable, cross-session claim about a
+ * project where that sentence stops being true when the task ends.
+ */
+test('pin: the description draws the line against remember', () => {
+  const { meta, body } = read('pin');
+  const description = String(meta.description ?? '');
+
+  assert.match(description, /\brun\b/i,
+    'a pin is scoped to this run — that is the whole distinction, and it belongs in the one '
+    + 'field Codex actually puts in front of the model.');
+  assert.match(description, /remember/,
+    'the description is where the model chooses between the two commands, so it has to name '
+    + 'the other one.');
+  assert.match(body, /cross-session|every future session/i,
+    '"durable" with no consequence attached is an adjective, not a rule.');
+});
+
+// § The Codex copy cannot say `${CLAUDE_PLUGIN_ROOT}`: the host sets no plugin-root variable
+//   of any spelling, so the shell expands it to nothing and `node /bin/pin.mjs` is an ENOENT.
+test('pin: the commands resolve the binary the way Codex requires', () => {
+  const { fenced, body } = read('pin');
+  assert.ok(!fenced.includes('CLAUDE_PLUGIN_ROOT'),
+    'a fenced command carrying ${CLAUDE_PLUGIN_ROOT} runs as `node /bin/pin.mjs` under Codex.');
+  assert.match(body, /plugin-root/i, 'the skill must tell the model how to find its own binary.');
+  assert.match(fenced, /bin\/pin\.mjs/, 'and the commands have to name it.');
+});
+
+// § The caps are refusals a user will hit. A refusal with no reason reads as a bug, and gets
+//   worked around by shortening the user's words — which changes the constraint.
+test('pin: states the caps and why a pin is expensive', () => {
+  const { body } = read('pin');
+  assert.match(body, /\b5\b|\bfive\b/i);
+  assert.match(body, /200/);
+  assert.match(body, /every prompt|each prompt/i);
+  assert.match(body, /never\s+(attempt\s+to\s+)?install|do not install|don't install/i,
+    'a memory plugin running installers is a trust failure.');
 });

@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  existsSync, mkdirSync, readdirSync, statSync, utimesSync, writeFileSync,
+  existsSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 
@@ -718,4 +718,153 @@ test('drain: an unresolvable actor costs the name, not the batch', async (t) => 
   assert.equal(spoolFiles(dataDir, RUN_ID).length, 0, 'the batch still committed');
   assert.equal(existsSync(join(dataDir, 'actor.json')), false,
     'a failed detection is not cached — a 30-day negative would outlive the fix for it');
+});
+
+// ---------------------------------------------------------------------------
+// W2-4 — the pin refresh
+// ---------------------------------------------------------------------------
+
+/**
+ * `refreshPins` lives here for the same reason `resolveActor` does: this is the one process in
+ * the plugin that is detached, unbudgeted and has nothing waiting on it. `readPins`, on the
+ * blocking side, is a single `readJson` — and it can only be that because the network half is
+ * down here.
+ */
+
+const pinsPath = (dataDir) => join(runDir(dataDir), 'pins.json');
+
+/** A cache old enough that a refresh is due. */
+function seedPins(dataDir, endpoint, pins, over = {}) {
+  mkdirSync(runDir(dataDir), { recursive: true });
+  writeFileSync(pinsPath(dataDir), JSON.stringify({
+    v: 1,
+    run_id: RUN_ID,
+    endpoint,
+    at: Date.now() - 10 * 60 * 1000,
+    pins: pins.map((text, i) => ({ slug: `p${i}`, text, at: Date.now() - 10 * 60 * 1000 })),
+    ...over,
+  }));
+}
+
+test('drain: refreshes the pin cache from the instance in its unbudgeted tail', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/variables/list': {
+      json: {
+        variables: [
+          { name: 'cc.pin.vendored', value_json: '"no vendored server edits"' },
+          { name: 'somebody.else', value_json: '"not ours"' },
+        ],
+      },
+    },
+  });
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['a stale constraint']);
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  server.assertCalled('POST', '/v2/control/variables/list', 1);
+  assert.equal(server.lastCall('POST', '/v2/control/variables/list').body.run_id, RUN_ID);
+
+  const cached = readJsonFile(pinsPath(dataDir));
+  assert.deepEqual(cached.pins.map((p) => p.text), ['no vendored server edits'],
+    'the cache is the instance\'s answer, narrowed to this plugin\'s namespace');
+  assert.equal(cached.run_id, RUN_ID);
+  assert.equal(cached.endpoint, server.url,
+    'the reader refuses a cache from another endpoint, so the writer has to stamp one');
+});
+
+/**
+ * **The most dangerous bug this ticket could ship.**
+ *
+ * A refresh that emptied the cache when `variables/list` failed would silently remove the
+ * user's standing constraint on a network blip — and the next prompt would look entirely
+ * normal, with a full recall block and nothing to suggest anything had been dropped. The user
+ * would discover it by being burned by exactly the thing they pinned against.
+ *
+ * So a failed refresh writes **nothing**. Byte-identical is the assertion, not "still has some
+ * pins": a rewrite that happened to preserve the contents would still have moved `at`, which
+ * is what decides when the next refresh is due.
+ */
+test('drain: a failed variables/list leaves the previous pin cache byte-identical', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/variables/list': { status: 503, json: { error: 'upstream down' } },
+  });
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['no vendored server edits']);
+  const before = readFileSync(pinsPath(dataDir), 'utf8');
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  assert.equal(readFileSync(pinsPath(dataDir), 'utf8'), before,
+    'a blip must not be able to clear a constraint the user is relying on');
+});
+
+// A successful list that returns nothing is a different answer entirely, and it does
+// overwrite: that is how `pin clear` in one terminal reaches the other.
+test('drain: an empty variables/list clears the cache, because that is how a cleared pin travels', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/variables/list': { json: { variables: [] } },
+  });
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['cleared elsewhere']);
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  assert.deepEqual(readJsonFile(pinsPath(dataDir)).pins, []);
+});
+
+// The TTL is a refresh cadence, and the drainer is spawned per prompt. Without the floor this
+// would be one request per keystroke-worth-of-typing on a path that has no business
+// generating traffic proportional to typing.
+test('drain: a cache refreshed a moment ago is not re-fetched', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['fresh'], { at: Date.now() });
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  server.assertNotCalled('POST', '/v2/control/variables/list');
+});
+
+// The switch has to reach the network half too, or a user who turned pins off would still be
+// paying a request per drain for a feature they cannot see.
+test('drain: pins turned off means no variables call at all', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url, { MUBIT_CC_PINS: '0' }),
+  }));
+
+  server.assertNotCalled('POST', '/v2/control/variables/list');
+  assert.ok(!existsSync(pinsPath(dataDir)), 'nothing writes a cache for a feature that is off');
+});
+
+/**
+ * The refresh is skipped when the connection state is anything but `ready`, and the reason is
+ * the *verdict* rather than the traffic.
+ *
+ * `recordSuccess` clears the state for the whole endpoint — the breaker is per instance, not
+ * per route. So a successful `variables/list` issued in the tail, moments after a 500 on
+ * `/v2/control/ingest`, would reset `server_error` to `ready` and the status line would stop
+ * showing the failure that just happened. A pin is not worth erasing a diagnosis for.
+ */
+test('drain: a failed ingest is not whitewashed by a successful pin refresh', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/ingest': { status: 500, json: { error: 'internal' } },
+  });
+  seedSpool(dataDir, 2);
+  seedPins(dataDir, server.url, ['a stale constraint']);
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  server.assertNotCalled('POST', '/v2/control/variables/list');
+  assert.equal(readJsonFile(pinsPath(dataDir)).pins.length, 1,
+    'and the pin the user set is still there, unrefreshed and still rendering');
 });

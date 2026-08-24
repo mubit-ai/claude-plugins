@@ -324,6 +324,13 @@ export function defaultRoutes() {
     },
     'POST /v2/control/memory_health': { json: { healthy: true } },
     'POST /v2/control/diagnose': { json: { findings: [] } },
+    // The pin refresh the detached drainer makes in its tail (`lib/pins.mjs`). Answering it
+    // here rather than in each drain fixture keeps a 404 out of every suite that spawns a
+    // drain for some other reason — an unrouted request is recorded AND counts as a failure
+    // against the breaker, which would make the pin refresh look like an instance fault.
+    'POST /v2/control/variables/list': { json: { variables: [] } },
+    'POST /v2/control/variables/set': { json: { success: true } },
+    'POST /v2/control/variables/delete': { json: { success: true } },
   };
 }
 

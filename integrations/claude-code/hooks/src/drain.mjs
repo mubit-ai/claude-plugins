@@ -51,6 +51,7 @@ import { postIngest, postOutcome } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
+import { refreshPins } from '../../lib/pins.mjs';
 import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import {
   acquireDrainLock, batchIdempotencyKey, commitBatch, readBatch, releaseDrainLock, spoolStats,
@@ -243,6 +244,31 @@ async function main() {
     resolveActor(cfg, resolveProjectDir(cfg, payload));
   } catch {
     // §4.9: a name is never worth a drain. The items ship either way.
+  }
+
+  // The run's pinned context, refreshed at most once a minute (`lib/pins.mjs`).
+  //
+  // It sits beside `resolveActor` for exactly the same reason. `hooks/src/prompt-recall.mjs`
+  // renders pins on a hook that blocks every prompt inside a 1500 ms budget, so its half of
+  // this is one `readJson` and cannot be anything more — which means the dial has to happen
+  // somewhere, and this is the only process in the plugin that can afford one.
+  //
+  // After the items have shipped, in the same unbudgeted tail as the actor and the TTL sweep:
+  // the drainer's job is memory, and a slow control-plane call must not sit in front of an
+  // ingest a user is waiting to see land. Running late costs one prompt's worth of staleness
+  // in a cache whose whole design says a stale pin still renders.
+  //
+  // Skipped when the breaker is not reporting `ready`. That guard is about the *verdict*, not
+  // the traffic: `recordSuccess` clears the connection state for the whole endpoint, so a
+  // successful `variables/list` issued moments after a 500 on `/v2/control/ingest` would
+  // whitewash the failure the status line is meant to be showing. The instance has just said
+  // it is unwell; the pins can wait for the drain that finds it well again, and until then a
+  // stale pin still renders.
+  try {
+    if (readBreaker(cfg).state === 'ready') await refreshPins(cfg, runId);
+  } catch {
+    // §4.9: a pin is never worth a drain. A failed refresh leaves the previous cache alone,
+    // which is the behaviour that matters — see `lib/pins.mjs`.
   }
 
   // §7's TTL sweep runs only from here and from `session-end` — never on a blocking hook's

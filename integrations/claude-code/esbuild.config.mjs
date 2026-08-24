@@ -170,6 +170,13 @@ const targets = [
     'statusline.launcher.mjs', 'bin/statusline.mjs',
   ),
   { entryPoints: ['bin/auth.src.mjs'], outfile: out('bin/auth.mjs'), ...shared },
+  // The pin binary, and no launcher for the same reason `auth` has none: launchers exist for
+  // entries the *host* execs on its own, where a parse error on an old Node would be silent.
+  // A skill-invoked script is run by a person who is watching.
+  //
+  // It is a binary rather than an MCP tool because the vendored server registers twenty-one
+  // tools and none of them touches variables, and `mcp/dist/server.js` cannot be rebuilt here.
+  { entryPoints: ['bin/pin.src.mjs'], outfile: out('bin/pin.mjs'), ...shared },
   // No launcher, for the same reason `bin/auth.mjs` has none: launchers exist for the entries
   // the *host* execs on its own (`hooks.json`, `settings.json`), where a parse error on an old
   // Node would be silent. A skill-invoked script is run by a person who is watching, and the

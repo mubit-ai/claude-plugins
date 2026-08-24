@@ -52,6 +52,8 @@
     "mcpTools": { "type": "string", "title": "MCP tool allowlist", "default": "",
       "description": "Comma-separated allowlist of Mubit MCP tools. Blank uses the curated default set." },
     "mcpLessonScope": { "type": "string", "title": "MCP lesson scope ceiling", "default": "run",
-      "description": "The widest scope a lesson written by an MCP tool may claim: run, session, or global. Anything wider than run is read by unrelated runs, so the default keeps an agent's lesson in the run that wrote it; reflection is still the path that promotes one beyond it." }
+      "description": "The widest scope a lesson written by an MCP tool may claim: run, session, or global. Anything wider than run is read by unrelated runs, so the default keeps an agent's lesson in the run that wrote it; reflection is still the path that promotes one beyond it." },
+    "pins": { "type": "boolean", "title": "Pinned context", "default": true,
+      "description": "Put the constraints pinned with /mubit-memory:pin in front of the model on every prompt of the run \u2014 including the prompts recall skips, such as a two-word answer or a moment when the instance is unreachable. Capped at five pins, 200 characters each and 240 tokens, because a pin is unranked and paid in full on every prompt. Off makes the feature invisible: the injected block goes back to being exactly what it was without it." }
   }
 }

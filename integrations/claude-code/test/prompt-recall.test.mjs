@@ -269,7 +269,14 @@ test('MUBIT_CC_RECALL_RANK_BY overrides the rule in both directions', async (t) 
 
 // `auto` is a client-side word. The server has no such mode, so sending it would fall
 // through to the default weights while looking, in a request log, like a deliberate choice.
-test('an unresolvable rank mode is omitted rather than sent as "auto"', async (t) => {
+//
+// What happens to an unusable value is a two-stage answer, and the name of this test used to
+// describe only the second stage. `lib/config.mjs` clamps the key with `enumOf` first, so
+// `sideways` never reaches the ladder as itself — it arrives as `auto`, and `auto` *means*
+// run the rule. `lib/recall.mjs` does have a branch that omits the field entirely, but no
+// caller in the plugin can reach it: all three pass a concrete mode. The omission that IS
+// reachable is rung 3's, which has its own test below.
+test('an unusable MUBIT_CC_RECALL_RANK_BY falls back to the rule, never to "auto"', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
 

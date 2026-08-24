@@ -46,7 +46,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
 import { dataDir, readJson, runDir, safeSegment, writeJsonAtomic } from './state.mjs';
@@ -874,4 +874,67 @@ function endpointHash(endpoint) {
 /** @returns {string} */
 function safeCwd() {
   try { return process.cwd(); } catch { return '.'; }
+}
+
+// ---------------------------------------------------------------------------
+// Observing which runs exist
+// ---------------------------------------------------------------------------
+
+/**
+ * Every run this data dir has a status marker for, with what the marker says about when it
+ * was last touched.
+ *
+ * This is the *observation* half of run resolution, and it is deliberately not the deciding
+ * half. `bin/activity.mjs` and `bin/pin.mjs` both have to answer "which run is this session",
+ * and neither can call `deriveRunId`: derivation is what a hook does from a payload it was
+ * handed, and re-running it from a CLI would compute an answer rather than read the one the
+ * hooks actually used — and, on `source: 'clear'`, would increment and persist `clear_count`
+ * a second time. So both observe instead, and this is the scan they share.
+ *
+ * What they do NOT share is the policy on top, which is why that stayed in each command:
+ * `activity` breaks a tie on the higher `-c<n>` (a pre-clear marker and its successor can be
+ * stamped inside one millisecond, and answering with the run the user just cleared would
+ * report it as this session), while `pin` refuses a marker older than a day and refuses the
+ * shared unconfigured run outright (a pin written there renders in a stranger's session).
+ * Folding those together would mean one command silently inheriting the other's rules.
+ *
+ * Markers are enumerated from `status/`, never from `runs/`: the marker is the only file
+ * guaranteed to exist, because a session that recalled and never captured has no `runs/<id>/`
+ * at all. `health.json` shares the directory and is the endpoint probe cache, not a run.
+ *
+ * A marker truncated by a SIGKILL still names a run, so it is reported with the file's mtime
+ * rather than dropped — the name is the run id, and that is the part being asked for. Total:
+ * an unreadable data dir is an empty list, never a throw.
+ *
+ * @param {string} root  the resolved data dir
+ * @returns {Array<{runId: string, at: number, clearCount: number}>}
+ */
+export function scanRunMarkers(root) {
+  /** @type {Array<{runId: string, at: number, clearCount: number}>} */
+  const out = [];
+  try {
+    const dir = join(str(root), 'status');
+    if (!str(root) || !existsSync(dir)) return out;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.json') || name === 'health.json') continue;
+      // The file name IS the run id — `updateMarker` writes `status/<run_id>.json`.
+      const runId = name.slice(0, -'.json'.length);
+      if (!runId) continue;
+      const path = join(dir, name);
+      let at = 0;
+      try {
+        at = Number(JSON.parse(readFileSync(path, 'utf8'))?.updated_at) || 0;
+      } catch { /* truncated after a SIGKILL; fall back to the file's own clock */ }
+      if (!Number.isFinite(at) || at <= 0) {
+        try { at = statSync(path).mtimeMs; } catch { at = 0; }
+      }
+      out.push({ runId, at, clearCount: Number(/-c(\d+)$/.exec(runId)?.[1] ?? 0) });
+    }
+  } catch { /* §4.9: an unreadable data dir is no runs, not a crash */ }
+  return out;
+}
+
+/** @param {any} v @returns {string} */
+function str(v) {
+  return typeof v === 'string' ? v : '';
 }

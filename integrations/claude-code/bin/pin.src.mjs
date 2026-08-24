@@ -52,12 +52,12 @@
  * Nothing here logs the API key, and no returned object contains it.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig } from '../lib/config.mjs';
 import { MAX_PIN_CHARS, MAX_PINS, writePinsLocal } from '../lib/pins.mjs';
+import { scanRunMarkers } from '../lib/runid.mjs';
 import { deleteVariable, listVariables, PIN_NAMESPACE, setVariable } from '../lib/variables.mjs';
 
 /** §4.3 / F21: the run id that must never be written to, from any surface. */
@@ -368,28 +368,14 @@ export function pickRun(cfg, explicit = '') {
  * @returns {string}
  */
 function newestMarker(cfg) {
-  try {
-    const root = str(cfg?.dataDir);
-    const dir = join(root, 'status');
-    if (!root || !existsSync(dir)) return '';
-
-    let best = '';
-    let bestAt = 0;
-    for (const name of readdirSync(dir)) {
-      if (!name.endsWith('.json') || name === 'health.json') continue;
-      // The file name IS the run id — `updateMarker` writes `status/<run_id>.json`.
-      const runId = name.slice(0, -'.json'.length);
-      if (!runId || runId === POISONED_RUN_ID) continue;
-      let at = 0;
-      try {
-        at = Number(JSON.parse(readFileSync(join(dir, name), 'utf8'))?.updated_at) || 0;
-      } catch { /* truncated after a SIGKILL; it simply does not win */ }
-      if (at > bestAt) { bestAt = at; best = runId; }
-    }
-    return bestAt > 0 && Date.now() - bestAt < MARKER_MAX_AGE_MS ? best : '';
-  } catch {
-    return '';
+  let best = '';
+  let bestAt = 0;
+  for (const m of scanRunMarkers(str(cfg?.dataDir))) {
+    // The shared run every unconfigured client falls into is never this session's.
+    if (m.runId === POISONED_RUN_ID) continue;
+    if (m.at > bestAt) { bestAt = m.at; best = m.runId; }
   }
+  return bestAt > 0 && Date.now() - bestAt < MARKER_MAX_AGE_MS ? best : '';
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 {
-  "measuredAt": "2026-08-24T11:26:44.100Z",
-  "value": 4564,
+  "measuredAt": "2026-08-24T12:11:51.743Z",
+  "value": 4764,
   "cached": 0,
-  "curatedValue": 4564,
+  "curatedValue": 4764,
   "allowlistHonoured": true,
   "method": "word/number/symbol segmentation; see the header of scripts/measure-context-cost.mjs",
   "surface": {
@@ -37,12 +37,14 @@
       "mubit_strategies"
     ],
     "skills": [
+      "activity",
       "auth",
       "checkpoint",
       "dashboard",
       "doctor",
       "forget",
       "memory-health",
+      "pin",
       "recall",
       "reflect",
       "remember",
@@ -70,9 +72,9 @@
       "count": 13
     },
     "skillFrontmatter": {
-      "tokens": 631,
-      "chars": 2152,
-      "count": 11
+      "tokens": 831,
+      "chars": 2813,
+      "count": 13
     },
     "agentFrontmatter": {
       "tokens": 62,

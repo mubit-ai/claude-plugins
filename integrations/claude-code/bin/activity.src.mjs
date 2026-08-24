@@ -36,21 +36,28 @@
  * `--export | jq` works, and why `--export --out audit.jsonl` prints something a person can
  * read instead of nothing.
  *
- * ## Why `pickRun` is here and not in `lib/runid.mjs`
+ * ## Which run, and why not `deriveRunId`
  *
- * Because it is twenty lines, and because `lib/runid.mjs` is a subtle file that several
- * branches are working in at once. Duplicating a small function is cheaper than resolving a
- * conflict inside `resolveRunId`, and the extraction is easy once there is more than one copy
- * to extract *from*. Duplicate small, extract after.
+ * `deriveRunId` computes a run id from a hook payload. There is no payload here, and running
+ * it anyway would answer with a run the hooks may never have used — and on `source: 'clear'`
+ * would increment and persist `clear_count` a second time. So this command *observes*: it
+ * reads the run markers the hooks wrote, through `scanRunMarkers`, and picks.
+ *
+ * The scan is shared with `bin/pin.mjs`; the pick is not. This command breaks a tie on the
+ * higher `-c<n>` because a pre-clear marker and its successor can be stamped inside the same
+ * millisecond, and reporting the run the user just cleared as this session's activity is the
+ * one wrong answer that looks right. `pin` bounds by age instead, for its own reasons. Sharing
+ * the scan and not the policy is what keeps either from inheriting the other's rules.
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { exportActivity, listActivity, scanActivity, scrubKey } from '../lib/activity.mjs';
 import { loadConfig } from '../lib/config.mjs';
+import { scanRunMarkers } from '../lib/runid.mjs';
 import { resolveDataDir } from '../lib/state.mjs';
 
 const USAGE = `mubit-memory: what this instance holds, and a copy of it you can keep.
@@ -177,32 +184,15 @@ export function parseArgs(argv = []) {
 export function pickRun(dataDir, explicit = '') {
   const want = typeof explicit === 'string' ? explicit.trim() : '';
   if (want) return want;
-  try {
-    const dir = join(dataDir, 'status');
-    let best = '';
-    let bestAt = -1;
-    let bestClear = -1;
-    for (const file of readdirSync(dir)) {
-      if (!file.endsWith('.json') || file === 'health.json') continue;
-      const runId = file.slice(0, -5);
-      const path = join(dir, file);
-      let at = 0;
-      try {
-        const m = JSON.parse(readFileSync(path, 'utf8'));
-        at = Number(m && m.updated_at);
-      } catch { /* a marker truncated by a SIGKILL still names a run */ }
-      if (!Number.isFinite(at) || at <= 0) {
-        try { at = statSync(path).mtimeMs; } catch { at = 0; }
-      }
-      const clear = Number(/-c(\d+)$/.exec(runId)?.[1] ?? 0);
-      if (at > bestAt || (at === bestAt && clear > bestClear)) {
-        best = runId; bestAt = at; bestClear = clear;
-      }
+  let best = '';
+  let bestAt = -1;
+  let bestClear = -1;
+  for (const m of scanRunMarkers(dataDir)) {
+    if (m.at > bestAt || (m.at === bestAt && m.clearCount > bestClear)) {
+      best = m.runId; bestAt = m.at; bestClear = m.clearCount;
     }
-    return best;
-  } catch {
-    return '';
   }
+  return best;
 }
 
 // ---------------------------------------------------------------------------

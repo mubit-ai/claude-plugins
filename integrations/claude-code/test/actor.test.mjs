@@ -111,7 +111,7 @@ const LADDER = [
   {
     rung: 1,
     what: 'cfg.actorId (MUBIT_CC_ACTOR_ID)',
-    git: { 'github.user': 'gh-login', 'user.email': 'user@example.com', 'user.name': 'Ada Lovelace' },
+    git: { 'github.user': 'gh-login', 'user.email': 'ada@example.com', 'user.name': 'Ada Lovelace' },
     env: { USER: 'shell-login' },
     cfg: { actorId: 'explicit-actor' },
     want: 'explicit-actor',

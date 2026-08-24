@@ -64,11 +64,19 @@ export const CONFIG = {
     '**/package-lock.json',
   ],
 
-  /** Addresses that may appear. Anything else matching an email shape is a finding. */
+  /**
+   * Addresses that may appear. Anything else matching an email shape is a finding.
+   *
+   * `example.com` is reserved by RFC 2606 and can never be delivered to, so nothing here can
+   * name a real person. The list is still a list rather than a domain pattern: a placeholder
+   * has to be recognisable as one to a reader too, and `ada@example.com` reads as fake only
+   * because this tree consistently uses Ada Lovelace as its stand-in user.
+   */
   allowedEmails: [
     'you@example.com',
     'test@example.com',
     'user@example.com',
+    'ada@example.com',
     'noreply@github.com',
   ],
 

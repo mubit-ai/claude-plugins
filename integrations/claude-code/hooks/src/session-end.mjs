@@ -137,38 +137,36 @@ const BUDGET_MS = DETACHED ? 55_000 : (CODEX_INLINE ? 2300 : 6800);
 const DRAIN_MS = CODEX_INLINE ? 1100 : 3500;
 /**
  * §5.7 step 4: the reflect is LLM-backed, so it gets the largest single slice — and inside a
- * detached child that slice is what the extra headroom above is *for*. Measured against a
- * hosted instance, 4000 ms is simply not enough: the first `--print` session ever to reach
- * this call recorded `POST /v2/control/reflect: aborted after 4000ms`. The inline value is
- * left exactly where it was, because there the host's 8 s ceiling still decides.
+ * detached child that slice is what the extra headroom above is *for*. 4000 ms is not enough:
+ * the first `--print` session ever to reach this call recorded `POST /v2/control/reflect:
+ * aborted after 4000ms`. The inline value is left exactly where it was, because there the
+ * host's 8 s ceiling still decides.
  *
- * 8000 ms was not enough either, and for the same reason one step out: a Terminal-Bench sweep
- * put the *successful* hosted tail at 9626 ms, so the detached child was aborting calls the
- * server was still answering. It now dials wide enough that the LLM, not the client, decides
- * when to give up — which is also why this call opts out of the breaker (see the call site).
+ * 8000 ms was not enough either, one step further out: reflections that the service went on to
+ * answer successfully were being aborted by the client before the answer arrived. It now dials
+ * wide enough that the model, not the client, decides when to give up — which is also why this
+ * call opts out of the breaker (see the call site).
  */
 const REFLECT_MS = DETACHED ? 45_000 : (CODEX_INLINE ? 700 : 4000);
 
 /**
  * The reflect budget above is a *total*, and this is how much of it one attempt may have.
  *
- * The server does not take 45 s to fail. Measured against the hosted instance
- * (`docs/reflect-504-probe.md`), every 504 this call has produced arrived in 15.06-15.22 s
- * — a 162 ms spread over six failures — and no success ever exceeded 14.5 s. There is a
- * fixed deadline upstream, and a request still open past it is waiting for a verdict that
- * has already been decided. Handing one attempt the whole 45 s therefore buys nothing and
+ * A reflect that is going to fail does not take 45 s to say so: the failures arrive at a
+ * consistent point well inside that, and a request still open past it is waiting for a
+ * verdict already decided. Handing one attempt the whole budget therefore buys nothing and
  * costs the retry below its window.
  *
- * 20 s: comfortably past the observed ceiling, so a slow-but-live reflection is never cut
- * off by us, and small enough that two full attempts fit inside REFLECT_MS with margin.
- * On the inline paths REFLECT_MS is already smaller and binds instead.
+ * 20 s: past where a live reflection has ever still been working, so a slow one is never cut
+ * off by us, and small enough that two full attempts fit inside REFLECT_MS with margin. On
+ * the inline paths REFLECT_MS is already smaller and binds instead.
  */
 const REFLECT_ATTEMPT_MS = 20_000;
 
 /**
- * Two attempts, not more. The reflection for a real run finishes just under the upstream
- * deadline, so attempts are close to independent coin flips at roughly 4-in-10 — a second
- * lifts a session's odds substantially, while a third does not fit in the envelope.
+ * Two attempts, not more. A reflection over a real run finishes close enough to the point
+ * where it is given up on that attempts behave like independent throws — so a second lifts a
+ * session's odds substantially, while a third does not fit in the envelope.
  */
 const REFLECT_ATTEMPTS = 2;
 const OUTCOME_MS = CODEX_INLINE ? 400 : 1500;
@@ -654,15 +652,14 @@ async function maybeReflect(cfg, o) {
    * Why this retries, and why it could not before.
    *
    * 12 reflect failures were logged over four days and every one of them was an HTTP
-   * 504. The probe in `docs/reflect-504-probe.md` shows why: the reflection for a real
-   * run takes 12.3-14.4 s and something upstream gives up at ~15.1 s, so the call sits
-   * right on a cliff and ordinary latency variance decides it. The same request, issued
-   * four times in a row, returned 504, 504, 200, 504.
+   * 504. A reflection over a real run finishes close to the point where it is given up
+   * on, so the call sits on a cliff and ordinary latency variance decides it: the same
+   * request, issued four times in a row, returned 504, 504, 200, 504.
    *
    * That is a retryable failure in the most literal sense - the second attempt is not
    * hoping the server changed its mind, it is re-rolling a dice throw. And it is
-   * affordable for the first time now that the failure is known to cost a predictable
-   * ~15 s instead of the 45 s this budget was sized for.
+   * affordable for the first time now that the failure is known to cost far less than
+   * the 45 s this budget was sized for.
    *
    * Only 5xx is retried. A 403 is an auth problem an identical request cannot fix, and
    * an abort means our own clock ran out, so retrying would abort again.

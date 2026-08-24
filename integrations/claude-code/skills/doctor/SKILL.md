@@ -44,11 +44,10 @@ one before it, and the cheap steps answer most questions.
    | `skipped:undrained` | " | The spool did not land, so reflecting would have drawn conclusions from a session the server only half has. The next session drains the rest and reflects then. |
 
    **A `failed` reflect whose `last_error` is an HTTP 504 is the known one.** Reflection over
-   a real run takes roughly 12-14 s and something upstream of the service gives up at ~15 s,
-   so the call sits on a cliff and ordinary latency variance decides it — the identical
-   request, issued four times in a row, has returned 504, 504, 200, 504. That is why this
-   call retries: `attempts: 2` with a 504 means both throws lost, which is expected roughly
-   one session in six and is **not** an instance fault. Do not send the user to check their
+   a real run runs long enough that it sits on a cliff, and ordinary latency variance decides
+   it — the identical request, issued four times in a row, has returned 504, 504, 200, 504.
+   That is why this call retries: `attempts: 2` with a 504 means both throws lost, which
+   happens to a minority of sessions and is **not** an instance fault. Do not send the user to check their
    key, their endpoint or their network for it; the same instance is answering every other
    route. What it costs is real, though — that session's lessons stay at `run` scope and are
    invisible to the next session. If it is failing on most sessions rather than some, that is

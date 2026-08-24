@@ -18,7 +18,7 @@
  * are operator-tunable, so any number written into this file would be a claim about one
  * deployment rather than about the API. Ask the instance instead: `explain: true` on a query
  * returns `rank_by_mode` and `fusion_weights_used` per evidence item, which is the only
- * authoritative answer and is what `docs/manual-test-wave1.md` uses.
+ * authoritative answer.
  *
  * Unknown values fall through to the server's default weighting, so a bad mode is inert
  * rather than an error — which is exactly why the client still whitelists before sending

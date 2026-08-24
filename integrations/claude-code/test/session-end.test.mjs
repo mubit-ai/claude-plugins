@@ -171,15 +171,14 @@ test('issues POST /v2/control/reflect BY DEFAULT with no opt-in env', async (t) 
 /*
  * Why reflect, alone among this hook's calls, retries.
  *
- * 12 reflect failures were logged over four days and every one was an HTTP 504. Probing the
- * hosted instance (`docs/reflect-504-probe.md`) showed the shape: a reflection over a real
- * run takes 12.3-14.4 s, something upstream gives up at ~15.1 s, and the call therefore sits
- * on a cliff where latency variance alone decides it. The identical request, issued four
- * times in a row, returned 504, 504, 200, 504.
+ * 12 reflect failures were logged over four days and every one was an HTTP 504. A reflection
+ * over a real run finishes close to the point where it is given up on, so the call sits on a
+ * cliff where latency variance alone decides it: the identical request, issued four times in
+ * a row, returned 504, 504, 200, 504.
  *
- * So the second attempt is not hoping the server reconsidered — it is re-rolling a throw
- * that lands about four times in ten. These three tests pin the policy: retry a 5xx, stop at
- * two, and never retry a verdict a repeat cannot change.
+ * So the second attempt is not hoping the server reconsidered — it is re-rolling a throw.
+ * These three tests pin the policy: retry a 5xx, stop at two, and never retry a verdict a
+ * repeat cannot change.
  */
 
 test('retries reflect once on 504 and keeps the second attempt\'s lessons', async (t) => {

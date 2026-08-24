@@ -60,7 +60,15 @@ Tip of a chain: `feat/link-run-routes` → `feat/link-command` → `feat/subagen
 
 On `pre-main` none of this exists: `runs/link` is never called and `include_linked_runs` is
 hardcoded `false` in `hooks/src/session-end.mjs`. **Landing that line is a merge decision, not
-a build.** Everything below assumes it lands.
+a build.**
+
+> **Correction (2026-08-24).** This paragraph originally ended *"everything below assumes it
+> lands"*. It has not landed, and not as one piece: PR #11 (`plugin-scope-fix` → `pre-main`) was
+> **closed, not merged**, on 2026-08-23 — *"this should not have been opened as one branch-wide PR.
+> The work stays on `plugin-scope-fix`; specific fixes will be carved out into their own PRs when
+> asked for."* The branch remains the place to read the link work before building anything
+> scope-shaped, but nothing below may assume it is merged. Wave 1 was built without it: neither
+> item depended on it technically, and the ordering was a preference rather than a constraint.
 
 ### What that supersedes
 
@@ -98,7 +106,17 @@ collaborative feature needs — and it is the one identity question the scope wo
 - **Watch** a `gh api user` spawn per hook is not affordable; resolve once and cache to the
   plugin data dir, the way `plugin-scope-fix` caches the git remote per session
 - **Note** `userId` already reaches the wire in `capture.mjs`, `drain.mjs`, `checkpoint.mjs`
-  and `session-end.mjs` — this fills an existing field rather than adding one
+  and `session-end.mjs`
+
+> **Correction (2026-08-24) — do not fill `userId`.** The note above read *"this fills an existing
+> field rather than adding one"*. Filling it would have broken recall. Server-side, `user_id` is a
+> **retrieval scope**, not an attribution tag: on capture it is stamped into the entry's metadata,
+> and on query it is enforced as a filter, defaulting to `actor::<accountId>` when a client sends
+> nothing. `lib/recall.mjs` never sends `user_id`, so every recall query runs under that default —
+> which means stamping a detected login into `user_id` would make every newly captured entry
+> **silently invisible to recall**. Codaph gets away with it only because it sends the same value
+> on both sides. Attribution therefore rides in `metadata_json.actor` on every ingest item, and
+> `cfg.userId` keeps its current meaning and its empty default.
 
 ### 2. Freshness-aware recall ranking
 
@@ -113,9 +131,13 @@ largest recurring context cost, and relevance-only ranking answers *where were w
 whatever is most similar rather than most recent. That is precisely how a superseded lesson gets
 injected ahead of the lesson that replaced it.
 
-- **Lands in** a pass-through in `lib/recall.mjs`, one config default, one rule in
-  `lib/classify.mjs` — which already classifies prompts, so the switch can be automatic rather
-  than a setting nobody finds
+- **Lands in** a pass-through in `lib/recall.mjs`, one config default, and one rule in
+  `lib/rank.mjs` — so the switch is automatic rather than a setting nobody finds
+
+> **Correction (2026-08-24).** This originally put the rule in `lib/classify.mjs`, *"which already
+> classifies prompts"*. It does not. `classify.mjs` classifies **tool names and turn events** off a
+> static lookup table, and `classifyTurn(prompt, …)` (`lib/classify.mjs:175-192`) takes a `prompt`
+> argument it never reads. The rule has to live where prompt text actually is.
 - **Check first** the v0.13.3 backend changes to lesson decay and recall ranking postdate the
   measurements this recommendation was reasoned from; re-measure before tuning
 
@@ -249,8 +271,8 @@ the failure mode a pinned slot removes.
 
 | # | Feature | Impact | Effort | Days | Depends on | Primary surface |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | *Land `plugin-scope-fix`* | *high* | *merge* | — | — | *already built* |
-| 1 | Actor id | ●●● | S | 1–2 | — | `lib/config.mjs` |
+| — | *`plugin-scope-fix`* | *high* | *unmerged* | — | — | *PR #11 closed — see Prior art* |
+| 1 | Actor id | ●●● | S | 1–2 | — | `lib/actor.mjs` |
 | 2 | Freshness ranking | ●●● | S | 1–2 | — | `lib/recall.mjs` |
 | 3 | Dormant MCP tools | ●●○ | S | 2–3 | — | `mcp/src/launch.mjs` |
 | 4 | Session resume block | ●●● | M | 4–5 | — | SessionStart hook |
@@ -276,8 +298,9 @@ routes we have no concept for at all; it is the right home for a team view.
 
 ## Sequencing
 
-**Wave 1 — identity and ranking (~1 week).** Land `plugin-scope-fix` first, then items 1 and 2.
-Small, independent, and everything collaborative reads better afterwards.
+**Wave 1 — identity and ranking (~1 week).** Items 1 and 2. Small, independent, and everything
+collaborative reads better afterwards. `plugin-scope-fix` was originally sequenced ahead of them;
+PR #11 closed unmerged and neither item depended on it, so Wave 1 skipped it — see *Prior art*.
 
 **Wave 2 — surface (~2 weeks).** Items 3, 4, 8, 9. Mostly exposure of capability already vendored
 and shipped; the highest visible-value-per-day on the list, and a good place to land user-facing

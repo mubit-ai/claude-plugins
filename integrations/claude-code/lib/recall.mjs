@@ -91,21 +91,15 @@ const QUERY_LIMIT = 8;
  * §5.2: the `rank_by` modes the server actually has. Anything else — `auto` included — is
  * left off the wire entirely.
  *
- * `rank_by` resolves to fusion weights server-side:
+ * `rank_by` selects how the server weights semantic, lexical and recency scores:
+ * `relevance` is similarity-dominant, `freshness` is recency-dominant, `balanced` sits
+ * between them. The exact weights are the server's, are operator-tunable per instance, and
+ * are deliberately not restated here — `explain: true` reports the ones actually used.
  *
- * | mode | semantic | lexical | recency |
- * | --- | --- | --- | --- |
- * | *(absent)* / `relevance` | 1.00 | 0.25 | 0.10 |
- * | `balanced` | 0.60 | 0.15 | 0.25 |
- * | `freshness` | 0.40 | 0.10 | **0.50** |
- *
- * The server falls through to the defaults on an unknown value, so a bad mode is inert
- * rather than an error — which is precisely why it is whitelisted here. A typo that ranks at
- * the default weights while sitting in the request log looking like a choice is a bug with
+ * The server falls through to its default weighting on an unknown value, so a bad mode is
+ * inert rather than an error — which is precisely why it is whitelisted here. A typo that
+ * ranks at the default while sitting in the request log looking like a choice is a bug with
  * no symptom. `auto` is a client-side word (`lib/rank.mjs`) and never reaches the wire.
- *
- * The weights above are the **Rust match arm**. The proto's own comment on `freshness`
- * transposes semantic and recency; do not "fix" this table against it.
  */
 const RANK_MODES = Object.freeze(['relevance', 'balanced', 'freshness']);
 

@@ -6,9 +6,10 @@
  * What is being claimed, and what would falsify it
  * ---------------------------------------------------------------------------
  * Ask the plugin "where were we?" and recall answers with whatever is most **similar**,
- * because `/v2/control/query` fuses at the default weights — semantic 1.0, lexical 0.25,
- * recency 0.10. A handoff question wants the opposite emphasis, and `rank_by: "freshness"`
- * is the server-side dial for it: semantic 0.40, lexical 0.10, recency 0.50.
+ * because `/v2/control/query` fuses at its default weighting, under which recency barely
+ * counts. A handoff question wants the opposite emphasis, and `rank_by: "freshness"` is the
+ * server-side dial for it. The exact weights are the instance's and are not asserted here —
+ * these tests pin the mode the client *sends*, which is the only half the client owns.
  *
  * The rule that decides which of those two a prompt gets is the entire risk in this change,
  * and it fails in exactly two directions:

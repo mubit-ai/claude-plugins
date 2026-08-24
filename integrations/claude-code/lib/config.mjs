@@ -381,9 +381,11 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const recallFallback = enumOf(pick('recallFallback', 'MUBIT_CC_RECALL_FALLBACK'),
     ['none', 'agent_routed'], 'none');
   // §5.2 — how the server fuses semantic, lexical and recency scores for a recall query.
-  // `relevance` is the server's own default and weights recency at 0.10, which is why "where
+  // `relevance` is the server's own default and barely counts recency, which is why "where
   // were we?" answers with the most *similar* memory rather than the most recent one;
-  // `freshness` moves that to 0.50, `balanced` to 0.25. Costs nothing either way — it is a
+  // `freshness` makes recency dominant and `balanced` sits between them. The exact weights
+  // are the instance's own and are operator-tunable, so they are not restated here — a query
+  // with `explain: true` reports the ones actually used. Costs nothing either way: it is a
   // field on a request the plugin already sends, and there is real event time to rank on
   // because every captured item carries `occurrence_time`.
   //

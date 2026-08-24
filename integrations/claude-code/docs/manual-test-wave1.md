@@ -380,8 +380,8 @@ has leaked onto the per-tool-call path.
 ## §6 — #19: `rank_by` on the wire
 
 The bug: *"where were we?"* is answered by whatever is most **similar** to those three words,
-because the server's default fusion weights recency at 0.10. `rank_by: "freshness"` moves it to
-0.50 for that one query.
+because the server's default weighting barely counts recency. `rank_by: "freshness"` makes
+recency dominant for that one query.
 
 ```bash
 RANK() { : > "$SCRATCH/calls.jsonl"; UPS "$1" | node "$PLUG/hooks/src/prompt-recall.mjs" >/dev/null 2>&1
@@ -592,6 +592,67 @@ node "$PLUG/scripts/mubit-inspect.mjs" --last 5
 `metadata_json`: had the actor gone into `user_id`, this is where it would read **0** — and
 nowhere earlier. Every check in Part A would still have passed.
 
+## §11a — If recall reads 0 sources, check the budget before you blame the feature
+
+**Measured on hosted Mubit, 2026-08-24: `/v2/control/query` took 2.0–2.6 s.** The per-prompt
+recall budget is **1500 ms**. So on an ordinary session recall gives up before the server
+answers, every prompt, and `mubit-inspect` reports it as a row of zeros:
+
+```
+prompt     when      rung  src  tok  chars  drop  ptr  empty_reason  used(m/c)
+30855551…  10:31:30     —    0    0      0     0    0  —             —
+totals      3 prompts · 0 tok injected · 0 sources · 0/3 prompts got an injection
+last recall 0 sources · 0 tok · 1507 ms · rung 1 · dry_streak 3
+```
+
+**`ms: 1507` is the tell.** A number sitting on the budget is a timeout; a genuine empty result
+comes back fast and carries an `empty_reason`. The marker's `state` reads `not_responding`,
+which is the same fact wearing a different label — and `status/health.json` will happily say
+`ok: true, state: ready`, because `/v2/core/health` is fast and the query path is not.
+
+**Raising `MUBIT_CC_RECALL_BUDGET_MS` does not fix this**, and it is worth knowing why before
+you spend an afternoon on it:
+
+```js
+const HARNESS_BUDGET_MS = Math.min(RECALL_BUDGET_MS + 400, 2800);   // hooks/src/prompt-recall.mjs
+```
+
+The harness stop is capped at **2800 ms** because the `UserPromptSubmit` hook timeout is 3 s.
+Anything above roughly 2400 buys nothing at all.
+
+**The fix is the async path**, which exists for exactly this:
+
+```bash
+export MUBIT_CC_RECALL_ASYNC=1
+```
+
+Recall then runs in a detached refresh with a **10 000 ms** budget
+(`REFRESH_BUDGET_MS`, `hooks/src/recall-refresh.mjs`) — four times what any blocking hook can
+ever be given. It costs one turn of staleness: the block you see was fetched just after your
+*previous* prompt, and the first prompt of a session gets nothing.
+
+To confirm the store is fine and it really is the budget, query outside the hook, where no
+deadline applies:
+
+```bash
+D="$HOME/.claude/plugins/data/mubit-memory-mubit"
+EP=$(python3 -c "import json;print(json.load(open('$D/credentials.json'))['endpoint'])")
+KEY=$(python3 -c "import json;print(json.load(open('$D/credentials.json'))['apiKey'])")
+curl -s -o /tmp/q.json -w "http %{http_code}  total %{time_total}s\n" -m 30 "$EP/v2/control/query" \
+  -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"run_id":"<your run id>","query":"where were we","mode":"direct_bypass",
+       "direct_lane":"semantic_search","evidence_only":true,"limit":5}'
+python3 -c "import json;print('evidence:', len(json.load(open('/tmp/q.json')).get('evidence') or []))"
+```
+
+**Look for** a `total` above 1.5 s together with a non-zero evidence count. That combination is
+the whole diagnosis: the memory is there, and the hook is not waiting long enough for it.
+
+> This is not a Wave 1 regression, and the quickest way to prove that is `dry_streak` on a run
+> that predates both features — it will show the same `ms: ~1505` and the same zeros.
+
+---
+
 ## §12 — The weights the server actually used
 
 `explain: true` makes the server report its own fusion weights per evidence item, which turns
@@ -606,23 +667,16 @@ curl -s "$MUBIT_ENDPOINT/v2/control/query" -H "Authorization: Bearer $MUBIT_API_
   | jq '.evidence[0].explain_info | {rank_by_mode, fusion_weights_used}'
 ```
 
-**Expect**
+**Look for** `rank_by_mode: "freshness"` — the mode you sent, echoed back — and a
+`fusion_weights_used` map in which **`recency` is the largest of the three**.
 
-```json
-{
-  "rank_by_mode": "freshness",
-  "fusion_weights_used": { "semantic": 0.4, "lexical": 0.1, "recency": 0.5 }
-}
-```
+The weights themselves are your instance's and are operator-tunable, so they are deliberately
+not pinned here: `explain: true` *is* the authoritative source, which is the whole reason this
+check exists rather than a table in a document.
 
-Those numbers are the **Rust match arm**. The proto's own comment on `freshness` transposes
-semantic and recency — it reads as though freshness were `0.50 / 0.10 / 0.40`. If you are ever
-tempted to "correct" the table above against the proto, you would be correcting it against the
-wrong source.
-
-Re-run with `"rank_by":"relevance"` and expect `{semantic: 1.0, lexical: 0.25, recency: 0.1}`;
-with the field removed entirely, expect the same — absent *is* `relevance` server-side, which is
-why the client omits rather than invents.
+Re-run with `"rank_by":"relevance"` and look for the emphasis inverted — `semantic` largest,
+`recency` smallest. With the field removed entirely, expect the same numbers as `relevance`:
+absent *is* `relevance` server-side, which is why the client omits rather than invents.
 
 > **One nuance worth carrying.** `recency_score` is min-max normalised across the candidate set,
 > so `freshness` **reorders within** the candidates the query already found. It does not go and

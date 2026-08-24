@@ -278,7 +278,7 @@ that cache, and writing credentials invalidates it immediately rather than after
 | `recallRepeatMode` | `pointer` | `MUBIT_CC_RECALL_REPEAT_MODE` | What happens to a memory this run has already injected. `pointer` repeats it as its reference id plus its first clause — roughly 20 tokens against 200 — and keeps the id attributable, so `Stop` still reinforces it. `full` re-sends the whole entry on every prompt, which is what releases before 0.10 did. Recall injection is the plugin's largest recurring context cost: up to 1500 tokens on *every* prompt, against 356 tokens *once* for the whole MCP tool surface. Compaction resets the set, because after it the model has not seen any of it. |
 | `recallAssemble` | `client` | `MUBIT_CC_RECALL_ASSEMBLE` | `client` assembles the context block locally for **0 LLM calls**. `server` uses `/v2/control/context`, which costs **2 LLM calls per prompt** and replaces the free path rather than adding to it. It also silently gives up `recallRankBy`: `/v2/control/context` has no ranking field of any kind, so on this path every recall fuses at the server's default weights and a handoff question goes back to being answered by similarity. |
 | `recallFallback` | `none` | `MUBIT_CC_RECALL_FALLBACK` | What recall does when the instance has direct-access recall disabled. `none` returns nothing, for **0 LLM calls**. `agent_routed` pays **1 LLM call per prompt** to get recall anyway — typically several seconds, against a recall budget of 1500 ms, so most prompts spend the call and still inject nothing. See [When recall returns nothing](#when-recall-returns-nothing). |
-| `recallRankBy` | `auto` | `MUBIT_CC_RECALL_RANK_BY` | How the server fuses semantic, lexical and recency scores for a recall query. The server's own default weights recency at **0.10**, which is why "where were we?" has always answered with the most *similar* memory rather than the most recent one — there is real event time to rank on, it was simply never asked for. `auto` decides per prompt: a temporal or handoff question ("what changed", "catch me up", "pick up where we left off", "still failing") is sent as `freshness` (recency **0.50**), and everything else as `relevance`. Pin `relevance` to turn the rule off, `freshness` to rank every prompt by recency, or `balanced` (recency **0.25**) for the middle, which the rule never chooses on its own. It costs **0 extra LLM calls and 0 extra round trips** — it is one field on a request that is already being sent. **`recallAssemble: server` ignores it entirely**: `/v2/control/context` has no ranking field of any kind, so rung 3 always fuses at the default weights, silently. |
+| `recallRankBy` | `auto` | `MUBIT_CC_RECALL_RANK_BY` | How the server weights semantic, lexical and recency scores for a recall query. Its default weighting barely counts recency, which is why "where were we?" has always answered with the most *similar* memory rather than the most recent one — there is real event time to rank on, it was simply never asked for. `auto` decides per prompt: a temporal or handoff question ("what changed", "catch me up", "pick up where we left off", "still failing") is sent as `freshness`, which makes recency dominant, and everything else as `relevance`. Pin `relevance` to turn the rule off, `freshness` to rank every prompt by recency, or `balanced` for the middle, which the rule never chooses on its own. The exact weights belong to your instance and are operator-tunable; a query with `explain: true` reports the ones actually used. It costs **0 extra LLM calls and 0 extra round trips** — it is one field on a request that is already being sent. **`recallAssemble: server` ignores it entirely**: `/v2/control/context` has no ranking field of any kind, so rung 3 always fuses at the default weighting, silently. |
 | `recallAsync` | `false` | `MUBIT_CC_RECALL_ASYNC` | Never make a prompt wait on recall. On, `UserPromptSubmit` injects the block that a **detached refresh retrieved just after the previous prompt** and returns without dialling — so the hook's wall clock is a file read, however slow the endpoint is, and `MUBIT_CC_RECALL_BUDGET_MS` stops being something you have to discover and tune. It costs one turn of staleness (the block says so, in the block) and the first prompt of a session gets no recalled memory — `SessionStart`'s standing lessons still land, so the session is not memoryless. Attribution is unaffected: the ids are staged against the turn that received the block. Off by default. |
 | `reflectOnEnd` | `true` | `MUBIT_CC_REFLECT_ON_END` | Reflect at `SessionEnd`. This is the only path that promotes a lesson beyond its own run, so turning it off to save a few seconds trades away cross-session memory entirely. See below. |
 | `sessionEndDetach` | `true` | `MUBIT_CC_SESSION_END_DETACH` | Let the end-of-session drain and reflection finish in a detached process. The host cancels the `SessionEnd` hook about a second into a teardown — under `--print` it always does — and anything still running inside the hook dies with it, including the reflect above. On, the hook stamps the marker `detached`, hands the work over and returns in milliseconds; the child reports a terminal `reflect.status` when it is done, usually a few seconds after the CLI has exited. Turn it off only where background processes are forbidden — the work then runs inline, where a teardown can cut it short. |
@@ -341,12 +341,23 @@ throughout, because nothing is wrong with the connection.
 
 A different symptom, with a different fix. If the status line shows `◌ not_responding` and
 `recall.empty_reason` is blank rather than `policy_denied`, the instance is answering — just
-not inside the budget. A self-hosted Mubit typically returns a rung-1 query in 1.4-2.3 s
-against a `MUBIT_CC_RECALL_BUDGET_MS` of 1500, so the call is abandoned after it has already
-been paid for.
+not inside the budget. The call is abandoned after it has already been paid for.
 
-Raising the budget trades one problem for another: it exists because the hook blocks your
-prompt, so a bigger number is a longer wait before every message you send.
+**This is not only a self-hosting problem.** Measured 2026-08-24, a rung-1 query against
+*hosted* Mubit took 2.0-2.6 s, against a `MUBIT_CC_RECALL_BUDGET_MS` of 1500. Self-hosted
+instances land in a similar range. On either, an ordinary session recalls nothing on every
+prompt and reports it as zeros.
+
+**The tell is the number, not the zero.** `mubit-inspect` printing `ms: 1507` — a figure
+sitting on the budget — is a timeout. A genuinely empty result returns fast and carries an
+`empty_reason`. `status/health.json` will still read `ok: true, state: ready`, because
+`/v2/core/health` is fast and the query path is not, so a healthy connection glyph does not
+clear this.
+
+**Raising the budget mostly cannot fix it.** The hook's hard stop is
+`min(recallBudgetMs + 400, 2800)` — capped at 2800 ms, because `UserPromptSubmit` has a 3 s
+host timeout. Past roughly 2400 the setting buys nothing, and every millisecond you do buy is
+a longer wait before every message you send.
 
 `MUBIT_CC_RECALL_ASYNC=1` removes the trade instead of tuning it. With it on, the hook injects
 the block a **detached refresh** retrieved just after your previous prompt and returns without

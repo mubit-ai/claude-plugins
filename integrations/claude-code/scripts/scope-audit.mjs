@@ -8,10 +8,9 @@
  * the cross-run leak is visible as a number rather than an anecdote.
  *
  * The defect it exists to measure: the bundled SDK hard-codes `lesson_scope: "session"` on
- * `mubit_learned`, and the control service surfaces every lesson whose scope is not `run`
- * to *other* runs (`crates/control/service/src/lib.rs` — "Only surface session-scoped,
- * global-scoped, and org-scoped lessons"). So an agent-written lesson followed its author
- * into unrelated projects. `mcp/src/egress.mjs` clamps that at the wire; this script is how
+ * `mubit_learned`, and the server surfaces every lesson whose scope is not `run` to *other*
+ * runs — session, global and org scope are all cross-run by design. So an agent-written
+ * lesson followed its author into unrelated projects. `mcp/src/egress.mjs` clamps that at the wire; this script is how
  * you tell whether the clamp held.
  *
  * Three numbers, in the order they matter:

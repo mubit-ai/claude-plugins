@@ -5,24 +5,24 @@
  * ---------------------------------------------------------------------------
  * The dial this exists to turn
  * ---------------------------------------------------------------------------
- * `/v2/control/query` fuses three scores, and `rank_by` picks the weights server-side:
+ * `/v2/control/query` fuses a semantic, a lexical and a recency score, and `rank_by` picks
+ * how they are weighted:
  *
- * | `rank_by` | semantic | lexical | recency |
- * | --- | --- | --- | --- |
- * | *(unset / `relevance`)* | 1.00 | 0.25 | 0.10 |
- * | `balanced` | 0.60 | 0.15 | 0.25 |
- * | `freshness` | 0.40 | 0.10 | **0.50** |
+ * | `rank_by` | what it emphasises |
+ * | --- | --- |
+ * | *(unset / `relevance`)* | semantic similarity; recency barely counts |
+ * | `balanced` | similarity, with recency meaningfully in play |
+ * | `freshness` | recency dominates |
  *
- * **Those numbers are the Rust match arm, not the proto's comment.** The proto's own comment
- * on `freshness` transposes semantic and recency — it reads as though freshness were
- * 0.50/0.10/0.40. The server does what the match arm says. If you are ever tempted to
- * "correct" the table above against the proto, you would be correcting it against the
- * wrong source.
+ * **The exact weights are the server's, are per-instance, and are not restated here.** They
+ * are operator-tunable, so any number written into this file would be a claim about one
+ * deployment rather than about the API. Ask the instance instead: `explain: true` on a query
+ * returns `rank_by_mode` and `fusion_weights_used` per evidence item, which is the only
+ * authoritative answer and is what `docs/manual-test-wave1.md` uses.
  *
- * Unknown values fall through to the defaults server-side, so a bad mode is inert rather
- * than an error — which is exactly why the client still whitelists before sending
- * (`lib/recall.mjs`): a typo that silently ranks at the default weights is a bug nobody
- * can see.
+ * Unknown values fall through to the server's default weighting, so a bad mode is inert
+ * rather than an error — which is exactly why the client still whitelists before sending
+ * (`lib/recall.mjs`): a typo that silently ranks at the default is a bug nobody can see.
  *
  * ---------------------------------------------------------------------------
  * Why a rule, and why a two-way one

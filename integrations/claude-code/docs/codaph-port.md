@@ -7,7 +7,7 @@ and the working brief for `feat/codaph-port`.
 | --- | --- |
 | codaph | v0.1.18 @ `d06aaf3`, confirmed level with `origin/main` |
 | plugin | v0.10.0, base `pre-main` @ `05adfe0` |
-| backend | route inventory counted in the `ricedb` checkout |
+| backend | route inventory counted against the control-plane API surface |
 | audited | 2026-08-23, re-verified against this branch's base 2026-08-24 |
 
 Nothing here is implemented. This document is the brief; the branch is empty of code changes
@@ -109,14 +109,18 @@ collaborative feature needs — and it is the one identity question the scope wo
   and `session-end.mjs`
 
 > **Correction (2026-08-24) — do not fill `userId`.** The note above read *"this fills an existing
-> field rather than adding one"*. Filling it would have broken recall. Server-side, `user_id` is a
-> **retrieval scope**, not an attribution tag: on capture it is stamped into the entry's metadata,
-> and on query it is enforced as a filter, defaulting to `actor::<accountId>` when a client sends
-> nothing. `lib/recall.mjs` never sends `user_id`, so every recall query runs under that default —
-> which means stamping a detected login into `user_id` would make every newly captured entry
-> **silently invisible to recall**. Codaph gets away with it only because it sends the same value
-> on both sides. Attribution therefore rides in `metadata_json.actor` on every ingest item, and
-> `cfg.userId` keeps its current meaning and its empty default.
+> field rather than adding one"*. Filling it would have broken recall. On the wire, `user_id` is a
+> **retrieval scope**, not an attribution tag: an entry ingested under one is only returned to a
+> query carrying the same one, and a query that omits it does not opt out — the server supplies a
+> default scope of its own. `lib/recall.mjs` never sends `user_id`, so every recall runs under that
+> default, and stamping a detected login into `user_id` on ingest would make every newly captured
+> entry **silently invisible to recall**. Codaph gets away with it only because it sends the same
+> value on both sides. Attribution therefore rides in `metadata_json.actor` on every ingest item,
+> and `cfg.userId` keeps its current meaning and its empty default.
+>
+> Confirmed against a live instance: entries captured after Wave 1 come back carrying
+> `metadata_json.actor`, alongside the server's own default `user_id` — the same default that sits
+> on entries written years before this change, which is exactly why they are all still reachable.
 
 ### 2. Freshness-aware recall ranking
 
@@ -342,7 +346,9 @@ transcript on the machine.
 ## How this was assembled
 
 Read against the local codaph checkout at `d06aaf3`, confirmed level with `origin/main`; the
-plugin at v0.10.0 on `pre-main` @ `05adfe0`; the backend route inventory counted in the `ricedb`
-checkout; and the in-flight scope work read from `plugin-scope-fix` and its four feeder branches.
+plugin at v0.10.0 on `pre-main` @ `05adfe0`; the backend route inventory counted against the
+control-plane API surface; and the in-flight scope work read from `plugin-scope-fix` and its four
+feeder branches. Backend behaviour cited anywhere in this document is stated as observable API
+behaviour: this repository is public, and server internals do not belong in it.
 Claims about what the plugin does or does not do were checked in source rather than in docs, and
 the redaction gap in item 5 was probed against the live module on this branch's base.

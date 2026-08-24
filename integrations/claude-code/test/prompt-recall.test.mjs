@@ -228,8 +228,8 @@ test('rung 1 request body matches §5.2 exactly', async (t) => {
 // ---------------------------------------------------------------------------
 
 // The bug: "where were we?" is answered by whatever is most *similar* to those three words.
-// `rank_by:"freshness"` moves the server's recency weight from 0.10 to 0.50 for that query
-// and that query only — nothing about the install changes.
+// `rank_by:"freshness"` asks the server to weight recency heavily for that query and that
+// query only — nothing about the install changes.
 test('a handoff-shaped prompt asks the server to rank by freshness', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());

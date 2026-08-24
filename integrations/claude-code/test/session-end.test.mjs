@@ -154,14 +154,14 @@ test('issues POST /v2/control/reflect BY DEFAULT with no opt-in env', async (t) 
 
   // §5.7 — the body, verbatim. `include_step_outcomes` folds outcome signals in
   // (`control.proto`) — the NEGATIVE ones produce the highest-value lessons. `last_n_items`
-  // is absent on purpose: this call asks for the whole run, not a tail of it.
+  // bounds the evidence to the most recent items of the run, which at a session end is
+  // this session.
   const body = server.lastCall('POST', '/v2/control/reflect').body;
   assert.equal(body.run_id, RUN_ID);
   assert.notEqual(body.run_id, 'default');
   assert.equal(body.include_linked_runs, false);
   assert.equal(body.include_step_outcomes, true);
-  assert.equal('last_n_items' in body, false,
-    'the reflect body must not bound the run to a tail');
+  assert.equal(body.last_n_items, 200);
 });
 
 // §5.7 — "Runs INLINE, not detached." The ingest is deliberately slow: a detached

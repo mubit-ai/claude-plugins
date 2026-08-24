@@ -53,7 +53,16 @@ const DEFAULT_MCP_TOOLS = [
 /** §7: `config.json` — cached resolved config, keyed by an input hash. */
 const CACHE_FILE = 'config.json';
 const CACHE_TTL_MS = 300 * 1000;
-const CACHE_VERSION = 1;
+/**
+ * Bumped to 2 for `resumeBlock` (W2-2).
+ *
+ * `loadConfig` returns a cached blob **verbatim**, without re-running any of the coercers
+ * below, so a config written by the previous version is missing every key added since — and
+ * a missing boolean reads `undefined`, which is falsy. Without this bump, every install would
+ * spend the 300 s TTL after an upgrade with the feature silently off, and the one report that
+ * reached anybody would be "it works on a fresh machine".
+ */
+const CACHE_VERSION = 2;
 
 /** §4.1: env_tags ride on every ingested item, so the cap is a payload-size guarantee. */
 const MAX_ENV_TAGS = 8;
@@ -470,6 +479,17 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // on for one run, measure how often it fires and on what, and decide from data whether the
   // matching is good enough to be worth anyone's attention.
   const preToolWarnings = bool(pick('preToolWarnings', 'MUBIT_CC_PRE_TOOL_WARNINGS'), false);
+  // W2-2 — the resume briefing. On, `SessionStart` spawns a detached child that asks
+  // `/v2/control/context` what the next agent on this run needs to know, and the first
+  // substantive prompt of the session renders it above ordinary recall.
+  //
+  // **Default ON, and it is the only one of these opt-ins that is.** The three that ship off
+  // are off because they cost something on EVERY prompt: `recallAsync` a second process,
+  // `recallAssemble: "server"` two LLM calls, `preToolWarnings` text in front of a tool call.
+  // This costs one process and two LLM calls **per session** — paid at the one moment the
+  // model knows least about what it is walking into, and never again. The README row states
+  // that cost out loud rather than leaving it to be discovered.
+  const resumeBlock = bool(pick('resumeBlock', 'MUBIT_CC_RESUME_BLOCK'), true);
   const mcpToolsRaw = pick('mcpTools', 'MUBIT_MCP_TOOLS');
   const mcpTools = list(mcpToolsRaw, DEFAULT_MCP_TOOLS);
   // §8.2 — the ceiling on what an MCP write may claim for itself. The bundled SDK
@@ -495,6 +515,13 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const recallBudgetMs = int(only('MUBIT_CC_RECALL_BUDGET_MS', 'recallBudgetMs'), 1500);
   const recallSections = list(only('MUBIT_CC_RECALL_SECTIONS', 'recallSections'),
     ['mental_models', 'active_rules', 'lessons', 'facts', 'working_memory', 'traces']);
+  // What the once-per-session briefing may cost, against `recallTokenBudget`'s 1500 per
+  // prompt. Lower because the two are spent in the same message on the first prompt of a
+  // session and the briefing is the wider, older half of it — and because a resume that does
+  // not fit on a screen is not a resume. Environment-only: there is no plausible reason to
+  // put this in front of a user at enable time when the flag above already answers the
+  // question they actually have.
+  const resumeTokenBudget = int(only('MUBIT_CC_RESUME_TOKENS', 'resumeTokenBudget'), 1000);
   const policyTtlMs = int(only('MUBIT_CC_POLICY_TTL_MS', 'policyTtlMs'), 86400000);
   const denyGlobs = list(only('MUBIT_CC_CAPTURE_DENY', 'denyGlobs'), []);
   const respectGitignore = bool(only('MUBIT_CC_RESPECT_GITIGNORE', 'respectGitignore'), true);
@@ -535,6 +562,8 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     recallRankBy,
     recallAsync,
     recallSections,
+    resumeBlock,
+    resumeTokenBudget,
     policyTtlMs,
     outcomeMode,
     reflectOnEnd,

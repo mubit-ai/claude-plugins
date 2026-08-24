@@ -130,6 +130,18 @@ export function baseEnv(o) {
     MUBIT_CC_LOG_LEVEL: 'error',
     // Tests must never inherit the MCP server's poisoned default (§4.3).
     MUBIT_DEFAULT_SESSION_ID: '',
+    // W2-2: the resume briefing ships ON, and it is pinned off here for the same category of
+    // reason as the line above it — a shipped default that would otherwise make unrelated
+    // suites nondeterministic. `session-start` spawns a DETACHED child, and that child dials
+    // the same `fakeMubit` at a moment nothing in a test controls. Without this pin,
+    // `session-start.test.mjs`'s exact-call-sequence assertion ("health → register → lessons,
+    // and nothing else") is a coin flip, and so is `attribution.test.mjs` and every other
+    // suite that runs that hook. Filtering `/v2/control/context` out of those assertions
+    // instead would hide the very race they exist to catch.
+    //
+    // The cost is that no ordinary suite sees the shipped default, so
+    // `test/session-resume.test.mjs` deletes this key by hand in the one test that asserts it.
+    MUBIT_CC_RESUME_BLOCK: '0',
   };
   return { ...env, ...(o.extra ?? {}) };
 }

@@ -514,6 +514,11 @@ const USER_CONFIG_ROWS = [
   // proven here. Its default is asserted separately below, and again in `pre-tool.test.mjs`
   // against the running hook — this is the stage that can put text in front of a tool call.
   { key: 'preToolWarnings', env: 'MUBIT_CC_PRE_TOOL_WARNINGS', field: 'preToolWarnings', raw: '1', optRaw: 'true', want: true },
+  // W2-2. Asserted OFF, because on is the default and a row that set it to true would pass
+  // just as well against a key `loadConfig` never reads. The default itself is asserted below
+  // and, against the running hooks, in `session-resume.test.mjs` — which is the only place in
+  // the repo that can see it, since `baseEnv` pins the flag off for every other suite.
+  { key: 'resumeBlock', env: 'MUBIT_CC_RESUME_BLOCK', field: 'resumeBlock', raw: '0', optRaw: 'false', want: false },
 ];
 
 for (const row of USER_CONFIG_ROWS) {
@@ -582,6 +587,14 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   // changes for an existing user until they ask for it — which is also what makes "measure
   // how often it fires" a safe thing to run.
   assert.equal(cfg.preToolWarnings, false);
+  // On, and the only opt-in feature in this table that ships on. The three above it are off
+  // because each costs something on EVERY prompt; this costs one detached process and two LLM
+  // calls once per session, at the one moment the model knows least about what it is walking
+  // into. A session that has none of it is the status quo this feature exists to end.
+  assert.equal(cfg.resumeBlock, true);
+  // §6.1 — environment-only. Lower than `recallTokenBudget` because the two are spent in the
+  // same message on the first prompt of a session.
+  assert.equal(cfg.resumeTokenBudget, 1000);
   assert.equal(cfg.maxParamBytes, 4096);
   assert.equal(cfg.maxOutputBytes, 8192);
   assert.equal(cfg.batchMaxItems, 32);

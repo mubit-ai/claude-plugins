@@ -61,6 +61,18 @@
  * is not degraded on the next turn — the seen-set saving silently reverts, with nothing red.
  *
  * ---------------------------------------------------------------------------
+ * The resume briefing (W2-2)
+ * ---------------------------------------------------------------------------
+ * On the first *substantive* prompt of a session — past the length gate and past the slash
+ * gate — this hook also renders the block `hooks/src/session-resume.mjs` assembled while the
+ * session was starting, **above** the ordinary recall block. It is a file read, exactly like
+ * carry-forward, and it is consumed once per session.
+ *
+ * All of it lives in three functions: `claimResume` takes and marks, `resumeWrap` renders,
+ * `injection` decides the order. Reading those three, in that order, is the whole feature from
+ * this side; `lib/resume.mjs` has the rest.
+ *
+ * ---------------------------------------------------------------------------
  * Budget and failure
  * ---------------------------------------------------------------------------
  * 1500 ms internal (`MUBIT_CC_RECALL_BUDGET_MS`) against a 3 s hook timeout, on a hook that
@@ -84,6 +96,7 @@ import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { rankForRecall } from '../../lib/rank.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
 import { redactText } from '../../lib/redact.mjs';
+import { takeResume } from '../../lib/resume.mjs';
 import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import { markSeen, readSeen } from '../../lib/seen.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
@@ -154,6 +167,18 @@ const HARNESS_BUDGET_MS = Math.min(RECALL_BUDGET_MS + 400, 2800);
  */
 const SUPPRESS = Object.freeze({ suppressOutput: true });
 
+/**
+ * An `Outcome` that recalled nothing, for the three paths that can now inject a W2-2 briefing
+ * without one: a failed recall, an open breaker, and a first async prompt with no carry file.
+ * A shared constant rather than a `null` check at every call site — `persistRecalled` and
+ * `injection` both read six fields off it, and six optional-chains would be six places to
+ * forget one.
+ */
+const NO_RECALL = Object.freeze({
+  failed: false, rung: 0, block: '', tokens: 0, sources: 0, dropped: 0, pointers: 0,
+  emptyReason: '', refIds: Object.freeze([]),
+});
+
 await runHook('prompt-recall', {
   budgetMs: HARNESS_BUDGET_MS,
   body: async (payload, _hookCfg, ctx) => {
@@ -186,9 +211,16 @@ await runHook('prompt-recall', {
       return SUPPRESS;
     }
 
+    // W2-2 — the resume briefing, consumed exactly once per session and marked seen straight
+    // away. Both of those are load-bearing and both are argued on `claimResume`. It sits above
+    // every branch below because all three of them render it, and below the two gates above
+    // because neither a slash command nor "ok" may spend a session's briefing on a message
+    // that injects nothing anywhere.
+    const resume = claimResume(cfg, runId);
+
     // §5.2 — the carry-forward path. Everything below this line dials; nothing beyond this
     // point in `carryForward` does. See the header for why the order inside it is fixed.
-    if (cfg.recallAsync) return carryForward(cfg, payload, runId, started);
+    if (cfg.recallAsync) return carryForward(cfg, payload, runId, started, resume);
 
     // §4.7/F7: a blocking hook in front of every prompt must not pay a connect timeout to a
     // server already known to be down. Read-only — `allowRequest` would spend the single
@@ -212,7 +244,13 @@ await runHook('prompt-recall', {
           ...dryness(cfg, runId, false),
         },
       });
-      return SUPPRESS;
+      // A briefing already on disk still renders. F7's rule is about not *dialing* a server
+      // known to be down; this block was assembled before the breaker tripped and cost a
+      // round trip nobody should pay twice — and `claimResume` has already consumed it, so
+      // withholding it here would not save it for later, it would throw it away.
+      if (!resume) return SUPPRESS;
+      persistRecalled(cfg, runId, safeId(turnKey(payload)), payload, NO_RECALL, resume);
+      return injection(runId, NO_RECALL, resume, Date.now() - started);
     }
 
     const query = prompt.slice(0, MAX_QUERY_CHARS);
@@ -240,12 +278,17 @@ await runHook('prompt-recall', {
 
     if (outcome.failed) {
       noteFailure(cfg, runId, outcome, ms);
-      return SUPPRESS;
+      // The briefing is unaffected by this turn's recall failing — it was assembled by another
+      // process, minutes ago, and `claimResume` has already spent it. Attribution goes with
+      // it: those ids reached the model in this message and no later turn will ever see them.
+      if (!resume) return SUPPRESS;
+      persistRecalled(cfg, runId, promptId, payload, NO_RECALL, resume);
+      return injection(runId, NO_RECALL, resume, ms);
     }
 
     // §5.2 step 6: what was rendered is what `Stop` attributes against (§5.5). Written even
     // when it is empty — an absent key is a different value from an empty one downstream.
-    persistRecalled(cfg, runId, promptId, payload, outcome);
+    persistRecalled(cfg, runId, promptId, payload, outcome, resume);
 
     // …and the same ids, rolled up per run, so the NEXT prompt can point at them instead of
     // paying for them again. After `persistRecalled` deliberately: attribution is the
@@ -268,19 +311,11 @@ await runHook('prompt-recall', {
       },
     });
 
-    // §5.2: an empty result injects NOTHING. No additionalContext, no systemMessage.
-    if (!outcome.block) return SUPPRESS;
+    // §5.2: an empty result injects NOTHING. No additionalContext, no systemMessage. A
+    // briefing counts as something, which is the whole of what W2-2 adds to this decision.
+    if (!outcome.block && !resume) return SUPPRESS;
 
-    const sources = outcome.refIds.length || outcome.sources;
-    return {
-      hookSpecificOutput: {
-        hookEventName: 'UserPromptSubmit',
-        additionalContext: wrap(runId, sources, outcome.tokens, outcome.block, outcome.pointers),
-      },
-      systemMessage: `mubit: ${sources} ${sources === 1 ? 'memory' : 'memories'}`
-        + `${DOT}${formatTokens(outcome.tokens)} tok${DOT}${ms}ms`,
-      suppressOutput: true,
-    };
+    return injection(runId, outcome, resume, ms);
   },
 });
 
@@ -308,19 +343,28 @@ await runHook('prompt-recall', {
  *      way — it cost a round trip nobody should pay twice — but F7's rule still holds for
  *      the dial: no process per prompt against a server already known to be down.
  *
+ * `resume` (W2-2) is handed in already consumed and already marked. It is rendered here rather
+ * than folded into the carry file for two reasons, both in `lib/resume.mjs`: two detached
+ * writers on one path is an unlocked race, and a briefing rendered through `wrap(…, carried)`
+ * would tell the model it "was retrieved against the previous message in this conversation",
+ * about a block assembled before any message existed.
+ *
  * @param {Record<string, any>} cfg
  * @param {Record<string, any>} payload
  * @param {string} runId
  * @param {number} started
+ * @param {import('../../lib/resume.mjs').Resumed|null} [resume]
  * @returns {Record<string, any>}
  */
-function carryForward(cfg, payload, runId, started) {
+function carryForward(cfg, payload, runId, started, resume = null) {
   const promptId = safeId(turnKey(payload));
   const carry = takeCarry(cfg, runId);
   const rendered = !!(carry && carry.block);
 
+  if (rendered || resume) {
+    persistRecalled(cfg, runId, promptId, payload, rendered ? carry : NO_RECALL, resume);
+  }
   if (rendered) {
-    persistRecalled(cfg, runId, promptId, payload, carry);
     markSeen(cfg, runId, carry.refIds);
   }
 
@@ -362,18 +406,56 @@ function carryForward(cfg, payload, runId, started) {
     spawnRefresh(cfg, payload, runId);
   }
 
-  if (!rendered) return SUPPRESS;
+  if (!rendered && !resume) return SUPPRESS;
 
-  const sources = carry.refIds.length || carry.sources;
-  return {
-    hookSpecificOutput: {
-      hookEventName: 'UserPromptSubmit',
-      additionalContext: wrap(runId, sources, carry.tokens, carry.block, carry.pointers, true),
-    },
-    systemMessage: `mubit: ${sources} ${sources === 1 ? 'memory' : 'memories'}`
-      + `${DOT}${formatTokens(carry.tokens)} tok${DOT}${ms}ms`,
-    suppressOutput: true,
-  };
+  return injection(runId, rendered ? carry : NO_RECALL, resume, ms, true);
+}
+
+// ---------------------------------------------------------------------------
+// W2-2 — the resume briefing
+// ---------------------------------------------------------------------------
+
+/**
+ * Take this session's briefing, and record that the model is about to be shown it.
+ *
+ * Three decisions live in these few lines and each of them is silent when it is wrong.
+ *
+ *   1. **The renderer marks, not the assembler.** `hooks/src/session-resume.mjs` writes the
+ *      block and nothing that describes what the model saw, for the reason
+ *      `recall-refresh.mjs:22-31` gives at length: a process that has shown nothing to anyone
+ *      must not record entries as shown. That argument is stronger for a briefing than for a
+ *      carried block — a carried block is rendered on the very next prompt, while a briefing
+ *      has a whole session's worth of ways never to be rendered at all.
+ *   2. **It marks BEFORE this turn's recall assembles.** `readSeen` runs a few lines below, so
+ *      an entry that is in both renders in **full** in the briefing above and as a **pointer**
+ *      in the recall block below. That is accurate rather than merely cheap: the briefing
+ *      really is earlier in the same message, so the pointer's promise — "this was injected in
+ *      full earlier" — is true. Mark after the assembly instead and the same 200 tokens are
+ *      sent twice in one message, with nothing red.
+ *   3. **The gate is on the read as well as on the write.** An operator who turns the feature
+ *      off gets it off on the next prompt, rather than after whatever a previous session
+ *      already staged has been spent.
+ *
+ * `takeResume` is consume-once and total, so this is safe to call on every prompt for the
+ * whole life of a session: the second call and every one after it answer `null`.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @returns {import('../../lib/resume.mjs').Resumed|null}
+ */
+function claimResume(cfg, runId) {
+  try {
+    if (!cfg.resumeBlock) return null;
+    const resume = takeResume(cfg, runId);
+    if (!resume) return null;
+    markSeen(cfg, runId, resume.refIds);
+    log(cfg, 'debug', `prompt-recall: rendering the session briefing (${resume.refIds.length} sources)`,
+      { run_id: runId });
+    return resume;
+  } catch {
+    // §4.9: a briefing is worth a session's opening summary, never a prompt.
+    return null;
+  }
 }
 
 /**
@@ -431,14 +513,32 @@ function spawnRefresh(cfg, payload, runId) {
  * back in the reply with no memory involved at all. It is done here, where the prompt is in
  * hand, rather than re-derived at Stop from a file that may have been truncated.
  *
+ * ---------------------------------------------------------------------------
+ * The W2-2 briefing rides on the same turn, and it has to
+ * ---------------------------------------------------------------------------
+ * `resume` is whatever `claimResume` consumed on this prompt. Its ids join `recalled[]` for
+ * the reason the standing lessons above them do: they reached the model in this message, they
+ * will never reach any other turn — the process that fetched them exited minutes ago — and an
+ * id that reaches `recalled[]` is an id `lib/outcome.mjs` will file a verdict against.
+ *
+ * Which is exactly why its **words** go into `terms` too. `decideOutcome` reads `used: false`
+ * as "memory was injected and the reply shows no sign of it" and files a `neutral` against
+ * every id on the turn. If the briefing's ids were credited but its vocabulary were not, a
+ * reply that used nothing *but* the briefing would score a miss and file that verdict against
+ * memories the model demonstrably read. The two blocks are tokenised separately rather than
+ * concatenated because `vocabularyOf` chooses its strategy per block — bullets when it has
+ * them, everything-but-headings when it does not — and a joined string would pick one strategy
+ * for two differently-rendered blocks.
+ *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {string} promptId
  * @param {Record<string, any>} payload
  * @param {Outcome} outcome
+ * @param {import('../../lib/resume.mjs').Resumed|null} [resume]
  * @returns {void}
  */
-function persistRecalled(cfg, runId, promptId, payload, outcome) {
+function persistRecalled(cfg, runId, promptId, payload, outcome, resume = null) {
   try {
     if (!promptId) return;
     const file = join(resolveDataDir(cfg), 'runs', safeId(runId), 'turns', `${promptId}.json`);
@@ -452,23 +552,28 @@ function persistRecalled(cfg, runId, promptId, payload, outcome) {
       // The standing lessons injected at session start ride along on the first turn that
       // stages ids, so that they too can be reinforced or corrected. Deduped: the same
       // entry reached through two lanes must not be reinforced twice for one turn.
-      recalled: [...new Set([...claimStandingLessons(cfg, runId), ...outcome.refIds])],
+      recalled: [...new Set([
+        ...claimStandingLessons(cfg, runId),
+        ...(resume ? resume.refIds : []),
+        ...outcome.refIds,
+      ])],
       recall: {
         at: Date.now(),
         rung: outcome.rung,
-        sources: outcome.refIds.length || outcome.sources,
-        tokens: outcome.tokens,
+        sources: (outcome.refIds.length || outcome.sources)
+          + (resume ? (resume.refIds.length || resume.sources) : 0),
+        tokens: outcome.tokens + (resume ? resume.tokens : 0),
         // The token figure is a four-chars-per-token estimate (§4.10). Characters are what
         // was actually injected, so a later reader can re-derive the estimate rather than
         // inherit it.
-        chars: outcome.block.length,
+        chars: outcome.block.length + (resume ? resume.block.length : 0),
         dropped: outcome.dropped,
         // How many of `sources` were repeats the model already had. Without it a smaller
         // `tokens` is unattributable — a block that shrank because the seen-set worked and
         // one that shrank because recall found half as much read identically.
         pointers: outcome.pointers,
         empty_reason: outcome.emptyReason,
-        terms: memoryTerms(cfg, outcome.block, str(payload?.prompt)),
+        terms: memoryTerms(cfg, [resume?.block ?? '', outcome.block], str(payload?.prompt)),
       },
     };
     if (typeof next.session_id !== 'string') next.session_id = str(payload?.session_id);
@@ -502,7 +607,9 @@ function persistRecalled(cfg, runId, promptId, payload, outcome) {
  *     `reason: 'no_distinct_terms'`, and is correctly read as **unmeasured** (row 4).
  *
  * A rung-3 block is the server's own rendering and has no bullets to trust, so there only
- * the headings are dropped. It cannot carry pointers: rung 3 assembles server-side.
+ * the headings are dropped. It cannot carry pointers: rung 3 assembles server-side. The W2-2
+ * briefing is that same rendering and is passed as a second block rather than concatenated,
+ * so each one gets the strategy that fits it — see `persistRecalled`.
  *
  * §4.4: the block is scrubbed before any of it is written down. Evidence content is not
  * necessarily this plugin's own redacted capture — another client, or `mubit_remember`, can
@@ -511,14 +618,13 @@ function persistRecalled(cfg, runId, promptId, payload, outcome) {
  * memory vocabulary, and a reply that happened to contain the word would score as an echo.
  *
  * @param {Record<string, any>} cfg
- * @param {string} block
+ * @param {string[]} blocks  every block injected in this message, in render order
  * @param {string} prompt
  * @returns {string[]}
  */
-function memoryTerms(cfg, block, prompt) {
+function memoryTerms(cfg, blocks, prompt) {
   try {
-    if (!block) return [];
-    let text = vocabularyOf(block);
+    let text = blocks.filter(Boolean).map(vocabularyOf).filter(Boolean).join('\n');
     if (!text) return [];
     try {
       text = str(redactText(text, cfg, 'output')?.text) || '';
@@ -698,6 +804,82 @@ function breakerOpen(cfg) {
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
+
+/**
+ * The one place this hook builds its stdout, shared by all three paths that inject anything.
+ *
+ * There are up to two elements and the order between them is fixed: the **briefing first**,
+ * then this turn's recall. The briefing is the older and wider context — it is about the run,
+ * assembled before the conversation started — and below the recall block a model reads it as
+ * an afterthought to a question it was never about. It is also what makes a pointer in the
+ * recall block honest: the full text really is earlier in the same message.
+ *
+ * The counts are summed rather than reported separately. `systemMessage` is one line by
+ * contract, and "how much memory is in front of me and what did it cost" is one question; the
+ * `· resume` suffix is what says the briefing was part of it, once, on the one prompt that
+ * carries one.
+ *
+ * @param {string} runId
+ * @param {Outcome} outcome           this turn's recall; `NO_RECALL` when there was none
+ * @param {import('../../lib/resume.mjs').Resumed|null} resume
+ * @param {number} ms
+ * @param {boolean} [carried]  the recall block came from the previous turn's refresh
+ * @returns {Record<string, any>}
+ */
+function injection(runId, outcome, resume, ms, carried = false) {
+  const recallSources = outcome.refIds.length || outcome.sources;
+  const resumeSources = resume ? (resume.refIds.length || resume.sources) : 0;
+  const sources = recallSources + resumeSources;
+  const tokens = outcome.tokens + (resume ? resume.tokens : 0);
+
+  const parts = [];
+  if (resume) parts.push(resumeWrap(runId, resumeSources, resume.tokens, resume.block));
+  if (outcome.block) {
+    parts.push(wrap(runId, recallSources, outcome.tokens, outcome.block, outcome.pointers, carried));
+  }
+
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'UserPromptSubmit',
+      additionalContext: parts.join('\n'),
+    },
+    systemMessage: `mubit: ${sources} ${sources === 1 ? 'memory' : 'memories'}`
+      + `${DOT}${formatTokens(tokens)} tok${DOT}${ms}ms${resume ? `${DOT}resume` : ''}`,
+    suppressOutput: true,
+  };
+}
+
+/**
+ * W2-2 stdout. The briefing `hooks/src/session-resume.mjs` assembled at the start of this
+ * session, wrapped in the two sentences it cannot be read correctly without.
+ *
+ * **When it was assembled.** This block predates every message in the conversation, including
+ * the one it is being injected into. Without that stated, the model reads a summary of last
+ * Tuesday's work as this plugin's answer to the question just typed — and then either acts on
+ * it or concludes that memory is unreliable. Neither is recoverable from inside the turn.
+ *
+ * **That it is not a task list.** This is the single most likely misfire, and it is the
+ * expensive one. "The ingest drain was left mid-batch" is a description of a past state; a
+ * model given it under a heading, at the top of a session, with no instruction attached, will
+ * reasonably infer that finishing it is the job. Nobody asked for any of it. One sentence
+ * turns a to-do list back into a briefing, and it is the cheapest twenty tokens in the file.
+ *
+ * The element name is deliberately not `<mubit-memory>`: these two blocks make different
+ * claims and the model has to be able to tell which sentence governs which text.
+ *
+ * @param {string} runId @param {number} sources @param {number} tokens @param {string} block
+ * @returns {string}
+ */
+function resumeWrap(runId, sources, tokens, block) {
+  return `<mubit-resume run="${runId}" sources="${sources}" tokens="${tokens}">\n`
+    + 'Assembled from memory at the start of this session, before this or any other message '
+    + 'in the conversation — it describes where earlier work on this project left off, not the '
+    + 'message you were just sent.\n'
+    + 'It is a briefing and not a task list: nothing in it has been asked for, it may be '
+    + 'incomplete or out of date, and anything here that still looks worth doing should be '
+    + 'confirmed against the code and with the user before you act on it.\n'
+    + `\n${block.replace(/\s+$/, '')}\n</mubit-resume>`;
+}
 
 /**
  * §5.2 stdout. The wrapper names the run and states what was spent, so a user reading the

@@ -29,7 +29,9 @@
  *   6. `POST /v2/control/lessons {scope:"global", limit:5}` @900 ms. **No `run_id`**:
  *      `ListLessonsRequest.run_id` is optional and empty means all runs, which is exactly what
  *      "global lessons" wants — scoping it to this run returns nothing on a brand-new one.
- *   7. Assemble `additionalContext`, update the marker, emit.
+ *   7. Assemble `additionalContext`, update the marker, emit — and, on `startup` and `resume`
+ *      only, spawn the detached `session-resume` that assembles the W2-2 briefing the first
+ *      substantive prompt will render. Nothing here waits on it; `spawnResume` says why.
  *
  * The steer block does two jobs. It names the run and the mode, and it tells the model **when
  * to search and when not to**: recall is injected before every turn, so opening turn one with
@@ -47,7 +49,7 @@ import { join } from 'node:path';
 
 import { endpointHash } from '../../lib/breaker.mjs';
 import { isConfigured, loadConfig } from '../../lib/config.mjs';
-import { runHook } from '../../lib/hook.mjs';
+import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { health, heartbeat, postLessons, registerAgent } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
@@ -296,6 +298,10 @@ await runHook('session-start', {
       },
     });
 
+    // W2-2 — the resume briefing. Everything above this line is what the session waits for;
+    // this is emphatically not, and `spawnResume` is where that is argued.
+    spawnResume(cfg, payload, runId, agentId, src);
+
     // §5.6 — the post-compaction re-anchor, on the one source that means "the host just
     // compacted this conversation". A local read of the file `checkpoint --pre` already wrote,
     // so it costs no budget and needs no round trip. It sits below the offline branch on
@@ -318,6 +324,75 @@ await runHook('session-start', {
     };
   },
 });
+
+// ---------------------------------------------------------------------------
+// W2-2 — the resume briefing
+// ---------------------------------------------------------------------------
+
+/**
+ * §5.1 step 7's last act: fire `session-resume` and forget about it.
+ *
+ * The whole feature turns on this call being fire-and-forget. `SessionStart` is a **blocking**
+ * hook — Claude Code holds the session open for it, with a 5 s host timeout and a 2500 ms
+ * internal budget — and the briefing costs a `/v2/control/context` round trip, which is two
+ * LLM calls and a 20 s deadline. Awaiting any part of it here would open every session in the
+ * world on a stalled hook, and would blow the budget often enough that the *steer block* would
+ * start going missing too. `test/session-resume.test.mjs` pins the wall clock against a
+ * `/context` that never answers.
+ *
+ * ---------------------------------------------------------------------------
+ * Only `startup` and `resume`
+ * ---------------------------------------------------------------------------
+ * `SessionStart` fires on five sources and three of them already have the answer:
+ *
+ *   - **`clear`** asks for a blank slate and `lib/runid.mjs` gives it one — a brand-new run id
+ *     with nothing under it. There is no "where we left off" to describe, and dialling for one
+ *     spends two LLM calls to be told so.
+ *   - **`compact`** is re-anchored for free a few lines above: the checkpoint id `checkpoint
+ *     --pre` stored does the same job with no round trip and against a transcript that is
+ *     actually there.
+ *   - **`fork`** continues a conversation that is already in the model's window, so the
+ *     briefing would describe context it can still read.
+ *
+ * That leaves the two where the window is empty and the run has history — which is exactly
+ * what "resume" means, whichever of the two words the host used.
+ *
+ * ---------------------------------------------------------------------------
+ * Why the identity goes on argv
+ * ---------------------------------------------------------------------------
+ * `--run` and `--agent`, the same handoff `cwd-changed` makes to `drain`. The child may not
+ * re-derive: `deriveRunId` increments and persists `clear_count` on a `clear` source, so a
+ * second process would produce `-c2` where this one produced `-c1` and write it back. The
+ * payload rides along only because `lib/hook.mjs` needs a parseable object on stdin; nothing
+ * in it is read for identity.
+ *
+ * A briefing that could not be started costs this session its summary and nothing else.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} payload
+ * @param {string} runId
+ * @param {string} agentId
+ * @param {string} src  the normalised `SessionStart` source
+ * @returns {void}
+ */
+function spawnResume(cfg, payload, runId, agentId, src) {
+  try {
+    if (!cfg.resumeBlock || !cfg.recall) return;
+    if (src !== 'startup' && src !== 'resume') return;
+
+    const payloadPath = stashPayload(cfg, payload);
+    if (!payloadPath) {
+      log(cfg, 'warn', 'session-start: could not stage the resume payload; this session opens '
+        + 'without a briefing', { run_id: runId });
+      return;
+    }
+    spawnDetached(cfg, 'session-resume', ['--run', runId, '--agent', agentId], payloadPath);
+    log(cfg, 'debug', 'session-start: resume briefing spawned', { run_id: runId });
+  } catch (err) {
+    log(cfg, 'warn', `session-start: could not start the resume briefing (${messageOf(err)})`,
+      { run_id: runId });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // The injected blocks

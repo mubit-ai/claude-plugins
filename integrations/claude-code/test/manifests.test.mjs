@@ -53,7 +53,7 @@ const DEFAULT_ALLOWLIST = [
 const USER_CONFIG_KEYS = [
   'endpoint', 'apiKey', 'userId', 'runStrategy', 'capture', 'recall', 'redact',
   'recallTokenBudget', 'recallAssemble', 'reflectOnEnd', 'outcomeMode', 'statusLine',
-  'mcpTools', 'preToolWarnings',
+  'mcpTools', 'preToolWarnings', 'resumeBlock',
 ];
 
 // ---------------------------------------------------------------------------

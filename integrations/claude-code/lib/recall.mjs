@@ -87,6 +87,28 @@ const RUNG2_MIN_BUDGET_MS = 500;
 const ENTRY_TYPES = Object.freeze(['mental_model', 'rule', 'lesson', 'fact', 'trace']);
 const QUERY_LIMIT = 8;
 
+/**
+ * §5.2: the `rank_by` modes the server actually has. Anything else — `auto` included — is
+ * left off the wire entirely.
+ *
+ * `rank_by` resolves to fusion weights server-side:
+ *
+ * | mode | semantic | lexical | recency |
+ * | --- | --- | --- | --- |
+ * | *(absent)* / `relevance` | 1.00 | 0.25 | 0.10 |
+ * | `balanced` | 0.60 | 0.15 | 0.25 |
+ * | `freshness` | 0.40 | 0.10 | **0.50** |
+ *
+ * The server falls through to the defaults on an unknown value, so a bad mode is inert
+ * rather than an error — which is precisely why it is whitelisted here. A typo that ranks at
+ * the default weights while sitting in the request log looking like a choice is a bug with
+ * no symptom. `auto` is a client-side word (`lib/rank.mjs`) and never reaches the wire.
+ *
+ * The weights above are the **Rust match arm**. The proto's own comment on `freshness`
+ * transposes semantic and recency; do not "fix" this table against it.
+ */
+const RANK_MODES = Object.freeze(['relevance', 'balanced', 'freshness']);
+
 /** §5.2 rung-3 body, verbatim. */
 const CONTEXT_LIMIT = 6;
 
@@ -117,6 +139,8 @@ const ENDPOINT_HASH_LEN = 12;
  * @property {number} deadline           absolute ms; every rung paces itself against it
  * @property {Set<string>|string[]} [seen]  already injected this run (`lib/seen.mjs`)
  * @property {number} [tokenBudget]      defaults to `cfg.recallTokenBudget`
+ * @property {string} [rankBy]           defaults to `cfg.recallRankBy`; `auto` (or anything
+ *                                       not in `RANK_MODES`) sends no `rank_by` at all
  * @property {number} [perSection]       defaults to `cfg.recallMaxPerSection`
  * @property {string} [repeatMode]       defaults to `cfg.recallRepeatMode`
  * @property {string} [projectDir]      the directory THIS prompt was sent in, for `env_tags`
@@ -155,6 +179,7 @@ export async function recallBlock(cfg, o) {
  * @returns {Promise<Outcome>}
  */
 async function ladder(cfg, o) {
+  const rankBy = rankByOf(cfg, o);
   const body = {
     run_id: o.runId,
     agent_id: o.agentId,
@@ -172,6 +197,18 @@ async function ladder(cfg, o) {
     // in — the same reason the run id reads the payload. A recall scored against `repo:`
     // tags from the wrong repo is worse than one scored against none.
     env_tags: envTags(cfg, o.projectDir),
+    // §5.2: `rank_by` is the same trap as `env_tags` above, one field further on.
+    // `ContextRequest` has no ranking field of ANY kind — its 12 fields do not include one —
+    // which makes freshness the second capability rungs 1-2 gain over rung 3 rather than
+    // something they give up. What makes it a trap rather than a limitation: turning rung 3
+    // on (`recallAssemble: "server"`) does not fail, warn, or fall back: it silently reverts
+    // every recall to the default fusion weights, and "where were we?" quietly goes back to
+    // answering with whatever is most similar. Documented in the README's `recallAssemble`
+    // row for the same reason.
+    //
+    // Omitted rather than sent when it resolves to nothing: absent IS `relevance`
+    // server-side, so there is no shape of request this spread cannot express.
+    ...(rankBy ? { rank_by: rankBy } : {}),
   };
 
   let denied = readPolicyDenial(cfg);
@@ -237,6 +274,10 @@ async function ladder(cfg, o) {
  * Rung 3 — `POST /v2/control/context`, two LLM calls, opt-in only. The server has already
  * assembled the block, so it is injected verbatim: re-assembling what two LLM calls just
  * paid for would be pure waste.
+ *
+ * `rank_by` does not reach it either, and cannot: `ContextRequest` has no ranking field, so
+ * this rung always fuses at the server's default weights. See the note beside the rung-1
+ * body — it is the one cost of `recallAssemble: "server"` that nothing at runtime reports.
  *
  * The seen-set does not reach this rung, and cannot: the block is the server's rendering and
  * the client has no seam inside it to degrade. An operator paying two LLM calls per prompt
@@ -345,6 +386,25 @@ function fromEvidence(cfg, responseBody, rung, o) {
  */
 function tokenBudgetOf(cfg, o) {
   return intOr(o?.tokenBudget ?? cfg?.recallTokenBudget, 1500);
+}
+
+/**
+ * The query's fusion weights: the caller's, then the config's, then nothing.
+ *
+ * "Nothing" is a real answer here and the reason this is not modelled with a default: the
+ * field is optional on `AgentQueryRequest`, and absent means exactly what `relevance` means.
+ * `auto` lands here as `''` — by then a caller was supposed to have resolved it
+ * (`lib/rank.mjs`, `rankForRecall`), and if one did not, ranking at the server's defaults is
+ * the same recall the plugin has always done rather than a new failure mode. Sending the
+ * literal `"auto"` would be the worst of the three: ignored by the server, and impossible to
+ * tell in a request log from a mode somebody chose.
+ *
+ * @param {Record<string, any>} cfg @param {RecallOptions} o @returns {string}
+ */
+function rankByOf(cfg, o) {
+  const v = o?.rankBy ?? cfg?.recallRankBy;
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  return RANK_MODES.includes(s) ? s : '';
 }
 
 /**

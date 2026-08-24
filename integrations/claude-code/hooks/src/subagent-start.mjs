@@ -83,6 +83,7 @@ import { join } from 'node:path';
 import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
+import { rankForRecall } from '../../lib/rank.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
 import { deriveAgentId, deriveRunId, deriveSubRunId, resolveProjectDir } from '../../lib/runid.mjs';
 import { readJson, runDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
@@ -170,6 +171,12 @@ await runHook('subagent-start', {
       query,
       deadline,
       tokenBudget: CFG.subagentRecallTokenBudget,
+      // §5.2 — the same rule over the same query text the parent's own prompt gets. The
+      // staged parent turn is the only description of this subagent's task, so it is also
+      // the only thing that can say the task is a handoff; a fan-out spawned off "where were
+      // we?" wants the recency emphasis its parent turn got, or the parent is caught up and
+      // every agent it spawned is not.
+      rankBy: rankForRecall(cfg, query),
       // The directory the SPAWN happened in, not the one the session launched in — a subagent
       // spawned after a `cd` belongs to the repo it is working in, same rule as the parent's.
       projectDir: resolveProjectDir(cfg, payload),

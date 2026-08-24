@@ -81,6 +81,7 @@ import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
+import { rankForRecall } from '../../lib/rank.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
 import { redactText } from '../../lib/redact.mjs';
 import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
@@ -215,6 +216,12 @@ await runHook('prompt-recall', {
     }
 
     const query = prompt.slice(0, MAX_QUERY_CHARS);
+    // §5.2 — how the server should fuse this query's scores. Read off the query text itself
+    // while `recallRankBy` is `auto`: "where were we?" is a question about the most recent
+    // state of the work, and default fusion weights recency at 0.10, so it answers with
+    // whatever is most *similar* to those three words. The same rule runs over the same text
+    // in `recall-refresh` and `subagent-start` — one explanation covers all three.
+    const rankBy = rankForRecall(cfg, query);
     const promptId = safeId(payload?.prompt_id);
     // Resolved once, from the same rule the run id uses, so the two can never disagree
     // about which repo this prompt belongs to.
@@ -226,7 +233,7 @@ await runHook('prompt-recall', {
     const seen = readSeen(cfg, runId).ids;
 
     const outcome = await recallBlock(cfg, {
-      runId, agentId, query, deadline, seen, projectDir,
+      runId, agentId, query, deadline, seen, projectDir, rankBy,
     });
 
     const ms = Date.now() - started;

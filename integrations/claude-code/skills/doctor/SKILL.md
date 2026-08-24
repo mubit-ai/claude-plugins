@@ -2,7 +2,7 @@
 name: doctor
 description: Diagnose Mubit connectivity, memory health, and stuck ingest jobs. Use when memory looks empty, captures are not landing, or the status line shows a failure glyph.
 disable-model-invocation: false
-tools: ["mcp__plugin_mubit-memory_mubit__mubit_status", "mcp__plugin_mubit-memory_mubit__mubit_diagnose"]
+tools: ["mcp__plugin_mubit-memory_mubit__mubit_status", "mcp__plugin_mubit-memory_mubit__mubit_diagnose", "mcp__plugin_mubit-memory_mubit__mubit_memory_health"]
 ---
 
 Work in this order and stop at the first thing that is broken. Each step costs more than the
@@ -52,9 +52,11 @@ one before it, and the cheap steps answer most questions.
    one route that answers without a key, so a healthy response here alongside a failing
    control-plane call points squarely at auth. It returns the plain string `OK`, not JSON —
    parsing it as JSON is itself a way to invent a `server_error` that is not there.
-3. **Check memory health** — `POST /v2/control/memory_health {run_id}`. This is what
-   distinguishes "nothing was ever written" from "things were written and are not coming
-   back".
+3. **Check memory health** — `mubit_memory_health`, or `POST /v2/control/memory_health
+   {run_id}` directly. This is what distinguishes "nothing was ever written" from "things were
+   written and are not coming back". It inspects the store; step 2 inspected the connection,
+   and a healthy answer there says nothing at all about this one.
+   `/mubit-memory:memory-health` is the same call with the reading guide attached.
 4. **Poll the run's ingest jobs.** `runs/<run_id>/jobs.json` holds the last 20 accepted job
    ids; poll each with `GET /v2/control/ingest/jobs/<job_id>?run_id=<run_id>`. Accepted means
    queued, not stored. A job stuck in `queued` for minutes means the instance accepted the

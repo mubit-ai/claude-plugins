@@ -149,7 +149,7 @@ asking how well attested a lesson is.
 
 ## Skills
 
-Seven, listed to the model as `mubit-memory:<name>`:
+Listed to the model as `mubit-memory:<name>`:
 
 | Skill | For |
 | --- | --- |
@@ -160,6 +160,9 @@ Seven, listed to the model as `mubit-memory:<name>`:
 | `reflect` | Extract lessons from this run now, rather than at session end. |
 | `forget` | Delete an entry, or down-weight one that is merely wrong. |
 | `doctor` | Diagnose. Its step 0 is the Codex-specific one: hooks that were never trusted. |
+| `strategies` | Read the pattern *across* many lessons rather than any single one. |
+| `checkpoint` | Save a named snapshot of where the run has got to, verbatim, before risky work. |
+| `memory-health` | Report what is actually stored: counts, staleness, contradictions. The store, not the connection. |
 
 There is no `mubit-recall` subagent here. Codex has no plugin-defined agent types — every
 `SubagentStart` reports `agent_type: "default"` — so a markdown subagent would be a file

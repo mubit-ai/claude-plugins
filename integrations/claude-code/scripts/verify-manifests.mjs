@@ -30,10 +30,11 @@ const CONN_STATES = [
   'ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding', 'unconfigured',
 ];
 
-/** §8.2 — ten of the twenty-one tools. */
+/** §8.2 — thirteen of the twenty-one tools; the last three were promoted in W2-1. */
 const DEFAULT_ALLOWLIST = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ];
 
 const P = {

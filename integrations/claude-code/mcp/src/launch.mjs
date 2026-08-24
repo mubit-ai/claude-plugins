@@ -41,13 +41,33 @@ import { installFetchGuard, resolveCeiling } from './egress.mjs';
 import { INSTRUCTIONS, installInstructionsGuard } from './instructions.mjs';
 
 /**
- * §8.2 — ten of the server's twenty-one tools, in the guide's order.
+ * §8.2 — thirteen of the server's twenty-one tools, in the guide's order.
  *
- * A blank `mcpTools` means this curated set, never "none" and never all 21: the eleven
- * excluded verbs are ones a hook already does better (`mubit_remember`, `mubit_context`,
- * `mubit_checkpoint`, `mubit_register_agent`, `mubit_list_agents`) or that have no Claude
- * Code surface at all (the multi-agent orchestration group). Nothing is removed — users
- * restore any of them through `mcpTools` / `MUBIT_MCP_TOOLS`.
+ * A blank `mcpTools` means this curated set, never "none" and never all 21: the eight
+ * excluded verbs are ones a hook already does better (`mubit_remember`, `mubit_context`)
+ * or that have no Claude Code surface at all (`mubit_register_agent`, `mubit_list_agents`
+ * and the rest of the multi-agent orchestration group). Nothing is removed — users restore
+ * any of them through `mcpTools` / `MUBIT_MCP_TOOLS`.
+ *
+ * The last three arrived later, and each was excluded for a reason that turned out not to
+ * hold.
+ *
+ * `mubit_checkpoint` was listed here as work a hook already did better. It is not the same
+ * work. The `PreCompact` hook checkpoints on the host's schedule — when the window fills —
+ * which is precisely the moment nobody can ask for. "Save where we are before I try this"
+ * is a decision a person makes, and there was no way to express it. The hook and the tool
+ * are the involuntary and the voluntary halves of one thing, not two paths to one.
+ *
+ * `mubit_strategies` reads the pattern *across* many lessons. Every retrieval verb above it
+ * reads individual ones, so this was not a duplicated lane; it was a lane nobody opened.
+ *
+ * `mubit_memory_health` was excluded while `skills/doctor/SKILL.md` told its reader to
+ * `POST /v2/control/memory_health` by hand at step 3. Withholding the tool never removed
+ * the need for the route — it only moved the call off the tool surface and into prose.
+ *
+ * Each of the three ships with a skill (`strategies`, `checkpoint`, `memory-health`): an
+ * allowlisted tool with nothing to invoke it is schema cost without a surface, which is the
+ * failure the curation exists to prevent.
  *
  * `lib/config.mjs` carries the same list; this copy is the launcher's floor for the case
  * where config resolution hands back an empty list.
@@ -55,6 +75,7 @@ import { INSTRUCTIONS, installInstructionsGuard } from './instructions.mjs';
 export const DEFAULT_ALLOWLIST = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ];
 
 /**

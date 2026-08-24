@@ -1,44 +1,53 @@
 {
-  "measuredAt": "2026-08-23T17:20:47.012Z",
-  "value": 3725,
+  "measuredAt": "2026-08-24T11:26:44.100Z",
+  "value": 4564,
   "cached": 0,
-  "curatedValue": 3725,
+  "curatedValue": 4564,
   "allowlistHonoured": true,
   "method": "word/number/symbol segmentation; see the header of scripts/measure-context-cost.mjs",
   "surface": {
     "allowlist": [
       "mubit_archive",
+      "mubit_checkpoint",
       "mubit_dereference",
       "mubit_diagnose",
       "mubit_forget",
       "mubit_learned",
       "mubit_lessons",
+      "mubit_memory_health",
       "mubit_outcome",
       "mubit_recall",
       "mubit_reflect",
-      "mubit_status"
+      "mubit_status",
+      "mubit_strategies"
     ],
     "registered": [
       "mubit_archive",
+      "mubit_checkpoint",
       "mubit_dereference",
       "mubit_diagnose",
       "mubit_forget",
       "mubit_learned",
       "mubit_lessons",
+      "mubit_memory_health",
       "mubit_outcome",
       "mubit_recall",
       "mubit_reflect",
-      "mubit_status"
+      "mubit_status",
+      "mubit_strategies"
     ],
     "skills": [
       "auth",
+      "checkpoint",
       "dashboard",
       "doctor",
       "forget",
+      "memory-health",
       "recall",
       "reflect",
       "remember",
-      "setup"
+      "setup",
+      "strategies"
     ],
     "agents": [
       "mubit-recall"
@@ -46,9 +55,9 @@
   },
   "breakdown": {
     "toolSchemas": {
-      "tokens": 2907,
-      "chars": 7981,
-      "count": 10
+      "tokens": 3515,
+      "chars": 9658,
+      "count": 13
     },
     "serverInstructions": {
       "tokens": 356,
@@ -56,14 +65,14 @@
       "count": 1
     },
     "curatedToolSchemas": {
-      "tokens": 2907,
-      "chars": 7981,
-      "count": 10
+      "tokens": 3515,
+      "chars": 9658,
+      "count": 13
     },
     "skillFrontmatter": {
-      "tokens": 400,
-      "chars": 1340,
-      "count": 8
+      "tokens": 631,
+      "chars": 2152,
+      "count": 11
     },
     "agentFrontmatter": {
       "tokens": 62,

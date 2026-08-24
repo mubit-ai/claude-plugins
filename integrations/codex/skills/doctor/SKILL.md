@@ -104,8 +104,11 @@ the plugin moved.
 
 ## Step 3 — check memory health
 
-`POST /v2/control/memory_health {run_id}`. This is what distinguishes "nothing was ever
-written" from "things were written and are not coming back".
+`mcp__mubit__mubit_memory_health`, or `POST /v2/control/memory_health {run_id}` directly.
+This is what distinguishes "nothing was ever written" from "things were written and are not
+coming back". It inspects the store; step 2 inspected the connection, and a healthy answer
+there says nothing at all about this one. `mubit-memory:memory-health` is the same call with
+the reading guide attached.
 
 ## Step 4 — poll the run's ingest jobs
 

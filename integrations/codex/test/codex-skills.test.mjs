@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * The seven skills, as data.
+ * The skills, as data.
  *
  * Codex reads a skill's frontmatter for two fields and nothing else. There is no
  * `allowed-tools` anywhere in the 0.146.0 binary and no `tools:` grant — the string does not
@@ -27,7 +27,26 @@ import { join } from 'node:path';
 import { CODEX_ROOT, SHARED_ROOT } from './helpers/codex-fixtures.mjs';
 
 const SKILLS_DIR = join(CODEX_ROOT, 'skills');
-const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth', 'dashboard'];
+/**
+ * The skills this plugin ships, in the order they were added and in lockstep with the Claude
+ * Code tree — the last test in this file asserts the two sets are equal.
+ *
+ * One name per line on purpose: several branches append to this list, and a single-line array
+ * makes every one of those a conflict on the same line.
+ */
+const SKILLS = [
+  'recall',
+  'remember',
+  'reflect',
+  'forget',
+  'doctor',
+  'setup',
+  'auth',
+  'dashboard',
+  'strategies',
+  'checkpoint',
+  'memory-health',
+];
 
 /**
  * The two skills that call no MCP tool: `auth` runs `bin/auth.mjs` to get a key, and
@@ -42,10 +61,11 @@ const PREFIX = 'mcp__mubit__';
 /** The prefix the Claude Code plugin uses. Present here is a copy-paste that was never adjusted. */
 const CC_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
-/** The ten tools the plugin allowlists by default. */
+/** The thirteen tools the plugin allowlists by default. */
 const TOOLS = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ];
 
 // ---------------------------------------------------------------------------
@@ -97,12 +117,12 @@ function fencedBlocks(raw) {
 // Frontmatter
 // ===========================================================================
 
-test('the eight skills are exactly the eight directories', () => {
+test('the skill set is exactly the skill directories', () => {
   const dirs = existsSync(SKILLS_DIR)
     ? readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()
     : [];
   assert.deepEqual(dirs, [...SKILLS].sort(),
-    'the Codex plugin ships the same eight skills as the Claude Code one; a missing one is a '
+    'the Codex plugin ships the same skills as the Claude Code one; a missing one is a '
     + 'command the user types and nothing answers.');
 });
 
@@ -293,7 +313,7 @@ test('forget: refuses to delete without confirming first', () => {
 // Drift against the Claude Code skills
 // ===========================================================================
 
-test('the two plugins ship the same eight skill names', () => {
+test('the two plugins ship the same skill names', () => {
   const ccDirs = readdirSync(join(SHARED_ROOT, 'skills'), { withFileTypes: true })
     .filter((d) => d.isDirectory()).map((d) => d.name).sort();
   const codexDirs = readdirSync(SKILLS_DIR, { withFileTypes: true })
@@ -303,4 +323,55 @@ test('the two plugins ship the same eight skill names', () => {
   //   other is a gap somebody meant to fill and forgot.
   assert.deepEqual(codexDirs, ccDirs,
     'the skill sets have diverged. The files differ by host; the set should not.');
+});
+
+// ===========================================================================
+// The three skills that carry a promoted tool
+// ===========================================================================
+
+/**
+ * Each of these three exists so that a tool promoted into the default allowlist has somewhere
+ * to be invoked from, which makes one sentence in each of them load-bearing: the one that
+ * separates the new tool from the neighbour it will otherwise be confused with.
+ *
+ * The stake is higher here than next door. Under Claude Code the `tools:` grant narrows what
+ * the skill can reach; Codex has no grant at all, so the prose is the only thing standing
+ * between the model and the wrong tool.
+ */
+
+test('strategies: separates the pattern from the lessons it is a pattern over', () => {
+  const { body } = read('strategies');
+  // § The tool clusters lessons. Asked for one lesson it returns a summary of the cluster that
+  //   lesson sits in, which reads like an answer and is not one.
+  assert.match(body, /across/i,
+    'strategies must say the answer is a pattern *across* lessons, not one of them.');
+  assert.match(body, new RegExp(`${PREFIX}mubit_lessons`),
+    'strategies must name mcp__mubit__mubit_lessons as the tool that reads the individual '
+    + 'lessons. The two are near-synonyms until one of them says so.');
+});
+
+test('checkpoint: says the snapshot is stored verbatim, and is run state not knowledge', () => {
+  const { body } = read('checkpoint');
+  // § `snapshot` is stored byte-for-byte and nothing extracts from it, so a model that writes a
+  //   headline has written a checkpoint that restores nothing.
+  assert.match(body, /verbatim/i, 'checkpoint must say the snapshot is stored verbatim.');
+  assert.match(body, /unsummaris|unsummariz|not summaris|not summariz/i,
+    'checkpoint must say nothing summarises it — a one-line snapshot restores nothing.');
+  assert.match(body, /run state, not knowledge/i,
+    'checkpoint must draw the line in those words: a checkpoint is run state, not knowledge.');
+  assert.match(body, /mubit-memory:remember/,
+    'checkpoint must send knowledge to mubit-memory:remember. Swap the two writes and memory '
+    + 'fills with state that expired the same afternoon.');
+});
+
+test('memory-health: states the store/connection split against mubit_status', () => {
+  const { body } = read('memory-health');
+  // § Both tools fail as "memory is not working" and their fixes are opposites: an empty store
+  //   behind a healthy connection and a full store behind a dead endpoint look identical.
+  assert.match(body, new RegExp(`${PREFIX}mubit_status`),
+    'memory-health must name mcp__mubit__mubit_status — it is the tool it is confused with.');
+  assert.match(body, /store/i, 'memory-health must say it inspects the store.');
+  assert.match(body, /connection/i,
+    'memory-health must say mubit_status inspects the connection; without the second half the '
+    + 'first half is not a distinction.');
 });

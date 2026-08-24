@@ -61,17 +61,20 @@ const SKILLS = [
   'checkpoint',
   'memory-health',
   'activity',
+  'pin',
 ];
 
 /**
- * The two skills that call no MCP tool, and cannot.
+ * The skills that call no MCP tool, and cannot.
  *
  * `auth` runs `bin/auth.mjs` to obtain a credential, which is precisely the thing that has to
- * exist before any MCP tool works. `dashboard` runs `bin/dashboard.mjs`, a local HTTP server
- * that proxies the control API itself — an MCP grant would be a second, weaker path to the
- * same data. Both are skipped by name rather than by accident.
+ * exist before any MCP tool works. `dashboard` runs `bin/dashboard.mjs` and `activity` runs
+ * `bin/activity.mjs`, both of which talk to the control API themselves — an MCP grant would be
+ * a second, weaker path to the same data. `pin` runs `bin/pin.mjs` because the bundled server
+ * registers twenty-one tools and not one of them touches variables, so there is no tool a
+ * `tools:` grant could name. All four are skipped by name rather than by accident.
  */
-const NO_MCP_SKILLS = ['auth', 'dashboard'];
+const NO_MCP_SKILLS = ['auth', 'dashboard', 'activity', 'pin'];
 const MCP_SKILLS = SKILLS.filter((s) => !NO_MCP_SKILLS.includes(s));
 
 // ---------------------------------------------------------------------------
@@ -746,4 +749,80 @@ test('activity/SKILL.md routes the per-prompt question at the dashboard, not at 
   assert.ok(!body.includes('mubit-inspect'),
     'mubit-inspect.mjs is not in package.json `files` — naming it sends a user to a path that '
     + 'does not exist in an installed plugin');
+});
+
+// ---------------------------------------------------------------------------
+// §9 — pin
+// ---------------------------------------------------------------------------
+
+/**
+ * Like `auth` and `dashboard`, this skill runs a bundled script rather than calling an MCP
+ * tool — and here that is not a choice. The bundled server registers twenty-one tools and not
+ * one of them touches variables, so there is no tool a `tools:` grant could name.
+ */
+test('pin/SKILL.md grants exactly the Bash permission it needs, and no MCP tools', () => {
+  const { fm } = loadSkill('pin');
+
+  const allowed = fm['allowed-tools'];
+  assert.ok(allowed, 'pin must declare allowed-tools so the host does not prompt on every run');
+  const text = Array.isArray(allowed) ? allowed.join(' ') : String(allowed);
+
+  assert.match(text, /Bash\(/, 'the grant is a Bash permission rule');
+  assert.match(text, /bin\/pin\.mjs/, 'the rule must name the script, not hand the skill a shell');
+  assert.match(text, /\$\{CLAUDE_PLUGIN_ROOT\}/,
+    'the plugin is installed at a path nobody can predict — a relative path resolves elsewhere');
+
+  assert.equal(toolsOf(fm), undefined,
+    'there is no variables tool in the bundled server; a tools: entry here would name nothing');
+});
+
+/**
+ * **The one thing this skill exists to do, and the one it can get wrong.**
+ *
+ * Unlike `dashboard`, `pin` is model-invocable — deliberately. When the user says "for the
+ * rest of this, don't touch the vendored server", the model is who notices, and if it cannot
+ * reach `pin` it writes a *lesson* instead: a durable, cross-session claim about a project
+ * where the sentence stops being true the moment the task ends. That is the exact failure this
+ * skill was built to remove, so the description has to draw the line hard enough that a model
+ * choosing between the two commands chooses correctly from the description alone.
+ */
+test('pin/SKILL.md is model-invocable and draws the line against remember', () => {
+  const { fm, body } = loadSkill('pin');
+
+  assert.notEqual(fm['disable-model-invocation'], true,
+    'the model is who notices a standing constraint; a user-only skill would never be reached '
+    + 'in the moment that matters, and a lesson would be written instead');
+
+  const description = String(fm.description ?? '');
+  assert.match(description, /run\b/i,
+    'the description must say a pin is scoped to this run — that is the whole distinction');
+  assert.match(description, /remember/,
+    'the description is where a model chooses between the two commands, so it has to name the '
+    + 'other one; without it a durable lesson gets written as a pin, or worse, the reverse');
+
+  assert.match(body, /cross-session|every future session/i,
+    'the body must say what a lesson is, or "durable" is an adjective with no consequence');
+  assert.match(body, /\bclear/i,
+    'a pin that outlives its task spends tokens enforcing a rule that is no longer true');
+});
+
+// The caps are refusals a user will hit, and a refusal with no reason reads as a bug. The
+// reason is specific and is the whole argument for the feature being cheap.
+test('pin/SKILL.md states the caps and why a pin is expensive', () => {
+  const { body } = loadSkill('pin');
+  assert.match(body, /\b5\b|\bfive\b/i, 'the pin count cap must be stated');
+  assert.match(body, /200/, 'the per-pin character cap must be stated');
+  assert.match(body, /every prompt|each prompt/i,
+    'a pin is paid in full on every prompt — that is why the caps are tight, and a cap with no '
+    + 'reason gets worked around by shortening the user\'s words');
+});
+
+// §9.3 — the trust rule every script-running skill states.
+test('pin/SKILL.md says it never installs anything, and is not a permission boundary', () => {
+  const { body } = loadSkill('pin');
+  assert.match(body, /never\s+(attempt\s+to\s+)?install|do not install|don't install/i,
+    'a memory plugin running installers is a trust failure (§9.3)');
+  assert.match(body, /permission/i,
+    'a pin is text in front of the model, not a boundary — a user who reads it as one will '
+    + 'stop using the permission system for something that actually has to hold');
 });

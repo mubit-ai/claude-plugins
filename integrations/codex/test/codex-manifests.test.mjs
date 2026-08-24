@@ -65,6 +65,7 @@ const SKILLS = [
   'checkpoint',
   'memory-health',
   'activity',
+  'pin',
 ];
 
 /** `.mcp.json` names the server `mubit`, so the model sees `mcp__mubit__<tool>`. */

@@ -61,7 +61,30 @@
  * is not degraded on the next turn — the seen-set saving silently reverts, with nothing red.
  *
  * ---------------------------------------------------------------------------
- * The resume briefing (W2-2)
+ * Pinned context
+ * ---------------------------------------------------------------------------
+ * A pin is a standing constraint the user set for this run — "for the rest of this, don't
+ * touch the vendored server". It is read from `runs/<run_id>/pins.json` (`lib/pins.mjs`) and
+ * rendered by `wrap`, and three properties of that are load-bearing:
+ *
+ *   - **It costs zero HTTP requests.** `readPins` is one `readJson`. The network half runs in
+ *     the detached drainer, which is why a pin can render inside this hook's 1500 ms budget
+ *     and, more to the point, while the breaker is open.
+ *   - **It renders where recall does not** — `recall: false`, a prompt under 8 characters, an
+ *     open breaker, a failed recall, an empty result, no carried block. Recall is a ranked
+ *     guess about what might be relevant; a pin is an instruction, and the turns where recall
+ *     finds nothing are exactly the turns where the instruction is all there is. The two gates
+ *     that stay closed are a slash command (addressed to the harness, not the model) and an
+ *     unconfigured install (no endpoint, and no run id worth deriving a subprocess for).
+ *   - **It is not memory.** Pins never enter `outcome.refIds`, so they never reach
+ *     `recalled[]` or the seen-set: there is no `reference_id` to attribute a turn to, and a
+ *     standing constraint degraded to `(seen earlier)` is a constraint that does nothing.
+ *
+ * Their cost is recorded as `recall.pin_tokens`, beside `recall.tokens` rather than inside it.
+ * Folding them together would corrupt every recall-cost measurement the plugin has taken.
+ *
+ * ---------------------------------------------------------------------------
+ * The resume briefing
  * ---------------------------------------------------------------------------
  * On the first *substantive* prompt of a session — past the length gate and past the slash
  * gate — this hook also renders the block `hooks/src/session-resume.mjs` assembled while the
@@ -93,10 +116,11 @@ import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
+import { readPins } from '../../lib/pins.mjs';
+import { takeResume } from '../../lib/resume.mjs';
 import { rankForRecall } from '../../lib/rank.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
 import { redactText } from '../../lib/redact.mjs';
-import { takeResume } from '../../lib/resume.mjs';
 import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import { markSeen, readSeen } from '../../lib/seen.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
@@ -187,7 +211,11 @@ await runHook('prompt-recall', {
     const deadline = started + RECALL_BUDGET_MS;
 
     // --- §5.2 step 0. Every skip here is "dial nothing", not "dial and discard".
-    if (!cfg.recall) return SUPPRESS;
+    // `pinsGate` keeps that promise — it reads one file — while still handing over a standing
+    // constraint the user set for this run. `recall: false` turns *recall* off; it is not a
+    // switch for "inject nothing ever", and the user who set it is the one most likely to be
+    // leaning on a pin instead.
+    if (!cfg.recall) return pinsGate(cfg, payload);
     // §4.1: with no endpoint there is nothing to recall from. Ahead of run-id derivation,
     // which can shell out to `git rev-parse` — this hook blocks every prompt, and an install
     // nobody has signed in to yet should not pay a subprocess per prompt to learn that.
@@ -195,7 +223,9 @@ await runHook('prompt-recall', {
     if (!isConfigured(cfg)) return SUPPRESS;
 
     const prompt = typeof payload?.prompt === 'string' ? payload.prompt.trim() : '';
-    if (prompt.length < MIN_PROMPT_CHARS) return SUPPRESS;
+    // "ok", "yes", "go on" carry no retrievable intent — a statement about *retrieval*. A
+    // standing constraint applies to "ok, do it" exactly as much as to a paragraph.
+    if (prompt.length < MIN_PROMPT_CHARS) return pinsGate(cfg, payload);
     // A slash command is addressed to the harness, not the model; recalling against
     // "/mubit-memory:recall …" would inject memory into a memory command.
     if (prompt.startsWith('/')) return SUPPRESS;
@@ -211,16 +241,21 @@ await runHook('prompt-recall', {
       return SUPPRESS;
     }
 
-    // W2-2 — the resume briefing, consumed exactly once per session and marked seen straight
-    // away. Both of those are load-bearing and both are argued on `claimResume`. It sits above
-    // every branch below because all three of them render it, and below the two gates above
-    // because neither a slash command nor "ok" may spend a session's briefing on a message
-    // that injects nothing anywhere.
+    // The run's pinned context. One `readJson`, before the branch, so both the carry-forward
+    // path and the blocking one render from the same read.
+    const pins = readPins(cfg, runId);
+
+    // The resume briefing, consumed exactly once per session and marked seen straight away.
+    // Both of those are load-bearing and both are argued on `claimResume`. It sits above every
+    // branch below because all three of them render it, and below the two gates above because
+    // neither a slash command nor "ok" may spend a session's briefing on a message that injects
+    // no memory anywhere — a pin is not memory, which is why those two gates still answer with
+    // `pinsGate` rather than with this.
     const resume = claimResume(cfg, runId);
 
     // §5.2 — the carry-forward path. Everything below this line dials; nothing beyond this
     // point in `carryForward` does. See the header for why the order inside it is fixed.
-    if (cfg.recallAsync) return carryForward(cfg, payload, runId, started, resume);
+    if (cfg.recallAsync) return carryForward(cfg, payload, runId, started, pins, resume);
 
     // §4.7/F7: a blocking hook in front of every prompt must not pay a connect timeout to a
     // server already known to be down. Read-only — `allowRequest` would spend the single
@@ -244,13 +279,18 @@ await runHook('prompt-recall', {
           ...dryness(cfg, runId, false),
         },
       });
-      // A briefing already on disk still renders. F7's rule is about not *dialing* a server
-      // known to be down; this block was assembled before the breaker tripped and cost a
-      // round trip nobody should pay twice — and `claimResume` has already consumed it, so
-      // withholding it here would not save it for later, it would throw it away.
-      if (!resume) return SUPPRESS;
+      // The open-breaker case is where a standing constraint matters most: recall is
+      // contributing nothing at all, and the pin is the only thing between the model and the
+      // mistake the user pinned it to prevent. `pinsOnly` reads no socket, so F7 still holds.
+      //
+      // A briefing already on disk survives the same way, and for a second reason: F7's rule is
+      // about not *dialing* a server known to be down, this block was assembled before the
+      // breaker tripped, and `claimResume` has already consumed it — withholding it here would
+      // not save it for later, it would throw it away.
+      if (!resume) return pinsOnly(cfg, pins, runId);
       persistRecalled(cfg, runId, safeId(turnKey(payload)), payload, NO_RECALL, resume);
-      return injection(runId, NO_RECALL, resume, Date.now() - started);
+      if (pins.text) updateMarker(cfg, runId, { recall: { pin_tokens: pins.tokens } });
+      return injection(runId, NO_RECALL, resume, pins, Date.now() - started);
     }
 
     const query = prompt.slice(0, MAX_QUERY_CHARS);
@@ -279,11 +319,12 @@ await runHook('prompt-recall', {
     if (outcome.failed) {
       noteFailure(cfg, runId, outcome, ms);
       // The briefing is unaffected by this turn's recall failing — it was assembled by another
-      // process, minutes ago, and `claimResume` has already spent it. Attribution goes with
-      // it: those ids reached the model in this message and no later turn will ever see them.
-      if (!resume) return SUPPRESS;
+      // process, minutes ago, and `claimResume` has already spent it. Attribution goes with it:
+      // those ids reached the model in this message and no later turn will ever see them.
+      if (!resume) return pinsOnly(cfg, pins, runId);
       persistRecalled(cfg, runId, promptId, payload, NO_RECALL, resume);
-      return injection(runId, NO_RECALL, resume, ms);
+      if (pins.text) updateMarker(cfg, runId, { recall: { pin_tokens: pins.tokens } });
+      return injection(runId, NO_RECALL, resume, pins, ms);
     }
 
     // §5.2 step 6: what was rendered is what `Stop` attributes against (§5.5). Written even
@@ -307,15 +348,20 @@ await runHook('prompt-recall', {
         empty_reason: outcome.emptyReason,
         rung: outcome.rung,
         dropped: outcome.dropped,
+        // Beside `tokens`, never inside it. `recall.tokens` answers "what did recall cost",
+        // and a pin is not recall — folding the two together would silently corrupt every
+        // per-turn cost the dashboard and `dry_streak` are built on.
+        pin_tokens: pins.tokens,
         ...dryness(cfg, runId, outcome.refIds.length > 0),
       },
     });
 
-    // §5.2: an empty result injects NOTHING. No additionalContext, no systemMessage. A
-    // briefing counts as something, which is the whole of what W2-2 adds to this decision.
-    if (!outcome.block && !resume) return SUPPRESS;
+    // §5.2: an empty result injects NOTHING — of recalled memory. A pin was not retrieved, so
+    // it does not become untrue because retrieval came back empty, and a briefing was assembled
+    // before this prompt existed and is not an answer to it either.
+    if (!outcome.block && !resume) return pinsOnly(cfg, pins, runId, true);
 
-    return injection(runId, outcome, resume, ms);
+    return injection(runId, outcome, resume, pins, ms);
   },
 });
 
@@ -343,20 +389,15 @@ await runHook('prompt-recall', {
  *      way — it cost a round trip nobody should pay twice — but F7's rule still holds for
  *      the dial: no process per prompt against a server already known to be down.
  *
- * `resume` (W2-2) is handed in already consumed and already marked. It is rendered here rather
- * than folded into the carry file for two reasons, both in `lib/resume.mjs`: two detached
- * writers on one path is an unlocked race, and a briefing rendered through `wrap(…, carried)`
- * would tell the model it "was retrieved against the previous message in this conversation",
- * about a block assembled before any message existed.
- *
  * @param {Record<string, any>} cfg
  * @param {Record<string, any>} payload
  * @param {string} runId
  * @param {number} started
+ * @param {import('../../lib/pins.mjs').PinBlock} pins
  * @param {import('../../lib/resume.mjs').Resumed|null} [resume]
  * @returns {Record<string, any>}
  */
-function carryForward(cfg, payload, runId, started, resume = null) {
+function carryForward(cfg, payload, runId, started, pins, resume = null) {
   const promptId = safeId(turnKey(payload));
   const carry = takeCarry(cfg, runId);
   const rendered = !!(carry && carry.block);
@@ -364,9 +405,7 @@ function carryForward(cfg, payload, runId, started, resume = null) {
   if (rendered || resume) {
     persistRecalled(cfg, runId, promptId, payload, rendered ? carry : NO_RECALL, resume);
   }
-  if (rendered) {
-    markSeen(cfg, runId, carry.refIds);
-  }
+  if (rendered) markSeen(cfg, runId, carry.refIds);
 
   const open = breakerOpen(cfg);
   const b = open ? readBreaker(cfg) : null;
@@ -396,6 +435,7 @@ function carryForward(cfg, payload, runId, started, resume = null) {
       empty_reason: rendered
         ? carry.emptyReason
         : (open ? 'breaker_open' : 'async_no_carry'),
+      pin_tokens: pins.tokens,
       ...dryness(cfg, runId, rendered),
     },
   });
@@ -406,13 +446,16 @@ function carryForward(cfg, payload, runId, started, resume = null) {
     spawnRefresh(cfg, payload, runId);
   }
 
-  if (!rendered && !resume) return SUPPRESS;
+  // The first prompt of an async session has no carried block by construction. A pin is not
+  // carried — it was read from disk a moment ago — so it renders on that prompt too, and so
+  // does a briefing, which a different process assembled before any of this ran.
+  if (!rendered && !resume) return pinsOnly(cfg, pins, runId, true);
 
-  return injection(runId, rendered ? carry : NO_RECALL, resume, ms, true);
+  return injection(runId, rendered ? carry : NO_RECALL, resume, pins, ms, true);
 }
 
 // ---------------------------------------------------------------------------
-// W2-2 — the resume briefing
+// The resume briefing
 // ---------------------------------------------------------------------------
 
 /**
@@ -513,29 +556,11 @@ function spawnRefresh(cfg, payload, runId) {
  * back in the reply with no memory involved at all. It is done here, where the prompt is in
  * hand, rather than re-derived at Stop from a file that may have been truncated.
  *
- * ---------------------------------------------------------------------------
- * The W2-2 briefing rides on the same turn, and it has to
- * ---------------------------------------------------------------------------
- * `resume` is whatever `claimResume` consumed on this prompt. Its ids join `recalled[]` for
- * the reason the standing lessons above them do: they reached the model in this message, they
- * will never reach any other turn — the process that fetched them exited minutes ago — and an
- * id that reaches `recalled[]` is an id `lib/outcome.mjs` will file a verdict against.
- *
- * Which is exactly why its **words** go into `terms` too. `decideOutcome` reads `used: false`
- * as "memory was injected and the reply shows no sign of it" and files a `neutral` against
- * every id on the turn. If the briefing's ids were credited but its vocabulary were not, a
- * reply that used nothing *but* the briefing would score a miss and file that verdict against
- * memories the model demonstrably read. The two blocks are tokenised separately rather than
- * concatenated because `vocabularyOf` chooses its strategy per block — bullets when it has
- * them, everything-but-headings when it does not — and a joined string would pick one strategy
- * for two differently-rendered blocks.
- *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {string} promptId
  * @param {Record<string, any>} payload
  * @param {Outcome} outcome
- * @param {import('../../lib/resume.mjs').Resumed|null} [resume]
  * @returns {void}
  */
 function persistRecalled(cfg, runId, promptId, payload, outcome, resume = null) {
@@ -607,9 +632,7 @@ function persistRecalled(cfg, runId, promptId, payload, outcome, resume = null) 
  *     `reason: 'no_distinct_terms'`, and is correctly read as **unmeasured** (row 4).
  *
  * A rung-3 block is the server's own rendering and has no bullets to trust, so there only
- * the headings are dropped. It cannot carry pointers: rung 3 assembles server-side. The W2-2
- * briefing is that same rendering and is passed as a second block rather than concatenated,
- * so each one gets the strategy that fits it — see `persistRecalled`.
+ * the headings are dropped. It cannot carry pointers: rung 3 assembles server-side.
  *
  * §4.4: the block is scrubbed before any of it is written down. Evidence content is not
  * necessarily this plugin's own redacted capture — another client, or `mubit_remember`, can
@@ -618,7 +641,7 @@ function persistRecalled(cfg, runId, promptId, payload, outcome, resume = null) 
  * memory vocabulary, and a reply that happened to contain the word would score as an echo.
  *
  * @param {Record<string, any>} cfg
- * @param {string[]} blocks  every block injected in this message, in render order
+ * @param {string} block
  * @param {string} prompt
  * @returns {string[]}
  */
@@ -806,7 +829,7 @@ function breakerOpen(cfg) {
 // ---------------------------------------------------------------------------
 
 /**
- * The one place this hook builds its stdout, shared by all three paths that inject anything.
+ * The one place this hook builds its stdout, shared by every path that injects anything.
  *
  * There are up to two elements and the order between them is fixed: the **briefing first**,
  * then this turn's recall. The briefing is the older and wider context — it is about the run,
@@ -814,28 +837,36 @@ function breakerOpen(cfg) {
  * an afterthought to a question it was never about. It is also what makes a pointer in the
  * recall block honest: the full text really is earlier in the same message.
  *
+ * Pins are not a third element. They render inside `wrap`, above its caveat, because a pin is
+ * a standing instruction rather than a retrieved memory and must not be read under a sentence
+ * that says it may be out of date. That also means a turn with pins and nothing else still
+ * emits a `<mubit-memory>` envelope, with an empty block — which is what `pinsOnly` asks for.
+ *
  * The counts are summed rather than reported separately. `systemMessage` is one line by
  * contract, and "how much memory is in front of me and what did it cost" is one question; the
- * `· resume` suffix is what says the briefing was part of it, once, on the one prompt that
- * carries one.
+ * `· resume` and `· N pinned` suffixes say what else was in the message, once, and only on the
+ * turns that carried one.
  *
  * @param {string} runId
  * @param {Outcome} outcome           this turn's recall; `NO_RECALL` when there was none
  * @param {import('../../lib/resume.mjs').Resumed|null} resume
+ * @param {import('../../lib/pins.mjs').PinBlock} pins
  * @param {number} ms
  * @param {boolean} [carried]  the recall block came from the previous turn's refresh
  * @returns {Record<string, any>}
  */
-function injection(runId, outcome, resume, ms, carried = false) {
+function injection(runId, outcome, resume, pins, ms, carried = false) {
   const recallSources = outcome.refIds.length || outcome.sources;
   const resumeSources = resume ? (resume.refIds.length || resume.sources) : 0;
   const sources = recallSources + resumeSources;
   const tokens = outcome.tokens + (resume ? resume.tokens : 0);
+  const pinned = pins && pins.text ? pins : null;
 
   const parts = [];
   if (resume) parts.push(resumeWrap(runId, resumeSources, resume.tokens, resume.block));
-  if (outcome.block) {
-    parts.push(wrap(runId, recallSources, outcome.tokens, outcome.block, outcome.pointers, carried));
+  if (outcome.block || pinned) {
+    parts.push(
+      wrap(runId, recallSources, outcome.tokens, outcome.block, outcome.pointers, carried, pinned));
   }
 
   return {
@@ -844,7 +875,9 @@ function injection(runId, outcome, resume, ms, carried = false) {
       additionalContext: parts.join('\n'),
     },
     systemMessage: `mubit: ${sources} ${sources === 1 ? 'memory' : 'memories'}`
-      + `${DOT}${formatTokens(tokens)} tok${DOT}${ms}ms${resume ? `${DOT}resume` : ''}`,
+      + `${DOT}${formatTokens(tokens)} tok${DOT}${ms}ms`
+      + `${resume ? `${DOT}resume` : ''}`
+      + `${pinned ? `${DOT}${pinned.pins.length} pinned` : ''}`,
     suppressOutput: true,
   };
 }
@@ -882,6 +915,62 @@ function resumeWrap(runId, sources, tokens, block) {
 }
 
 /**
+ * The pinned block on a turn where recall contributed nothing — and `{suppressOutput: true}`
+ * when there is nothing pinned either.
+ *
+ * Every gate in this hook that used to return `SUPPRESS` now returns this instead, which is
+ * the whole of the "pins render where recall does not" rule. The read has already happened;
+ * this only decides whether there is anything to say.
+ *
+ * `pin_tokens` is stamped here rather than left to the caller because these are the paths
+ * where nothing else writes the `recall` group — a pinned turn under `recall: false` would
+ * otherwise be invisible in the one file that measures what injection costs.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {import('../../lib/pins.mjs').PinBlock} pins
+ * @param {string} runId
+ * @param {boolean} [stamped]  the caller has already written `pin_tokens` onto the marker
+ * @returns {Record<string, any>}
+ */
+function pinsOnly(cfg, pins, runId, stamped = false) {
+  if (!pins || !pins.text) return SUPPRESS;
+  if (!stamped) updateMarker(cfg, runId, { recall: { pin_tokens: pins.tokens } });
+  const n = pins.pins.length;
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'UserPromptSubmit',
+      additionalContext: wrap(runId, 0, 0, '', 0, false, pins),
+    },
+    systemMessage: `mubit: ${n} pinned${DOT}${formatTokens(pins.tokens)} tok`,
+    suppressOutput: true,
+  };
+}
+
+/**
+ * The same thing for the two gates that fire *before* the run id has been derived.
+ *
+ * They are left in their original order deliberately: `!cfg.recall` and the 8-character floor
+ * both used to return before any derivation, and moving them below it would put a possible
+ * `git rev-parse` in front of every two-word prompt for everyone. Deriving lazily, only on the
+ * gate that is actually taken, keeps that cost exactly where it already was on the main path.
+ *
+ * A derivation that cannot answer is not an error here — it is a run with no pins.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} payload
+ * @returns {Record<string, any>}
+ */
+function pinsGate(cfg, payload) {
+  try {
+    const runId = deriveRunId(cfg, payload);
+    return pinsOnly(cfg, readPins(cfg, runId), runId);
+  } catch {
+    // `static` with no pin, or a derivation that could only have answered "default" (§4.3).
+    return SUPPRESS;
+  }
+}
+
+/**
  * §5.2 stdout. The wrapper names the run and states what was spent, so a user reading the
  * transcript can see where the injected block came from — and so the model can tell injected
  * memory apart from its own reasoning.
@@ -903,24 +992,59 @@ function resumeWrap(runId, sources, tokens, block) {
  * than that it is one turn behind. One turn of staleness is the mode's whole cost; stating it
  * is far cheaper than hiding it.
  *
+ * ---------------------------------------------------------------------------
+ * Pins go ABOVE the caveat, and the caveat is conditional
+ * ---------------------------------------------------------------------------
+ * The "may be incomplete or out of date" line is about *retrieved* memory: a ranked guess
+ * over a token budget, possibly stale, never re-checked against the tree. A pin is none of
+ * those things — the user typed it a minute ago and it is true until they clear it. A model
+ * that reads the caveat as covering the pin will second-guess a standing constraint, which is
+ * the exact opposite of the point. Above it is the only placement where it does not.
+ *
+ * The caveat, the carried-block note and the pointer note are all conditional on there being
+ * a recalled block at all, because on a pins-only turn each of them describes an absence.
+ *
+ * The one clause that separates the two renders only when recalled memory follows: it is
+ * ~15 tokens spent telling them apart, and on a pins-only turn there is nothing to tell apart.
+ *
+ * **Not in `lib/assemble.mjs`.** Three reasons, each sufficient. `assembleContext`'s contract
+ * is that it reproduces what the server's rung 3 would render, and a client-only section
+ * inside it breaks that. Under `recallAssemble: server` rung 3 never passes through it, so
+ * pins would silently vanish for those users. And inside it a pin would be subject to the
+ * seen-set — a pin degraded to `(seen earlier)` is a pin that does nothing.
+ *
  * @param {string} runId @param {number} sources @param {number} tokens @param {string} block
  * @param {number} [pointers]
  * @param {boolean} [carried]  the block came from the previous turn's refresh
+ * @param {import('../../lib/pins.mjs').PinBlock|null} [pins]  the run's standing constraints
  * @returns {string}
  */
-function wrap(runId, sources, tokens, block, pointers = 0, carried = false) {
-  return `<mubit-memory run="${runId}" sources="${sources}" tokens="${tokens}">\n`
-    + 'Recalled from memory of earlier work — it may be incomplete or out of date, so verify '
-    + 'against the code before relying on it.\n'
-    + (carried
+function wrap(runId, sources, tokens, block, pointers = 0, carried = false, pins = null) {
+  const pinned = pins && pins.text ? pins : null;
+  const recalled = typeof block === 'string' && block !== '';
+  return `<mubit-memory run="${runId}" sources="${sources}" tokens="${tokens}"`
+    // Only when there are pins, so a user who has none gets the envelope they have always had.
+    + `${pinned ? ` pins="${pinned.pins.length}"` : ''}>\n`
+    + (pinned
+      ? `${pinned.text}${recalled
+        ? 'Those were pinned for this run and hold until they are cleared. Everything below '
+          + 'them was retrieved for this prompt.\n'
+        : ''}`
+      : '')
+    + (recalled
+      ? 'Recalled from memory of earlier work — it may be incomplete or out of date, so verify '
+        + 'against the code before relying on it.\n'
+      : '')
+    + (recalled && carried
       ? 'It was retrieved against the previous message in this conversation, not this one, '
         + 'so treat it as background rather than as an answer to what was just asked.\n'
       : '')
-    + (pointers > 0
+    + (recalled && pointers > 0
       ? `A line marked "${POINTER_MARK}" was injected in full earlier in this conversation `
         + 'and is repeated here only as a reference; ask mubit_dereference for its text.\n'
       : '')
-    + `\n${block.replace(/\s+$/, '')}\n</mubit-memory>`;
+    + (recalled ? `\n${block.replace(/\s+$/, '')}\n` : '')
+    + '</mubit-memory>';
 }
 
 /** `1187` → `1.2k`; small counts stay exact. @param {number} n @returns {string} */

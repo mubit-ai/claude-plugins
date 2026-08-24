@@ -183,6 +183,10 @@ const targets = [
   // is to run this file, so without the target the Codex copy of the skill names a path that
   // does not exist — the same first-run dead end `auth` would have.
   { entryPoints: [resolve(SHARED, 'bin', 'activity.src.mjs')], outfile: out('bin/activity.mjs'), ...shared },
+  // The pin binary, from the same shared source as the Claude Code copy. `/mubit-memory:pin`
+  // is the second skill that calls no MCP tool — the vendored server has no variables tool to
+  // call — so without this the skill on this host names a binary that does not exist.
+  { entryPoints: [resolve(SHARED, 'bin', 'pin.src.mjs')], outfile: out('bin/pin.mjs'), ...shared },
   // The dashboard binary, built from the same shared source as the Claude Code copy. Two
   // installable plugins cannot share a path — the same reason this tree carries its own
   // `mcp/dist/server.js` — so the bundle is emitted here rather than referenced across.

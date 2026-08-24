@@ -217,6 +217,13 @@ export function pruneStale(cfg = {}) {
       // abandoned before its first prompt leaves one behind, and it would otherwise sit in
       // the data directory for as long as the run does.
       expire(join(rd, 'resume.json'), 1 * HOUR);
+      // runs/<run_id>/pins.json — 7 d. Longer than the seen-set and the turns because a pin
+      // is scoped to a *run*, and under the default `per-directory` strategy a run is a
+      // project someone comes back to for weeks. It is a cache either way: the next drain
+      // re-derives it from the instance, and a sweep that fired early would only cost the
+      // prompts between it and that drain. Kept in the table rather than left out so a run
+      // nobody returns to does not leave a file behind for ever.
+      expire(join(rd, 'pins.json'), 7 * DAY);
       // runs/<run_id>/drain.lock — 60 s, stolen after
       expire(join(rd, 'drain.lock'), 60 * SEC);
       // runs/<run_id>/checkpoints.json — 30 d; jobs.json — 24 h

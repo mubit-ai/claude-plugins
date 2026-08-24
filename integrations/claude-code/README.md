@@ -127,6 +127,7 @@ an unwritable data dir, or a corrupt state file costs you a memory, never a turn
 | `/mubit-memory:checkpoint` | Save a named snapshot of where a run has got to, stored verbatim, before risky work. The half of `PreCompact` you can ask for. |
 | `/mubit-memory:memory-health` | Report what is actually stored: entry counts, staleness, contradictions. The store, not the connection. |
 | `/mubit-memory:activity` | The audit question: what does this instance actually hold, filtered by time, type, agent or origin — and an export of the whole record as JSONL you can keep. Prints to stdout; writes a file only if you ask. Also not model-invocable. |
+| `/mubit-memory:pin` | Pin a standing constraint for the rest of this run — "don't touch the vendored server" — so it is put in front of the model on every prompt, including the ones recall skips. Cleared when it stops being true; a durable, cross-session rule is `remember` instead. |
 | `@mubit-memory:mubit-recall` | Subagent: multi-angle memory search in an isolated context, returns a synthesis instead of raw evidence. |
 
 ### Thirteen MCP tools
@@ -301,6 +302,7 @@ that cache, and writing credentials invalidates it immediately rather than after
 | `resumeBlock` | `true` | `MUBIT_CC_RESUME_BLOCK` | Open a session with a briefing on where earlier work left off. `SessionStart` spawns a detached child that asks `/v2/control/context` for a sections block about this run, and the first substantive prompt of the session renders it above the ordinary recall block. **The one opt-in feature here that ships on**, because its cost is per *session* and not per prompt: one background process and **2 LLM calls once**, against the prompt where the model knows least about what it is walking into — nothing waits for it, and no prompt after the first pays anything. Only `startup` and `resume` sessions get one: `/clear` starts a fresh run with no history, and a compaction or a fork is already re-anchored. It renders as `<mubit-resume>` and says, in the block, that it is a briefing and not a task list. **How much it can describe depends on `runStrategy`.** `/v2/control/context` is *mostly* run-scoped — activity, working memory, rules and archived blocks all come from the run id you give it — but lessons also reach across runs, through linked runs and a session/global lesson lane. So under the default `per-directory` the block summarises everything this project has ever done; under `per-conversation`, where every session is its own run, a new session's own run is empty and the block falls back to whatever cross-run lessons apply — thinner, but not nothing. Set `MUBIT_CC_RESUME_TOKENS` to change its 1000-token ceiling. |
 | `mcpTools` | `""` (the curated thirteen) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
 | `mcpLessonScope` | `run` | `MUBIT_MCP_LESSON_SCOPE` | The widest scope a lesson written by an MCP tool may claim: `run`, `session` or `global`. Anything above `run` is read back by unrelated runs, so the default keeps an agent-written lesson in the run that wrote it — with `runStrategy: per-directory`, that is the project it was written in. Raise it if you want agent-written rules to follow you between projects; reflection promotes a lesson beyond its run either way. |
+| `pins` | `true` | `MUBIT_CC_PINS` | Put the constraints pinned with `/mubit-memory:pin` in front of the model on every prompt of the run. A pin is a sentence that is true for *this task* — "don't touch the vendored server", "no new dependencies until this PR lands" — and before this existed the only place to put one was memory, where it became a durable lesson and was recalled into every later session of a project where it had stopped being true. Pins render above the recalled block and, unlike recall, on the prompts recall skips: a two-word answer, an open circuit breaker, a recall that failed or found nothing. Capped at five pins, 200 characters each and 240 rendered tokens — tight, because a pin is unranked and never degrades to a pointer, so it is the most expensive context the plugin injects per unit of information. It costs **0 extra requests on the prompt path**: the hook reads one file, and the refresh rides in the detached drainer. Counted separately as `recall.pin_tokens`, so `recall.tokens` keeps meaning what recall cost. Off makes the feature invisible — the injected block is byte-for-byte what it was without it. |
 
 ### Environment-only settings
 
@@ -351,6 +353,47 @@ You can tell this is what is happening from the status line — `recall dry N` a
 consecutive empty recalls — or from `/mubit-memory:doctor`, which reads `recall.empty_reason`
 and names `policy_denied` specifically. Note that the connection state stays `ready`
 throughout, because nothing is wrong with the connection.
+
+### Pinning a constraint for one task
+
+Some rules are true for an afternoon. "Don't touch the vendored server." "No new dependencies
+until this PR lands." "Stay on 0.10." They are not lessons — a lesson is durable and crosses
+sessions, and saving one of these as a lesson means it comes back six months later in a project
+where it stopped being true the day the task ended. Until this existed there was nowhere else
+to put them, so that is exactly what happened.
+
+```
+/mubit-memory:pin don't touch the vendored server
+/mubit-memory:pin list
+/mubit-memory:pin clear vendored
+```
+
+A pin renders above the recalled block on every prompt of the run, in full, with a line telling
+the model which half is which — pins are an instruction, and the "may be out of date, verify
+before relying on it" caveat that guards recalled memory is about *retrieved* memory and would
+teach the model to second-guess a constraint the user set a minute ago.
+
+It also renders where recall does not: on a two-word answer, with `recall` switched off, on a
+recall that failed or came back empty, and while the circuit breaker is open. That last one is
+the case it was built for — the endpoint being down does not make a standing constraint less
+true, and it is exactly when the model has nothing else to go on.
+
+**It costs no requests on the prompt path.** The hook reads one file; the refresh from the
+instance rides in the detached drainer that is already running, at most once a minute. Pins are
+stored on your instance as run-scoped variables, so a second terminal in the same run sees
+them — and a pin the instance did not accept is not written locally at all, because a pin that
+exists only on one machine is one you believe is shared and is not.
+
+Five pins, 200 characters each, 240 rendered tokens, and the command refuses anything over that
+rather than truncating your words. They are tight because a pin has neither of the properties
+that make recall affordable: it is not ranked against the prompt, and it never degrades to a
+one-line pointer once the model has seen it. Six standing constraints is not a set of
+constraints, it is a document, and a document belongs in `CLAUDE.md` where it costs nothing per
+prompt. The pinned tokens are reported separately from `recall.tokens`, as `recall.pin_tokens`,
+so recall's own cost keeps meaning what it always did.
+
+Subagents do not get pins yet: `SubagentStart` injects its own, smaller recalled block and does
+not read them.
 
 ### When recall is slow rather than empty
 

@@ -103,6 +103,7 @@ The settings worth knowing, all `MUBIT_CC_*` unless noted:
 | `MUBIT_CC_REFLECT_ON_END` | `1` | Reflect at session end. Off costs cross-session memory entirely. |
 | `MUBIT_CC_SESSION_END_DETACH` | `1` | Finish the end-of-session flush in a detached process. **Leave this on under Codex** — see below. |
 | `MUBIT_CC_PRE_TOOL_WARNINGS` | `0` | Show a stored rule before a matching tool call. It only ever warns. |
+| `MUBIT_CC_PINS` | `1` | Render the constraints pinned with the `pin` skill above the recalled block on every prompt of the run — including the prompts recall skips. Capped at five pins, 200 characters each and 240 tokens; costs no extra request on the prompt path. Off restores the injected block exactly. |
 | `MUBIT_CC_DATA_DIR` | — | Overrides where state lives. Highest precedence of any data-dir input. |
 | `MUBIT_CC_STATUSLINE` | `0` here | Defaults **off** under Codex, whose status line is a fixed list of built-in item ids with nothing scriptable in it. |
 
@@ -160,10 +161,12 @@ Listed to the model as `mubit-memory:<name>`:
 | `reflect` | Extract lessons from this run now, rather than at session end. |
 | `forget` | Delete an entry, or down-weight one that is merely wrong. |
 | `doctor` | Diagnose. Its step 0 is the Codex-specific one: hooks that were never trusted. |
+| `dashboard` | Open a local page over the lessons, the per-prompt recall cost and ingest health. Loopback only. |
 | `strategies` | Read the pattern *across* many lessons rather than any single one. |
 | `checkpoint` | Save a named snapshot of where the run has got to, verbatim, before risky work. |
 | `memory-health` | Report what is actually stored: counts, staleness, contradictions. The store, not the connection. |
 | `activity` | The audit question: what this instance actually holds, filtered by time, type, agent or origin — and an export of the whole record as JSONL. Prints to stdout; writes a file only if asked. |
+| `pin` | Pin a standing constraint for the rest of this run — "don't touch the vendored server" — so it is put in front of the model on every prompt, including the ones recall skips. A pin is cleared when it stops being true; a durable, cross-session rule is `remember`. |
 
 There is no `mubit-recall` subagent here. Codex has no plugin-defined agent types — every
 `SubagentStart` reports `agent_type: "default"` — so a markdown subagent would be a file

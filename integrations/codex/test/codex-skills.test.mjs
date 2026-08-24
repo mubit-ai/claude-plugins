@@ -47,6 +47,7 @@ const SKILLS = [
   'checkpoint',
   'memory-health',
   'activity',
+  'pin',
 ];
 
 /**
@@ -454,4 +455,50 @@ test('activity: does not name a script this plugin does not ship', () => {
     'naming it sends a user to a path that does not exist in an installed plugin');
   assert.match(body, /Turns/,
     'per-prompt cost lives in the dashboard\'s Turns tab; this skill cannot answer it');
+});
+
+// ===========================================================================
+// pin
+// ===========================================================================
+
+/**
+ * Codex reads a skill's `name` and `description` and nothing else, so the description IS the
+ * routing decision — and this is the one skill where routing wrongly does damage rather than
+ * nothing. When the user says "for the rest of this, don't touch the vendored server", the
+ * alternative to reaching `pin` is writing a *lesson*: a durable, cross-session claim about a
+ * project where that sentence stops being true when the task ends.
+ */
+test('pin: the description draws the line against remember', () => {
+  const { meta, body } = read('pin');
+  const description = String(meta.description ?? '');
+
+  assert.match(description, /\brun\b/i,
+    'a pin is scoped to this run — that is the whole distinction, and it belongs in the one '
+    + 'field Codex actually puts in front of the model.');
+  assert.match(description, /remember/,
+    'the description is where the model chooses between the two commands, so it has to name '
+    + 'the other one.');
+  assert.match(body, /cross-session|every future session/i,
+    '"durable" with no consequence attached is an adjective, not a rule.');
+});
+
+// § The Codex copy cannot say `${CLAUDE_PLUGIN_ROOT}`: the host sets no plugin-root variable
+//   of any spelling, so the shell expands it to nothing and `node /bin/pin.mjs` is an ENOENT.
+test('pin: the commands resolve the binary the way Codex requires', () => {
+  const { fenced, body } = read('pin');
+  assert.ok(!fenced.includes('CLAUDE_PLUGIN_ROOT'),
+    'a fenced command carrying ${CLAUDE_PLUGIN_ROOT} runs as `node /bin/pin.mjs` under Codex.');
+  assert.match(body, /plugin-root/i, 'the skill must tell the model how to find its own binary.');
+  assert.match(fenced, /bin\/pin\.mjs/, 'and the commands have to name it.');
+});
+
+// § The caps are refusals a user will hit. A refusal with no reason reads as a bug, and gets
+//   worked around by shortening the user's words — which changes the constraint.
+test('pin: states the caps and why a pin is expensive', () => {
+  const { body } = read('pin');
+  assert.match(body, /\b5\b|\bfive\b/i);
+  assert.match(body, /200/);
+  assert.match(body, /every prompt|each prompt/i);
+  assert.match(body, /never\s+(attempt\s+to\s+)?install|do not install|don't install/i,
+    'a memory plugin running installers is a trust failure.');
 });

@@ -1165,3 +1165,476 @@ test('a failed recall marks nothing as seen', async (t) => {
       `${id} was counted as shown again by a turn that showed nothing`);
   }
 });
+
+// ===========================================================================
+// W2-4 — pinned context
+// ===========================================================================
+
+/**
+ * A pin is a standing constraint the user set for this run — "for the rest of this, don't
+ * touch the vendored server". It is neither a recalled memory nor a lesson: it holds for
+ * exactly as long as the user says it does, and it has to reach the model on the turns where
+ * recall reaches it with nothing at all.
+ *
+ * Everything below turns on one property, which is why the first assertion is an *absence*:
+ * rendering a pin costs **zero HTTP requests**. `readPins` is one `readJson` on a hook that
+ * blocks every prompt inside a 1500 ms budget; the network half lives in the detached
+ * drainer. A mock could not fail that assertion — only a real socket count can.
+ */
+
+import { mkdirSync } from 'node:fs';
+
+/** `${dataDir}/runs/<run_id>/pins.json` — what the drainer's refresh leaves for the hook. */
+const pinsPath = (d) => join(d, 'runs', RUN_ID, 'pins.json');
+
+/**
+ * Hand-write the pin cache.
+ *
+ * Deliberately not built through `lib/pins.mjs`: the file is a contract between a detached
+ * writer and a blocking reader, and a fixture written by the same code that reads it cannot
+ * see the two drift apart.
+ */
+function writePins(dir, server, pins, over = {}) {
+  mkdirSync(join(dir, 'runs', RUN_ID), { recursive: true });
+  writeFileSync(pinsPath(dir), JSON.stringify({
+    v: 1,
+    run_id: RUN_ID,
+    endpoint: server ? server.url : 'http://127.0.0.1:1',
+    at: Date.now(),
+    pins: pins.map((p, i) => (typeof p === 'string'
+      ? { slug: `pin-${i + 1}`, text: p, at: Date.now() }
+      : p)),
+    ...over,
+  }));
+}
+
+const PIN_ONE = "don't touch the vendored server";
+const PIN_TWO = 'the codex twin ships with every skill';
+
+/** The heading the block renders pins under. */
+const PIN_HEADING = '## Pinned for this run';
+
+// ---------------------------------------------------------------------------
+// The promise: a pinned block costs nothing on the wire
+// ---------------------------------------------------------------------------
+
+// The whole design rests on this. If rendering a pin could dial, a standing constraint would
+// become the most expensive thing in the plugin rather than the cheapest. `MUBIT_CC_RECALL=0`
+// removes the recall request, so the socket count here is *only* the pins path.
+test('pins: a pinned block renders with zero HTTP requests', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  writePins(dir, server, [PIN_ONE]);
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(dir, server, { MUBIT_CC_RECALL: '0' }),
+  });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0,
+    `rendering a pin must not dial anything; saw: ${server.summary()}`);
+  assert.ok(r.json?.hookSpecificOutput?.additionalContext?.includes(PIN_ONE),
+    'the pin never reached the model');
+});
+
+// The case that matters most, and the one a naive implementation loses: the endpoint is down,
+// recall is contributing nothing at all, and a standing constraint is the only thing standing
+// between the model and the mistake the user pinned it to prevent.
+test('pins: an open breaker still renders them, and still dials nothing', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { status: 500, json: { error: 'boom' } },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server, { MUBIT_CC_BREAKER_THRESHOLD: '2' });
+
+  await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_a' }), { env: e });
+  await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_b' }), { env: e });
+
+  writePins(dir, server, [PIN_ONE]);
+  server.reset();
+  const r = await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_c' }), { env: e });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0,
+    `the breaker short-circuit must survive; saw: ${server.summary()}`);
+  assert.ok(r.json?.hookSpecificOutput?.additionalContext?.includes(PIN_ONE),
+    'an open breaker is exactly when a standing constraint matters most');
+});
+
+// An empty recall injects nothing at all — that is deliberate, and it must not take the pins
+// down with it.
+test('pins: an empty recall still renders them', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: [] }) },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  writePins(dir, server, [PIN_ONE]);
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+
+  assertHookContract(r);
+  const ctx = r.json?.hookSpecificOutput?.additionalContext ?? '';
+  assert.ok(ctx.includes(PIN_ONE), 'an empty recall injects nothing; a pin is not "nothing"');
+  assert.ok(!/Recalled from memory of earlier work/.test(ctx),
+    'nothing was recalled, so the caveat about recalled memory must not be printed');
+});
+
+// A recall that failed leaves the model with no memory at all. Same rule.
+test('pins: a failed recall still renders them', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { status: 500, json: { error: 'boom' } },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  writePins(dir, server, [PIN_ONE]);
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+
+  assertHookContract(r);
+  assert.ok(r.json?.hookSpecificOutput?.additionalContext?.includes(PIN_ONE));
+});
+
+// ---------------------------------------------------------------------------
+// The tax guard
+// ---------------------------------------------------------------------------
+
+/**
+ * **The regression test for everybody who is not using this feature.**
+ *
+ * Every assertion in this file about an exact `additionalContext` is green only because its
+ * fixture has no `pins.json`. That is an accident of the fixtures until something pins it
+ * deliberately, and this is that something: with no pins, the injected block is byte-for-byte
+ * what it was before pinning existed — no attribute on the envelope, no heading, not one
+ * space.
+ *
+ * The literal is the output captured from the tree before `wrap()` was touched.
+ */
+test('pins: with none set the injected block is byte-identical to the block before pins existed', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+
+  assertHookContract(r);
+  assert.equal(r.json.hookSpecificOutput.additionalContext,
+    '<mubit-memory run="cc-test-run-1" sources="3" tokens="51">\n'
+    + 'Recalled from memory of earlier work — it may be incomplete or out of date, so verify '
+    + 'against the code before relying on it.\n'
+    + '\n'
+    + '## Active rules\n'
+    + '- Ingest returns when queued, not when stored; poll the job.\n'
+    + '\n'
+    + '## Lessons\n'
+    + '- A job stays queued until indexing completes.\n'
+    + '\n'
+    + '## Facts\n'
+    + '- IngestAccepted.status is always "queued" on success.\n'
+    + '</mubit-memory>',
+    'a user with no pins must pay nothing for the feature — not a token, not a byte');
+});
+
+// The same guard from the other side: the feature switched off restores the block exactly,
+// even with a cache sitting on disk. Without this, "turn it off" would mean "turn most of it
+// off", which is not an escape hatch anybody can rely on.
+test('pins: MUBIT_CC_PINS=0 restores the block byte for byte', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const plain = await runHook('prompt-recall', userPromptSubmit(),
+    { env: env(makeDataDir(), server) });
+  assertHookContract(plain);
+
+  const withCache = makeDataDir();
+  writePins(withCache, server, [PIN_ONE, PIN_TWO]);
+  const off = await runHook('prompt-recall', userPromptSubmit(),
+    { env: env(withCache, server, { MUBIT_CC_PINS: '0' }) });
+  assertHookContract(off);
+
+  assert.equal(off.json.hookSpecificOutput.additionalContext,
+    plain.json.hookSpecificOutput.additionalContext,
+    'the flag is off, so the pin cache on disk must be invisible');
+});
+
+// ---------------------------------------------------------------------------
+// Placement
+// ---------------------------------------------------------------------------
+
+/**
+ * Pins go **above** the "may be incomplete or out of date" caveat.
+ *
+ * That caveat is about *retrieved* memory — a ranked guess over a token budget, which may be
+ * stale and was not re-checked against the working tree. A pin is none of those things: the
+ * user typed it a minute ago and it is true until they say otherwise. A model that reads the
+ * caveat as covering the pin will second-guess a standing constraint, which is the exact
+ * opposite of what pinning is for.
+ */
+test('pins: render first, above the caveat, and are marked off from recalled memory', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  writePins(dir, server, [PIN_ONE, PIN_TWO]);
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  assertHookContract(r);
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+
+  const pinAt = ctx.indexOf(PIN_HEADING);
+  const caveatAt = ctx.indexOf('Recalled from memory of earlier work');
+  const recallAt = ctx.indexOf('## Active rules');
+  assert.ok(pinAt >= 0, `no pinned section in:\n${ctx}`);
+  assert.ok(caveatAt >= 0 && recallAt >= 0, 'this fixture recalls, so both must be present');
+  assert.ok(pinAt < caveatAt,
+    'the caveat is about retrieved memory; above it is the only place a pin is not covered by it');
+  assert.ok(caveatAt < recallAt, 'the caveat still introduces the recalled block');
+  assert.ok(ctx.includes(PIN_ONE) && ctx.includes(PIN_TWO), 'both pins must render');
+});
+
+// The clause that tells the two apart is worth ~15 tokens and is only worth them when there
+// is something to tell it apart *from*. On a pins-only turn it is noise about an absence.
+test('pins: the contrast clause renders only when recalled memory follows', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: [] }) },
+  });
+  t.after(() => server.close());
+
+  const alone = makeDataDir();
+  writePins(alone, server, [PIN_ONE]);
+
+  const only = await runHook('prompt-recall', userPromptSubmit(), { env: env(alone, server) });
+  assertHookContract(only);
+  const onlyCtx = only.json.hookSpecificOutput.additionalContext;
+  assert.ok(onlyCtx.includes(PIN_ONE));
+  assert.ok(!/retrieved for this prompt/i.test(onlyCtx),
+    'nothing was retrieved, so there is nothing to contrast the pin with');
+
+  const full = await fakeMubit();
+  t.after(() => full.close());
+  const both = makeDataDir();
+  writePins(both, full, [PIN_ONE]);
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(both, full) });
+  assertHookContract(r);
+  assert.match(r.json.hookSpecificOutput.additionalContext, /retrieved for this prompt/i,
+    'with recalled memory below it, the model needs one line saying which is which');
+});
+
+// ---------------------------------------------------------------------------
+// Identity — a pin is not a memory
+// ---------------------------------------------------------------------------
+
+/**
+ * A pin never enters `recalled[]` and never enters `seen.json`.
+ *
+ * Both would be category errors with real costs. `recalled[]` is what `Stop` attributes a
+ * turn's outcome against, and crediting a pin would reinforce or penalise an entry that was
+ * never retrieved — there is no entry. The seen-set degrades a repeat into a pointer, and a
+ * standing constraint degraded to "(seen earlier)" is a constraint that does nothing.
+ */
+test('pins: never land in recalled[] and never enter the seen-set', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  writePins(dir, server, [{ slug: 'vendored', text: PIN_ONE, at: Date.now() }]);
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) }));
+
+  const staged = turn(dir);
+  assert.ok(!staged.recalled.includes('vendored'),
+    'a pin has no reference_id, so nothing about it can be attributed');
+  assert.ok(!JSON.stringify(staged.recalled).includes('pin'),
+    `pins leaked into recalled[]: ${JSON.stringify(staged.recalled)}`);
+
+  const seen = readJsonFile(seenPath(dir));
+  assert.ok(!JSON.stringify(seen).includes('vendored'),
+    'a pin degraded to "(seen earlier)" on the second prompt is a pin that stopped working');
+});
+
+// The second prompt is where a seen-set bug would show: the pin must render in full again.
+test('pins: render in full on every prompt, never degraded to a pointer', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  writePins(dir, server, [PIN_ONE]);
+  const e = env(dir, server);
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_1' }), { env: e }));
+  const second = await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_2' }), { env: e });
+  assertHookContract(second);
+
+  const ctx = second.json.hookSpecificOutput.additionalContext;
+  assert.ok(ctx.includes(PIN_ONE), 'the constraint is still true on the second prompt');
+  assert.ok(!/\(seen earlier\)[^\n]*don't touch/.test(ctx),
+    'a pin is not a repeat to be degraded — it is a standing instruction');
+});
+
+// ---------------------------------------------------------------------------
+// The marker split
+// ---------------------------------------------------------------------------
+
+/**
+ * `recall.tokens` keeps its meaning exactly: what *recall* cost. Pins are counted beside it
+ * in `recall.pin_tokens`.
+ *
+ * Folding them together would silently corrupt every recall-cost measurement the plugin has
+ * ever taken — the dashboard's per-turn cost, `dry_streak`, and the whole argument for the
+ * seen-set. `test/statusline.test.mjs` is untouched by this ticket for the same reason: if it
+ * reddens, this split was done wrong.
+ */
+test('pins: are counted in recall.pin_tokens and left out of recall.tokens', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const plain = makeDataDir();
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: env(plain, server) }));
+  const base = marker(plain).recall;
+
+  const pinned = makeDataDir();
+  writePins(pinned, server, [PIN_ONE, PIN_TWO]);
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: env(pinned, server) }));
+  const withPins = marker(pinned).recall;
+
+  assert.equal(withPins.tokens, base.tokens,
+    'recall.tokens is what recall cost; a pin is not recall');
+  assert.equal(withPins.sources, base.sources, 'a pin is not a source');
+  assert.ok(withPins.pin_tokens > 0,
+    'the pinned tokens are real context spend and must be measurable somewhere');
+  assert.equal(base.pin_tokens ?? 0, 0, 'no pins, no pin tokens');
+});
+
+// ---------------------------------------------------------------------------
+// The gate matrix
+// ---------------------------------------------------------------------------
+
+// `recall: false` turns *recall* off. It is not a switch for "inject nothing ever" — the user
+// who set it is the user most likely to be leaning on a pin instead.
+test('pins: render even with recall turned off entirely', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  writePins(dir, server, [PIN_ONE]);
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(dir, server, { MUBIT_CC_RECALL: '0' }),
+  });
+  assertHookContract(r);
+  assert.ok(r.json?.hookSpecificOutput?.additionalContext?.includes(PIN_ONE));
+});
+
+// "ok" carries no retrievable intent — which is a statement about *retrieval*. A standing
+// constraint applies to "ok, do it" exactly as much as to a paragraph.
+test('pins: render on a prompt too short to recall against', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  writePins(dir, server, [PIN_ONE]);
+
+  const r = await runHook('prompt-recall', userPromptSubmit({ prompt: 'yes' }), {
+    env: env(dir, server),
+  });
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0, `saw: ${server.summary()}`);
+  assert.ok(r.json?.hookSpecificOutput?.additionalContext?.includes(PIN_ONE));
+});
+
+// The two gates that stay closed. A slash command is addressed to the harness, not the model,
+// and an unconfigured install must not pay a run-id derivation per prompt to learn it has
+// nothing to say.
+test('pins: a slash command and an unconfigured install still inject nothing', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const slash = makeDataDir();
+  writePins(slash, server, [PIN_ONE]);
+  const a = await runHook('prompt-recall', userPromptSubmit({ prompt: '/mubit-memory:doctor check' }),
+    { env: env(slash, server) });
+  assertHookContract(a);
+  assert.equal(a.json?.hookSpecificOutput, undefined,
+    'recalling into a memory command is what this gate exists to stop; a pin is no different');
+
+  const blank = makeDataDir();
+  writePins(blank, null, [PIN_ONE]);
+  const b = await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(blank, server, { MUBIT_ENDPOINT: '' }),
+  });
+  assertHookContract(b);
+  assert.equal(b.json?.hookSpecificOutput, undefined,
+    'with no endpoint there is nothing behind the pin cache, and no run to key it by');
+});
+
+// ---------------------------------------------------------------------------
+// Carry-forward
+// ---------------------------------------------------------------------------
+
+// Under `recallAsync` the hook does not dial at all. Pins ride the same synchronous path and
+// must render both with a carried block and — the first prompt of a session — without one.
+test('pins: render under recallAsync, with and without a carried block', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  writePins(dir, server, [PIN_ONE]);
+  const e = env(dir, server, { MUBIT_CC_RECALL_ASYNC: '1' });
+
+  // First prompt: no carry file exists yet, so recall contributes nothing.
+  const first = await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_c1' }), { env: e });
+  assertHookContract(first);
+  assert.ok(first.json?.hookSpecificOutput?.additionalContext?.includes(PIN_ONE),
+    'the first prompt of an async session has no recalled memory; the pin is all there is');
+
+  // A block the previous turn's refresh left behind.
+  writeFileSync(join(dir, 'runs', RUN_ID, 'carry.json'), JSON.stringify({
+    run_id: RUN_ID, written_at: Date.now(), for_prompt_id: 'p_c1', fetch_ms: 12,
+    rung: 1, block: '## Lessons\n- CARRIED_LESSON\n', tokens: 9, sources: 1,
+    dropped: 0, pointers: 0, empty_reason: '', ref_ids: ['ref_carried'],
+  }));
+
+  const second = await runHook('prompt-recall', userPromptSubmit({ prompt_id: 'p_c2' }), { env: e });
+  assertHookContract(second);
+  const ctx = second.json.hookSpecificOutput.additionalContext;
+  assert.ok(ctx.includes(PIN_ONE) && ctx.includes('CARRIED_LESSON'));
+  assert.ok(ctx.indexOf(PIN_HEADING) < ctx.indexOf('retrieved against the previous message'),
+    'the pin was not retrieved against anything; the staleness note is about the carried block');
+});
+
+// ---------------------------------------------------------------------------
+// Totality at the render edge
+// ---------------------------------------------------------------------------
+
+// A pin cache written by another instance, or by another run, must never render. It is the
+// rule `readHealthCache` already applies, and for the same reason: switching endpoints must
+// not inherit the other one's answers.
+test('pins: a cache from another run or another endpoint is ignored', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const otherRun = makeDataDir();
+  writePins(otherRun, server, [PIN_ONE], { run_id: 'cc-some-other-run' });
+  const a = await runHook('prompt-recall', userPromptSubmit(), { env: env(otherRun, server) });
+  assertHookContract(a);
+  assert.ok(!a.json.hookSpecificOutput.additionalContext.includes(PIN_ONE),
+    'a pin belongs to the run it was set in');
+
+  const otherEndpoint = makeDataDir();
+  writePins(otherEndpoint, server, [PIN_ONE], { endpoint: 'https://elsewhere.example.com' });
+  const b = await runHook('prompt-recall', userPromptSubmit(), { env: env(otherEndpoint, server) });
+  assertHookContract(b);
+  assert.ok(!b.json.hookSpecificOutput.additionalContext.includes(PIN_ONE),
+    'switching instances must not inherit the other instance\'s standing constraints');
+});
+
+// A truncated file is the ordinary state of a data dir after a SIGKILL. It costs the pins and
+// nothing else — the recall block still renders and the hook still exits 0.
+test('pins: a truncated cache costs the pins and not the prompt', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  mkdirSync(join(dir, 'runs', RUN_ID), { recursive: true });
+  writeFileSync(pinsPath(dir), '{"v":1,"run_id":"cc-test-run-1","pins":[{"slug"');
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) });
+  assertHookContract(r);
+  assert.match(r.json.hookSpecificOutput.additionalContext, /## Active rules/,
+    'a broken pin cache must not take recall down with it');
+});

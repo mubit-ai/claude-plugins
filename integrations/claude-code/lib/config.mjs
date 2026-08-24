@@ -511,6 +511,16 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // it could write a tenant-wide rule.
   const mcpLessonScope = enumOf(pick('mcpLessonScope', 'MUBIT_MCP_LESSON_SCOPE'),
     ['run', 'session', 'global'], 'run');
+  // W2-4 — pinned context. On (the default), a constraint the user pins for this run with
+  // `/mubit-memory:pin` is rendered above the recalled block on every prompt, including the
+  // prompts recall itself skips: an open breaker, `recall: false`, a two-word answer.
+  //
+  // A switch rather than a budget, because the budget is not the user's problem to manage —
+  // `lib/pins.mjs` caps the set at five pins, 200 characters each and 240 rendered tokens, at
+  // write time *and* at render time. What a user might reasonably want is for the feature not
+  // to exist, and off means exactly that: the cache on disk becomes invisible and the injected
+  // block goes back to being byte-for-byte what it was before pins existed.
+  const pins = bool(pick('pins', 'MUBIT_CC_PINS'), true);
 
   // §6.1 environment-only rows -------------------------------------------
   const only = (envVar, key) => {
@@ -583,6 +593,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    pins,
     denyGlobs,
     respectGitignore,
     maxParamBytes,

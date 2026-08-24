@@ -58,7 +58,7 @@ env | grep -iE '^(MUBIT|CLAUDE_PLUGIN)' | sed 's/\(MUBIT_API_KEY=.\{0,10\}\).*/\
 Now paste this whole block into the terminal you will use for the rest of the run:
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/hs-6-async-recall/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export SCRATCH=/tmp/mubit-hs6
 export DATA=/tmp/mubit-hs6-data     # the async arm
 export SYNC=/tmp/mubit-hs6-sync     # the blocking arm, kept separate so the counters are clean
@@ -87,7 +87,7 @@ echo "endpoint $MUBIT_ENDPOINT"
 **Expect**
 
 ```
-plugin   /Users/eldaru/Mubit/hs-6-async-recall/integrations/claude-code
+plugin   $HOME/src/claude-plugins/integrations/claude-code
 data     /tmp/mubit-hs6-data (async) / /tmp/mubit-hs6-sync (blocking)
 endpoint http://127.0.0.1:3199
 ```

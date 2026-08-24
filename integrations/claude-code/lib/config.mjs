@@ -456,6 +456,20 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // manifest fields are real but static, so a flag expressed there would need two competing
   // registrations and would cost a second process per prompt to everyone, opted in or not.
   const recallAsync = bool(pick('recallAsync', 'MUBIT_CC_RECALL_ASYNC'), false);
+  // §5.2 — whether recall may ask the server for its cross-run lesson overlay: lessons
+  // learned in OTHER runs, surfaced alongside this run's own memory. It is real value, and it
+  // is billed on a lane that cannot be bounded by a run id, so its cost tracks the size of the
+  // whole instance and grows on its own as one fills up. On a hosted instance today it is
+  // ~1.7s of a ~2.0s recall — five times the rest of the query put together, for the one
+  // extra item it returned in every measurement.
+  //
+  // `auto` (the default) spends it where there is room and declines it where there is not,
+  // reading the budget the caller already passed rather than asking anyone to choose: a hook
+  // answering inside the host's prompt timeout declines, `recallAsync`'s detached refresh
+  // takes it. `on` pays for it everywhere — coherent only with `recallAsync` on, or a
+  // `timeoutMs` and a `recallBudgetMs` raised together to fund it. `off` never asks.
+  const recallCrossRun = enumOf(pick('recallCrossRun', 'MUBIT_CC_RECALL_CROSS_RUN'),
+    ['auto', 'on', 'off'], 'auto');
   const reflectOnEnd = bool(pick('reflectOnEnd', 'MUBIT_CC_REFLECT_ON_END'), true);
   // §5.7 runs in a process the host is free to take away: under `--print` Claude Code emits
   // its result and *cancels* SessionEnd about a second in, and interactive sessions are
@@ -490,7 +504,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // on for one run, measure how often it fires and on what, and decide from data whether the
   // matching is good enough to be worth anyone's attention.
   const preToolWarnings = bool(pick('preToolWarnings', 'MUBIT_CC_PRE_TOOL_WARNINGS'), false);
-  // W2-2 — the resume briefing. On, `SessionStart` spawns a detached child that asks
+  // The resume briefing. On, `SessionStart` spawns a detached child that asks
   // `/v2/control/context` what the next agent on this run needs to know, and the first
   // substantive prompt of the session renders it above ordinary recall.
   //
@@ -511,7 +525,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // it could write a tenant-wide rule.
   const mcpLessonScope = enumOf(pick('mcpLessonScope', 'MUBIT_MCP_LESSON_SCOPE'),
     ['run', 'session', 'global'], 'run');
-  // W2-4 — pinned context. On (the default), a constraint the user pins for this run with
+  // Pinned context. On (the default), a constraint the user pins for this run with
   // `/mubit-memory:pin` is rendered above the recalled block on every prompt, including the
   // prompts recall itself skips: an open breaker, `recall: false`, a two-word answer.
   //
@@ -582,6 +596,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     recallFallback,
     recallRankBy,
     recallAsync,
+    recallCrossRun,
     recallSections,
     resumeBlock,
     resumeTokenBudget,

@@ -454,7 +454,7 @@ test('--pre leaves the seen-set alone', async (t) => {
     'the model still has the whole transcript when --pre runs');
 });
 
-// W2-2: the same reset, applied to the resume briefing. A session that compacted before its
+// The same reset, applied to the resume briefing. A session that compacted before its
 // first substantive prompt has one still on disk describing the run in the shape it had
 // before the transcript was rewritten. `session-start` re-anchors a compacted run through the
 // checkpoint id instead, which is the same job against a conversation that is actually there.

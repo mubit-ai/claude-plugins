@@ -43,7 +43,7 @@ than inherited, so paste this whole block into the terminal you will use for the
 run:
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/hs-2-mcp-instructions/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export DATA=/tmp/mubit-hs2-data
 export SCRATCH=/tmp/mubit-hs2
 
@@ -68,7 +68,7 @@ echo "scratch $SCRATCH"
 **Expect**
 
 ```
-plugin  /Users/eldaru/Mubit/hs-2-mcp-instructions/integrations/claude-code
+plugin  $HOME/src/claude-plugins/integrations/claude-code
 data    /tmp/mubit-hs2-data
 scratch /tmp/mubit-hs2
 ```

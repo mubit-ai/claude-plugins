@@ -400,6 +400,22 @@ test('recall-refresh ranks a handoff prompt by freshness, exactly as the blockin
   assert.equal(body.query, 'catch me up on where we left off');
 });
 
+// The whole point of moving recall off the prompt is that the expensive lane becomes
+// affordable again. If the detached half inherited the blocking half's opt-out, `recallAsync`
+// would buy latency and quietly pay for it in coverage — the cross-run lessons would be gone
+// from every path at once and nothing would say so.
+test('recall-refresh keeps the cross-run lesson overlay the blocking path declines', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { json: ONE } });
+  t.after(() => server.close());
+
+  assertHookContract(await runHook('recall-refresh', userPromptSubmit(), {
+    env: env(makeDataDir(), server, ASYNC_ON),
+  }));
+
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.prefer_current_run, undefined,
+    'a process no prompt is waiting on is exactly where a ~1.7s lane belongs');
+});
+
 // A failed refresh writes no block. The alternative — an empty carry file — would be read by
 // the next turn as "nothing to inject" either way, but it would also silently overwrite a
 // good block that was still in date.

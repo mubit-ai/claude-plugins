@@ -9,7 +9,7 @@ Prove two things a user cannot see from the outside:
    streams of evidence on one indistinguishable turn.
 
 Executed on **2026-08-19** against **Claude Code 2.1.235** and the plugin at
-`/Users/eldaru/Mubit/hs-5-subagent-start/integrations/claude-code`, branch `feat/subagent-start`.
+`$HOME/src/claude-plugins/integrations/claude-code`, branch `feat/subagent-start`.
 The **Expect** blocks are transcripts, not predictions. Where a number will differ on your
 machine, the text says so.
 
@@ -42,7 +42,7 @@ env | grep -iE '^(MUBIT|CLAUDE_PLUGIN)' | sort
 Now paste this whole block into the terminal you will use for the rest of the run:
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/hs-5-subagent-start/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export DATA=/tmp/mubit-hs5-data
 export SCRATCH=/tmp/mubit-hs5
 
@@ -66,7 +66,7 @@ echo "endpoint $MUBIT_ENDPOINT"
 **Expect**
 
 ```
-plugin   /Users/eldaru/Mubit/hs-5-subagent-start/integrations/claude-code
+plugin   $HOME/src/claude-plugins/integrations/claude-code
 data     /tmp/mubit-hs5-data
 endpoint http://127.0.0.1:3987
 ```

@@ -30,7 +30,7 @@
  *      `ListLessonsRequest.run_id` is optional and empty means all runs, which is exactly what
  *      "global lessons" wants — scoping it to this run returns nothing on a brand-new one.
  *   7. Assemble `additionalContext`, update the marker, emit — and, on `startup` and `resume`
- *      only, spawn the detached `session-resume` that assembles the W2-2 briefing the first
+ *      only, spawn the detached `session-resume` that assembles the resume briefing the first
  *      substantive prompt will render. Nothing here waits on it; `spawnResume` says why.
  *
  * The steer block does two jobs. It names the run and the mode, and it tells the model **when
@@ -298,7 +298,7 @@ await runHook('session-start', {
       },
     });
 
-    // W2-2 — the resume briefing. Everything above this line is what the session waits for;
+    // The resume briefing. Everything above this line is what the session waits for;
     // this is emphatically not, and `spawnResume` is where that is argued.
     spawnResume(cfg, payload, runId, agentId, src);
 
@@ -326,7 +326,7 @@ await runHook('session-start', {
 });
 
 // ---------------------------------------------------------------------------
-// W2-2 — the resume briefing
+// The resume briefing
 // ---------------------------------------------------------------------------
 
 /**

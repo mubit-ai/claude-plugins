@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `lib/resume.mjs` — the briefing a session leaves for its own first prompt (W2-2).
+ * `lib/resume.mjs` — the briefing a session leaves for its own first prompt.
  *
  * ---------------------------------------------------------------------------
  * Why this is a twin of `lib/carry.mjs` and not a second mode inside it

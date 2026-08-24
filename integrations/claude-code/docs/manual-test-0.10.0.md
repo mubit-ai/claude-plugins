@@ -74,7 +74,7 @@ node "$PLUG/scripts/mubit-inspect.mjs" --runs        # every data dir it can fin
 Now paste this whole block into the terminal you will use for the rest of the run:
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/pre-main/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export DATA=/tmp/mubit-ux-data
 export SCRATCH=/tmp/mubit-ux
 
@@ -98,7 +98,7 @@ echo "key     ${MUBIT_API_KEY:0:8}… (${#MUBIT_API_KEY} chars)"
 **Expect**
 
 ```
-plugin  /Users/eldaru/Mubit/pre-main/integrations/claude-code
+plugin  $HOME/src/claude-plugins/integrations/claude-code
 data    /tmp/mubit-ux-data
 endpoint https://api.mubit.ai
 key     mbt_mubi… (105 chars)
@@ -870,7 +870,7 @@ replace yours:
 
 ```json
 "statusLine": { "type": "command", "command": "node",
-                "args": ["/Users/eldaru/Mubit/pre-main/integrations/claude-code/bin/statusline.mjs"],
+                "args": ["$HOME/src/claude-plugins/integrations/claude-code/bin/statusline.mjs"],
                 "padding": 0 }
 ```
 
@@ -879,7 +879,7 @@ Chaining, if you already have one — the payload arrives on stdin, so it has to
 ```bash
 #!/bin/bash
 payload=$(cat)
-mine=$(printf '%s' "$payload" | /Users/eldaru/.claude/statusline.sh)
+mine=$(printf '%s' "$payload" | $HOME/.claude/statusline.sh)
 mubit=$(printf '%s' "$payload" | node "$PLUG/bin/statusline.mjs")
 printf '%s%s' "$mine" "${mubit:+  $mubit}"
 ```

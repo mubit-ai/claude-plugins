@@ -26,7 +26,7 @@ import { join } from 'node:path';
 
 import { PLUGIN_ROOT, REPO_ROOT, makeDataDir, makeProjectDir, tempDir, baseEnv, lib, mod } from './helpers/harness.mjs';
 
-/** §8.2 — the curated set, in the guide's order, with the three W2-1 promotions last. */
+/** §8.2 — the curated set, in the guide's order, with the three promoted tools last. */
 const DEFAULT_ALLOWLIST = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',

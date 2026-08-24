@@ -148,6 +148,29 @@ const DRAIN_MS = CODEX_INLINE ? 1100 : 3500;
  * when to give up — which is also why this call opts out of the breaker (see the call site).
  */
 const REFLECT_MS = DETACHED ? 45_000 : (CODEX_INLINE ? 700 : 4000);
+
+/**
+ * The reflect budget above is a *total*, and this is how much of it one attempt may have.
+ *
+ * The server does not take 45 s to fail. Measured against the hosted instance
+ * (`docs/reflect-504-probe.md`), every 504 this call has produced arrived in 15.06-15.22 s
+ * — a 162 ms spread over six failures — and no success ever exceeded 14.5 s. There is a
+ * fixed deadline upstream, and a request still open past it is waiting for a verdict that
+ * has already been decided. Handing one attempt the whole 45 s therefore buys nothing and
+ * costs the retry below its window.
+ *
+ * 20 s: comfortably past the observed ceiling, so a slow-but-live reflection is never cut
+ * off by us, and small enough that two full attempts fit inside REFLECT_MS with margin.
+ * On the inline paths REFLECT_MS is already smaller and binds instead.
+ */
+const REFLECT_ATTEMPT_MS = 20_000;
+
+/**
+ * Two attempts, not more. The reflection for a real run finishes just under the upstream
+ * deadline, so attempts are close to independent coin flips at roughly 4-in-10 — a second
+ * lifts a session's odds substantially, while a third does not fit in the envelope.
+ */
+const REFLECT_ATTEMPTS = 2;
 const OUTCOME_MS = CODEX_INLINE ? 400 : 1500;
 const HEARTBEAT_MS = CODEX_INLINE ? 300 : 1000;
 
@@ -256,7 +279,10 @@ await runHook('session-end', {
       // Written unconditionally: a conditional block makes `status: ""` ambiguous between
       // "reflect was skipped" and "this hook never reached the marker write". After this, a
       // blank status means exactly the second — the hook was killed with its own work.
-      reflect: { at: reflect.at, lessons_stored: reflect.lessons, status: reflect.status },
+      reflect: {
+        at: reflect.at, lessons_stored: reflect.lessons, status: reflect.status,
+        attempts: reflect.attempts,
+      },
       ...(reflect.error ? { last_error: reflect.error.slice(0, 200) } : {}),
     });
 
@@ -565,10 +591,11 @@ async function flushOutcomes(cfg, o) {
  * @param {Record<string, any>} cfg
  * @param {{runId: string, budget: number, anythingIngested: boolean, undelivered?: boolean,
  *          pending?: number}} o
- * @returns {Promise<{attempted: boolean, status: string, lessons: number, at: number, error: string}>}
+ * @returns {Promise<{attempted: boolean, status: string, lessons: number, at: number,
+ *                     attempts: number, error: string}>}
  */
 async function maybeReflect(cfg, o) {
-  const idle = { attempted: false, status: 'skipped', lessons: 0, at: 0, error: '' };
+  const idle = { attempted: false, status: 'skipped', lessons: 0, at: 0, attempts: 0, error: '' };
 
   if (cfg.reflectOnEnd === false) {
     log(cfg, 'info', 'session-end: reflect disabled by MUBIT_CC_REFLECT_ON_END=0 — this session\'s '
@@ -592,10 +619,15 @@ async function maybeReflect(cfg, o) {
   if (o.budget <= 0) {
     log(cfg, 'warn', 'session-end: no budget left for reflect; this session\'s lessons stay at run scope',
       { run_id: o.runId });
-    return { ...idle, attempted: true, status: 'failed', at: Date.now(), error: 'reflect budget exhausted' };
+    return {
+      ...idle, attempted: true, status: 'failed', at: Date.now(),
+      error: 'reflect budget exhausted',
+    };
   }
 
-  const res = await request(cfg, 'POST', ROUTES.reflect, {
+  // The request body is identical across attempts; built once so the retry below cannot
+  // drift from the call it is retrying.
+  const reflectBody = {
     run_id: o.runId,
     include_linked_runs: false,
     // `include_step_outcomes` folds outcome signals into the evidence
@@ -616,13 +648,60 @@ async function maybeReflect(cfg, o) {
     // wide-dialing caller should have to say so itself. The cost is that a *successful*
     // reflect no longer records one either; the drain above and the idle heartbeat below
     // still give the breaker real transport verdicts on every session end.
-  }, { timeoutMs: o.budget, record: false });
+};
+
+  /*
+   * Why this retries, and why it could not before.
+   *
+   * 12 reflect failures were logged over four days and every one of them was an HTTP
+   * 504. The probe in `docs/reflect-504-probe.md` shows why: the reflection for a real
+   * run takes 12.3-14.4 s and something upstream gives up at ~15.1 s, so the call sits
+   * right on a cliff and ordinary latency variance decides it. The same request, issued
+   * four times in a row, returned 504, 504, 200, 504.
+   *
+   * That is a retryable failure in the most literal sense - the second attempt is not
+   * hoping the server changed its mind, it is re-rolling a dice throw. And it is
+   * affordable for the first time now that the failure is known to cost a predictable
+   * ~15 s instead of the 45 s this budget was sized for.
+   *
+   * Only 5xx is retried. A 403 is an auth problem an identical request cannot fix, and
+   * an abort means our own clock ran out, so retrying would abort again.
+   */
+  const deadline = Date.now() + o.budget;
+  let res;
+  let attempts = 0;
+
+  for (;;) {
+    attempts += 1;
+    const attemptAt = Date.now();
+    const remaining = Math.max(1, deadline - attemptAt);
+    res = await request(cfg, 'POST', ROUTES.reflect, reflectBody,
+      { timeoutMs: Math.min(remaining, REFLECT_ATTEMPT_MS), record: false });
+
+    if (res.ok) break;
+    if (attempts >= REFLECT_ATTEMPTS) break;
+    // A 403 is an auth problem an identical request cannot fix, and an abort (no status at
+    // all) means our own clock ran out, so going again would just abort again.
+    if (!(Number(res.status) >= 500)) break;
+    // Only go again if there is room to repeat what we just did. Sizing this off the failed
+    // attempt rather than off REFLECT_ATTEMPT_MS keeps it honest on both of this hook's
+    // lifetimes: the detached child has 45 s, so a ~15 s failure leaves room to spare, while
+    // an inline hook holding 4 s retries only a failure that came back fast enough to fit
+    // twice — which is the only kind it could survive anyway.
+    if (deadline - Date.now() < Math.max(500, Date.now() - attemptAt)) break;
+    log(cfg, 'info', `session-end: reflect got HTTP ${res.status}; retrying once`,
+      { run_id: o.runId, attempt: attempts });
+  }
 
   if (!res.ok) {
-    log(cfg, 'warn', `session-end: reflect failed (${res.state}); this session's lessons stay at run scope`, {
-      run_id: o.runId, status: res.status ?? 0, error: str(res.error).slice(0, 300),
-    });
-    return { attempted: true, status: 'failed', lessons: 0, at: Date.now(), error: str(res.error) };
+    log(cfg, 'warn',
+      `session-end: reflect failed (${res.state}) after ${attempts} attempt(s); `
+      + 'this session\'s lessons stay at run scope', {
+        run_id: o.runId, status: res.status ?? 0, attempts, error: str(res.error).slice(0, 300),
+      });
+    return {
+      attempted: true, status: 'failed', lessons: 0, at: Date.now(), attempts, error: str(res.error),
+    };
   }
 
   const body = isObject(res.body) ? res.body : {};
@@ -630,8 +709,10 @@ async function maybeReflect(cfg, o) {
     ? Math.max(0, Math.trunc(Number(body.lessons_stored)))
     : (Array.isArray(body.lessons) ? body.lessons.length : 0);
 
-  log(cfg, 'info', `session-end: reflect stored ${stored} lesson(s)`, { run_id: o.runId });
-  return { attempted: true, status: 'ok', lessons: stored, at: Date.now(), error: '' };
+  log(cfg, 'info',
+    `session-end: reflect stored ${stored} lesson(s)${attempts > 1 ? ` on attempt ${attempts}` : ''}`,
+    { run_id: o.runId, attempts });
+  return { attempted: true, status: 'ok', lessons: stored, at: Date.now(), attempts, error: '' };
 }
 
 // ---------------------------------------------------------------------------

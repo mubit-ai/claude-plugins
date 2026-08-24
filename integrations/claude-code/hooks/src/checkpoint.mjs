@@ -325,7 +325,7 @@ function postcompact(payload, cfg) {
   // are already baked in — clearing the set alone would leave a block promising that the full
   // entries are earlier in a transcript that no longer exists.
   clearCarry(cfg, runId);
-  // …and the W2-2 briefing, if this session's first substantive prompt never arrived before
+  // …and the resume briefing, if this session's first substantive prompt never arrived before
   // the compaction did. It describes a session in the shape it had before the transcript was
   // rewritten, and `session-start` re-anchors a compacted run through the checkpoint id below
   // instead — which is the same job done against a conversation that is actually there.

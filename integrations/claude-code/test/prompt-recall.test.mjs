@@ -224,6 +224,76 @@ test('rung 1 request body matches §5.2 exactly', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
+// §5.2 — `prefer_current_run`, the cross-run overlay opt-out
+// ---------------------------------------------------------------------------
+
+// The bug this closes: `entry_types` carries `lesson`, which silently enrols every recall in
+// a SECOND retrieval lane — an unscoped search for lessons from other runs. Unscoped means
+// unbounded by a run id, so it costs what the whole instance costs and grows as one fills up.
+// Measured on a hosted instance it was ~1.7s of a ~2.0s call, against a 1500ms budget: recall
+// timed out on every prompt, and no budget could fix it because the host caps the hook at 3s.
+test('rung 1 declines the cross-run lesson overlay on the blocking path', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: env(makeDataDir(), server) }));
+
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.prefer_current_run, true,
+    'a hook the host will cut off at 3s cannot fund a lane that costs ~1.7s and gets slower '
+    + 'as the instance grows — without this field the default install never recalls at all');
+});
+
+// `off` is the same wire shape as the blocking default; what it changes is that a budget big
+// enough to afford the lane no longer buys it. It is the escape hatch for an instance where
+// the lane is slow enough to hurt even the detached path.
+test('MUBIT_CC_RECALL_CROSS_RUN=off declines the lane whatever the budget', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(makeDataDir(), server, {
+      MUBIT_CC_RECALL_CROSS_RUN: 'off',
+      MUBIT_CC_RECALL_BUDGET_MS: '9000',
+      MUBIT_CC_TIMEOUT_MS: '9000',
+    }),
+  }));
+
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.prefer_current_run, true);
+});
+
+// `on` is the counterpart pin: an operator who has decided the cross-run lessons are worth a
+// slow prompt gets them, and gets them on the blocking path where `auto` would refuse.
+test('MUBIT_CC_RECALL_CROSS_RUN=on pays for the lane even on the blocking path', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(makeDataDir(), server, { MUBIT_CC_RECALL_CROSS_RUN: 'on' }),
+  }));
+
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.prefer_current_run, undefined,
+    'absent IS false server-side: the opt-out is sent only when somebody declined the lane, '
+    + 'so a request log shows the decision rather than the default');
+});
+
+// The threshold is a property of the budget, not of the installation — which is what lets one
+// rule serve a 1500ms hook and a 10s detached refresh without either being told which it is.
+test('auto: a budget big enough to fund the lane asks for it', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(makeDataDir(), server, {
+      MUBIT_CC_RECALL_BUDGET_MS: '9000',
+      MUBIT_CC_TIMEOUT_MS: '9000',
+    }),
+  }));
+
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.prefer_current_run, undefined,
+    'auto spends the lane where there is room for it; pinning is only for the two ends');
+});
+
+// ---------------------------------------------------------------------------
 // §5.2 — `rank_by`, the freshness dial
 // ---------------------------------------------------------------------------
 
@@ -1167,7 +1237,7 @@ test('a failed recall marks nothing as seen', async (t) => {
 });
 
 // ===========================================================================
-// W2-4 — pinned context
+// Pinned context
 // ===========================================================================
 
 /**

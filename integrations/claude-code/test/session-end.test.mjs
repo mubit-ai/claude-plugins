@@ -164,6 +164,101 @@ test('issues POST /v2/control/reflect BY DEFAULT with no opt-in env', async (t) 
   assert.equal(body.last_n_items, 200);
 });
 
+// ---------------------------------------------------------------------------
+// §5.7 step 4 — the 504 retry
+// ---------------------------------------------------------------------------
+
+/*
+ * Why reflect, alone among this hook's calls, retries.
+ *
+ * 12 reflect failures were logged over four days and every one was an HTTP 504. Probing the
+ * hosted instance (`docs/reflect-504-probe.md`) showed the shape: a reflection over a real
+ * run takes 12.3-14.4 s, something upstream gives up at ~15.1 s, and the call therefore sits
+ * on a cliff where latency variance alone decides it. The identical request, issued four
+ * times in a row, returned 504, 504, 200, 504.
+ *
+ * So the second attempt is not hoping the server reconsidered — it is re-rolling a throw
+ * that lands about four times in ten. These three tests pin the policy: retry a 5xx, stop at
+ * two, and never retry a verdict a repeat cannot change.
+ */
+
+test('retries reflect once on 504 and keeps the second attempt\'s lessons', async (t) => {
+  const server = await fakeMubit({
+    // fakeMubit walks an array of replies and holds the last, so this is "504 then 200".
+    'POST /v2/control/reflect': [
+      { status: 504, json: { error: 'request could not be processed' } },
+      { json: { lessons: [], summary: 'ok', confidence: 0.9, degraded: false, lessons_stored: 3 } },
+    ],
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/reflect', 2);
+
+  const marker = readMarker(dataDir);
+  assert.equal(marker.reflect.status, 'ok',
+    'a 504 that succeeds on retry is a successful reflect, not a failed one');
+  assert.equal(marker.reflect.lessons_stored, 3);
+  assert.equal(marker.reflect.attempts, 2,
+    'the marker records how many attempts it took — one 504 is invisible otherwise');
+
+  // The retry must be the same request. A retry that quietly narrows its own evidence
+  // would make the second attempt succeed for a reason we did not intend.
+  const [first, second] = server.calls('POST', '/v2/control/reflect');
+  assert.deepEqual(second.body, first.body, 'the retry must re-send an identical body');
+});
+
+test('stops after two reflect attempts when the 504 persists', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/reflect': { status: 504, json: { error: 'request could not be processed' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  // §5.7 — a failing reflect is best-effort. It costs scope promotion, never the hook.
+  assertHookContract(r);
+  assert.deepEqual(r.json, { suppressOutput: true });
+  server.assertCalled('POST', '/v2/control/reflect', 2);
+
+  const marker = readMarker(dataDir);
+  assert.equal(marker.reflect.status, 'failed');
+  assert.equal(marker.reflect.attempts, 2, 'two attempts, and no third');
+  assert.equal(marker.reflect.lessons_stored, 0);
+  assert.match(String(marker.last_error ?? ''), /504/,
+    'the marker keeps the reason, so the doctor skill can name it');
+
+  // The captures were already committed before reflect was attempted (§5.7): a reflect that
+  // fails twice must still not cost the session its ingest.
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0);
+});
+
+test('does not retry reflect on 403 — an identical request cannot fix auth', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/reflect': { status: 403, json: { error: 'request could not be processed' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/reflect', 1);
+  assert.equal(readMarker(dataDir).reflect.attempts, 1,
+    'a 4xx is a verdict about the request, not a dice throw — going again only doubles the cost');
+});
+
 // §5.7 — "Runs INLINE, not detached." The ingest is deliberately slow: a detached
 // drain would let the hook exit first and this count would still be 0. There is no
 // `waitFor` here on purpose — that is the assertion.

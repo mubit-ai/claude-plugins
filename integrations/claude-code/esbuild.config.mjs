@@ -212,6 +212,21 @@ const targets = [
     entryPoints: [MCP_SERVER_ENTRY],
     outfile: out('mcp/dist/server.js'),
     ...shared,
+    // The one target that must NOT carry `shared`'s inline sourcemap, and the reason is
+    // publication rather than size. An esbuild inline map embeds `sourcesContent` — the
+    // verbatim text of every source that went into the bundle. For every other target here
+    // that is free: their sources are `lib/`, `hooks/src/`, `bin/*.src.mjs` and `mcp/src/*.mjs`,
+    // all of which are tracked files in this repository already, so the map republishes what
+    // is published. This target is the exception: it bundles `@mubit-ai/mcp`, whose TypeScript
+    // is NOT part of this repository, and the committed artifact is mirrored to a PUBLIC one.
+    // Left on, `mcp/dist/server.js` carries ~67 KB of unpublished first-party source (and
+    // ~2 MB of dependency source) into that mirror, where nothing else would put it.
+    //
+    // Nothing is lost by turning it off. `minify: false` above is what keeps a stack trace
+    // readable, and it still applies; the map only ever pointed at files a reader of the
+    // public tree does not have. Off rather than `sourcesContent: false` because a map with
+    // no sources is 4 MB of mappings nobody can resolve.
+    sourcemap: false,
     banner: {
       js: `${shared.banner.js}\n`
         + "import { createRequire as __mubitCreateRequire } from 'node:module';\n"

@@ -295,6 +295,24 @@ export function render(payload = {}) {
   const global = num(lessons.global);
   if (global > 0) parts.push(`lessons ${int(global)}g`);
 
+  // §16.2 — the reflect verdict, for the same reason `recall dry` is above it.
+  //
+  // Reflect at session end is the only call that can widen a lesson past `run` scope, so a
+  // reflect that fails costs the session its cross-session memory outright. It failed 12
+  // times over four days and nobody noticed, because the failure logs at `warn` while the
+  // success logs at `info`: at the default level a healthy instance and a broken one print
+  // exactly the same nothing, and the only other record is a JSON marker nobody cats.
+  //
+  // Deliberately NOT a ConnState. `resolveDisplay` merges verdicts about the *connection*,
+  // and this is a verdict about content — reflect can fail on an instance that is answering
+  // everything else perfectly (it does: the failure is a timeout upstream of a healthy
+  // service). So it takes a segment and leaves the glyph alone.
+  //
+  // `failed` only. The skip reasons are all deliberate — disabled, nothing ingested, spool
+  // undrained — and a status line that reports intended behaviour as a fault teaches the
+  // user to ignore it.
+  if (str(group(marker.reflect).status) === 'failed') parts.push('reflect failed');
+
   // §10/§1.8: rung 1 is the free path at zero LLM calls and needs no label. `rung` is only
   // a label when it is a rung the user is *paying* for — `0` is the §4.8 default for "no
   // recall has happened yet", not a rung, and must never render as `rung 0`.

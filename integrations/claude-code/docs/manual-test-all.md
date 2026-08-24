@@ -41,7 +41,7 @@ nothing".
 Now paste this whole block:
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/hook-surface/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export SCRATCH=/tmp/mubit-all
 export DATA=/tmp/mubit-all-data
 
@@ -75,7 +75,7 @@ echo "endpoint $MUBIT_ENDPOINT"
 **Expect**
 
 ```
-plugin   /Users/eldaru/Mubit/hook-surface/integrations/claude-code
+plugin   $HOME/src/claude-plugins/integrations/claude-code
 data     /tmp/mubit-all-data
 endpoint http://127.0.0.1:3991
 ```

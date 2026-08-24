@@ -42,7 +42,7 @@ inside a running session — start a clean shell.
 Now paste this whole block into the terminal you will use for the rest of the run:
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/hs-1-fork-matcher/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export SCRATCH=/tmp/mubit-hs1
 export DATA=/tmp/mubit-hs1-data
 
@@ -66,7 +66,7 @@ echo "host     $(claude --version)"
 **Expect**
 
 ```
-plugin   /Users/eldaru/Mubit/hs-1-fork-matcher/integrations/claude-code
+plugin   $HOME/src/claude-plugins/integrations/claude-code
 data     /tmp/mubit-hs1-data
 scratch  /tmp/mubit-hs1
 endpoint https://api.mubit.ai
@@ -403,7 +403,7 @@ match-all      startup, fork
 --- the fork payload, verbatim ---
 {
   "session_id": "e8303836-739a-45da-a09a-5861b96df5d1",
-  "transcript_path": "/Users/eldaru/.claude/projects/-private-tmp-mubit-hs1/e8303836-739a-45da-a09a-5861b96df5d1.jsonl",
+  "transcript_path": "$HOME/.claude/projects/-private-tmp-mubit-hs1/e8303836-739a-45da-a09a-5861b96df5d1.jsonl",
   "cwd": "/private/tmp/mubit-hs1",
   "hook_event_name": "SessionStart",
   "source": "fork"

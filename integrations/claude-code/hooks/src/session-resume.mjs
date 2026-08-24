@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * `hooks/src/session-resume.mjs` — the detached half of the resume briefing (W2-2).
+ * `hooks/src/session-resume.mjs` — the detached half of the resume briefing.
  *
  * Not registered in `hooks.json`, for the same reason `drain.mjs` and `recall-refresh.mjs` are
  * not: it is spawned detached by `session-start`, exactly the way `prompt-recall` fires the

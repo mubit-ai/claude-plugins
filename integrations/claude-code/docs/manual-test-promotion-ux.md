@@ -53,7 +53,7 @@ Two of them: a **scratch** directory for the stub and its log, and a **data** di
 in for the plugin's state. Both live under `/tmp` and both are removed in §14.
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/pre-main/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export SCRATCH=/tmp/mubit-ux
 export DATA=/tmp/mubit-ux-data
 
@@ -84,7 +84,7 @@ echo "plugin   $PLUG"; echo "scratch  $SCRATCH"; echo "data     $DATA"
 **Expect**
 
 ```
-plugin   /Users/eldaru/Mubit/pre-main/integrations/claude-code
+plugin   $HOME/src/claude-plugins/integrations/claude-code
 scratch  /tmp/mubit-ux
 data     /tmp/mubit-ux-data
 ```

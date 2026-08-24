@@ -209,7 +209,7 @@ test('serverInfo reports the bundled server\'s real version', async () => {
 // §8.2 — the three verbs promoted into the allowlist
 // ---------------------------------------------------------------------------
 
-/** The W2-1 promotions: excluded until a skill existed to reach each of them. */
+/** The promoted three: excluded until a skill existed to reach each of them. */
 const PROMOTED = ['mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health'];
 
 /**

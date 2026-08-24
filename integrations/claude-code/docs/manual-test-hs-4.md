@@ -11,7 +11,7 @@ Everything downstream of it — `knowledge_confidence`, the 0.6 / 0.25 validatio
 promotion, the shadow A/B that gates the widest scopes — depends on its input being clean.
 
 Everything below was executed on **2026-08-19** against the branch `feat/stop-failure` at
-worktree `/Users/eldaru/Mubit/hs-4-stop-failure`, built with
+worktree `$HOME/src/claude-plugins`, built with
 `MUBIT_CC_BUILD_SKIP_SERVER=1 npm run build`, and it drives **`hooks/dist/`** — the bundles the
 host actually executes — not `hooks/src/`. The host facts in §1 come from Claude Code
 **2.1.235**. The **Expect** blocks are transcripts, not predictions; where a number will differ
@@ -49,7 +49,7 @@ you will seed one run and inspect another.
 Now paste this whole block into the terminal you will use for the rest of the run:
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/hs-4-stop-failure/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export SCRATCH=/tmp/mubit-hs4
 export DATA=/tmp/mubit-hs4-data
 
@@ -72,7 +72,7 @@ echo "run id   $MUBIT_CC_RUN_ID"
 **Expect**
 
 ```
-plugin   /Users/eldaru/Mubit/hs-4-stop-failure/integrations/claude-code
+plugin   $HOME/src/claude-plugins/integrations/claude-code
 data     /tmp/mubit-hs4-data
 run id   cc-hs4
 ```

@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `resumeBlock` — the briefing a session opens with (W2-2).
+ * `resumeBlock` — the briefing a session opens with.
  *
  * ---------------------------------------------------------------------------
  * What is being claimed, and what would falsify it

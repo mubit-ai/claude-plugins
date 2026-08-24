@@ -14,7 +14,7 @@ first clause, and it keeps that id in `recalled[]` so `Stop` can still attribute
 Dropping it would break attribution for exactly the memories that are helping most.
 
 Everything below was executed on **2026-08-19** against this build, in
-`/Users/eldaru/Mubit/hs-3-recall-seen-set`. §1–§7 are offline and deterministic; §8 runs
+`$HOME/src/claude-plugins`. §1–§7 are offline and deterministic; §8 runs
 against the hosted `https://api.mubit.ai` with the key already on this machine. **Every Expect
 block is captured output, not a prediction.** Where a number will differ on your machine the
 text says so.
@@ -42,7 +42,7 @@ env | grep -iE '^(MUBIT|CLAUDE_PLUGIN)' | sed 's/\(MUBIT_API_KEY=.\{0,10\}\).*/\
 this whole block into the terminal you will use for the rest of the run:
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/hs-3-recall-seen-set/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export DATA=/tmp/mubit-hs3-data
 export SCRATCH=/tmp/mubit-hs3
 
@@ -65,7 +65,7 @@ echo "key      ${MUBIT_API_KEY:0:8}… (${#MUBIT_API_KEY} chars)"
 **Expect**
 
 ```
-plugin   /Users/eldaru/Mubit/hs-3-recall-seen-set/integrations/claude-code
+plugin   $HOME/src/claude-plugins/integrations/claude-code
 data     /tmp/mubit-hs3-data
 endpoint http://127.0.0.1:48317
 key      mbt_stub… (58 chars)

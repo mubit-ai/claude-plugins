@@ -514,7 +514,7 @@ const USER_CONFIG_ROWS = [
   // proven here. Its default is asserted separately below, and again in `pre-tool.test.mjs`
   // against the running hook — this is the stage that can put text in front of a tool call.
   { key: 'preToolWarnings', env: 'MUBIT_CC_PRE_TOOL_WARNINGS', field: 'preToolWarnings', raw: '1', optRaw: 'true', want: true },
-  // W2-2. Asserted OFF, because on is the default and a row that set it to true would pass
+  // Asserted OFF, because on is the default and a row that set it to true would pass
   // just as well against a key `loadConfig` never reads. The default itself is asserted below
   // and, against the running hooks, in `session-resume.test.mjs` — which is the only place in
   // the repo that can see it, since `baseEnv` pins the flag off for every other suite.

@@ -38,10 +38,23 @@ one before it, and the cheap steps answer most questions.
    | `handoff` | the session-end hook, before it does any work | The hook started and was killed before it could either hand the flush over or fall back to running it inline. This is the value to expect when the host cancels SessionEnd inside its ~1 s window, and it is what keeps `""` above meaning only "never ran". Still reading this minutes later means that session's flush was lost — the next session's first drain picks the captures back up, but its reflection is gone. |
    | `detached` | the session-end hook, just before it spawns | The flush was handed to a background process and no child has reported since. Momentary at the end of a session; still reading this minutes later means the child was reaped before it finished — the container exited with it, or the machine went to sleep. |
    | `ok` | whichever process ran the flush | Reflection ran. `lessons_stored` is what it stored, and it can legitimately be `0` when the server has not finished indexing the session's evidence. |
-   | `failed` | " | Reflection was attempted and did not answer. `last_error` carries the reason; this session's lessons stay at `run` scope. |
+   | `failed` | " | Reflection was attempted and did not answer. `last_error` carries the reason and `attempts` says how many tries it took to give up; this session's lessons stay at `run` scope. **Read `attempts` before diagnosing anything else** — see the note below. |
    | `skipped:disabled` | " | `MUBIT_CC_REFLECT_ON_END=0`. Not a fault — a deliberate opt-out that costs cross-session memory. |
    | `skipped:not-ingested` | " | Nothing was ingested this session, so there was no tail to reflect over. |
    | `skipped:undrained` | " | The spool did not land, so reflecting would have drawn conclusions from a session the server only half has. The next session drains the rest and reflects then. |
+
+   **A `failed` reflect whose `last_error` is an HTTP 504 is the known one.** Reflection over
+   a real run takes roughly 12-14 s and something upstream of the service gives up at ~15 s,
+   so the call sits on a cliff and ordinary latency variance decides it — the identical
+   request, issued four times in a row, has returned 504, 504, 200, 504. That is why this
+   call retries: `attempts: 2` with a 504 means both throws lost, which is expected roughly
+   one session in six and is **not** an instance fault. Do not send the user to check their
+   key, their endpoint or their network for it; the same instance is answering every other
+   route. What it costs is real, though — that session's lessons stay at `run` scope and are
+   invisible to the next session. If it is failing on most sessions rather than some, that is
+   worth escalating, and the number to quote is how many consecutive session markers read
+   `failed`. `attempts: 1` with a 5xx means the retry was skipped for lack of budget, which
+   points at a session-end that was already nearly out of time.
 
    One caveat before reporting a stuck `detached`: when SessionEnd fires twice for the same
    session — a `reason=exit` after a `reason=clear` — the second hand-off's child stands down

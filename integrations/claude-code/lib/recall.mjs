@@ -65,7 +65,7 @@
  * `recallBlock(cfg, {runId, agentId, query, deadline})` is exactly what `UserPromptSubmit`
  * asks for today, and a tighter caller overrides `tokenBudget` and nothing else.
  *
- * `resumeContext` (W2-2) is the one export that is deliberately NOT a rung of that ladder. It
+ * `resumeContext` is the one export that is deliberately NOT a rung of that ladder. It
  * is a session-start briefing rather than a recall against a prompt, it makes exactly one
  * request whatever `recallAssemble` says, and it is the only caller in this file that asks
  * `lib/http.mjs` not to record what it learns. Its own docblock says why.
@@ -93,6 +93,33 @@ const ENTRY_TYPES = Object.freeze(['mental_model', 'rule', 'lesson', 'fact', 'tr
 const QUERY_LIMIT = 8;
 
 /**
+ * §5.2 — the budget below which rung 1 opts OUT of the server's cross-run lesson overlay.
+ *
+ * `entry_types` above contains `lesson`, and that alone puts the query on a second retrieval
+ * lane: alongside the run-scoped search, the server runs an unscoped one to surface lessons
+ * learned in OTHER runs. The run-scoped search takes a bounded fast path. The unscoped one
+ * cannot — there is no run to bound it by — so it scales with the size of the whole
+ * instance, not with this run, and it gets slower as an instance accumulates data no matter
+ * what this plugin does. Measured against a hosted instance, that one lane is ~1.7s of a
+ * ~2.0s rung-1 call: with it, the mean is 2.07s and every request overruns the 1500ms
+ * default; without it, 0.35s. It is the difference between recall landing and recall timing
+ * out, and no value of `recallBudgetMs` can buy its way out — `HARNESS_BUDGET_MS` in
+ * `prompt-recall` is capped at 2800ms by the host's own 3s `UserPromptSubmit` timeout.
+ *
+ * So the threshold sits above that cap, deliberately: a blocking hook can never clear it and
+ * always opts out, while the detached refresh (10s) and anything else with real slack always
+ * clears it and keeps the overlay. The dial that decides this is a budget the caller already
+ * has to set, not a new one to discover, and the rule reads the same way in both directions —
+ * ask for the expensive lane only where there is room to pay for it.
+ *
+ * What opting out costs is small and measurable: the overlay contributed exactly ONE item per
+ * query in every measurement, and now that lessons carry a real timestamp and age on a
+ * half-life, that item ranks *below* the run-scoped hits it arrives with (0.34 against 1.00).
+ * Set `recallCrossRun: "on"` to pay for it on the blocking path anyway.
+ */
+const CROSS_RUN_MIN_BUDGET_MS = 3000;
+
+/**
  * §5.2: the `rank_by` modes the server actually has. Anything else — `auto` included — is
  * left off the wire entirely.
  *
@@ -112,7 +139,7 @@ const RANK_MODES = Object.freeze(['relevance', 'balanced', 'freshness']);
 const CONTEXT_LIMIT = 6;
 
 // ---------------------------------------------------------------------------
-// W2-2 — the resume briefing's request
+// The resume briefing's request
 // ---------------------------------------------------------------------------
 
 /**
@@ -242,6 +269,8 @@ const ENDPOINT_HASH_LEN = 12;
  *                                       not in `RANK_MODES`) sends no `rank_by` at all
  * @property {number} [perSection]       defaults to `cfg.recallMaxPerSection`
  * @property {string} [repeatMode]       defaults to `cfg.recallRepeatMode`
+ * @property {string} [crossRun]         defaults to `cfg.recallCrossRun`; `auto` decides from
+ *                                       the budget this call was given
  * @property {string} [projectDir]      the directory THIS prompt was sent in, for `env_tags`
  */
 
@@ -279,6 +308,7 @@ export async function recallBlock(cfg, o) {
  */
 async function ladder(cfg, o) {
   const rankBy = rankByOf(cfg, o);
+  const crossRun = crossRunOf(cfg, o);
   const body = {
     run_id: o.runId,
     agent_id: o.agentId,
@@ -308,6 +338,13 @@ async function ladder(cfg, o) {
     // Omitted rather than sent when it resolves to nothing: absent IS `relevance`
     // server-side, so there is no shape of request this spread cannot express.
     ...(rankBy ? { rank_by: rankBy } : {}),
+    // §5.2: opting out of the cross-run lesson overlay, and the ONLY field here that is sent
+    // to make the request cheaper rather than better. See `CROSS_RUN_MIN_BUDGET_MS`.
+    //
+    // Omitted rather than sent as `false` when the overlay is wanted: absent IS `false`
+    // server-side, and a request log that only ever shows the field when somebody declined
+    // the lane is easier to read than one where every request carries it.
+    ...(crossRun ? {} : { prefer_current_run: true }),
   };
 
   let denied = readPolicyDenial(cfg);
@@ -407,7 +444,7 @@ async function rungThree(cfg, o) {
 }
 
 // ---------------------------------------------------------------------------
-// W2-2 — the resume briefing
+// The resume briefing
 // ---------------------------------------------------------------------------
 
 /**
@@ -597,6 +634,28 @@ function rankByOf(cfg, o) {
   const v = o?.rankBy ?? cfg?.recallRankBy;
   const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
   return RANK_MODES.includes(s) ? s : '';
+}
+
+/**
+ * Whether this call may ask for the server's cross-run lesson overlay.
+ *
+ * `on` and `off` are pins. `auto` — the default — reads the budget the caller arrived with,
+ * so the answer is a property of the PATH rather than of the installation: a hook that must
+ * answer inside the host's prompt timeout declines the lane, the detached refresh behind it
+ * takes it, and neither needed to be told which one it is. See `CROSS_RUN_MIN_BUDGET_MS`.
+ *
+ * An absent or unparseable deadline is treated as no slack. That is the safe direction: the
+ * cost of wrongly declining is one cross-run lesson, the cost of wrongly accepting is the
+ * whole recall.
+ *
+ * @param {Record<string, any>} cfg @param {RecallOptions} o @returns {boolean}
+ */
+function crossRunOf(cfg, o) {
+  const v = o?.crossRun ?? cfg?.recallCrossRun;
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  if (s === 'on') return true;
+  if (s === 'off') return false;
+  return remaining(cfg, o?.deadline) >= CROSS_RUN_MIN_BUDGET_MS;
 }
 
 /**

@@ -3,7 +3,6 @@
 **Branch:** `feat/hook-surface-followups`, off `pre-main` at `af866e8`.
 **Origin:** a research pass over Mubit's docs and Claude Code's hook reference, asking two
 questions — which hooks the plugin should add, and where MCP earns its place against a hook.
-Full memo: <https://claude.ai/code/artifact/41191641-1101-444d-94da-420dcd8f0661>.
 
 Seven items. They are ordered so that the cheap correctness fixes land first and the one that
 changes the plugin's economics lands third, before anything speculative. Items 1, 2 and 4 are

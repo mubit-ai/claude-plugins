@@ -48,7 +48,7 @@ turns it back off deliberately to check that off means off.
 Now paste this whole block into the terminal you will use for the rest of the run:
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/hs-7-pretooluse-warn/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export SCRATCH=/tmp/mubit-hs7
 export DATA=/tmp/mubit-hs7-data
 
@@ -80,7 +80,7 @@ echo "run     $MUBIT_CC_RUN_ID"
 **Expect**
 
 ```
-plugin  /Users/eldaru/Mubit/hs-7-pretooluse-warn/integrations/claude-code
+plugin  $HOME/src/claude-plugins/integrations/claude-code
 data    /tmp/mubit-hs7-data
 endpoint https://api.mubit.ai
 key     mbt_mubi… (105 chars)
@@ -160,7 +160,7 @@ env -u MUBIT_ENDPOINT -u MUBIT_API_KEY -u MUBIT_CC_DATA_DIR \
 **Expect**
 
 ```
-Validating plugin manifest: /Users/eldaru/Mubit/hs-7-pretooluse-warn/integrations/claude-code/.claude-plugin/plugin.json
+Validating plugin manifest: $HOME/src/claude-plugins/integrations/claude-code/.claude-plugin/plugin.json
 
 ✔ Validation passed
 ```

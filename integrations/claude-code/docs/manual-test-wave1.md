@@ -62,7 +62,7 @@ directory you own and can delete.
 ### Create the temp directories
 
 ```bash
-export PLUG=/Users/eldaru/Mubit/codaph-port/integrations/claude-code
+export PLUG=$HOME/src/claude-plugins/integrations/claude-code
 export SCRATCH=/tmp/mubit-w1
 export DATA=/tmp/mubit-w1-data
 
@@ -106,7 +106,7 @@ echo "plugin   $PLUG"; echo "scratch  $SCRATCH"; echo "data     $DATA"
 **Expect**
 
 ```
-plugin   /Users/eldaru/Mubit/codaph-port/integrations/claude-code
+plugin   $HOME/src/claude-plugins/integrations/claude-code
 scratch  /tmp/mubit-w1
 data     /tmp/mubit-w1-data
 ```
@@ -592,11 +592,12 @@ node "$PLUG/scripts/mubit-inspect.mjs" --last 5
 `metadata_json`: had the actor gone into `user_id`, this is where it would read **0** — and
 nowhere earlier. Every check in Part A would still have passed.
 
-## §11a — If recall reads 0 sources, check the budget before you blame the feature
+## §11a — If recall reads 0 sources, it is the cross-run lesson lane
 
-**Measured on hosted Mubit, 2026-08-24: `/v2/control/query` took 2.0–2.6 s.** The per-prompt
-recall budget is **1500 ms**. So on an ordinary session recall gives up before the server
-answers, every prompt, and `mubit-inspect` reports it as a row of zeros:
+**Measured on hosted Mubit, 2026-08-24: `/v2/control/query` took 1.9–2.4 s** (n=8, p50 2.006,
+max 2.042 — a floor, not a tail). The per-prompt recall budget is **1500 ms**. So on an
+ordinary session recall gave up before the server answered, every prompt, and `mubit-inspect`
+reported it as a row of zeros:
 
 ```
 prompt     when      rung  src  tok  chars  drop  ptr  empty_reason  used(m/c)
@@ -610,46 +611,108 @@ comes back fast and carries an `empty_reason`. The marker's `state` reads `not_r
 which is the same fact wearing a different label — and `status/health.json` will happily say
 `ok: true, state: ready`, because `/v2/core/health` is fast and the query path is not.
 
-**Raising `MUBIT_CC_RECALL_BUDGET_MS` does not fix this**, and it is worth knowing why before
-you spend an afternoon on it:
+### What it actually was
+
+Not the policy dial, and not the store. Rung 1 was granted throughout — `policy/` empty,
+`routing_summary: "direct_bypass:evidence_only"`, `degraded: false`.
+
+**~1.7 s of the ~2.0 s was one request field.** `entry_types` carries `lesson`, and that alone
+enrols the query in a second retrieval lane: alongside the run-scoped search, the server runs
+an *unscoped* one to surface lessons from other runs. The run-scoped search is bounded by the
+run id. The unscoped one has nothing to bound it, so it costs what the whole instance costs
+and gets slower on its own as one fills up — which is why the same call measured 378 ms on
+08-19 and ~2.0 s five days later with no plugin change in between. Sending
+`prefer_current_run: true` declines that lane:
+
+| request | latency (mean of 5 queries) |
+|---|---|
+| rung 1 exactly as the plugin sent it | **2.071 s** |
+| the same request **+ `prefer_current_run: true`** | **0.349 s** |
+
+The lane contributed exactly **one** evidence item per query in every measurement, and since
+lessons started carrying a real timestamp and ageing on a half-life (v0.13.3) that item ranks
+*below* the run-scoped hits it arrives with — 0.34 against 1.00.
+
+### Raising the budget: what it does and does not buy
+
+Three limits stack, and **all three are this plugin's**, not the host's:
 
 ```js
-const HARNESS_BUDGET_MS = Math.min(RECALL_BUDGET_MS + 400, 2800);   // hooks/src/prompt-recall.mjs
+const RECALL_BUDGET_MS  = clampInt(CFG.recallBudgetMs, 1500, 50, 10_000);  // the ladder's deadline
+const HARNESS_BUDGET_MS = Math.min(RECALL_BUDGET_MS + 400, 2800);          // the hook's own hard stop
+// "timeout": 3   -- hooks/hooks.json, what the plugin asks Claude Code to allow (host default: 60)
 ```
 
-The harness stop is capped at **2800 ms** because the `UserPromptSubmit` hook timeout is 3 s.
-Anything above roughly 2400 buys nothing at all.
+So `MUBIT_CC_RECALL_BUDGET_MS` **saturates at 2400**: `2400 + 400 = 2800` is the cap, and every
+value above it produces the identical hook. Measured, n=6 each, against the same endpoint on the
+same day, with the lane forced on:
 
-**The fix is the async path**, which exists for exactly this:
-
-```bash
-export MUBIT_CC_RECALL_ASYNC=1
+```
+budget=1500  landed 0/6   mean 1593 ms    <- the shipped default: the harness stop fires first
+budget=2400  landed 6/6   mean 2127 ms
+budget=3000  landed 6/6   mean 2119 ms    <- identical to 2400; the extra 600 is unreachable
 ```
 
-Recall then runs in a detached refresh with a **10 000 ms** budget
-(`REFRESH_BUDGET_MS`, `hooks/src/recall-refresh.mjs`) — four times what any blocking hook can
-ever be given. It costs one turn of staleness: the block you see was fetched just after your
-*previous* prompt, and the first prompt of a session gets nothing.
+**So raising it to 2400 does work today** — and it is the wrong thing to rely on, for two
+reasons that have nothing to do with whether it currently passes:
 
-To confirm the store is fine and it really is the budget, query outside the hook, where no
-deadline applies:
+- **It buys a margin, not a fix.** The hook must finish inside its own 3 s declaration; the
+  harness stops it at 2800 ms. A ~2.1 s wall clock leaves roughly 700 ms of slack, and the lane
+  it is paying for grows with the size of the instance rather than with anything here. When it
+  crosses ~2.6 s the hook returns to injecting nothing — with no dial left to turn, because
+  2400 was already the top one.
+- **It bills every prompt for it.** 2.1 s of blocking wait before the model sees the message,
+  on every turn, to add the one cross-run item measured in the table above.
+
+Raising `"timeout"` in `hooks.json` past 3 lifts the ceiling — the host allows far more — but it
+raises what a *stalled* endpoint costs the user by exactly as much, on a hook that runs before
+every prompt. That is the trade `recallAsync` removes rather than re-balances.
+
+### The fix, and how to prove it
+
+`recallCrossRun` defaults to `auto`, which declines the lane on any path that cannot fund it
+(see `CROSS_RUN_MIN_BUDGET_MS` in `lib/recall.mjs`) and keeps it on any path that can. Run the
+hook both ways against your own endpoint:
 
 ```bash
 D="$HOME/.claude/plugins/data/mubit-memory-mubit"
 EP=$(python3 -c "import json;print(json.load(open('$D/credentials.json'))['endpoint'])")
 KEY=$(python3 -c "import json;print(json.load(open('$D/credentials.json'))['apiKey'])")
-curl -s -o /tmp/q.json -w "http %{http_code}  total %{time_total}s\n" -m 30 "$EP/v2/control/query" \
-  -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
-  -d '{"run_id":"<your run id>","query":"where were we","mode":"direct_bypass",
-       "direct_lane":"semantic_search","evidence_only":true,"limit":5}'
-python3 -c "import json;print('evidence:', len(json.load(open('/tmp/q.json')).get('evidence') or []))"
+UPS() { printf '{"hook_event_name":"UserPromptSubmit","session_id":"s","cwd":"%s","prompt":"where were we"}' "$PWD"; }
+for mode in on off; do
+  s=$(python3 -c 'import time;print(int(time.time()*1000))')
+  n=$(UPS | MUBIT_CC_DATA_DIR=$(mktemp -d) MUBIT_ENDPOINT=$EP MUBIT_API_KEY=$KEY \
+        MUBIT_CC_RUN_ID="<your run id>" MUBIT_CC_RECALL_CROSS_RUN=$mode \
+        node hooks/src/prompt-recall.mjs 2>/dev/null \
+      | python3 -c 'import sys,json;print(len((json.load(sys.stdin).get("hookSpecificOutput") or {}).get("additionalContext") or ""))')
+  echo "cross_run=$mode  wall=$(( $(python3 -c 'import time;print(int(time.time()*1000))') - s ))ms  chars=$n"
+done
 ```
 
-**Look for** a `total` above 1.5 s together with a non-zero evidence count. That combination is
-the whole diagnosis: the memory is there, and the hook is not waiting long enough for it.
+**Expected**, and what it printed here on 2026-08-24:
 
-> This is not a Wave 1 regression, and the quickest way to prove that is `dry_streak` on a run
-> that predates both features — it will show the same `ms: ~1505` and the same zeros.
+```
+cross_run=on   wall=1587ms  chars=0      ← the shipped-before behaviour: times out, injects nothing
+cross_run=off  wall=706ms   chars=456    ← lands
+```
+
+`on` reproducing the 1500-ms timeout *is* the diagnosis. If `on` and `off` are both fast, your
+instance is small enough that the lane is not yet the cost and something else is wrong.
+
+**If you want the cross-run lessons back**, put recall somewhere that can pay for them rather
+than pinning `on`:
+
+```bash
+export MUBIT_CC_RECALL_ASYNC=1
+```
+
+The detached refresh has a **10 000 ms** budget (`REFRESH_BUDGET_MS`,
+`hooks/src/recall-refresh.mjs`), clears the `auto` threshold, and so keeps the lane the
+blocking path declines. It costs one turn of staleness: the block you see was fetched just
+after your *previous* prompt, and the first prompt of a session gets nothing.
+
+> This was never a Wave 1 regression, and the quickest way to prove that is `dry_streak` on a
+> run that predates both features — it shows the same `ms: ~1505` and the same zeros.
 
 ---
 

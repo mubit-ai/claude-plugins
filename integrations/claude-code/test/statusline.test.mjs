@@ -254,6 +254,40 @@ test('a dry streak under the threshold does not cry wolf', async () => {
   assert.match(r.line, /recall 6\/1\.2k tok/);
 });
 
+// §16.2 — reflect is the only call that widens a lesson past `run` scope, so a failed one
+// costs the session its cross-session memory. It failed 12 times over four days in silence:
+// the failure logs at `warn`, the success at `info`, so at the default level a healthy and a
+// broken instance print the same nothing.
+test('a failed reflect is named on the line', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  seedMarker(dataDir, runId, {
+    reflect: { at: 1, lessons_stored: 0, status: 'failed', attempts: 2 },
+  });
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.match(r.line, /reflect failed/);
+  // A content verdict, not a ConnState: reflect fails on instances that answer everything
+  // else, so it must not repaint the glyph as a connection fault.
+  assert.match(r.line, /^● /, 'a failed reflect must not change the connection glyph');
+});
+
+// The skip reasons are all deliberate — disabled, nothing ingested, spool undrained. A line
+// that reports intended behaviour as a fault teaches the user to ignore the line.
+test('a deliberately skipped reflect is not reported as a fault', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  for (const status of ['ok', 'skipped:disabled', 'skipped:not-ingested', 'skipped:undrained']) {
+    seedMarker(dataDir, runId, { reflect: { at: 1, lessons_stored: 0, status, attempts: 0 } });
+    const r = await runStatusline({ env: e });
+    assertNoStackTrace(r);
+    assert.doesNotMatch(r.line, /reflect/, `"${status}" must not render as a fault`);
+  }
+});
+
 // A marker written before this field existed has no `dry_streak`. It must render exactly as
 // it always did rather than printing `recall dry NaN`.
 test('a marker predating dry_streak renders unchanged', async () => {

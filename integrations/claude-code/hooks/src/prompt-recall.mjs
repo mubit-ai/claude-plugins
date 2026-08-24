@@ -192,7 +192,7 @@ const HARNESS_BUDGET_MS = Math.min(RECALL_BUDGET_MS + 400, 2800);
 const SUPPRESS = Object.freeze({ suppressOutput: true });
 
 /**
- * An `Outcome` that recalled nothing, for the three paths that can now inject a W2-2 briefing
+ * An `Outcome` that recalled nothing, for the three paths that can now inject a resume briefing
  * without one: a failed recall, an open breaker, and a first async prompt with no carry file.
  * A shared constant rather than a `null` check at every call site — `persistRecalled` and
  * `injection` both read six fields off it, and six optional-chains would be six places to
@@ -883,7 +883,7 @@ function injection(runId, outcome, resume, pins, ms, carried = false) {
 }
 
 /**
- * W2-2 stdout. The briefing `hooks/src/session-resume.mjs` assembled at the start of this
+ * The resume briefing's stdout. The block `hooks/src/session-resume.mjs` assembled at the start of this
  * session, wrapped in the two sentences it cannot be read correctly without.
  *
  * **When it was assembled.** This block predates every message in the conversation, including

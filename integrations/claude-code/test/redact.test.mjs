@@ -198,6 +198,118 @@ describe('stage 1 — pattern scrub (§4.4)', () => {
     });
   }
 
+  /**
+   * The two ways a real secret gets past the assignment rule.
+   *
+   * Both were found by probing the shipped redactor rather than reading it, and
+   * neither is about where on the line the assignment sits — an indented
+   * `DATABASE_PASSWORD=` has always redacted correctly.
+   *
+   * **Shadowing.** The name group matches any `[A-Za-z0-9_-]` token and the value
+   * group is `\S+`, so in `env: X_API_TOKEN=hunter2` the *first* match takes the
+   * name `env` and the value `X_API_TOKEN=hunter2` — the whole secret. `env` holds
+   * no keyword, the match is returned untouched, and the scan has already moved
+   * past the thing it was looking for. Nothing about `env` is special: any word
+   * plus a separator does it. It swallows exactly one assignment, which is why
+   * the second of two on a line always redacted while the first never did.
+   *
+   * **URL credentials.** A password in a connection string is matched by no rule
+   * at all: `DATABASE_URL` contains none of the keywords, and there is no
+   * `user:pass@host` pattern. It leaks in every position, prose included.
+   *
+   * The entropy backstop hides both whenever the value is a real random key, so
+   * what actually survives is the short human-chosen password — which is most of
+   * what a pasted `.env` block is made of.
+   */
+  describe('secrets a neighbouring assignment used to hide', () => {
+    it('redacts a keyword assignment shadowed by a plain one', async () => {
+      const { redactText } = await R();
+      const r = redactText('env: X_API_TOKEN=hunter2', cfg(), 'output');
+
+      assert.ok(!r.text.includes('hunter2'), `shadowed secret leaked:\n${r.text}`);
+      assert.ok(r.text.includes(PH('assignment')), `expected an assignment placeholder; got:\n${r.text}`);
+      assert.ok(r.text.startsWith('env:'), `the shadowing name is not a secret and must survive:\n${r.text}`);
+    });
+
+    it('redacts every assignment on the line, not just the last', async () => {
+      const { redactText } = await R();
+      const r = redactText('env: A_TOKEN=alpha9182 B_SECRET=bravo7261', cfg(), 'output');
+
+      assert.ok(!r.text.includes('alpha9182'), `first assignment leaked:\n${r.text}`);
+      assert.ok(!r.text.includes('bravo7261'), `second assignment leaked:\n${r.text}`);
+    });
+
+    // The control. This shape already redacted before the fix, so it is what
+    // proves the fix re-scanned the shadow rather than just widening the anchor.
+    it('still redacts an assignment preceded by an unrelated one', async () => {
+      const { redactText } = await R();
+      const r = redactText('A=b X_API_TOKEN=hunter2', cfg(), 'output');
+
+      assert.ok(!r.text.includes('hunter2'), `control case regressed:\n${r.text}`);
+    });
+
+    it('leaves a shadowing name that carries no secret alone', async () => {
+      const { redactText } = await R();
+      const r = redactText('note: the build is green', cfg(), 'output');
+
+      assert.equal(r.text, 'note: the build is green');
+      assert.equal(r.redactions, 0);
+    });
+
+    it('redacts the credentials in a connection string', async () => {
+      const { redactText } = await R();
+      const r = redactText('DATABASE_URL=postgres://admin:Tr0ub4dor@db.internal:5432/app', cfg(), 'output');
+
+      assert.ok(!r.text.includes('Tr0ub4dor'), `URL password leaked:\n${r.text}`);
+      assert.ok(r.text.includes(PH('url-credentials')), `expected a url-credentials placeholder; got:\n${r.text}`);
+      assert.ok(r.text.includes('db.internal'), `the host is not a secret and must survive:\n${r.text}`);
+    });
+
+    it('redacts URL credentials in prose, where no assignment rule can reach', async () => {
+      const { redactText } = await R();
+      const r = redactText('try psql postgres://admin:Tr0ub4dor@db.internal/app and report back', cfg(), 'output');
+
+      assert.ok(!r.text.includes('Tr0ub4dor'), `URL password leaked from prose:\n${r.text}`);
+      assert.ok(r.text.startsWith('try psql'), `surrounding prose must survive:\n${r.text}`);
+    });
+
+    it('leaves a URL with no credentials alone', async () => {
+      const { redactText } = await R();
+      const r = redactText('see https://mubit.example.com/docs/a@b for the rest', cfg(), 'output');
+
+      assert.equal(r.text, 'see https://mubit.example.com/docs/a@b for the rest');
+      assert.equal(r.redactions, 0);
+    });
+
+    /*
+     * The shape of both fixes is a scan that can be made to revisit what it has
+     * already read, and a tool call is the one input an attacker picks the size
+     * of. Each case below is a megabyte-scale run with no secret in it, chosen
+     * so the pattern it stresses cannot match: a run of scheme-legal characters
+     * for the URL rule, and separator-dense runs for the assignment rule. The
+     * quadratic versions of both did not finish in two minutes.
+     *
+     * The budget is loose on purpose — it is here to separate linear from
+     * quadratic, not to hold a millisecond figure that a slower machine would
+     * fail. `capture` enforces the real one, end to end, at 15 s per hook.
+     */
+    it('scans a megabyte of adversarial text in linear time', async () => {
+      const { redactText } = await R();
+      const inputs = [
+        'A'.repeat(2 * 1024 * 1024),
+        ('http'.repeat(8) + '.').repeat(40_000),
+        'a:b:c:d:'.repeat(32_768),
+        'k=v;'.repeat(65_536),
+      ];
+
+      const started = Date.now();
+      for (const text of inputs) assert.equal(redactText(text, cfg(), 'output').redactions, 0);
+      const elapsed = Date.now() - started;
+
+      assert.ok(elapsed < 5_000, `redaction is super-linear in input size: ${elapsed}ms for 4 inputs`);
+    });
+  });
+
   // §4.4: the placeholder format is exactly `[REDACTED:<kind>]` (spec §6.4 says
   // `[redacted:<kind>]`; the build guide is the implementation contract).
   it('uses the exact [REDACTED:<kind>] placeholder form', async () => {

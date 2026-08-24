@@ -257,10 +257,26 @@ test('no tracked file contains an absolute home-directory path naming a real acc
  */
 const WORKSPACE_CRATE_PATH = /\bcrates\/[A-Za-z0-9_.-]+\//g;
 
+/**
+ * The one file that must contain what this check looks for.
+ *
+ * `.github/scripts/leakcheck.selftest.mjs` exercises the wider scanner, so its
+ * fixtures are by construction examples of every shape the scanner blocks — a
+ * crate path among them. It is the same exemption `REDACTION_DEMO_FILES` makes
+ * below for the redactor's fixtures, and for the same reason: a check that fires
+ * on the material proving another check works is a check that gets switched off.
+ *
+ * Scoped to this one assertion rather than dropped from `corpus()` wholesale.
+ * The selftest is still scanned for real secrets and real home directories,
+ * which is where a pasted fixture would actually do damage.
+ */
+const isGateFixture = (rel) => rel.endsWith('.github/scripts/leakcheck.selftest.mjs');
+
 test('no tracked file references a Rust workspace crate path', () => {
   const findings = [];
 
   for (const { rel, text } of corpus()) {
+    if (isGateFixture(rel)) continue;
     const seen = new Set();
     for (const match of stripMaps(text).matchAll(WORKSPACE_CRATE_PATH)) {
       if (seen.has(match[0])) continue;

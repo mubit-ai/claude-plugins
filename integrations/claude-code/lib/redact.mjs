@@ -75,11 +75,46 @@ const ASSIGNMENT_KEYWORDS = [
  *
  * The separator run is `[ \t]*` rather than `\s*` so an assignment can never
  * reach across a newline and swallow the following line.
+ *
+ * The value is deliberately *not* consumed. `(?=\S)` proves one is there and
+ * stops; `scrubAssignments` measures its extent itself when — and only when — it
+ * is about to replace it.
+ *
+ * That is what keeps the scan linear. A consuming `\S+` is greedy, so on a miss
+ * the cursor lands past a value that was never examined (`env: X_API_TOKEN=…`
+ * hides the secret behind it), and putting the cursor back to look would re-scan
+ * the same tail once per separator — quadratic on the 2 MB single-token payloads
+ * a tool call can carry. Not consuming it gets the re-scan for free: the cursor
+ * is already sitting at the start of the value.
  */
-const ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(\S+)/g;
+const ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(?=\S)/g;
+
+/** The extent of one assignment's value, measured from where the separator ended. */
+const VALUE_RE = /\S+/y;
 
 /** Maximal base64/hex-ish runs, the candidate set for the entropy rule. */
 const ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
+
+/**
+ * The `userinfo` of a URL — `scheme://user:pass@host` — which RFC 3986 deprecates
+ * for exactly the reason this rule exists.
+ *
+ * The whole of `userinfo` goes, not just the password half. A bare
+ * `scheme://token@host` has no colon and is still a credential, and a username
+ * that is worth keeping is in the connection string twice anyway. The host and
+ * path survive, which is what makes the redacted line still worth reading.
+ *
+ * `[^\s/?#@]` cannot cross a `/`, `?`, `#` or a second `@`, so an `@` further
+ * along the path is not userinfo and does not match. A bare address in prose has
+ * no `scheme://` in front of it and does not match either.
+ *
+ * Both runs are bounded and the scheme is preceded by a character that cannot be
+ * part of one. Without that guard the scheme run is unanchored, and 2 MB of `A`
+ * — which is exactly what a hostile `tool_input` carries — costs one full
+ * backtrack per starting offset. The guard fails at the first character instead,
+ * so a long run of scheme-legal characters is walked once rather than squared.
+ */
+const URL_CREDENTIALS_RE = /(^|[^A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/)[^\s/?#@]{1,256}@/g;
 
 /* The detector's own parameters. leakcheck-allow: redaction-threshold — this is the client's
    implementation; the constants are two lines below, so hiding the prose would hide nothing. */
@@ -98,6 +133,7 @@ const ENTROPY_THRESHOLD = 4.0;
  */
 const RULES = [
   { kind: 'assignment', scrub: scrubAssignments },
+  { kind: 'url-credentials', scrub: scrubUrlCredentials },
   { kind: 'pem', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { kind: 'mubit-key', re: /mbt_[A-Za-z0-9_-]{8,}/g },
   { kind: 'openai-key', re: /sk-[A-Za-z0-9_-]{16,}/g },
@@ -114,12 +150,64 @@ const RULES = [
  * @returns {string}
  */
 function scrubAssignments(text, count) {
-  return text.replace(ASSIGNMENT_RE, (m, pre, name, _sep, _value) => {
+  // An `exec` loop rather than `replace`, for the one thing `replace` cannot do:
+  // put the cursor back.
+  //
+  // `ASSIGNMENT_RE`'s value group is greedy, so `env: X_API_TOKEN=hunter2` matches
+  // as name `env` with the entire secret as its value. `env` holds no keyword, so
+  // the old code returned the match untouched — and by then the scan had already
+  // stepped over `X_API_TOKEN=hunter2`, which was never examined at all. It is not
+  // the anchor and it is not indentation: any word plus a separator shadows the
+  // assignment behind it, and it takes exactly one, which is why the *second* of
+  // two secrets on a line always redacted while the first never did.
+  //
+  // A miss steps back one character, onto the last character of the separator,
+  // and carries on from there. That character is a `:`, `=`, space or tab — all
+  // of which `pre` accepts — so the value is scanned as an assignment in its own
+  // right, which is what catches the one hiding behind `env:`. It is a step back
+  // from where the separator ended, never from where the match began: `name` and
+  // `sep` are each at least one character, so the cursor still ends up ahead of
+  // `m.index` and the loop always terminates.
+  //
+  // A hit measures the value with a sticky `\S+` and steps over it, so nothing
+  // inside a replaced secret is looked at twice.
+  ASSIGNMENT_RE.lastIndex = 0;
+  let out = '';
+  let copied = 0;
+  let m;
+  while ((m = ASSIGNMENT_RE.exec(text)) !== null) {
+    const [, pre, name] = m;
+    const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
-    if (EXEMPT_RE.test(lower)) return m;
-    if (!ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) return m;
+
+    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+      ASSIGNMENT_RE.lastIndex = valueStart - 1;
+      continue;
+    }
+
+    VALUE_RE.lastIndex = valueStart;
+    if (VALUE_RE.exec(text) === null) {
+      ASSIGNMENT_RE.lastIndex = valueStart - 1;
+      continue;
+    }
+
+    out += text.slice(copied, m.index) + pre + PH('assignment');
+    copied = VALUE_RE.lastIndex;
+    ASSIGNMENT_RE.lastIndex = copied;
     count.n += 1;
-    return `${pre}${PH('assignment')}`;
+  }
+  return out + text.slice(copied);
+}
+
+/**
+ * @param {string} text
+ * @param {{n: number}} count
+ * @returns {string}
+ */
+function scrubUrlCredentials(text, count) {
+  return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
+    count.n += 1;
+    return `${pre}${scheme}${PH('url-credentials')}@`;
   });
 }
 

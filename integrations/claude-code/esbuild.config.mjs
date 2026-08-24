@@ -170,6 +170,10 @@ const targets = [
     'statusline.launcher.mjs', 'bin/statusline.mjs',
   ),
   { entryPoints: ['bin/auth.src.mjs'], outfile: out('bin/auth.mjs'), ...shared },
+  // `/mubit-memory:activity` — the audit surface. No launcher, for the same reason as `auth`
+  // below: a person typed the command and is watching it, so a runtime-floor failure is
+  // reported by the shell rather than swallowed.
+  { entryPoints: ['bin/activity.src.mjs'], outfile: out('bin/activity.mjs'), ...shared },
   // No launcher, for the same reason `bin/auth.mjs` has none: launchers exist for the entries
   // the *host* execs on its own (`hooks.json`, `settings.json`), where a parse error on an old
   // Node would be silent. A skill-invoked script is run by a person who is watching, and the

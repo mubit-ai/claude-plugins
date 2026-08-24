@@ -27,7 +27,22 @@ import { join } from 'node:path';
 import { CODEX_ROOT, SHARED_ROOT } from './helpers/codex-fixtures.mjs';
 
 const SKILLS_DIR = join(CODEX_ROOT, 'skills');
-const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth', 'dashboard'];
+/**
+ * The skills this plugin ships, in the order they arrived. One per line, because several
+ * branches add to this list at once and a merge should be able to take both sides of a
+ * conflict without re-reading a wrapped array.
+ */
+const SKILLS = [
+  'recall',
+  'remember',
+  'reflect',
+  'forget',
+  'doctor',
+  'setup',
+  'auth',
+  'dashboard',
+  'activity',
+];
 
 /**
  * The two skills that call no MCP tool: `auth` runs `bin/auth.mjs` to get a key, and
@@ -303,4 +318,83 @@ test('the two plugins ship the same eight skill names', () => {
   //   other is a gap somebody meant to fill and forgot.
   assert.deepEqual(codexDirs, ccDirs,
     'the skill sets have diverged. The files differ by host; the set should not.');
+});
+
+// ===========================================================================
+// activity
+// ===========================================================================
+
+test('activity: no runnable command interpolates ${CLAUDE_PLUGIN_ROOT}', () => {
+  const { body, fenced } = read('activity');
+  // § docs/harness-probe.md §4: Codex exports no plugin-root variable of any spelling. The
+  //   Claude Code copy's `node ${CLAUDE_PLUGIN_ROOT}/bin/activity.mjs` expands to
+  //   `node /bin/activity.mjs` in the login shell Codex runs commands in — ENOENT, on the one
+  //   command whose entire job is to prove the plugin can show its work.
+  assert.ok(!fenced.includes('${CLAUDE_PLUGIN_ROOT}'),
+    'a runnable command in the activity skill interpolates ${CLAUDE_PLUGIN_ROOT}, which is '
+    + 'empty under Codex.');
+  assert.match(body, /Do not write .*CLAUDE_PLUGIN_ROOT|no plugin-root variable/,
+    'the skill should say so outright as well — this is the mistake anyone porting from the '
+    + 'Claude Code skill makes.');
+  assert.match(fenced, /bin\/activity\.mjs/, 'the activity skill must still name the binary it runs.');
+  assert.match(body, /SKILL\.md|this file|skill directory/i,
+    'Codex lists each skill with its absolute SKILL.md path, which is the anchor that works.');
+});
+
+/**
+ * The `disable-model-invocation: true` that the Claude Code copy carries has no equivalent
+ * here — the key does not exist in the Codex binary — so the rule has to survive as prose or
+ * not at all. Without it a model that reads "list what memory holds" will do exactly that,
+ * unprompted, and pull somebody's whole memory into a transcript.
+ */
+test('activity: keeps the do-not-invoke-yourself rule that Codex cannot enforce', () => {
+  const { body } = read('activity');
+  assert.match(body, /own initiative|only then|never on your own/i,
+    'Codex reads no disable-model-invocation key, so this paragraph is the whole control.');
+});
+
+/**
+ * The guard that matters most, and the reason it is duplicated across both hosts: without it
+ * the model will describe an export as "filtered activity", which is the precise false claim
+ * the design prevents. `/v2/control/activity/export` accepts neither `exclude_derived` nor
+ * `projection`, so an export is always everything in scope.
+ */
+test('activity: keeps the listing and the export distinguishable', () => {
+  const { body } = read('activity');
+  assert.match(body, /never filtered|not filtered|accepts no `?exclude_derived/i,
+    'the skill must say outright that an export carries no filter');
+  assert.match(body, /verbatim|byte for byte/i,
+    'and that its content is what the instance holds rather than something this client shaped');
+  assert.match(body, /never describe an export as/i,
+    'the instruction has to be an instruction — this is the sentence that stops "here is your '
+    + 'filtered export"');
+});
+
+test('activity: forbids --out unless the user asked for a file', () => {
+  const { body } = read('activity');
+  // § Writing a file is the only irreversible thing the command does, and the model decides
+  //   whether it happens. An export is a complete copy of what the instance holds.
+  assert.match(body, /Do not pass `--out` unless/i, 'creating the copy is the user\'s decision');
+  assert.match(body, /absolute path/i,
+    'a file the user cannot find is a file they cannot delete — the reply has to name it');
+});
+
+test('activity: tells the model to relay the findings rather than summarise them away', () => {
+  const { body } = read('activity');
+  // § A correction that stops at the terminal is no correction. "The instance ignored the
+  //   filter you asked for" is the finding, and compressing it out is the model's default.
+  assert.match(body, /did not honour/i);
+  assert.match(body, /incomplete|prefix/i,
+    'a truncated scan reported as a complete answer is the same lie as an unhonoured filter');
+  assert.match(body, /Relay|rather than summaris/i);
+});
+
+test('activity: does not name a script this plugin does not ship', () => {
+  const { body } = read('activity');
+  // § `scripts/mubit-inspect.mjs` is Claude-Code-side, untested, and not in either plugin's
+  //   `files`. The question it answers is real, so the skill routes at the surface that ships.
+  assert.ok(!body.includes('mubit-inspect'),
+    'naming it sends a user to a path that does not exist in an installed plugin');
+  assert.match(body, /Turns/,
+    'per-prompt cost lives in the dashboard\'s Turns tab; this skill cannot answer it');
 });

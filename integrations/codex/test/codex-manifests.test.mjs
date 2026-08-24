@@ -46,8 +46,22 @@ const P = {
   ccPlugin: join(SHARED_ROOT, '.claude-plugin', 'plugin.json'),
 };
 
-/** §2 — the seven skills, the same seven the Claude Code plugin ships. */
-const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth', 'dashboard'];
+/**
+ * §2 — the skills, the same set the Claude Code plugin ships, in the order they arrived. One
+ * per line, because several branches add to this list at once and a merge should be able to
+ * take both sides of a conflict without re-reading a wrapped array.
+ */
+const SKILLS = [
+  'recall',
+  'remember',
+  'reflect',
+  'forget',
+  'doctor',
+  'setup',
+  'auth',
+  'dashboard',
+  'activity',
+];
 
 /** `.mcp.json` names the server `mubit`, so the model sees `mcp__mubit__<tool>`. */
 const MCP_SERVER = 'mubit';

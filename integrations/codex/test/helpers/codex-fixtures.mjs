@@ -43,7 +43,7 @@ export const SHARED_ROOT = resolve(CODEX_ROOT, '..', 'claude-code');
 /** Absolute path to the repo root. */
 export const REPO_ROOT = resolve(CODEX_ROOT, '..', '..');
 
-/** Where the schemas extracted from the Codex binary live. */
+/** Where the recordings of what the host actually sent live. */
 export const OBSERVED_DIR = join(CODEX_ROOT, 'test', 'fixtures', 'observed');
 
 /**

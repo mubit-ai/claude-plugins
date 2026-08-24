@@ -3,7 +3,7 @@
  * `lib/breaker.mjs` — the connection-state classifier and the circuit breaker.
  *
  * Guide sections under test: §4.7 (breaker), §7 (state layout), §12.6 (test plan),
- * §1.1/§1.2 (status codes and the one unauthenticated route).
+ * §1.1/§1.2 (status codes, and which call is made before a key is set).
  *
  * Two rules dominate this file and both exist to stop the plugin from lying to the user:
  *   1. "A timeout is not a verdict."  A cold start, a laptop waking from sleep, and

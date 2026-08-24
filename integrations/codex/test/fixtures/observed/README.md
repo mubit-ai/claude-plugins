@@ -48,11 +48,11 @@ hand-writing a file here.
 
 ## Why this and not the host's own schemas
 
-The previous oracle was twenty-one draft-07 documents lifted out of the compiled binary with
-`strings`. They were a stronger instrument than this one — closed schemas, both directions,
-all eleven events, able to reject a field as well as require one — and they were the vendor's
-artefact, republished here along with the recipe for extracting them. That is not ours to
-publish, however useful it was.
+The previous oracle was twenty-one schema documents that came out of the host's own build
+rather than off its wire. They were a stronger instrument than this one — closed schemas, both
+directions, all eleven events, able to reject a field as well as require one — and they were
+the vendor's, republished here along with enough detail to obtain more of them. That is not
+ours to publish, however useful it was.
 
 A recording pins the fields an event was *seen* to carry rather than the fields it *may*
 carry. It cannot prove a field optional and it cannot reject one the host would accept. It

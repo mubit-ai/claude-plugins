@@ -340,7 +340,7 @@ export function pickRun(cfg, explicit = '') {
   const named = str(explicit) || (str(cfg?.runStrategy) === 'static' ? str(cfg?.runId) : '');
   if (named) {
     if (named === POISONED_RUN_ID) {
-      return { ok: false, state: 'poisoned_run', detail: `"${POISONED_RUN_ID}" is the shared run every unconfigured client falls into — a pin written there would render in a stranger's session. Name a real run.` };
+      return { ok: false, state: 'poisoned_run', detail: `"${POISONED_RUN_ID}" is the fallback a run id takes when nothing configured one, not a run of yours. A pin is a standing constraint, so it needs a real run to belong to.` };
     }
     return { ok: true, runId: named };
   }
@@ -371,7 +371,7 @@ function newestMarker(cfg) {
   let best = '';
   let bestAt = 0;
   for (const m of scanRunMarkers(str(cfg?.dataDir))) {
-    // The shared run every unconfigured client falls into is never this session's.
+    // The fallback a run id takes when nothing configured one is never this session's.
     if (m.runId === POISONED_RUN_ID) continue;
     if (m.at > bestAt) { bestAt = m.at; best = m.runId; }
   }

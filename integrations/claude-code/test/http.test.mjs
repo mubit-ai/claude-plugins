@@ -3,7 +3,7 @@
  * `lib/http.mjs` — "the only network primitive".
  *
  * Guide sections under test: §4.2 (the module), §1.1 (routes and the per-route 256 KiB cap
- * on /v2/control/query), §1.2 (auth, and the one allowlisted unauthenticated route),
+ * on /v2/control/query), §1.2 (auth, and which call precedes a configured key),
  * §1.3 (required fields — a missing one is a 422, not a silent default), §1.8 + §5.2 (the
  * `mode` literal and what a typo costs), §4.3 (the `"default"` run-id guard), §4.7 (the
  * breaker is consulted before dialing).
@@ -279,9 +279,9 @@ test('health: the result is cached for 30s — a second call makes zero extra re
     'the cached verdict lives at status/health.json (§7)');
 });
 
-// §1.2: health is the one route that answers before a credential is checked, which is what
-// makes it usable as the readiness probe before the user has pasted a key.
-test('health: works with no API key configured', async (t) => {
+// §1.2: the readiness probe is the one call the plugin makes before the user has pasted a
+// key, so it must not require the config to carry one.
+test('health: the readiness probe runs before a key is configured', async (t) => {
   const { server, cfg, http } = await setup(t, { apiKey: '' });
 
   const r = await http.health(cfg);

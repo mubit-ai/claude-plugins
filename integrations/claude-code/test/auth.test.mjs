@@ -89,9 +89,9 @@ test('a good key against a healthy instance is ready', async () => {
 /**
  * The assertion this whole file is built around.
  *
- * `/v2/core/health` is unauthenticated by design — it is the readiness probe the plugin
- * uses before a key exists. So a check that stops there reports success for a key the
- * server would reject on every subsequent call.
+ * `/v2/core/health` is the readiness probe, and the plugin makes it before a key exists —
+ * that is the whole point of it, and it is why its verdict says nothing about the key. A
+ * check that stops there reports success for a key that is rejected on every later call.
  */
 test('a rejected key is auth_failed, even though health says OK', async () => {
   const { verifyCredentials } = await mod('bin/auth.src.mjs');

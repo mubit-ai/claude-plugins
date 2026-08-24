@@ -3,7 +3,7 @@
  * `lib/http.mjs` — the only network primitive in the plugin.
  *
  * The module, its routes, and the per-route body cap on
- * `/v2/control/query`), §1.2 (auth, and the one allowlisted unauthenticated route), §1.3
+ * `/v2/control/query`), §1.2 (auth, and which call the plugin may make before a key is set), §1.3
  * (required fields — a missing one is a 422, not a silent default), §1.8 + §5.2 (the `mode`
  * literal and what a typo costs), §4.3 (the `"default"` run-id guard), §4.7 (the breaker is
  * consulted before dialing).

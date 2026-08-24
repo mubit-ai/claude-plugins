@@ -134,6 +134,46 @@ const CASES = [
     expect: ['internal-runbook'],
   },
   {
+    // The gap the prefix version left: an internal document named nothing in particular.
+    // `handoff-`, `manual-test-` and `manual-verification` were the names the first batch
+    // happened to use, and two 500-line documents walked through on their filenames alone.
+    path: 'docs/some-working-brief.md',
+    body: '# a brief nobody outside would read\n',
+    expect: ['internal-runbook'],
+  },
+  {
+    // And the other side of an allowlist: the one document that is meant to be there.
+    path: 'docs/user-guide.md',
+    body: '# how to use it\n',
+    expect: [],
+    quiet: ['internal-runbook'],
+  },
+  {
+    // Three phrasings that each survived a branch the narrow patterns had already passed.
+    // They say what `tenant-wide` and `allowlisted before auth` say, in the words somebody
+    // writing for a user reaches for instead.
+    path: 'a/phrasings.mjs',
+    body: [
+      "// a pin written there renders in a stranger's session",
+      '// health is unauthenticated by design',
+      '// §1.2 (auth, and the one allowlisted unauthenticated route)',
+    ].join('\n'),
+    expect: ['isolation-defect-disclosure', 'unauthenticated-surface'],
+  },
+  {
+    // The recipe, which is the part of a lifted artefact that cannot be written by accident.
+    // Twenty-one files sat in the tree while both gates passed; nothing looked at a fixture
+    // directory full of somebody else's JSON, and what made them reproducible was the note
+    // beside them saying how to get more.
+    path: 'a/extraction.mjs',
+    body: [
+      '// BIN=/opt/homebrew/lib/node_modules/@vendor/cli/node_modules/@vendor/cli-darwin-arm64/vendor/bin/cli',
+      '// strings -n 2 "$BIN" > out.txt',
+      '// the schemas are extracted from the Vendor binary; brace-match from each `{`',
+    ].join('\n'),
+    expect: ['vendor-artifact-extraction'],
+  },
+  {
     // Prose wraps. A rule anchored to a line is defeated by a line break, which is how four
     // real findings survived the first sweep — so the scanner joins comment runs and matches
     // against those too, and this proves it still does.

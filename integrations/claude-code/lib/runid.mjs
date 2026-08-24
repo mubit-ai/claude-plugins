@@ -895,7 +895,7 @@ function safeCwd() {
  * `activity` breaks a tie on the higher `-c<n>` (a pre-clear marker and its successor can be
  * stamped inside one millisecond, and answering with the run the user just cleared would
  * report it as this session), while `pin` refuses a marker older than a day and refuses the
- * shared unconfigured run outright (a pin written there renders in a stranger's session).
+ * fallback run id outright (a pin is a standing constraint and needs a run to belong to).
  * Folding those together would mean one command silently inheriting the other's rules.
  *
  * Markers are enumerated from `status/`, never from `runs/`: the marker is the only file

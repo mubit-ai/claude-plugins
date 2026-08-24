@@ -220,7 +220,13 @@ export const RULES = [
     id: 'unauthenticated-surface',
     severity: 'block',
     kind: 'content',
-    pattern: /allowlisted before auth|before authentication|answers .{0,24}(?:for|with) (?:a )?wrong key|no auth(?:entication)? (?:is )?required|without a key at all|for a wrong key|the (?:access|core access) policy allowlists/gi,
+    // The last four alternatives were added after three disclosures survived a branch this
+    // rule had already passed. Each named the open route a different way — "unauthenticated by
+    // design", "the one allowlisted unauthenticated route", "works with no API key" — and none
+    // of them used the words the first six look for. A route is open or it is not; how a
+    // sentence phrases it is not the thing worth keying on, so the pattern now covers the
+    // vocabulary rather than the idiom.
+    pattern: /allowlisted before auth|before authentication|answers .{0,24}(?:for|with) (?:a )?wrong key|no auth(?:entication)? (?:is )?required|without a key at all|for a wrong key|the (?:access|core access) policy allowlists|allowlisted unauthenticated|unauthenticated (?:by design|route|endpoint)|(?:works|answers|responds) with no API key/gi,
     why: 'Points at the one route on the production control plane that answers without a credential. That is a free liveness and enumeration probe for anyone who reads it.',
     fix: 'Do not document the auth boundary from the outside. If a health route must be open, that is an infrastructure decision, not a published one.',
     found: 'A runbook described which route answers before the credential is checked.',
@@ -257,7 +263,10 @@ export const RULES = [
     id: 'isolation-defect-disclosure',
     severity: 'block',
     kind: 'content',
-    pattern: /tenant-wide|cross-run leak|write into any run(?: it can name)?|blast radius|(?:leak|leaks|leaked|leaking|injected) into (?:other|five unrelated|unrelated)|the whole tenant/gi,
+    // `stranger's session` and its neighbours were the phrasing that survived: the same
+    // disclosure as `tenant-wide`, written as a sentence a user would read rather than as
+    // jargon. One of them was a runtime error string, so it shipped in every bundle.
+    pattern: /tenant-wide|cross-run leak|write into any run(?: it can name)?|blast radius|(?:leak|leaks|leaked|leaking|injected) into (?:other|five unrelated|unrelated)|the whole tenant|(?:a |another )?stranger's (?:session|run|project)|shared run every unconfigured|fork a stranger/gi,
     why: 'Describes a live isolation weakness in the hosted service, in public, with enough precision to reproduce it. This is not reverse engineering — it is a disclosure, and it is worse than the code it guards.',
     fix: 'Fix it server-side, then describe the guarantee rather than the gap. Until then the note belongs in the private tracker.',
     found: 'Two source comments described, precisely, what an unguarded client could write and where.',
@@ -452,13 +461,50 @@ export const RULES = [
   /* 7. Internal process leaking through                               */
   /* ---------------------------------------------------------------- */
   {
+    // The gap that let twenty-one files sit in a public tree while both gates passed.
+    //
+    // They were draft-07 schemas lifted out of a third-party vendor's compiled binary with
+    // `strings`, checked in as ordinary JSON test fixtures. No rule here looked at them: the
+    // content rules scan prose for our own vocabulary, the path rules key on our own layout,
+    // and a fixture directory full of someone else's JSON matches neither. What made them
+    // findable was never the files — it was the recipe published beside them.
+    //
+    // So this keys on the extraction, which is the part that cannot be written by accident.
+    // A test fixture recorded from a tool's documented output does not describe how to open
+    // its binary; a lifted artefact has to, or nobody can reproduce it.
+    id: 'vendor-artifact-extraction',
+    severity: 'block',
+    kind: 'content',
+    pattern: /\bstrings\s+-n\s*\d|extracted (?:verbatim )?from the [A-Za-z][\w-]* binary|lifted out of the [A-Za-z][\w-]* binary|(?:brace-match|brace match) from each|node_modules\/@[\w-]+\/[\w-]+\/vendor\//gi,
+    why: 'Republishes a third-party vendor\'s internal artefact, and the technique for lifting it out of their shipped binary. Ours to use, not ours to publish — and the recipe is what turns one file into a repeatable extraction of anything else in there.',
+    fix: 'Pin the behaviour against what the tool was observed doing — its documented output, or a payload it sent — and record how to reproduce that instead. A recording is a weaker oracle; say so rather than reaching for the stronger one.',
+    found: 'Twenty-one schema documents and a rule table, extracted from a vendor binary, plus a 584-line document teaching the extraction.',
+  },
+  {
     id: 'internal-runbook',
     severity: 'block',
     kind: 'path',
-    pattern: /(?:^|\/)docs\/(?:handoff-|manual-test-|manual-verification)/,
+    // An allowlist, not a prefix list. The prefix version keyed on `handoff-`,
+    // `manual-test-` and `manual-verification`, which caught the runbooks that happened to be
+    // named that way and let two 500-line internal documents through on their filenames alone
+    // — one a working brief with effort estimates and open decisions, the other a probe of a
+    // third-party binary. Naming is not a property of the content, and whoever writes the next
+    // one will not know the convention.
+    //
+    // So: everything under `docs/` blocks, and the exceptions are listed. Adding a published
+    // document is then a deliberate one-line edit somebody reviews, which is the point.
+    pattern: /(?:^|\/)docs\/[^/]+\.md$/,
     why: 'Internal runbooks and handoff memos are written for the team, against the team\'s machines, and they carry unshipped plans, private paths and pasted production output. Every other finding in this catalogue was found inside one.',
-    fix: 'Keep them in the source repository and leave them out of the published file set. `docs/user-guide.md` is the one users need and it stays.',
+    fix: 'Keep them in the source repository and leave them out of the published file set. If a document is genuinely for users, add it to this rule\'s `exclude` list and say why.',
     found: 'Twelve such files, 7 700 lines, added to the public tree in one release cycle.',
+    exclude: [
+      // The one users need.
+      '**/docs/user-guide.md',
+      // Published deliberately: a feature audit and working brief, kept as the public record of
+      // what the port shipped. It reads like an internal document because it was one — it is
+      // here on an explicit decision, and it is scanned for everything else in this catalogue.
+      '**/docs/codaph-port.md',
+    ],
   },
   {
     id: 'unshipped-plan',

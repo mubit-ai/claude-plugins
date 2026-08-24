@@ -531,7 +531,7 @@ test('source=fork reuses the parent run and heartbeats instead of registering', 
  * strategy's job, and under the default `per-directory` the fork derives the very run its
  * parent derived from the same directory. That is what makes the matcher fix sufficient
  * rather than merely necessary: without this the fix would fire the hook and still hand the
- * fork a stranger's run.
+ * fork a run that is not the one it continues.
  */
 test('an unmapped fork session id still lands on the run its parent derived', async (t) => {
   const server = await fakeMubit();

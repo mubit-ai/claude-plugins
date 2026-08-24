@@ -453,3 +453,29 @@ test('--pre leaves the seen-set alone', async (t) => {
   assert.equal(existsSync(seenPath(dataDir)), true,
     'the model still has the whole transcript when --pre runs');
 });
+
+// W2-2: the same reset, applied to the resume briefing. A session that compacted before its
+// first substantive prompt has one still on disk describing the run in the shape it had
+// before the transcript was rewritten. `session-start` re-anchors a compacted run through the
+// checkpoint id instead, which is the same job against a conversation that is actually there.
+test('--post clears an un-injected resume briefing along with the seen-set', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const resumePath = join(runDir(dataDir), 'resume.json');
+  mkdirSync(runDir(dataDir), { recursive: true });
+  writeFileSync(resumePath, JSON.stringify({
+    run_id: RUN_ID, written_at: Date.now(), block: '## Working memory\n- Left mid-batch.',
+    ref_ids: ['ref_wm_1'],
+  }));
+
+  const r = await runHook('checkpoint', fx.postCompact(), {
+    env: env(dataDir, server.url), args: ['--post'],
+  });
+
+  assertHookContract(r);
+  assert.equal(existsSync(resumePath), false,
+    'a briefing that survives a compaction describes a session the model can no longer read, '
+    + 'and would be injected on the first prompt after it as if nothing had happened');
+  assert.equal(server.requests.length, 0, '--post still dials nothing (§5.6)');
+});

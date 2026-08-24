@@ -65,6 +65,11 @@
  * `recallBlock(cfg, {runId, agentId, query, deadline})` is exactly what `UserPromptSubmit`
  * asks for today, and a tighter caller overrides `tokenBudget` and nothing else.
  *
+ * `resumeContext` (W2-2) is the one export that is deliberately NOT a rung of that ladder. It
+ * is a session-start briefing rather than a recall against a prompt, it makes exactly one
+ * request whatever `recallAssemble` says, and it is the only caller in this file that asks
+ * `lib/http.mjs` not to record what it learns. Its own docblock says why.
+ *
  * Discipline shared with the rest of `lib/`: zero dependencies, Node >= 20 built-ins only,
  * no import outside `lib/`, and nothing here throws (§4.9).
  */
@@ -105,6 +110,106 @@ const RANK_MODES = Object.freeze(['relevance', 'balanced', 'freshness']);
 
 /** §5.2 rung-3 body, verbatim. */
 const CONTEXT_LIMIT = 6;
+
+// ---------------------------------------------------------------------------
+// W2-2 — the resume briefing's request
+// ---------------------------------------------------------------------------
+
+/**
+ * The sections a "where did this leave off" question is actually asking about.
+ *
+ * `facts` is deliberately absent. A fact is timeless — true before the session, during it and
+ * after — so it answers "what is true here", not "what were we doing". Everything a resume
+ * needs is state: what was in flight (`working_memory`), what happened (`traces`), the shape
+ * the work is being done in (`mental_models`), and the constraints that were being observed
+ * while doing it (`active_rules`, `lessons`).
+ *
+ * The list is paired with `RESUME_ENTRY_TYPES` below and the two cannot be edited apart: a
+ * section no entry type can fill renders as nothing, silently, on a healthy 200.
+ * `test/session-resume.test.mjs` checks both directions against `sectionFor()`.
+ *
+ * ---------------------------------------------------------------------------
+ * The known weakness of this path, measured rather than assumed
+ * ---------------------------------------------------------------------------
+ * `GetContext` does **not** order its evidence by retrieval score. It re-sorts into a fixed
+ * section hierarchy — mental_models, active_rules, lessons, …, working_memory(9), traces(10) —
+ * with importance second and the fused score only as a third-order tiebreak, and then spends
+ * `max_token_budget` top-down in that order. So the two sections a resume question is actually
+ * about are the *last* to be paid for, and on a real run against api.mubit.ai a 1000-token
+ * budget was consumed by 4 lessons and 2 traces with `working_memory` rendering nothing at all.
+ *
+ * Narrowing this list to `working_memory,traces` was measured too and is worse, not better: a
+ * `trace` is a captured tool call rather than a summary, so the block became 553 tokens of one
+ * raw multi-line shell script. Both orderings are in the PR that introduced this.
+ *
+ * Keeping the wider list is therefore the deliberate choice: the sections that render first
+ * are the ones that render *legibly*. The real fix is not a different section list — it is
+ * `postQuery{mode:'direct_bypass', rank_by:'freshness'}` assembled client-side, which is
+ * cheaper, better ranked and not subject to any of this. That is a follow-up, and the reason
+ * `resumeContext` is one small function with one caller is so it can be swapped whole.
+ */
+export const RESUME_SECTIONS = Object.freeze([
+  'working_memory', 'traces', 'mental_models', 'active_rules', 'lessons',
+]);
+
+/**
+ * The entry types that fill those sections (`lib/assemble.mjs`'s §4.10 table).
+ *
+ * `working_memory` has no entry type here and does not need one: `include_working_memory: true`
+ * on the request is what fills it, and it is the section most of the answer comes from. That
+ * asymmetry is the single most likely way this pair drifts, which is why the test names it
+ * rather than skipping it.
+ *
+ * `entry_types` IS a real `ContextRequest` field — one of the eleven — unlike `rank_by`,
+ * `lane_filter` and `env_tags`, and it is worth sending: without it the briefing competes for
+ * a 1000-token budget against every `observation` and `tool_output` the run has produced.
+ */
+export const RESUME_ENTRY_TYPES = Object.freeze([
+  'trace', 'task_result', 'mental_model', 'rule', 'lesson',
+]);
+
+/**
+ * The briefing's question: three clauses, and a constant.
+ *
+ * Constant because there is no prompt to derive it from — this request is made before the user
+ * has typed anything, which is the whole reason the feature exists. The three clauses are the
+ * three things a person actually asks when they sit back down: where it stopped, what was
+ * unfinished, and what to do first. Asking them in one query rather than three is what keeps
+ * this to one round trip.
+ */
+export const RESUME_QUERY = 'Where did the work on this project leave off; '
+  + 'what was in progress or blocked when it stopped; '
+  + 'what should the next session pick up first.';
+
+/**
+ * Candidates for the briefing. Larger than `CONTEXT_LIMIT` (6) because this runs once per
+ * *session* rather than once per prompt, and because five sections cannot be filled from six
+ * candidates.
+ *
+ * **What `limit` actually counts, read off the backend rather than the proto.** `control.proto`
+ * calls it "maximum number of evidence items per section" and that is wrong. `GetContext`
+ * clamps it to `min(limit, 50)` and forwards it as the *total* limit on one internal
+ * `AgentQueryRequest`, where it becomes a single `take(limit)` over the fused candidate list —
+ * there is no per-section application anywhere in the handler. Worse for anyone budgeting
+ * against it, `get_context`'s own overlay lanes sit **outside** it and add their own hardcoded
+ * caps on top: up to 6 lesson/rule overlay items, 3 archive blocks, 2 workflow hints and 1
+ * supplemental fact. So a `limit` of 12 can return up to 24 sources, and the only true bound
+ * on the response is `max_token_budget`.
+ *
+ * `evidence_candidates_considered` is the observable that shows it: it is the merged, deduped
+ * candidate count *before* budget truncation, and `evidence_dropped_by_budget` is that count
+ * minus what survived.
+ */
+export const RESUME_LIMIT = 12;
+
+/**
+ * The briefing's deadline. Note that it is *looser* than `MUBIT_CC_TIMEOUT_MS`, which is
+ * exactly why the request carrying it must also carry `{record: false}` — see `resumeContext`.
+ */
+const RESUME_TIMEOUT_MS = 20_000;
+
+/** §6.1 `resumeTokenBudget`, used when a config could not be resolved. */
+const RESUME_TOKEN_BUDGET = 1000;
 
 /** §5.2/§7: the policy verdict file, keyed by endpoint hash — the same scheme as the breaker. */
 const POLICY_TTL_MS = 86_400_000;
@@ -298,8 +403,101 @@ async function rungThree(cfg, o) {
   }, { timeoutMs: budget });
 
   if (!res.ok) return failure(res.state, res.error, 3);
+  return fromContext(res.body, 3);
+}
 
-  const b = isObject(res.body) ? res.body : {};
+// ---------------------------------------------------------------------------
+// W2-2 — the resume briefing
+// ---------------------------------------------------------------------------
+
+/**
+ * The one request `hooks/src/session-resume.mjs` makes: `POST /v2/control/context` asking what
+ * the next agent on this run needs to know.
+ *
+ * ---------------------------------------------------------------------------
+ * `postContext` directly, and never `recallBlock`
+ * ---------------------------------------------------------------------------
+ * `recallBlock` dispatches on `cfg.recallAssemble`, so routing the briefing through it would
+ * mean the feature silently changes shape — a different endpoint, a different body, a
+ * different ranking story — the moment an operator flips a per-prompt dial that has nothing to
+ * do with it. This path has exactly one shape and reaching it costs one function.
+ *
+ * ---------------------------------------------------------------------------
+ * `{record: false, timeoutMs: 20000}` is required, not optional
+ * ---------------------------------------------------------------------------
+ * `lib/http.mjs:557-560` tags an abort `abortedEarly` — and `settle()` at :592 then declines to
+ * record it with the breaker — **only** when the caller's deadline is *tighter* than the
+ * configured default. That is the right rule: a caller on a 400 ms slice learns nothing about
+ * a healthy instance from its own impatience.
+ *
+ * This deadline is 20 s against a 4000 ms default, which is *looser*, so an abort here would
+ * be treated as evidence and recorded. Five sessions inside the five-minute window and the
+ * breaker opens — which stops `prompt-recall` dialling and suppresses the capture drain, for a
+ * briefing nobody was waiting on. A background feature must not be able to take recall down,
+ * so it declines to vote at all.
+ *
+ * 20 s is the right deadline for the same reason `recall-refresh` ignores `recallBudgetMs`:
+ * nothing is waiting. Rung 3 costs two LLM calls and the runbook's own measurement puts an
+ * agent-routed call at a 5 s median with a tail past 11 s.
+ *
+ * Never throws and never rejects — every failure is already a shape in `Outcome` (§4.9).
+ *
+ * @param {Record<string, any>} cfg
+ * @param {{runId: string, agentId: string, tokenBudget?: number}} o
+ * @returns {Promise<Outcome>}
+ */
+export async function resumeContext(cfg, o) {
+  try {
+    const res = await postContext(cfg, {
+      run_id: o?.runId,
+      agent_id: o?.agentId,
+      query: RESUME_QUERY,
+      mode: 'sections',
+      sections: [...RESUME_SECTIONS],
+      entry_types: [...RESUME_ENTRY_TYPES],
+      include_working_memory: true,
+      max_token_budget: intOr(o?.tokenBudget ?? cfg?.resumeTokenBudget, RESUME_TOKEN_BUDGET),
+      limit: RESUME_LIMIT,
+      format: 'structured',
+      // Four fields are deliberately absent and each is absent for its own reason:
+      //
+      //   `rank_by`     — `ContextRequest` has no ranking field of ANY kind. Sending one is
+      //                   ignored server-side while sitting in the request log looking like a
+      //                   choice somebody made, which is a bug with no symptom. It is also the
+      //                   real cost of this path: `lib/rank.mjs` has a `where_were_we` rule
+      //                   that would resolve this query to `freshness`, and it cannot be used.
+      //   `lane_filter` — an `AgentQueryRequest` field, not a `ContextRequest` one
+      //                   (`mcp/dist/server.js:47366` against `getContext` at :47398-47415).
+      //   `env_tags`    — the same gap, one field further on. Version-aware tag scoring is a
+      //                   capability rungs 1-2 have and this endpoint does not.
+      //   `user_id`     — a retrieval FILTER the server enforces, not a label. Filling it
+      //                   narrows the briefing to entries captured under the same id, which on
+      //                   every install that never set one is nothing at all.
+    }, { timeoutMs: RESUME_TIMEOUT_MS, record: false });
+
+    if (!res.ok) return failure(res.state, res.error, 3);
+    return fromContext(res.body, 3);
+  } catch (err) {
+    log(cfg, 'warn', `resume: the context call threw (${messageOf(err)})`, { run_id: o?.runId });
+    return failure('server_error', messageOf(err), 3);
+  }
+}
+
+/**
+ * A `ContextResponse` as an `Outcome`. Shared by rung 3 and the resume briefing, because they
+ * are the same response off the same endpoint — and a second parser would be a second place
+ * for `sources[]` to be read as `evidence[]`, which is the mistake this shape invites.
+ *
+ * The seen-set never reaches either caller and cannot: the block is the server's own rendering
+ * and the client has no seam inside it to degrade. `pointers` is 0 here honestly rather than
+ * by omission.
+ *
+ * @param {any} responseBody
+ * @param {number} rung
+ * @returns {Outcome}
+ */
+function fromContext(responseBody, rung) {
+  const b = isObject(responseBody) ? responseBody : {};
   const block = typeof b.context_block === 'string' ? b.context_block.trim() : '';
   const refIds = Array.isArray(b.sources)
     ? [...new Set(b.sources.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim()))]
@@ -309,7 +507,7 @@ async function rungThree(cfg, o) {
 
   return {
     failed: false,
-    rung: 3,
+    rung,
     block,
     tokens: numOr(b.token_estimate, 0) || estimateTokens(block),
     sources: refIds.length || counted,

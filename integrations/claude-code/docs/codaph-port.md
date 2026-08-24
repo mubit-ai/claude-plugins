@@ -171,8 +171,16 @@ vendored and tested. What is missing is an allowlist entry and a skill that make
 **Impact: high · Effort: M · 4–5 days**
 
 `codaph mubit context "what should the next agent know?"` builds a structured block for handoff,
-with `sections`, `lane_filter`, `entry_types`, `include_working_memory` and `max_token_budget`.
+with `sections`, `entry_types`, `include_working_memory` and `max_token_budget`.
 It also generates a per-session summary for its browse view.
+
+> **Correction (W2-2).** An earlier draft of this section listed `lane_filter` among those
+> fields. It is not one: `lane_filter` exists on `AgentQueryRequest` and **not** on
+> `ContextRequest`. Read it off the vendored client — `mcp/dist/server.js:47366` is the only
+> occurrence in the whole bundle and it sits inside `query()`, while `getContext()` at
+> `:47398-47415` carries exactly eleven fields and no `lane_filter` among them. The same list
+> has no ranking field of any kind, which is why the shipped implementation sends no `rank_by`
+> either and cannot use `lib/rank.mjs`'s `where_were_we` rule on this path.
 
 We already call `/v2/control/context`, but only as the `recallAssemble: server` variant of
 per-prompt recall. SessionStart injects recalled memory; it does not inject *here is where you

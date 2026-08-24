@@ -211,6 +211,12 @@ export function pruneStale(cfg = {}) {
       // (`lib/seen.mjs`). It also expires entry by entry on every read; this is the sweep
       // for a run nobody comes back to, whose whole file would otherwise outlive its turns.
       expire(join(rd, 'seen.json'), 6 * HOUR);
+      // runs/<run_id>/resume.json — 1 h. The W2-2 briefing is already consume-once and
+      // already carries its own 30 min injectability window (`lib/resume.mjs`), so this is
+      // the sweep for the file nobody ever came back to read: a session that was started and
+      // abandoned before its first prompt leaves one behind, and it would otherwise sit in
+      // the data directory for as long as the run does.
+      expire(join(rd, 'resume.json'), 1 * HOUR);
       // runs/<run_id>/drain.lock — 60 s, stolen after
       expire(join(rd, 'drain.lock'), 60 * SEC);
       // runs/<run_id>/checkpoints.json — 30 d; jobs.json — 24 h

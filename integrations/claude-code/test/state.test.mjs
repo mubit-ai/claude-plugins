@@ -287,6 +287,10 @@ const TTL_ROWS = [
   { what: 'status marker', rel: 'status/cc-x.json', ttl: 12 * HOUR },
   { what: 'cached health', rel: 'status/health.json', ttl: 30 * SEC },
   { what: 'detached payload handoff', rel: 'tmp/0c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f.json', ttl: 1 * HOUR },
+  // W2-2. The briefing is consume-once and carries its own 30 min injectability window, so
+  // this row is the sweep for the one nobody came back to read: a session started and
+  // abandoned before its first prompt leaves a file that would otherwise outlive the run.
+  { what: 'resume briefing', rel: 'runs/cc-x/resume.json', ttl: 1 * HOUR },
 ];
 
 for (const row of TTL_ROWS) {

@@ -215,6 +215,46 @@ test('--pre spools a checkpoint-intent item even when the checkpoint POST 500s',
   assert.ok(!JSON.stringify(item).includes(fx.SECRETS.mubitKey), 'the spooled item is redacted too');
 });
 
+// The PreCompact anchor is an ingest item like any other, so it wears the actor like any
+// other — otherwise the one memory that survives a compaction is the one nobody is
+// attributed for. And, as everywhere else, the actor rides in `metadata_json`: `user_id` is
+// a *retrieval scope* the server enforces as a query filter, and recall never sends one, so
+// an actor put there would hide this anchor from the recall meant to find it.
+test('--pre stamps the actor on the anchor item, in metadata and not in user_id', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const transcript = writeTranscript(dataDir, { bytes: 16 * 1024 });
+
+  const r = await runHook('checkpoint', preCompactPayload(transcript), {
+    env: env(dataDir, server.url, { MUBIT_CC_ACTOR_ID: 'ada' }),
+    args: ['--pre'],
+  });
+  assertHookContract(r);
+
+  const item = readJsonFile(spoolFiles(dataDir, RUN_ID)[0]);
+  assert.equal(JSON.parse(item.metadata_json).actor, 'ada',
+    'the anchor must carry the actor in metadata_json');
+  assert.ok(!('user_id' in item),
+    `the actor must not mint a user_id: ${JSON.stringify(item.user_id)}`);
+});
+
+// Nothing known means no key, not an empty one — an `"actor": ""` on every anchor is a
+// field that is always there and never says anything.
+test('--pre omits the actor key entirely when no actor is known', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const transcript = writeTranscript(dataDir, { bytes: 16 * 1024 });
+
+  const r = await runHook('checkpoint', preCompactPayload(transcript),
+    { env: env(dataDir, server.url), args: ['--pre'] });
+  assertHookContract(r);
+
+  const meta = JSON.parse(readJsonFile(spoolFiles(dataDir, RUN_ID)[0]).metadata_json);
+  assert.ok(!('actor' in meta), `expected no actor key at all, got ${JSON.stringify(meta.actor)}`);
+});
+
 // §5.6 — PreCompact stdout carries the id so the user can find the anchor later.
 test('--pre stdout carries the checkpoint id in systemMessage', async (t) => {
   const server = await fakeMubit();

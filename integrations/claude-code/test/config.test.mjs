@@ -483,6 +483,10 @@ const USER_CONFIG_ROWS = [
   { key: 'endpoint', env: 'MUBIT_ENDPOINT', field: 'endpoint', raw: 'https://mubit.example.com', want: 'https://mubit.example.com' },
   { key: 'apiKey', env: 'MUBIT_API_KEY', field: 'apiKey', raw: 'mbt_acme_kid_secret', want: 'mbt_acme_kid_secret' },
   { key: 'userId', env: 'MUBIT_CC_USER_ID', field: 'userId', raw: 'eldar@mubit.ai', want: 'eldar@mubit.ai' },
+  // Rung 1 of the `lib/actor.mjs` ladder, and the neighbour of `userId` it must never be
+  // confused with: this one is attribution, in item metadata; `userId` is a retrieval scope
+  // the server enforces as a query filter.
+  { key: 'actorId', env: 'MUBIT_CC_ACTOR_ID', field: 'actorId', raw: 'eldar', want: 'eldar' },
   { key: 'runStrategy', env: 'MUBIT_CC_RUN_STRATEGY', field: 'runStrategy', raw: 'git-branch', want: 'git-branch' },
   { key: 'capture', env: 'MUBIT_CC_CAPTURE', field: 'capture', raw: '0', optRaw: 'false', want: false },
   { key: 'recall', env: 'MUBIT_CC_RECALL', field: 'recall', raw: '0', optRaw: 'false', want: false },
@@ -541,6 +545,10 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.mode, 'hosted');
   assert.equal(cfg.apiKey, '');
   assert.equal(cfg.userId, '');
+  // Empty by default, and detection deliberately stays out of `resolveAll`: a subprocess
+  // result cached for 300 s under an input hash that cannot invalidate it is a bug waiting
+  // to happen, and `drain` — detached, unbudgeted — is where the ladder belongs.
+  assert.equal(cfg.actorId, '');
   assert.equal(cfg.runStrategy, 'per-directory');
   assert.equal(cfg.capture, true);
   assert.equal(cfg.recall, true);

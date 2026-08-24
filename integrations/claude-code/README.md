@@ -266,7 +266,8 @@ that cache, and writing credentials invalidates it immediately rather than after
 | --- | --- | --- | --- |
 | `endpoint` | `""` | `MUBIT_ENDPOINT` | Your Mubit instance URL. Required — without it there is nothing to talk to. |
 | `apiKey` | `""` | `MUBIT_API_KEY` | `mbt_...` key, sent as `Authorization: Bearer`. Set it with `/mubit-memory:auth`, or via plugin settings to keep it in the OS keychain. |
-| `userId` | `""` | `MUBIT_CC_USER_ID` | Optional user/entity id for multi-user memory scoping. |
+| `userId` | `""` | `MUBIT_CC_USER_ID` | Optional user/entity id for multi-user memory scoping. A **retrieval scope**, not a name: it is sent as `user_id`, which the server stamps on capture and then *enforces as a filter* on query. Recall does not send one, so anything captured under a `userId` is invisible to this plugin's own recall — set it only when you mean to partition memory. To label who did the work, use `actorId`. |
+| `actorId` | `""` (detected) | `MUBIT_CC_ACTOR_ID` | Who captured memory is attributed to. Left blank it is detected — `git config github.user`, then the local-part of `git config user.email`, then `git config user.name`, then `$USER` — and cached for 30 days at `${CLAUDE_PLUGIN_DATA}/actor.json`. Detection runs only in the detached drainer, never on a hook that a prompt is waiting on, so the first capture in a brand-new data dir may go unattributed. The value rides in each item's metadata and, unlike `userId`, never narrows what recall can see. |
 | `runStrategy` | `per-directory` | `MUBIT_CC_RUN_STRATEGY` | How a session maps to a Mubit run. See [Run strategies](#run-strategies). |
 | `capture` | `true` | `MUBIT_CC_CAPTURE` | Capture tool activity. Off means the `PostToolUse`/`Stop` hooks spool nothing. |
 | `recall` | `true` | `MUBIT_CC_RECALL` | Inject recalled memory before each prompt. Off means `UserPromptSubmit` dials nothing. |

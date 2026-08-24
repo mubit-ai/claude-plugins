@@ -329,6 +329,17 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const endpoint = endpointRaw.trim();   // blank means unconfigured: nothing is sent
   const apiKey = str(pick('apiKey', 'MUBIT_API_KEY'), '').trim();
   const userId = str(pick('userId', 'MUBIT_CC_USER_ID'), '').trim();
+  // Who the work is attributed to — the neighbour of `userId` that must never be confused
+  // with it. `userId` reaches the wire as `user_id`, which the server enforces as a *query
+  // filter*; `actorId` reaches it inside `metadata_json`, where it is a label and nothing
+  // else. `lib/recall.mjs` sends no `user_id` at all, so a detected login placed there would
+  // scope every captured entry out of the recall that is meant to find it.
+  //
+  // Detection deliberately does not happen here. It costs two `git` spawns, and the answer
+  // would land in the 300 s `config.json` cache keyed by an input hash that has no way to
+  // notice it went stale. `lib/actor.mjs` owns the ladder, `hooks/src/drain.mjs` — detached
+  // and unbudgeted — is the only caller of it, and it caches under its own 30-day TTL.
+  const actorId = str(pick('actorId', 'MUBIT_CC_ACTOR_ID'), '').trim();
   const runStrategy = str(pick('runStrategy', 'MUBIT_CC_RUN_STRATEGY'), 'per-directory').trim()
     || 'per-directory';
   const capture = bool(pick('capture', 'MUBIT_CC_CAPTURE'), true);
@@ -451,6 +462,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     mode: MODE,
     apiKey,
     userId,
+    actorId,
     runStrategy,
     runId,
     capture,

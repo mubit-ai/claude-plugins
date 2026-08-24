@@ -31,6 +31,7 @@
 
 import { join } from 'node:path';
 
+import { readActor } from '../../lib/actor.mjs';
 import { envTags } from '../../lib/config.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { classifyTool, classifyTurn } from '../../lib/classify.mjs';
@@ -465,6 +466,14 @@ function buildTurnItem(payload, cfg, runId, mode) {
  */
 function item(o) {
   const cfg = o.cfg ?? {};
+  // Who this is attributed to. A pure cache read — `lib/actor.mjs` keeps the detection
+  // ladder, which shells out to git, on `drain`'s side of the line and nowhere near here.
+  //
+  // It goes into `metadata_json` and it must NEVER go into `user_id`. `user_id` is a
+  // retrieval *scope* the server enforces as a filter on query, and `lib/recall.mjs` sends
+  // none — so an actor written there would scope every item this hook captures out of the
+  // recall meant to find it, silently, for as long as attribution was switched on.
+  const actor = attempt(() => readActor(cfg), '');
   /** @type {Record<string, any>} */
   const out = {
     item_id: clamp(o.id || `cc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, MAX_ID_CHARS),
@@ -481,7 +490,10 @@ function item(o) {
     // would be half a fix: the memory would land in the right run wearing the wrong labels.
     env_tags: attempt(
       () => envTags(cfg, resolveProjectDir(cfg, o.payload)), ['tool:claude-code']),
-    metadata_json: safeJson(o.metadata),
+    // Merged here rather than at each call site, so *every* ingest item this hook writes
+    // carries it uniformly. Omitted entirely when unknown: `"actor": ""` would be a field
+    // that is always present and never says anything.
+    metadata_json: safeJson(actor ? { ...o.metadata, actor } : o.metadata),
   };
   const userId = str(cfg.userId);
   if (userId) out.user_id = userId;

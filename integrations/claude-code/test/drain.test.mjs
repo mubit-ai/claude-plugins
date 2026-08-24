@@ -20,7 +20,7 @@ import {
 import { join } from 'node:path';
 
 import {
-  runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir,
+  runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir, makeProjectDir,
   readJsonFile, readJsonDir, spoolFiles, waitFor,
 } from './helpers/harness.mjs';
 import { stop, spoolItem, PROMPT_ID } from './helpers/fixtures.mjs';
@@ -663,4 +663,59 @@ test('drain --run: a "default" pin drains nothing', async (t) => {
   assertHookContract(r);
   assert.equal(server.requests.length, 0, `saw unexpected HTTP: ${server.summary()}`);
   assert.equal(spoolFiles(dataDir, RUN_ID).length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// The actor cache — drain is its only writer
+// ---------------------------------------------------------------------------
+
+// `lib/actor.mjs` splits detection from reading precisely so that the `git` spawns land
+// here, in the one process nothing is waiting on, and never on `capture`'s per-tool-call
+// path. If the drainer stops writing the cache, capture reads an empty file forever and
+// every memory the plugin stores goes unattributed — quietly, with nothing failing.
+test('drain: resolves the actor once and caches it for capture to read', async (t) => {
+  const dataDir = makeDataDir();
+  // A real repo, so the ladder has something to find: `makeProjectDir({git:true})` sets
+  // `user.email = test@example.com`, and rung 3 takes the local-part.
+  const projectDir = makeProjectDir({ git: true });
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+
+  const r = await runHook('drain', { ...stop(), cwd: projectDir }, {
+    env: baseEnv({
+      dataDir,
+      endpoint: server.url,
+      projectDir,
+      extra: { MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: RUN_ID },
+    }),
+  });
+
+  assertHookContract(r);
+  const cached = readJsonFile(join(dataDir, 'actor.json'));
+  assert.equal(cached.v, 1);
+  assert.equal(cached.actor, 'test', `expected the git email local-part, got ${JSON.stringify(cached.actor)}`);
+  assert.equal(typeof cached.at, 'number');
+  // Recorded so "why does it think I am that?" is answerable from the file alone.
+  assert.ok(String(cached.source).length > 0, 'the record must name the rung that answered');
+});
+
+// The drainer ships memory. A machine with no git, no configured actor and no `$USER` has
+// nothing to attribute to, and that must cost the name and nothing else (§4.9).
+test('drain: an unresolvable actor costs the name, not the batch', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const ids = seedSpool(dataDir, 2);
+
+  const r = await runHook('drain', stop(), {
+    // `projectDir` is the data dir, which is not a repo, so every git rung is skipped by the
+    // `hasGitDir` guard before it can spawn anything.
+    env: envFor(dataDir, server.url, { USER: '', USERNAME: '', LOGNAME: '' }),
+  });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  assert.deepEqual(server.lastCall('POST', '/v2/control/ingest').body.items.map((i) => i.item_id), ids);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0, 'the batch still committed');
+  assert.equal(existsSync(join(dataDir, 'actor.json')), false,
+    'a failed detection is not cached — a 30-day negative would outlive the fix for it');
 });

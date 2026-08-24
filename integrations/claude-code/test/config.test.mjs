@@ -490,6 +490,10 @@ const USER_CONFIG_ROWS = [
   { key: 'recallTokenBudget', env: 'MUBIT_CC_RECALL_TOKENS', field: 'recallTokenBudget', raw: '900', want: 900 },
   { key: 'recallAssemble', env: 'MUBIT_CC_RECALL_ASSEMBLE', field: 'recallAssemble', raw: 'server', want: 'server' },
   { key: 'recallRepeatMode', env: 'MUBIT_CC_RECALL_REPEAT_MODE', field: 'recallRepeatMode', raw: 'full', want: 'full' },
+  // Asserted at a concrete mode rather than at `auto`: `auto` is the default, so a row that
+  // set it there would pass just as well against a key `loadConfig` never reads. `freshness`
+  // is also the value an operator most plausibly pins, since it is the whole point of the key.
+  { key: 'recallRankBy', env: 'MUBIT_CC_RECALL_RANK_BY', field: 'recallRankBy', raw: 'freshness', want: 'freshness' },
   // Asserted ON rather than off: the default is already false, so a row that set it to false
   // would pass just as well against a key `loadConfig` never reads.
   { key: 'recallAsync', env: 'MUBIT_CC_RECALL_ASYNC', field: 'recallAsync', raw: '1', optRaw: 'true', want: true },
@@ -551,6 +555,11 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   // §5.2: a memory already injected this run is repeated as a one-line pointer rather than
   // in full. `full` is the pre-seen-set behaviour and costs up to 1500 tokens every prompt.
   assert.equal(cfg.recallRepeatMode, 'pointer');
+  // §5.2: `auto` decides per prompt — a handoff question ("where were we?") is ranked by
+  // recency, everything else by similarity. Defaulting to `relevance` would keep the bug;
+  // defaulting to `freshness` would rank every ordinary question by recency, which is the
+  // same mistake pointed the other way.
+  assert.equal(cfg.recallRankBy, 'auto');
   // Carry-forward recall is opt-in. Default-on would hand every install a first prompt with
   // no memory and a turn of staleness on every prompt after it, in exchange for latency
   // most instances do not have a problem with.

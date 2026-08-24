@@ -208,7 +208,28 @@ test('the query is the parent turn\'s staged prompt, because the payload carries
     assert.equal(body.run_id, RUN_ID,
       'the query must read the PARENT run: a sub-run id has no memory stored against it, so '
       + 'querying one would return nothing for every subagent, forever');
+    // §5.2 — and the same text decides the fusion weights. The staged parent prompt is a
+    // diagnosis, so `auto` resolves it to `relevance`, exactly as it does for the parent's
+    // own `UserPromptSubmit`. One rule, one query text, three call sites.
+    assert.equal(body.rank_by, 'relevance');
   });
+
+// The parent's question is the only description of the subagent's task, so it is also the
+// only thing that can say whether the task is a handoff. A fan-out spawned off "where were
+// we?" wants the same recency emphasis its parent turn got — otherwise the parent is caught
+// up and every agent it spawns is not.
+test('a subagent spawned off a handoff prompt inherits freshness ranking', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir, 'where were we on the drain rewrite?');
+
+  await runHook('subagent-start', subagentStart(), { env: env(dir, server) });
+
+  const body = server.lastCall('POST', '/v2/control/query').body;
+  assert.equal(body.rank_by, 'freshness',
+    'the rule runs over the parent query, the same rule and the same text prompt-recall uses');
+});
 
 // No staged turn means no query text. Dialling anyway would spend a round trip per subagent
 // spawn on a search with nothing to search for.

@@ -214,6 +214,120 @@ test('rung 1 request body matches §5.2 exactly', async (t) => {
   assert.ok(body.env_tags.includes('tool:claude-code'));
   assert.ok(body.env_tags.includes('ci:test'), 'MUBIT_CC_ENV_TAGS extras are appended verbatim');
   assert.ok(body.env_tags.length <= 8, 'env_tags is capped at 8 (§4.1)');
+  // §5.2 — the fusion weights, chosen client-side. The fixture prompt is a diagnosis
+  // ("why is the ingest job stuck in queued?"), not a handoff, so the default `auto` rule
+  // resolves it to `relevance`. A `freshness` here would mean the rule fires on ordinary
+  // questions, which is the one way this feature makes recall worse rather than better.
+  assert.equal(body.rank_by, 'relevance',
+    'rank_by must be on the wire and concrete: `auto` is a client-side word, and sending it '
+    + 'would fall through to the default weights while looking like a decision');
+});
+
+// ---------------------------------------------------------------------------
+// §5.2 — `rank_by`, the freshness dial
+// ---------------------------------------------------------------------------
+
+// The bug: "where were we?" is answered by whatever is most *similar* to those three words.
+// `rank_by:"freshness"` moves the server's recency weight from 0.10 to 0.50 for that query
+// and that query only — nothing about the install changes.
+test('a handoff-shaped prompt asks the server to rank by freshness', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const r = await runHook('prompt-recall', userPromptSubmit({ prompt: 'where were we on the ingest bug?' }),
+    { env: env(makeDataDir(), server) });
+  assertHookContract(r);
+
+  const body = server.lastCall('POST', '/v2/control/query').body;
+  assert.equal(body.rank_by, 'freshness',
+    '"where were we" is the archetypal handoff question; ranking it by similarity is the '
+    + 'behaviour this dial exists to fix');
+  assert.equal(body.query, 'where were we on the ingest bug?',
+    'the rule reads the query text and changes nothing about it');
+});
+
+// The rule is what `auto` means, not a fallback for a missing setting. An operator who names
+// a mode has made a decision, and `balanced` is reachable no other way.
+test('MUBIT_CC_RECALL_RANK_BY overrides the rule in both directions', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const handoff = userPromptSubmit({ prompt: 'catch me up on this branch' });
+  assertHookContract(await runHook('prompt-recall', handoff, {
+    env: env(makeDataDir(), server, { MUBIT_CC_RECALL_RANK_BY: 'balanced' }),
+  }));
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.rank_by, 'balanced',
+    'a configured mode must survive a prompt the rule would have re-ranked — otherwise the '
+    + 'setting is a suggestion and "balanced" can never be reached at all');
+
+  assertHookContract(await runHook('prompt-recall', handoff, {
+    env: env(makeDataDir(), server, { MUBIT_CC_RECALL_RANK_BY: 'relevance' }),
+  }));
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.rank_by, 'relevance',
+    'pinning relevance is how an operator turns the rule off');
+});
+
+// `auto` is a client-side word. The server has no such mode, so sending it would fall
+// through to the default weights while looking, in a request log, like a deliberate choice.
+test('an unresolvable rank mode is omitted rather than sent as "auto"', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const r = await runHook('prompt-recall', userPromptSubmit(), {
+    env: env(makeDataDir(), server, { MUBIT_CC_RECALL_RANK_BY: 'sideways' }),
+  });
+  assertHookContract(r);
+
+  const body = server.lastCall('POST', '/v2/control/query').body;
+  assert.notEqual(body.rank_by, 'auto', '"auto" is never a wire value');
+  assert.notEqual(body.rank_by, 'sideways', 'an unknown mode is clamped by config, not shipped');
+  assert.equal(body.rank_by, 'relevance',
+    'an unusable setting falls back to the rule, which is what `auto` would have done');
+});
+
+// One field on one body object covers both rungs: rung 2 is `{...body, mode:"agent_routed"}`.
+// Asserted anyway, because "byte-identical but for the mode" is a claim that has to keep
+// being true as fields are added.
+test('rung 2 carries the same rank_by as rung 1', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': [DENIED, { json: queryResponse({ mode: 'agent_routed' }) }],
+  });
+  t.after(() => server.close());
+
+  const r = await runHook('prompt-recall', userPromptSubmit({ prompt: 'what changed since yesterday?' }),
+    { env: env(makeDataDir(), server, FALLBACK_ON) });
+  assertHookContract(r);
+
+  const [first, second] = server.calls('POST', '/v2/control/query').map((c) => c.body);
+  assert.equal(first.rank_by, 'freshness');
+  assert.equal(second.rank_by, 'freshness',
+    'the fallback rung must not quietly revert to default fusion weights');
+});
+
+/*
+ * THE caveat, pinned as a test because it is invisible everywhere else.
+ *
+ * `/v2/control/context` — rung 3, `recallAssemble:"server"` — has **no `rank_by` field at
+ * all**. `ContextRequest` lists 12 fields and ranking is not among them, the same way
+ * `env_tags` exists on `AgentQueryRequest` and not on `ContextRequest`. So an operator who
+ * turns rung 3 on to buy a server-assembled block silently gives up freshness ranking, and
+ * nothing tells them. This asserts the field is absent rather than sent-and-ignored, so the
+ * day it is added to the proto this test fails and points at the README row that says it is
+ * missing.
+ */
+test('rung 3 sends no rank_by, because ContextRequest has no such field', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+
+  const r = await runHook('prompt-recall', userPromptSubmit({ prompt: 'where were we?' }), {
+    env: env(makeDataDir(), server, { MUBIT_CC_RECALL_ASSEMBLE: 'server' }),
+  });
+  assertHookContract(r);
+
+  const body = server.lastCall('POST', '/v2/control/context').body;
+  assert.equal(body.rank_by, undefined,
+    'inventing a field the server does not read would make rung 3 look ranked when it is '
+    + 'not; the honest record is that recallAssemble:"server" costs you freshness');
 });
 
 /*

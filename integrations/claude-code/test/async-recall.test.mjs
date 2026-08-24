@@ -343,6 +343,12 @@ test('recall-refresh writes the carried block, and writes neither the turn nor t
   assert.ok(String(carry.block).includes('poll the job'), 'the refresh exists to produce a block');
   assert.deepEqual(carry.ref_ids, ['ref_rule_1']);
 
+  // §5.2 — the refresh runs the same ladder, so it must send the same fusion weights. The
+  // fixture prompt is a diagnosis, so `auto` resolves it to `relevance` here too: a hook
+  // that dials on a user's behalf and quietly ranks it differently from the one the user
+  // waits on is two recall behaviours wearing one name.
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.rank_by, 'relevance');
+
   assert.equal(existsSync(seenPath(dataDir)), false,
     'marking here would record a memory as shown before any turn has shown it — the next '
     + 'full-price block would then degrade it to a pointer naming text the model never got');
@@ -372,6 +378,26 @@ test('recall-refresh is not bounded by recallBudgetMs — a slow endpoint still 
     + 'the entire trade, and getting it wrong reproduces the empty recall it was meant to fix');
   assert.ok(carry.fetch_ms >= 700,
     `the refresh must record what it actually spent; got ${carry.fetch_ms}ms`);
+});
+
+// The rule reads the prompt this process was spawned with, which is the same text the
+// synchronous half would have queried on. Carry-forward moves *when* the call happens, never
+// *what* it asks for — a handoff question ranked by similarity in the background is the same
+// bug, just one turn later and harder to see.
+test('recall-refresh ranks a handoff prompt by freshness, exactly as the blocking path would', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { json: ONE } });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('recall-refresh', userPromptSubmit({ prompt: 'catch me up on where we left off' }), {
+    env: env(dataDir, server, ASYNC_ON),
+  });
+
+  assertHookContract(r);
+  const body = server.lastCall('POST', '/v2/control/query').body;
+  assert.equal(body.rank_by, 'freshness',
+    'the detached half must not fall back to default fusion weights');
+  assert.equal(body.query, 'catch me up on where we left off');
 });
 
 // A failed refresh writes no block. The alternative — an empty carry file — would be read by

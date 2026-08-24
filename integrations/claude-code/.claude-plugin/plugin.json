@@ -33,6 +33,8 @@
       "description": "How recalled memory is assembled: 'client' is free; 'server' uses /v2/control/context, which costs two LLM calls per prompt." },
     "recallRepeatMode": { "type": "string", "title": "Repeated memory", "default": "pointer",
       "description": "What to do with a memory already injected earlier in this run: 'pointer' repeats it as a one-line reference, 'full' re-sends the whole entry on every prompt. Recall injection is the plugin's largest recurring context cost." },
+    "recallRankBy": { "type": "string", "title": "Recall ranking", "default": "auto",
+      "description": "How the server ranks recalled memory: 'auto' reads it off the prompt \u2014 a handoff question like 'where were we?' is ranked by recency, everything else by similarity. 'relevance' is the server default and is what made those questions answer with the most similar memory rather than the most recent one; 'freshness' and 'balanced' pin the emphasis for every prompt. Costs nothing: it is one field on a request the plugin already sends. Ignored when recallAssemble is 'server', which has no ranking field at all." },
     "recallAsync": { "type": "boolean", "title": "Non-blocking recall", "default": false,
       "description": "Never make a prompt wait on recall. The block injected before each prompt is the one retrieved in the background just after the previous prompt, so the hook returns instantly however slow the endpoint is. Costs one turn of staleness, and the first prompt of a session gets no recalled memory." },
     "reflectOnEnd": { "type": "boolean", "title": "Reflect on session end", "default": true,

@@ -369,6 +369,22 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // Operators who would rather pay it can opt back in.
   const recallFallback = enumOf(pick('recallFallback', 'MUBIT_CC_RECALL_FALLBACK'),
     ['none', 'agent_routed'], 'none');
+  // §5.2 — how the server fuses semantic, lexical and recency scores for a recall query.
+  // `relevance` is the server's own default and weights recency at 0.10, which is why "where
+  // were we?" answers with the most *similar* memory rather than the most recent one;
+  // `freshness` moves that to 0.50, `balanced` to 0.25. Costs nothing either way — it is a
+  // field on a request the plugin already sends, and there is real event time to rank on
+  // because every captured item carries `occurrence_time`.
+  //
+  // `auto` is the default and decides per prompt (`lib/rank.mjs`): a temporal or handoff
+  // question gets `freshness`, everything else `relevance`. Pinning `relevance` turns the
+  // rule off; `balanced` is reachable only from here, because a two-way rule cannot justify
+  // a third class from prompt text alone.
+  //
+  // Note: this is inert under `recallAssemble: "server"`. `ContextRequest` has no `rank_by`
+  // field at all, so rung 3 always ranks at the server's defaults.
+  const recallRankBy = enumOf(pick('recallRankBy', 'MUBIT_CC_RECALL_RANK_BY'),
+    ['auto', 'relevance', 'balanced', 'freshness'], 'auto');
   // §5.2 — carry-forward recall. On, `prompt-recall` renders the block the PREVIOUS turn's
   // detached refresh left in `runs/<run_id>/carry.json` and returns without dialling, so the
   // prompt never waits on the endpoint and `recallBudgetMs` stops being a tuning parameter
@@ -463,6 +479,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     recallAssemble,
     recallRepeatMode,
     recallFallback,
+    recallRankBy,
     recallAsync,
     recallSections,
     policyTtlMs,

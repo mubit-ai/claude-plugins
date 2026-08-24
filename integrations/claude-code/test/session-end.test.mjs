@@ -152,11 +152,10 @@ test('issues POST /v2/control/reflect BY DEFAULT with no opt-in env', async (t) 
   assertHookContract(r);
   server.assertCalled('POST', '/v2/control/reflect', 1);
 
-  // §5.7 — the body, verbatim. `last_n_items` bounds reflection to the recent tail
-  // instead of replaying the whole run (control.proto), which keeps the
-  // LLM-backed call inside its 4000 ms budget on a long session.
-  // `include_step_outcomes` folds outcome signals in (control.proto) — the
-  // NEGATIVE ones produce the highest-value lessons.
+  // §5.7 — the body, verbatim. `include_step_outcomes` folds outcome signals in
+  // (`control.proto`) — the NEGATIVE ones produce the highest-value lessons. `last_n_items`
+  // bounds the evidence to the most recent items of the run, which at a session end is
+  // this session.
   const body = server.lastCall('POST', '/v2/control/reflect').body;
   assert.equal(body.run_id, RUN_ID);
   assert.notEqual(body.run_id, 'default');

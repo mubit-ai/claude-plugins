@@ -13,6 +13,16 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const has = (rel) => existsSync(resolve(ROOT, rel));
+
+// Where the build WRITES. Inputs always come from `ROOT`; only the outputs move.
+//
+// `MUBIT_CC_BUILD_OUTDIR` exists for one caller: the freshness gate, which rebuilds into a
+// temp directory and compares the result byte-for-byte with the committed bundles. `npm test`
+// runs `hooks/src` while the host runs the committed `hooks/dist`, so without that comparison
+// a stale bundle passes the entire suite — which is exactly how a rejected field shipped in a
+// launcher that no test had ever executed.
+const OUT = process.env.MUBIT_CC_BUILD_OUTDIR ? resolve(process.env.MUBIT_CC_BUILD_OUTDIR) : ROOT;
+const out = (rel) => resolve(OUT, rel);
 const readJson = (rel) => JSON.parse(readFileSync(resolve(ROOT, rel), 'utf8'));
 
 const shared = {
@@ -126,7 +136,7 @@ ${hookProtocol ? '    writeSync(1, \'{"suppressOutput":true}\');\n' : ''}  } cat
 /** @param {string} contents @param {string} sourcefile @param {string} outfile */
 const launcherTarget = (contents, sourcefile, outfile) => ({
   stdin: { contents, sourcefile, loader: /** @type {const} */ ('js'), resolveDir: ROOT },
-  outfile,
+  outfile: out(outfile),
   bundle: false,              // the one dynamic import must stay a runtime import, not inlined
   platform: /** @type {const} */ ('node'),
   format: /** @type {const} */ ('esm'),
@@ -143,7 +153,7 @@ const targets = [
   // `outfile` targets below are unaffected because they name the extension outright.)
   {
     entryPoints: HOOKS.map((n) => `hooks/src/${n}.mjs`),
-    outdir: 'hooks/dist/impl', outbase: 'hooks/src',
+    outdir: out('hooks/dist/impl'), outbase: 'hooks/src',
     outExtension: { '.js': '.mjs' },
     ...shared,
   },
@@ -152,21 +162,31 @@ const targets = [
   ...HOOKS.map((n) => launcherTarget(
     launcher(`./impl/${n}.mjs`, `hook ${n}`, true), `${n}.launcher.mjs`, `hooks/dist/${n}.mjs`,
   )),
-  { entryPoints: ['bin/statusline.src.mjs'], outfile: 'bin/impl/statusline.mjs', ...shared },
+  { entryPoints: ['bin/statusline.src.mjs'], outfile: out('bin/impl/statusline.mjs'), ...shared },
   // The status line runs on every UI frame, so an unguarded parse error there is the loudest
   // possible version of this bug.
   launcherTarget(
     launcher('./impl/statusline.mjs', 'the status line', false),
     'statusline.launcher.mjs', 'bin/statusline.mjs',
   ),
-  { entryPoints: ['bin/auth.src.mjs'], outfile: 'bin/auth.mjs', ...shared },
+  { entryPoints: ['bin/auth.src.mjs'], outfile: out('bin/auth.mjs'), ...shared },
+  // No launcher, for the same reason `bin/auth.mjs` has none: launchers exist for the entries
+  // the *host* execs on its own (`hooks.json`, `settings.json`), where a parse error on an old
+  // Node would be silent. A skill-invoked script is run by a person who is watching, and the
+  // runtime floor is already reported by the command they typed.
+  //
+  // `bin/dashboard.html` is read at runtime rather than imported as a text module, so it does
+  // not appear here: importing it would make `bin/dashboard.src.mjs` unloadable by Node, and
+  // the suite drives `main()` by importing that file. It also keeps 20 KB of markup out of
+  // this bundle's inline sourcemap. The page ships as the tracked sibling it already is.
+  { entryPoints: ['bin/dashboard.src.mjs'], outfile: out('bin/dashboard.mjs'), ...shared },
   // The launcher hands the server its own version, because the server cannot read it once
   // relocated: it does `require("../package.json")`, which resolves inside @mubit-ai/mcp and
   // not inside this plugin. Inlined from the tracked sibling manifest, so the value is
   // byte-reproducible and `scripts/set-version.mjs` already keeps it in lockstep.
   {
     entryPoints: ['mcp/src/launch.mjs'],
-    outfile: 'mcp/dist/index.js',
+    outfile: out('mcp/dist/index.js'),
     ...shared,
     external: ['./server.js'],
     define: { __MUBIT_MCP_VERSION__: JSON.stringify(MCP_VERSION) },
@@ -178,7 +198,7 @@ const targets = [
   // there. Only this target needs it — nothing else here bundles a CJS dependency tree.
   {
     entryPoints: [MCP_SERVER_ENTRY],
-    outfile: 'mcp/dist/server.js',
+    outfile: out('mcp/dist/server.js'),
     ...shared,
     banner: {
       js: `${shared.banner.js}\n`

@@ -1,0 +1,21 @@
+{
+  "name": "@mubit-ai/codex-plugin",
+  "version": "0.10.0",
+  "type": "module",
+  "description": "Mubit memory plugin for OpenAI Codex CLI — involuntary capture, pre-prompt recall, and outcome attribution.",
+  "engines": { "node": ">=20.0.0" },
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "build:watch": "node esbuild.config.mjs --watch",
+    "test": "node --test 'test/**/*.test.mjs'",
+    "test:dist": "MUBIT_CC_TEST_TARGET=dist node --test 'test/**/*.test.mjs'",
+    "test:watch": "node --test --watch 'test/**/*.test.mjs'",
+    "lint": "node --check hooks/src/*.mjs lib/*.mjs bin/*.mjs",
+    "version:check": "node ../claude-code/scripts/set-version.mjs --check"
+  },
+  "_files": "scripts/ and lib/ are load-bearing, not tooling: the setup skill's central instruction is `node <root>/scripts/setup.mjs`, and that file imports ../lib/boot.mjs. Publishing without them ships a plugin whose only install procedure is absent.",
+  "files": [".codex-plugin", "hooks.json", "hooks/dist", "mcp/dist", "skills",
+            "scripts", "lib", "bin", ".mcp.json", "README.md", "LICENSE"],
+  "dependencies": {},
+  "devDependencies": { "esbuild": "^0.28.0" }
+}

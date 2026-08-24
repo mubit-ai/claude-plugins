@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * `hooks/src/capture.mjs` — PostToolUse / PostToolUseFailure / Stop / StopFailure /
- * SubagentStop (§5.4).
+ * `hooks/src/capture.mjs` — PostToolUse / PostToolUseFailure / PermissionRequest / Stop /
+ * StopFailure / SubagentStop (§5.4).
  *
- * One script, five modes by argv: none, `--failure`, `--stop`, `--stop-failure`,
- * `--subagent`.
+ * One script, six modes by argv: none, `--failure`, `--permission`, `--stop`,
+ * `--stop-failure`, `--subagent`.
+ *
+ * `--permission` is Codex-only, because `PermissionRequest` is an event Claude Code does not
+ * have. See `buildPermissionItem` for why it earns a mode of its own rather than riding on
+ * the ordinary tool path.
  *
  * ---------------------------------------------------------------------------
  * The two properties that dominate this file
@@ -32,11 +36,12 @@
 import { join } from 'node:path';
 
 import { readActor } from '../../lib/actor.mjs';
-import { envTags } from '../../lib/config.mjs';
+import { envTags, host } from '../../lib/config.mjs';
+import { firstUserText, toolCallRecord } from '../../lib/codex-rollout.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { classifyTool, classifyTurn } from '../../lib/classify.mjs';
 import { isDeniedPath, isSelfReference, redactParams, redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey, turnNumber } from '../../lib/runid.mjs';
 import { appendItem, spoolStats } from '../../lib/spool.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -170,7 +175,7 @@ const API_ERROR_UNKNOWN = 'unknown';
 
 // ---------------------------------------------------------------------------
 
-/** @typedef {'tool'|'failure'|'stop'|'stop-failure'|'subagent'} Mode */
+/** @typedef {'tool'|'failure'|'permission'|'stop'|'stop-failure'|'subagent'} Mode */
 
 const MODE = pickMode(process.argv.slice(2));
 
@@ -195,6 +200,7 @@ await runHook('capture', {
 function pickMode(argv) {
   const args = Array.isArray(argv) ? argv : [];
   if (args.includes('--failure')) return 'failure';
+  if (args.includes('--permission')) return 'permission';
   if (args.includes('--stop-failure')) return 'stop-failure';
   if (args.includes('--stop')) return 'stop';
   if (args.includes('--subagent')) return 'subagent';
@@ -217,7 +223,11 @@ function capture(rawPayload, cfg, mode) {
 
   // 2a. §3.2: the matcher lets every tool through, so the bookkeeping tools are dropped
   //     here. See `SKIP_TOOLS` for why an allowlist in the manifest could not do this job.
-  if (mode === 'tool' && SKIP_TOOLS.has(str(payload.tool_name).trim())) return;
+  //
+  //     `--permission` is dropped by the same list: a permission request for `TodoWrite` is
+  //     as much bookkeeping as the write would have been.
+  if ((mode === 'tool' || mode === 'permission')
+      && SKIP_TOOLS.has(str(payload.tool_name).trim())) return;
 
   // 2. §4.4 self-reference suppression. Without it the plugin records its own traffic,
   //    recalls it, then records the recall.
@@ -228,13 +238,17 @@ function capture(rawPayload, cfg, mode) {
   //    doctor skill exists to surface. Suppressing it would also swallow every failure in
   //    any repo whose crate names happen to contain `mubit` — the fixture
   //    `cargo check -p my-crate` is precisely that case.
-  if (mode === 'tool') {
+  //    `--permission` is suppressed too, and here the reason is sharper than the loop: under
+  //    Codex the plugin's own MCP tools are the ones most likely to be gated, so without this
+  //    every `mubit_recall` approval would be recorded as an episode by the thing being
+  //    approved.
+  if (mode === 'tool' || mode === 'permission') {
     if (attempt(() => isSelfReference(payload.tool_name, payload.tool_input, cfg), false)) return;
   }
 
   // 3. §4.4 stage 2: a denylisted subject is DROPPED, never scrubbed. A scrubbed `.env` is
   //    still a map of which secrets the project holds.
-  if (mode === 'tool' || mode === 'failure') {
+  if (mode === 'tool' || mode === 'failure' || mode === 'permission') {
     if (attempt(() => hasDeniedSubject(payload, cfg), false)) return;
   }
 
@@ -250,6 +264,7 @@ function capture(rawPayload, cfg, mode) {
   const item = attempt(
     () => {
       if (mode === 'stop-failure') return null;
+      if (mode === 'permission') return buildPermissionItem(payload, cfg);
       return mode === 'stop' || mode === 'subagent'
         ? buildTurnItem(payload, cfg, runId, mode)
         : buildToolItem(payload, cfg, mode);
@@ -327,7 +342,19 @@ function apiErrorOf(payload) {
  * @returns {Record<string, any>|null}
  */
 function buildToolItem(payload, cfg, mode) {
-  const failed = mode === 'failure';
+  // Codex has no `PostToolUseFailure`, so `mode` is `'tool'` for every call this host ever
+  // makes and `failed` would be permanently false — every failed command stored as a success,
+  // which empties the half of memory `mubit_diagnose` matches against.
+  //
+  // The host records the real outcome in the rollout transcript, under this call's own
+  // `tool_use_id`; `lib/codex-rollout.mjs` explains why that is the only place it exists.
+  // Consulted only when no failure event fired, and only when it answers: a miss leaves the
+  // item exactly as it would have been, because the fix for "the host said failed and we wrote
+  // ok" must not become "we guessed".
+  const recorded = mode === 'tool' && host() === 'codex'
+    ? attempt(() => toolCallRecord(payload.transcript_path, payload.tool_use_id), null)
+    : null;
+  const failed = mode === 'failure' || !!recorded?.failed;
   const toolName = clamp(str(payload.tool_name) || 'Tool', 128);
 
   // 4. §4.5. `classifyTool` is a function of the tool name and the outcome alone, so a
@@ -383,15 +410,100 @@ function buildToolItem(payload, cfg, mode) {
       tool_use_id: str(payload.tool_use_id),
       hook_event: str(payload.hook_event_name) || (failed ? 'PostToolUseFailure' : 'PostToolUse'),
       session_id: str(payload.session_id),
-      prompt_id: str(payload.prompt_id),
+      prompt_id: turnKey(payload),
       // The host names it `duration_ms`; `execution_time_ms` is the older payload name and
       // stays as a fallback. The metadata key keeps the old spelling because it is already
       // on the wire in every stored item.
-      execution_time_ms: finiteOr(payload.duration_ms ?? payload.execution_time_ms, 0),
+      //
+      // Codex sends neither: `duration_ms` is in none of its eleven input schemas, so every
+      // item stored on that host read 0 and "which calls are slow" had no answer. The rollout
+      // record carries the duration the host itself measured, and it is the last rung here
+      // rather than the first so no Claude Code item changes shape.
+      execution_time_ms: finiteOr(
+        payload.duration_ms ?? payload.execution_time_ms ?? recorded?.durationMs, 0),
+      // Present only when the host recorded one, which is the one thing distinguishing this
+      // failure from every other.
+      ...(typeof recorded?.exitCode === 'number' ? { exit_code: recorded.exitCode } : {}),
       outcome: failed ? 'failure' : 'ok',
       truncated: !!(params.truncated || tail.truncated),
       redactions: num(scrubbed.redactions) + num(params.redactions) + num(tail.redactions),
       ...(isObject(cls.metadata) ? cls.metadata : {}),
+    },
+  });
+}
+
+/**
+ * PermissionRequest (Codex only): `"<tool>(<params>) NEEDS APPROVAL"`.
+ *
+ * ---------------------------------------------------------------------------
+ * Why this is an item at all
+ * ---------------------------------------------------------------------------
+ * A permission request looks like half a fact — it says a gated call was *attempted* and
+ * never says what the human answered. That reads like a reason to drop it, and it is
+ * exactly backwards.
+ *
+ * When the user **allows** the call, `PostToolUse` fires and records the whole episode, so
+ * this item is redundant and cheap. When the user **denies** it, no `PostToolUse` ever
+ * fires — observed live, `docs/harness-probe.md` §5 — and this is the only trace anywhere
+ * that the attempt happened. "We tried this and were not allowed to" is precisely the class
+ * of fact a model cannot re-derive by reading the codebase, and without this mode a coding
+ * agent rediscovers the same forbidden operation once a session, forever.
+ *
+ * ---------------------------------------------------------------------------
+ * Why a mode of its own rather than the ordinary tool path
+ * ---------------------------------------------------------------------------
+ * Three things differ, and each would be wrong on the tool path:
+ *
+ *   1. **There is no `tool_response`.** `buildToolItem` would render `Tool(params) -> ` with
+ *      nothing after the arrow, which is the exact string that made every early memory this
+ *      plugin shipped useless.
+ *   2. **The intent is `feedback`, not `tool_output`.** §4.5 grades `feedback` as "the one
+ *      entry type that records what the human, not the model, decided", and a request for
+ *      approval is a question put to a human. Grading it as tool output files it with the
+ *      file reads.
+ *   3. **There is no `tool_use_id`.** Codex's `permission-request.command.input` has no such
+ *      field, so the stable id has to come from the fallback hash. Two identical requests in
+ *      one turn therefore dedupe to one item, which is the right answer: they are the same
+ *      question asked twice.
+ *
+ * `medium`, not `high`: a gated call is a routine event under `dontAsk`, and grading every
+ * one of them `high` would outrank the failures that §4.5 reserves `high` for.
+ *
+ * @param {Record<string, any>} payload
+ * @param {Record<string, any>} cfg
+ * @returns {Record<string, any>|null}
+ */
+function buildPermissionItem(payload, cfg) {
+  const toolName = clamp(str(payload.tool_name) || 'Tool', 128);
+
+  const scrubbed = attempt(() => redactParams(payload.tool_input, cfg), { params: null, redactions: 0 });
+  const params = attempt(
+    () => redactText(renderParams(scrubbed.params), cfg, 'param'),
+    { text: '', redactions: 0, truncated: false },
+  );
+
+  // Unlike `buildToolItem`, an empty render is fatal here rather than merely thin: with no
+  // output half either, `Tool() NEEDS APPROVAL` names no operation at all.
+  if (!params.text.trim()) return null;
+
+  return item({
+    cfg,
+    payload,
+    id: `cc-perm-${fallbackId(payload, `${toolName}|${params.text}`)}`,
+    text: `${toolName}(${params.text}) NEEDS APPROVAL`,
+    intent: 'feedback',
+    importance: 'medium',
+    metadata: {
+      tool: toolName,
+      hook_event: str(payload.hook_event_name) || 'PermissionRequest',
+      session_id: str(payload.session_id),
+      prompt_id: turnKey(payload),
+      permission_requested: true,
+      // Deliberately not an `outcome`: this event fires *before* the human answers, and the
+      // plugin never learns what they said. Stamping `ok` here would be a claim about a
+      // decision nobody recorded.
+      truncated: !!params.truncated,
+      redactions: num(scrubbed.redactions) + num(params.redactions),
     },
   });
 }
@@ -419,8 +531,18 @@ function buildTurnItem(payload, cfg, runId, mode) {
     { intent: 'task_result', importance: 'medium', contentType: 'text', agentId: '', agentType: '' },
   );
 
-  const turn = attempt(() => readTurn(cfg, runId, payload.prompt_id), null);
-  const staged = str(turn?.prompt) || str(payload.prompt);
+  const turn = attempt(() => readTurn(cfg, runId, turnKey(payload)), null);
+
+  // A subagent's question is its OWN, and the turn file above belongs to its parent — shared
+  // with every sibling in the fan-out, so six subagents in one turn would all be stored as
+  // answers to one identical question. `agent_transcript_path` arrives on SubagentStop and is
+  // the only coordinate that differs between siblings; its opening user message is the task
+  // this one was actually given. Falls back to the parent's staged prompt, which is what was
+  // stored before any of this, whenever the transcript does not answer.
+  const own = mode === 'subagent'
+    ? attempt(() => firstUserText(payload.agent_transcript_path), '')
+    : '';
+  const staged = own || str(turn?.prompt) || str(payload.prompt);
   const answer = str(payload.last_assistant_message) || str(payload.message);
   if (!staged && !answer) return null;
 
@@ -438,18 +560,24 @@ function buildTurnItem(payload, cfg, runId, mode) {
     cfg,
     payload,
     id: mode === 'subagent'
-      ? `cc-sub-${idPart(payload.agent_id) || 'anon'}-${idPart(payload.prompt_id) || idPart(payload.session_id) || 'turn'}`
-      : `cc-stop-${idPart(payload.prompt_id) || idPart(payload.session_id) || 'turn'}`,
+      ? `cc-sub-${idPart(payload.agent_id) || 'anon'}-${idPart(turnKey(payload)) || idPart(payload.session_id) || 'turn'}`
+      : `cc-stop-${idPart(turnKey(payload)) || idPart(payload.session_id) || 'turn'}`,
     text,
     intent: cls.intent,
     importance: cls.importance,
     metadata: {
       hook_event: str(payload.hook_event_name) || event,
       session_id: str(payload.session_id),
-      prompt_id: str(payload.prompt_id),
-      turn_number: finiteOr(payload.turn_number, 0),
+      prompt_id: turnKey(payload),
+      // Payload first, then the ordinal `stage-prompt` staged — Codex sends no `turn_number`
+      // on any event, so without the second source every item here recorded 0.
+      turn_number: attempt(() => turnNumber(cfg, runId, payload), 0),
       ...(subAgent ? { agent_id: subAgent, agent_type: str(cls.agentType) } : {}),
       ...(subAgent ? { mubit_agent_id: attempt(() => deriveAgentId(payload), '') } : {}),
+      // The path itself, so a later reader can rejoin this subagent to its own rollout —
+      // which is what `persistSubRun` names as the next step on real per-subagent isolation.
+      ...(str(payload.agent_transcript_path)
+        ? { agent_transcript_path: str(payload.agent_transcript_path) } : {}),
       truncated: !!(q.truncated || a.truncated),
       redactions: num(q.redactions) + num(a.redactions),
     },
@@ -490,14 +618,46 @@ function item(o) {
     // would be half a fix: the memory would land in the right run wearing the wrong labels.
     env_tags: attempt(
       () => envTags(cfg, resolveProjectDir(cfg, o.payload)), ['tool:claude-code']),
-    // Merged here rather than at each call site, so *every* ingest item this hook writes
-    // carries it uniformly. Omitted entirely when unknown: `"actor": ""` would be a field
-    // that is always present and never says anything.
-    metadata_json: safeJson(actor ? { ...o.metadata, actor } : o.metadata),
+    // Both merged here rather than at each call site, so *every* ingest item this hook
+    // writes carries them uniformly, and both omitted entirely when unknown rather than
+    // written empty — a field that is always present and never says anything is worse
+    // than an absent one.
+    //
+    // `model` rides on the payload of ten of Codex's eleven events and was recorded nowhere,
+    // so memory could not say which model produced a lesson — or notice that two of them
+    // disagreed about the same thing. Claude Code sends it on SessionStart only, and an
+    // empty string would read as "the host said the model is blank".
+    metadata_json: safeJson(withActor(withModel(o.metadata, o.payload), actor)),
   };
   const userId = str(cfg.userId);
   if (userId) out.user_id = userId;
   return out;
+}
+
+/**
+ * `metadata` plus the model that produced it, when the payload names one.
+ *
+ * @param {Record<string, any>} metadata
+ * @param {Record<string, any>} payload
+ * @returns {Record<string, any>}
+ */
+function withModel(metadata, payload) {
+  const base = isObject(metadata) ? metadata : {};
+  if ('model' in base) return base;
+  const model = clamp(str(payload?.model), 128);
+  return model ? { ...base, model } : base;
+}
+
+/**
+ * `metadata` plus who it is attributed to, when the actor is known.
+ *
+ * @param {Record<string, any>} metadata
+ * @param {string} actor
+ * @returns {Record<string, any>}
+ */
+function withActor(metadata, actor) {
+  const base = isObject(metadata) ? metadata : {};
+  return actor ? { ...base, actor } : base;
 }
 
 // ---------------------------------------------------------------------------
@@ -637,11 +797,11 @@ function readTurn(cfg, runId, promptId) {
  * @param {string} [apiError]  the taxonomy value that ended the turn; '' on a normal Stop
  */
 function closeTurn(cfg, runId, payload, apiError = '') {
-  const p = turnPath(cfg, runId, payload.prompt_id);
+  const p = turnPath(cfg, runId, turnKey(payload));
   if (!p) return;
   const prev = readJson(p, null);
   const base = isObject(prev) ? prev : {
-    prompt_id: str(payload.prompt_id),
+    prompt_id: turnKey(payload),
     session_id: str(payload.session_id),
     started_at: Date.now(),
   };
@@ -789,7 +949,7 @@ function drainTriggerFired(cfg, runId) {
 
 /** `--with-outcome <prompt_id>`, or nothing when the turn has no id to attribute against. */
 function outcomeArgs(payload) {
-  const id = str(payload.prompt_id);
+  const id = turnKey(payload);
   return id ? ['--with-outcome', id] : [];
 }
 
@@ -808,13 +968,14 @@ function fireDrain(cfg, runId, payload, args) {
   const handoff = stashPayload(cfg, {
     hook_event_name: str(payload.hook_event_name),
     session_id: str(payload.session_id),
-    prompt_id: str(payload.prompt_id),
+    prompt_id: turnKey(payload),
     transcript_path: str(payload.transcript_path),
     cwd: str(payload.cwd),
     permission_mode: str(payload.permission_mode),
     agent_id: str(payload.agent_id),
     agent_type: str(payload.agent_type),
-    turn_number: finiteOr(payload.turn_number, 0),
+    // Resolved here rather than in the child: the child reads this stash, not the payload.
+    turn_number: attempt(() => turnNumber(cfg, runId, payload), 0),
     run_id: runId,
   });
   spawnDetached(cfg, 'drain', args, handoff);
@@ -912,7 +1073,7 @@ function idPart(v) {
  */
 function fallbackId(payload, text) {
   let h = 0x811c9dc5;
-  const seed = `${str(payload.session_id)}|${str(payload.prompt_id)}|${str(payload.tool_name)}|${text}`;
+  const seed = `${str(payload.session_id)}|${turnKey(payload)}|${str(payload.tool_name)}|${text}`;
   for (let i = 0; i < seed.length; i++) {
     h ^= seed.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;

@@ -51,7 +51,7 @@ import { postIngest, postOutcome } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
-import { deriveAgentId, deriveRunId, resolveProjectDir } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import {
   acquireDrainLock, batchIdempotencyKey, commitBatch, readBatch, releaseDrainLock, spoolStats,
 } from '../../lib/spool.mjs';
@@ -196,7 +196,7 @@ async function main() {
   }
 
   const agentId = deriveAgentId(payload);
-  const promptId = str(outcomeArg) || str(payload.prompt_id);
+  const promptId = str(outcomeArg) || turnKey(payload);
 
   // §5.5 step 1: exactly one drainer per run.
   const lock = await acquireConfirmed(cfg, runId, wantsOutcome, started);

@@ -450,6 +450,39 @@ export function releaseDrainLock(lock) {
  * @param {string} name  e.g. `flushed-<session_id>`
  * @returns {boolean} true when this process owns the claim (or could not record one)
  */
+/**
+ * Has the claim already been recorded? The read half of `claimOnce`.
+ *
+ * `claimOnce` asks and answers in one step, which is what makes it a claim. That is the wrong
+ * shape when the work being claimed can be *taken away mid-flight*: `session-end` under Codex
+ * runs against a 3-second ceiling and is killed at it, so a claim taken up front marked the
+ * session flushed with the drain and the reflect still undone — and this marker is exactly
+ * what makes every later attempt stand down, so nothing ever retried.
+ *
+ * Splitting the two lets that caller check up front and record afterwards. What it gives up is
+ * mutual exclusion between two flushes running *concurrently*, which was never this marker's
+ * job: `acquireDrainLock` serialises the drain, and the contract below already accepts a
+ * double send in its own failure case — "losing a session's captures is worse than sending
+ * them twice", collapsed server-side by the per-batch idempotency key.
+ *
+ * **Returns `false` on any error**, so an unreadable data directory reads as "not claimed,
+ * go ahead" — the same direction `claimOnce` fails in, for the same reason.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {string} name  e.g. `flushed-<session_id>`
+ * @returns {boolean}
+ */
+export function claimHeld(cfg, runId, name) {
+  try {
+    const safe = safeSegment(name);
+    if (!safe) return false;
+    return existsSync(join(runDir(cfg, runId), `${safe}.marker`));
+  } catch {
+    return false;
+  }
+}
+
 export function claimOnce(cfg, runId, name) {
   try {
     const safe = safeSegment(name);

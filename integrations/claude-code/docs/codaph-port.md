@@ -246,13 +246,23 @@ run — the link is the edge, the handoff is what travels along it.
 **Impact: medium · Effort: S · 2–3 days**
 
 `codaph mubit activity --limit 20 --exclude-derived --projection compact` and
-`mubit export --format jsonl`, over `/v2/control/activity` and `/activity/export`. We call
-neither. What was captured is visible only through `scripts/mubit-inspect.mjs`, which reads local
-markers and is not in the package `files` list, so users never receive it.
+`mubit export --format jsonl`, over `/v2/control/activity` and `/activity/export`.
 
 Two audiences, both unserved: support, who need to see what actually landed rather than what we
 believe landed; and anyone answering a procurement or compliance question about what left the
 machine. Cheap, and it makes the redaction story demonstrable instead of assertable.
+
+> **Correction (2026-08-24).** This item originally read *"we call neither"*. Half of that is now
+> wrong. `pre-main` shipped `lib/dashboard-api.mjs`, whose `fetchActivity()` calls
+> `/v2/control/activity` — but only from `createdAtIndex`, to join a `created_at` onto entries the
+> dashboard already holds. So the route is reached and the capability is not: `/activity/export`
+> is called from nowhere, `exclude_derived`, `projection`, `created_after`, `created_before`,
+> `user_id` and `agent_id` are sent by nothing, there is no pagination past the first page, and
+> the dashboard's three tabs are Memory / Turns / Analytics — no activity tab, and no surface at
+> all outside a browser. The remaining work is therefore **export, the request fields, and
+> reachability**, not a first call. `scripts/mubit-inspect.mjs` is still absent from the package
+> `files` list and stays that way: it carries untested copies of what `lib/dashboard-data.mjs`
+> now owns, and it answers the *local* question the Turns tab already ships.
 
 - **Watch** activity needs a longer deadline than the 4000 ms hook budget; non-hook callers must
   pass their own. The lesson join needs `entry_types: ["lesson"]` or it matches nothing.

@@ -17,6 +17,9 @@
  * `userConfig` wins because it is the user's deliberate per-install choice and
  * where the keychain-backed `apiKey` lives.
  *
+ * Rung 1 exists only under Claude Code. Codex has no plugin option mechanism — see `host()` —
+ * so a Codex session starts the ladder at rung 2, with no rung of its own to add.
+ *
  * The credentials store exists because nothing else can be written by a slash
  * command: `sensitive` userConfig values live in the OS keychain and the `/plugin`
  * UI is their only writer, so `/auth` needs a store of its own. It ranks below the
@@ -96,6 +99,32 @@ export function optionValue(key, env = process.env) {
     if (v !== undefined) return v;
   }
   return undefined;
+}
+
+/**
+ * Which harness this process is running under: `claude-code` (the default) or `codex`.
+ *
+ * **Declared, never sniffed.** `integrations/codex/lib/boot.mjs` sets `MUBIT_CC_HOST=codex`
+ * before anything reads config, and it can do that unconditionally because that bundle exists
+ * nowhere else — if it is running, the host is Codex.
+ *
+ * Detection would be the obvious alternative and it is wrong in both directions: a Codex
+ * session launched from a Claude Code terminal inherits `CLAUDECODE=1` and a dozen
+ * `CLAUDE_CODE_*` variables, and a Claude Code session has no marker that a Codex one
+ * reliably lacks. Both misreadings are silent.
+ *
+ * Codex itself has no plugin option mechanism at all — the strings `PLUGIN_OPTION` and
+ * `userConfig` appear nowhere in its 0.146.0 binary — so there is no `CODEX_PLUGIN_OPTION_*`
+ * rung for `optionValue` to check. Configuration there is `MUBIT_*` env, then
+ * `credentials.json`, then `.mubit-cc.json`, which are rungs 2-4 of the ladder above and work
+ * unchanged.
+ *
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {string}
+ */
+export function host(env = process.env) {
+  const v = typeof env?.MUBIT_CC_HOST === 'string' ? env.MUBIT_CC_HOST.trim().toLowerCase() : '';
+  return v === 'codex' ? 'codex' : 'claude-code';
 }
 
 // ---------------------------------------------------------------------------
@@ -417,7 +446,17 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const sessionEndDetach = bool(pick('sessionEndDetach', 'MUBIT_CC_SESSION_END_DETACH'), true);
   const outcomeMode = enumOf(pick('outcomeMode', 'MUBIT_CC_OUTCOME_MODE'),
     ['off', 'implicit', 'explicit'], 'implicit');
-  const statusLine = bool(pick('statusLine', 'MUBIT_CC_STATUSLINE'), true);
+  // The one setting whose *default* depends on the host, and the only place in `lib/` that
+  // knows there is more than one.
+  //
+  // Codex's status line is a declarative list of built-in item ids: there is no command hook
+  // and nothing scriptable to render into. Leaving the default `true` there would have the
+  // plugin computing a status nobody can see, on a host with no surface to show it on.
+  //
+  // Only the default moves. Every rung of `pick` above it still wins, so a user driving Codex
+  // through some other front end can turn it back on with `MUBIT_CC_STATUSLINE=1` — which is
+  // what keeps this a default rather than a hard-coded answer.
+  const statusLine = bool(pick('statusLine', 'MUBIT_CC_STATUSLINE'), host(e) !== 'codex');
   // HS-7 stage 1 — `PreToolUse`, warnings only. **Default false, and deliberately so.**
   //
   // Every other setting here changes what the plugin costs or what it remembers. This one
@@ -518,6 +557,9 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     dataDir,
     projectDir,
     pluginRoot: str(e.CLAUDE_PLUGIN_ROOT, ''),
+    // Carried so a run marker and `/mubit-memory:doctor` can say which harness wrote a run —
+    // the two share a data directory, so "which host" is a real question about a real file.
+    host: host(e),
   };
 }
 
@@ -531,7 +573,13 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
  * endpoint would point every hook at the wrong instance for up to 300 s.
  */
 function inputHash(e, userFileRaw, creds, projectDir, dataDir) {
-  const parts = [`v${CACHE_VERSION}`, `pd=${projectDir}`, `dd=${dataDir}`, `home=${e.HOME ?? ''}`];
+  const parts = [
+    `v${CACHE_VERSION}`, `pd=${projectDir}`, `dd=${dataDir}`, `home=${e.HOME ?? ''}`,
+    // The host decides one default, and the two plugins share this cache file because they
+    // share a data directory. Without this term a Claude Code session's cached config would
+    // answer a Codex hook's `loadConfig` for up to 300 s, statusLine included.
+    `host=${host(e)}`,
+  ];
   const names = Object.keys(e)
     .filter((k) => k.startsWith('MUBIT_') || k.startsWith('CLAUDE_'))
     .sort();

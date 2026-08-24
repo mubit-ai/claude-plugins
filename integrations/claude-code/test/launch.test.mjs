@@ -26,10 +26,11 @@ import { join } from 'node:path';
 
 import { PLUGIN_ROOT, REPO_ROOT, makeDataDir, makeProjectDir, tempDir, baseEnv, lib, mod } from './helpers/harness.mjs';
 
-/** §8.2 — the curated ten, in the guide's order. */
+/** §8.2 — the curated set, in the guide's order, with the three W2-1 promotions last. */
 const DEFAULT_ALLOWLIST = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ];
 
 // ---------------------------------------------------------------------------
@@ -233,15 +234,15 @@ test('per-conversation falls back to per-directory and says so on stderr', async
 // §8.2 — the allowlist the launcher hands to the server
 // ---------------------------------------------------------------------------
 
-// §8.2 — blank config means the curated ten, not "all 21". The whole point of the
+// §8.2 — blank config means the curated set, not "all 21". The whole point of the
 // allowlist is bounding the always-loaded context cost of the tool schemas (§3.5).
-test('MUBIT_MCP_TOOLS defaults to the curated ten when mcpTools is blank', async () => {
+test('MUBIT_MCP_TOOLS defaults to the curated set when mcpTools is blank', async () => {
   const r = await runLauncher({ extra: { MUBIT_MCP_TOOLS: '', CLAUDE_PLUGIN_OPTION_MCP_TOOLS: '' } });
   assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
 
   const got = String(r.envAtImport.MUBIT_MCP_TOOLS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   assert.deepEqual([...got].sort(), [...DEFAULT_ALLOWLIST].sort(),
-    `MUBIT_MCP_TOOLS must default to the curated ten (§8.2), got: ${got.join(', ') || '(empty)'}`);
+    `MUBIT_MCP_TOOLS must default to the curated ${DEFAULT_ALLOWLIST.length} (§8.2), got: ${got.join(', ') || '(empty)'}`);
 });
 
 // §8.2 — "Users restore any of them with mcpTools / MUBIT_MCP_TOOLS." A user-supplied
@@ -313,11 +314,12 @@ test('[mirror of @mubit-ai/mcp tools suite] a two-name allowlist registers exact
   assert.deepEqual(got, ['mubit_recall', 'mubit_status'], 'a two-name allowlist must register exactly those two');
 });
 
-// §8.2 — and the curated ten must select ten of the twenty-one.
-test('[mirror of @mubit-ai/mcp tools suite] the curated default allowlist selects ten of twenty-one', () => {
+// §8.2 — and the curated set must select exactly itself out of the twenty-one.
+test('[mirror of @mubit-ai/mcp tools suite] the curated default allowlist selects thirteen of twenty-one', () => {
   const names = realToolNames();
   const got = applyAllowlist(names, DEFAULT_ALLOWLIST.join(','));
-  assert.equal(got.length, 10, `curated allowlist selected ${got.length} tools: ${got.join(', ')}`);
+  assert.equal(got.length, DEFAULT_ALLOWLIST.length,
+    `curated allowlist selected ${got.length} tools: ${got.join(', ')}`);
   for (const n of DEFAULT_ALLOWLIST) {
     assert.ok(names.includes(n), `default allowlist names "${n}", which the bundled server does not register`);
   }
@@ -354,11 +356,11 @@ test('the bundled server honours the allowlist, and context-cost.json says so', 
     + '`node scripts/measure-context-cost.mjs --write`.');
 
   // `surface.registered` is the real `tools/list` answer, so under a blank `mcpTools` it is
-  // the curated ten — not the 21 the bundle *defines*. Both facts are checked, because
-  // "advertises ten" and "still carries all 21 for users who restore them" are separate
+  // the curated set — not the 21 the bundle *defines*. Both facts are checked, because
+  // "advertises the curated set" and "still carries all 21 for users who restore them" are separate
   // promises and only the first one bounds the context cost.
   assert.deepEqual(cost.surface?.registered, [...DEFAULT_ALLOWLIST].sort(),
-    'context-cost.json was measured against a tool surface that is not the curated ten — '
+    'context-cost.json was measured against a tool surface that is not the curated set — '
     + 're-measure with `node scripts/measure-context-cost.mjs --write`');
 
   for (const name of cost.surface?.registered ?? []) {

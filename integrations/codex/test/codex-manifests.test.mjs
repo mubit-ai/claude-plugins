@@ -46,8 +46,25 @@ const P = {
   ccPlugin: join(SHARED_ROOT, '.claude-plugin', 'plugin.json'),
 };
 
-/** §2 — the seven skills, the same seven the Claude Code plugin ships. */
-const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth', 'dashboard'];
+/**
+ * §2 — the skills, the same set the Claude Code plugin ships.
+ *
+ * One name per line on purpose: several branches append to this list, and a single-line array
+ * makes every one of those a conflict on the same line.
+ */
+const SKILLS = [
+  'recall',
+  'remember',
+  'reflect',
+  'forget',
+  'doctor',
+  'setup',
+  'auth',
+  'dashboard',
+  'strategies',
+  'checkpoint',
+  'memory-health',
+];
 
 /** `.mcp.json` names the server `mubit`, so the model sees `mcp__mubit__<tool>`. */
 const MCP_SERVER = 'mubit';
@@ -407,12 +424,12 @@ test('no agents/ directory ships, because Codex has no plugin-defined subagent t
 // Skills as files
 // ===========================================================================
 
-test('all eight skills are present, one directory each', () => {
+test('every skill is present, one directory each', () => {
   const dirs = existsSync(P.skills)
     ? readdirSync(P.skills, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()
     : [];
   assert.deepEqual(dirs, [...SKILLS].sort(),
-    'the Codex plugin ships the same eight skills as the Claude Code one. A missing skill is '
+    'the Codex plugin ships the same skills as the Claude Code one. A missing skill is '
     + 'a slash command that silently does not exist.');
   for (const s of SKILLS) {
     assert.ok(existsSync(join(P.skills, s, 'SKILL.md')),

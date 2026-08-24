@@ -111,7 +111,7 @@ one per `if` pattern.)
 Every hook exits 0, always. A memory layer has no business breaking a prompt — a dead server,
 an unwritable data dir, or a corrupt state file costs you a memory, never a turn.
 
-### Eight skills and one subagent
+### The skills and one subagent
 
 | Command | Use it for |
 | --- | --- |
@@ -123,22 +123,33 @@ an unwritable data dir, or a corrupt state file costs you a memory, never a turn
 | `/mubit-memory:reflect` | Extract lessons from this session mid-flight, rather than waiting for `SessionEnd`. |
 | `/mubit-memory:forget` | Delete a lesson, or down-weight one that is merely wrong. |
 | `/mubit-memory:dashboard` | Open a local page over everything above: browse and search lessons, see what recall cost per prompt, watch ingest health. Loopback only, and the one skill the model cannot invoke for you. |
+| `/mubit-memory:strategies` | Read the pattern *across* many lessons rather than any single one — what this project keeps doing, and keeps getting wrong. |
+| `/mubit-memory:checkpoint` | Save a named snapshot of where a run has got to, stored verbatim, before risky work. The half of `PreCompact` you can ask for. |
+| `/mubit-memory:memory-health` | Report what is actually stored: entry counts, staleness, contradictions. The store, not the connection. |
 | `@mubit-memory:mubit-recall` | Subagent: multi-angle memory search in an isolated context, returns a synthesis instead of raw evidence. |
 
-### Ten MCP tools
+### Thirteen MCP tools
 
-The bundled MCP server carries 21 tools and registers ten of them by default — the other
-eleven cost you nothing until you ask for them:
+The bundled MCP server carries 21 tools and registers thirteen of them by default — the other
+eight cost you nothing until you ask for them:
 
 ```
 mubit_learned   mubit_recall   mubit_outcome   mubit_reflect   mubit_lessons
 mubit_diagnose  mubit_archive  mubit_dereference  mubit_forget  mubit_status
+mubit_strategies  mubit_checkpoint  mubit_memory_health
 ```
 
-The other eleven are excluded because a hook already does the job better
-(`mubit_remember`, `mubit_context`, `mubit_checkpoint`, `mubit_register_agent`,
-`mubit_list_agents`) or because they have no Claude Code surface (the multi-agent
-orchestration group). Nothing is removed — restore any of them by name with `mcpTools`.
+The other eight are excluded because a hook already does the job better (`mubit_remember`,
+`mubit_context`) or because they have no Claude Code surface (`mubit_register_agent`,
+`mubit_list_agents` and the rest of the multi-agent orchestration group). Nothing is removed:
+restore any of them by name with `mcpTools`.
+
+The last three on that list were excluded until each had a skill to reach it. A checkpoint is
+not what `PreCompact` does — the hook fires when the window fills, which is the one moment you
+cannot ask for, and `mubit_checkpoint` is the marker you name yourself. `mubit_strategies`
+reads the pattern across many lessons where every other retrieval verb reads individual ones.
+`mubit_memory_health` answers the route `/mubit-memory:doctor` used to tell you to `POST` by
+hand.
 
 ### A status line
 
@@ -286,7 +297,7 @@ that cache, and writing credentials invalidates it immediately rather than after
 | `outcomeMode` | `implicit` | `MUBIT_CC_OUTCOME_MODE` | `implicit`: a turn whose reply carried the recalled memory's own vocabulary is attributed to those memories; a turn that carried none of it is recorded as `neutral` against the run and attributed to no entry, so an injection nobody used is counted rather than being invisible. `explicit`: only the model's own `mubit_outcome` calls count. `off`: no attribution, and no measurement of it either. |
 | `statusLine` | `true` | `MUBIT_CC_STATUSLINE` | Render the status line. When false it prints an empty line and exits 0 rather than erroring per frame. |
 | `preToolWarnings` | `false` | `MUBIT_CC_PRE_TOOL_WARNINGS` | Show the model a matching stored `rule` just before an `rm` or `git push` runs. Warnings only — it never blocks, rewrites or asks about a tool call, and the filter that decides when it runs at all is best-effort, so treat it as a reminder and use Claude Code's permission system for anything that has to hold. Off by default: this is the one setting that can put text in front of a tool call. |
-| `mcpTools` | `""` (the curated ten) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
+| `mcpTools` | `""` (the curated thirteen) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
 | `mcpLessonScope` | `run` | `MUBIT_MCP_LESSON_SCOPE` | The widest scope a lesson written by an MCP tool may claim: `run`, `session` or `global`. Anything above `run` is read back by unrelated runs, so the default keeps an agent-written lesson in the run that wrote it — with `runStrategy: per-directory`, that is the project it was written in. Raise it if you want agent-written rules to follow you between projects; reflection promotes a lesson beyond its run either way. |
 
 ### Environment-only settings

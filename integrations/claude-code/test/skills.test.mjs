@@ -39,8 +39,28 @@ const SERVER_BUNDLE = join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js');
 /** §3.2 matcher note — `.mcp.json` names the server `mubit`. */
 const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
-/** §2/§9 — the skills the plugin ships. `auth` is the seventh and `dashboard` the eighth. */
-const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth', 'dashboard'];
+/**
+ * §2/§9 — the skills the plugin ships, in the order they were added. The first eight are
+ * the original set; each of the rest grants one MCP tool that used to sit outside the
+ * default allowlist, because an allowlisted tool with nothing to invoke it is schema cost
+ * with no surface.
+ *
+ * One name per line on purpose: several branches append to this list, and a single-line
+ * array makes every one of those a conflict on the same line.
+ */
+const SKILLS = [
+  'recall',
+  'remember',
+  'reflect',
+  'forget',
+  'doctor',
+  'setup',
+  'auth',
+  'dashboard',
+  'strategies',
+  'checkpoint',
+  'memory-health',
+];
 
 /**
  * The two skills that call no MCP tool, and cannot.
@@ -124,8 +144,7 @@ function skillFile(name) {
 
 function loadSkill(name) {
   const text = readOrFail(skillFile(name), `skills/${name}/SKILL.md`,
-    'The plugin ships one skill each for recall, remember, reflect, forget, doctor, setup, auth '
-    + 'and dashboard.');
+    `The plugin ships one skill each for: ${SKILLS.join(', ')}.`);
   return parseFrontmatter(text, `skills/${name}/SKILL.md`);
 }
 
@@ -571,4 +590,55 @@ test('remember/SKILL.md names the setting that widens what an agent may write', 
   const { body } = loadSkill('remember');
   assert.match(body, /mcpLessonScope|MUBIT_MCP_LESSON_SCOPE/,
     'remember/SKILL.md does not name the setting that raises the scope ceiling (§6.2)');
+});
+
+// ---------------------------------------------------------------------------
+// §9 — the three skills that carry a promoted tool
+// ---------------------------------------------------------------------------
+
+/**
+ * Each of these three exists so that a tool promoted into the default allowlist has somewhere
+ * to be invoked from. That makes one sentence in each of them load-bearing: the sentence that
+ * separates the new tool from the neighbour it will otherwise be confused with. Without it the
+ * skill is a second, vaguer route to a tool the model already had, and the promotion has
+ * bought a schema in every session for nothing.
+ */
+
+// The tool's own description says it clusters lessons and to "prefer mubit_lessons to read the
+// individual lessons themselves". A skill that only says "finds patterns" sends the model here
+// for single-lesson questions, which is the one thing it answers badly.
+test('strategies/SKILL.md separates the pattern from the lessons it is a pattern over', () => {
+  const { body } = loadSkill('strategies');
+  assert.match(body, /across/i,
+    'strategies must say the answer is a pattern *across* lessons, not one of them (§9)');
+  assert.match(body, /mubit_lessons/,
+    'strategies must name mubit_lessons as the tool that reads the individual lessons — '
+    + 'the two are near-synonyms until one of them says so');
+});
+
+// `snapshot` is stored byte-for-byte with nothing extracting from it, so a model that writes a
+// headline has written a checkpoint that restores nothing.
+test('checkpoint/SKILL.md says the snapshot is stored verbatim, and is run state not knowledge', () => {
+  const { body } = loadSkill('checkpoint');
+  assert.match(body, /verbatim/i, 'checkpoint must say the snapshot is stored verbatim (§9)');
+  assert.match(body, /unsummaris|unsummariz|not summaris|not summariz/i,
+    'checkpoint must say nothing summarises it — a one-line snapshot restores nothing');
+  assert.match(body, /run state, not knowledge/i,
+    'checkpoint must draw the line in those words: a checkpoint is run state, not knowledge');
+  assert.match(body, /\/mubit-memory:remember/,
+    'checkpoint must send knowledge to /mubit-memory:remember, or the two writes get swapped '
+    + 'and memory fills with state that expires');
+});
+
+// The split this skill exists to state. Both tools fail as "memory is not working" and their
+// fixes are opposites: an empty store behind a healthy connection and a full store behind a
+// dead endpoint look identical from the status line.
+test('memory-health/SKILL.md states the store/connection split against mubit_status', () => {
+  const { body } = loadSkill('memory-health');
+  assert.match(body, /mubit_status/,
+    'memory-health must name mubit_status — it is the tool it will be confused with (§9)');
+  assert.match(body, /store/i, 'memory-health must say it inspects the store');
+  assert.match(body, /connection/i,
+    'memory-health must say mubit_status inspects the connection; without the second half the '
+    + 'first half is not a distinction');
 });

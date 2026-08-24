@@ -40,12 +40,12 @@ const SERVER_BUNDLE = join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js');
 const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
 /**
- * §2/§9 — the skills the plugin ships, in the order they were added. The first eight are
- * the original set; each of the rest grants one MCP tool that used to sit outside the
- * default allowlist, because an allowlisted tool with nothing to invoke it is schema cost
- * with no surface.
+ * §2/§9 — the skills the plugin ships, in the order they arrived. The first eight are the
+ * original set. Of the rest, three grant an MCP tool that used to sit outside the default
+ * allowlist — an allowlisted tool with nothing to invoke it is schema cost with no surface —
+ * and `activity` runs a bundled script instead, the way `auth` and `dashboard` do.
  *
- * One name per line on purpose: several branches append to this list, and a single-line
+ * One name per line on purpose: four branches append to this list at once, and a single-line
  * array makes every one of those a conflict on the same line.
  */
 const SKILLS = [
@@ -60,6 +60,7 @@ const SKILLS = [
   'strategies',
   'checkpoint',
   'memory-health',
+  'activity',
 ];
 
 /**
@@ -641,4 +642,108 @@ test('memory-health/SKILL.md states the store/connection split against mubit_sta
   assert.match(body, /connection/i,
     'memory-health must say mubit_status inspects the connection; without the second half the '
     + 'first half is not a distinction');
+});
+
+// ---------------------------------------------------------------------------
+// §9 — activity
+// ---------------------------------------------------------------------------
+
+/**
+ * Like `auth` and `dashboard`, this skill runs a bundled script rather than calling an MCP
+ * tool, so its grant is `allowed-tools` (a Bash permission rule) and not `tools` (the MCP
+ * grant). A `tools:` entry naming a Bash command matches nothing and fails silently, and the
+ * host then prompts for approval on every run.
+ */
+test('activity/SKILL.md grants exactly the Bash permission it needs, and no MCP tools', () => {
+  const { fm } = loadSkill('activity');
+
+  const allowed = fm['allowed-tools'];
+  assert.ok(allowed, 'activity must declare allowed-tools so the host does not prompt on every run');
+  const text = Array.isArray(allowed) ? allowed.join(' ') : String(allowed);
+
+  assert.match(text, /Bash\(/, 'the grant is a Bash permission rule');
+  assert.match(text, /bin\/activity\.mjs/, 'the rule must name the script, not hand the skill a shell');
+  assert.match(text, /\$\{CLAUDE_PLUGIN_ROOT\}/,
+    'the plugin is installed at a path nobody can predict — a relative path resolves elsewhere');
+
+  assert.equal(toolsOf(fm), undefined,
+    'the command talks to the control API itself; an MCP grant would be a second, weaker path to it');
+});
+
+/**
+ * The second skill in the set the model may not invoke, for the same two reasons as the first.
+ *
+ * Pulling a copy of everything an instance holds into a transcript is a thing a person decides
+ * to do. It is also what makes this skill free: a `disable-model-invocation: true` skill's
+ * description is not loaded into context, so it costs nothing until somebody types it — and
+ * `/mubit-memory:doctor` already owns the cheaper, model-facing "is capture working" question.
+ */
+test('activity/SKILL.md is user-invocable but never model-invocable', () => {
+  const { fm } = loadSkill('activity');
+  assert.equal(fm['disable-model-invocation'], true,
+    'nothing in a conversation should decide on its own to export somebody\'s memory');
+});
+
+/**
+ * The guard that matters most, because without it the model will describe an export as
+ * "filtered activity" — the exact false claim the module's design exists to prevent.
+ *
+ * `/v2/control/activity/export` accepts neither `exclude_derived` nor `projection`. An export
+ * is therefore always everything in scope, and a user who asked for "an export of my
+ * non-derived entries" is asking for two different operations. A skill that blurs the two
+ * produces a reply asserting a filter that never ran.
+ */
+test('activity/SKILL.md keeps the listing and the export distinguishable', () => {
+  const { body } = loadSkill('activity');
+  assert.match(body, /never filtered|not filtered|accepts no `?exclude_derived/i,
+    'the skill must say outright that an export carries no filter');
+  assert.match(body, /verbatim|byte for byte/i,
+    'and that its content is what the instance holds rather than something this client shaped');
+  assert.match(body, /never describe an export as/i,
+    'the instruction has to be an instruction, not an implication — this is the sentence that '
+    + 'stops "here is your filtered export"');
+});
+
+/**
+ * Writing a file is the only irreversible thing this command does, and the model is what
+ * decides whether it happens.
+ */
+test('activity/SKILL.md forbids --out unless the user asked for a file, and requires naming the path', () => {
+  const { body } = loadSkill('activity');
+  assert.match(body, /Do not pass `--out` unless/i,
+    'an export is a complete copy of somebody\'s memory; creating one is their decision');
+  assert.match(body, /absolute path/i,
+    'a file the user cannot find is a file they cannot delete — the reply has to name it');
+  assert.match(body, /refuses to overwrite/i, 'the second run of this command is the first one again');
+  assert.match(body, /data dir/i,
+    'an export inside the data dir sits outside the TTL sweep and is never mentioned again');
+});
+
+/**
+ * The corrections are worth nothing if they stop at the terminal. When the instance ignores a
+ * filter, that fact is the finding — and the model is the thing that decides whether the user
+ * ever hears it.
+ */
+test('activity/SKILL.md tells the model to relay the findings rather than summarise them away', () => {
+  const { body } = loadSkill('activity');
+  assert.match(body, /did not honour/i,
+    'the skill must name the "the instance ignored this" line as something to pass on');
+  assert.match(body, /incomplete|prefix/i,
+    'a truncated scan reported as a complete answer is the same lie as an unhonoured filter');
+  assert.match(body, /Relay|rather than summaris/i,
+    'the model\'s default is to compress a note out of existence; this is what stops it');
+});
+
+// `scripts/mubit-inspect.mjs` is not in `files` and is not shipped: it carries untested copies
+// of data-dir discovery and the marker/turn join that `lib/dashboard-data.mjs` now owns with
+// tests behind it, and its HTTP paths have neither breaker discipline nor a deadline. The
+// question it answers — per-prompt cost — is real, so the skill has to route the reader at the
+// surface that does ship it rather than leaving a gap somebody fills with the unshipped script.
+test('activity/SKILL.md routes the per-prompt question at the dashboard, not at a script that does not ship', () => {
+  const { body } = loadSkill('activity');
+  assert.match(body, /Turns/,
+    'per-prompt cost lives in the dashboard\'s Turns tab; this skill cannot answer it');
+  assert.ok(!body.includes('mubit-inspect'),
+    'mubit-inspect.mjs is not in package.json `files` — naming it sends a user to a path that '
+    + 'does not exist in an installed plugin');
 });

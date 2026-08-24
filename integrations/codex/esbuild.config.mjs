@@ -176,6 +176,10 @@ const targets = [
   // this to obtain the credential every other tool needs — so a Codex plugin without it has
   // no first-run story at all.
   { entryPoints: [resolve(SHARED, 'bin', 'auth.src.mjs')], outfile: out('bin/auth.mjs'), ...shared },
+  // The activity binary. The `activity` skill ships under both hosts and its only instruction
+  // is to run this file, so without the target the Codex copy of the skill names a path that
+  // does not exist — the same first-run dead end `auth` would have.
+  { entryPoints: [resolve(SHARED, 'bin', 'activity.src.mjs')], outfile: out('bin/activity.mjs'), ...shared },
   // The dashboard binary, built from the same shared source as the Claude Code copy. Two
   // installable plugins cannot share a path — the same reason this tree carries its own
   // `mcp/dist/server.js` — so the bundle is emitted here rather than referenced across.

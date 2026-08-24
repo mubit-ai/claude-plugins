@@ -163,6 +163,7 @@ Listed to the model as `mubit-memory:<name>`:
 | `strategies` | Read the pattern *across* many lessons rather than any single one. |
 | `checkpoint` | Save a named snapshot of where the run has got to, verbatim, before risky work. |
 | `memory-health` | Report what is actually stored: counts, staleness, contradictions. The store, not the connection. |
+| `activity` | The audit question: what this instance actually holds, filtered by time, type, agent or origin — and an export of the whole record as JSONL. Prints to stdout; writes a file only if asked. |
 
 There is no `mubit-recall` subagent here. Codex has no plugin-defined agent types — every
 `SubagentStart` reports `agent_type: "default"` — so a markdown subagent would be a file

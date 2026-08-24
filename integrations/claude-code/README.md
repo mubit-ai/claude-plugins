@@ -122,10 +122,11 @@ an unwritable data dir, or a corrupt state file costs you a memory, never a turn
 | `/mubit-memory:remember` | Save a durable lesson, rule, or standing preference. |
 | `/mubit-memory:reflect` | Extract lessons from this session mid-flight, rather than waiting for `SessionEnd`. |
 | `/mubit-memory:forget` | Delete a lesson, or down-weight one that is merely wrong. |
-| `/mubit-memory:dashboard` | Open a local page over everything above: browse and search lessons, see what recall cost per prompt, watch ingest health. Loopback only, and the one skill the model cannot invoke for you. |
+| `/mubit-memory:dashboard` | Open a local page over everything above: browse and search lessons, see what recall cost per prompt, watch ingest health. Loopback only, and one of the skills the model cannot invoke for you. |
 | `/mubit-memory:strategies` | Read the pattern *across* many lessons rather than any single one — what this project keeps doing, and keeps getting wrong. |
 | `/mubit-memory:checkpoint` | Save a named snapshot of where a run has got to, stored verbatim, before risky work. The half of `PreCompact` you can ask for. |
 | `/mubit-memory:memory-health` | Report what is actually stored: entry counts, staleness, contradictions. The store, not the connection. |
+| `/mubit-memory:activity` | The audit question: what does this instance actually hold, filtered by time, type, agent or origin — and an export of the whole record as JSONL you can keep. Prints to stdout; writes a file only if you ask. Also not model-invocable. |
 | `@mubit-memory:mubit-recall` | Subagent: multi-angle memory search in an isolated context, returns a synthesis instead of raw evidence. |
 
 ### Thirteen MCP tools

@@ -47,10 +47,10 @@ const P = {
 };
 
 /**
- * §2 — the skills, the same set the Claude Code plugin ships.
+ * §2 — the skills, the same set the Claude Code plugin ships, in the order they arrived.
  *
- * One name per line on purpose: several branches append to this list, and a single-line array
- * makes every one of those a conflict on the same line.
+ * One name per line on purpose: four branches append to this list at once, and a single-line
+ * array makes every one of those a conflict on the same line.
  */
 const SKILLS = [
   'recall',
@@ -64,6 +64,7 @@ const SKILLS = [
   'strategies',
   'checkpoint',
   'memory-health',
+  'activity',
 ];
 
 /** `.mcp.json` names the server `mubit`, so the model sees `mcp__mubit__<tool>`. */

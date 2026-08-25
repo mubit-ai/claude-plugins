@@ -8,10 +8,10 @@ and the working brief for `feat/codaph-port`.
 | codaph | v0.1.18 @ `d06aaf3`, confirmed level with `origin/main` |
 | plugin | v0.10.0, base `pre-main` @ `05adfe0`, merged level with `pre-main` at `fca3837` |
 | backend | route inventory counted against the control-plane API surface |
-| audited | 2026-08-23 · re-verified 2026-08-24 · **waves 1 and 2 shipped, brief updated 2026-08-24** |
+| audited | 2026-08-23 · re-verified 2026-08-24 · **wave 2.5 shipped, brief updated 2026-08-25** |
 
-**Status.** Waves 1 and 2 are on `feat/codaph-port`. Items 1, 2, 3, 4, 8 and 9 are built,
-tested and merged; items 5, 6 and 7 are not. Each shipped item keeps its original text and
+**Status.** Waves 1, 2 and 2.5 are on `feat/codaph-port`. Items 0, 1, 2, 3, 4, 8 and 9 are
+built, tested and merged; items 5, 6 and 7 are not. Each shipped item keeps its original text and
 carries a **Shipped** note recording what was built and, where they differ, what turned out to
 be true instead. Those notes are the more reliable half of this document now: the
 recommendation was written from the outside, the note was written from inside the code.
@@ -54,9 +54,10 @@ Three things fell out of the audit. Two are now done:
 
 And one thing has fallen out since, which is larger than anything left on the list:
 
-4. **Recall currently returns nothing at all.** Not slowly — nothing. Measured on three live
-   runs, every rung-1 query aborts at the 1500 ms budget. It is a one-line request-body fix.
-   See item 0.
+4. ~~**Recall currently returns nothing at all.**~~ **Done** (item 0), in the same commit that
+   wrote this brief — which is why the original text below still reads as open. The fix is a
+   request-body field, but *when* to send it turned out to be the whole of the design, and the
+   answer is a budget rule rather than a constant. See the Shipped note on item 0.
 
 ---
 
@@ -111,7 +112,7 @@ Ordered by impact per unit of effort with dependencies respected, so the list is
 order. Day figures assume one engineer already fluent in the plugin, and include tests plus a
 skill where the feature needs a user-facing surface. **These are estimates, not commitments.**
 
-### 0. Make recall answer at all
+### 0. Make recall answer at all — SHIPPED (wave 2.5, `144eab7`)
 
 **Impact: critical · Effort: XS · under a day · NOT FROM CODAPH — found while building wave 2**
 
@@ -158,6 +159,32 @@ is a request-body change and not a server one.
 - **It compounds with run-scoped lessons**: entries stored at `scope: "run"` are discarded by the
   lane *after* it has paid for them, and that empty result is what triggers the 10 000-entry
   fallback.
+
+> **Shipped (2026-08-24) in `144eab7`, alongside this brief** — which is why every paragraph
+> above still reads as open. Built as `recallCrossRun` (`auto | on | off`,
+> `MUBIT_CC_RECALL_CROSS_RUN`) rather than the unconditional field the item proposed.
+>
+> **`auto` is a property of the path, not of the installation.** It reads the budget the caller
+> already arrived with against `CROSS_RUN_MIN_BUDGET_MS`: a hook that must answer before the
+> user's prompt goes out declines the lane, the detached refresh behind it takes it, and neither
+> needed to be told which one it is. Pinning it to a constant would have forced a second dial
+> nobody would find. `on` and `off` remain as pins.
+>
+> **The recommendation's "where the wider lesson search moves to" was the wrong question.** It
+> does not move: `session-start` was *already* fetching global-scope lessons on their own route,
+> once per session, and that is where standing lessons were arriving from all along — see
+> *Cross-run lessons arrive by two paths* below. Declining the per-prompt overlay costs the
+> per-prompt refresh of cross-run lessons, not cross-run memory.
+>
+> **Correction (2026-08-25) to the numbers in this item.** The `2.05 s mean` / `0.25 s` figures
+> were taken against a hosted instance in one session and are not reproducible from a clean
+> checkout, so they have been removed from shipped source and from the README — a request-level
+> latency breakdown of the backend does not belong in a public repo, and the scanner's
+> `server-latency-profile` rule now clears. They are left in *this* paragraph as dated history,
+> stated as what one measurement showed rather than as a property of the service. What survives
+> re-measurement is only the **shape**: the cross-run half of a recall is not bounded by a run
+> id, so it grows with the store rather than with your session, and it costs the same whether it
+> finds a lesson or finds nothing.
 
 ---
 
@@ -489,7 +516,7 @@ the failure mode a pinned slot removes.
 | # | Feature | Impact | Effort | Days | Depends on | Status |
 | --- | --- | --- | --- | --- | --- | --- |
 | — | *`plugin-scope-fix`* | *high* | *unmerged* | — | — | *PR #11 closed — see Prior art* |
-| **0** | **Recall answers at all** | **●●●** | **XS** | **<1** | — | **open — outranks everything** |
+| 0 | Recall answers at all | ●●● | XS | <1 | — | ✅ wave 2.5, `144eab7` |
 | 1 | Actor id | ●●● | S | 1–2 | — | ✅ wave 1, PR #18 |
 | 2 | Freshness ranking | ●●● | S | 1–2 | — | ✅ wave 1, PR #19 |
 | 3 | Dormant MCP tools | ●●○ | S | 2–3 | — | ✅ wave 2, PR #20 |
@@ -503,8 +530,8 @@ the failure mode a pinned slot removes.
 | 11 | Git post-commit anchor | ●○○ | S–M | 3–5 | — | second shelf |
 | 12 | Project registry / team view | ●●○ | L | 15+ | actor id | second shelf |
 
-Six of nine shipped. What is left is the expensive half, and it is the half the estimates are
-least trustworthy about: items 1–4, 8 and 9 all came in near their figures, but every one of them
+Seven of ten shipped. What is left is the expensive half, and it is the half the estimates are
+least trustworthy about: items 0–4, 8 and 9 all came in near their figures, but every one of them
 was *exposure* of something already vendored. Items 5, 6 and 7 are the first that build something
 the backend does not already do for us.
 
@@ -540,11 +567,16 @@ Two process notes worth reusing, both learned the expensive way:
   reached it without a single Codex file changing, and `codex-dist.test.mjs` caught it at the
   merge. Any wave that touches `lib/` owes both packages a rebuild.
 
-**Wave 2.5 — before Wave 3 (under a day).** Item 0, and a decision on item 4's endpoint. This is
-new, and it is not optional in the way the rest of the ordering is a preference: **item 5 imports
-months of history into a retrieval path that currently returns nothing.** Backfill is justified by
-what recall does with the result, so fixing recall first is what makes the wave measurable —
-otherwise a successful import and a failed one look identical from the prompt.
+**Wave 2.5 — before Wave 3 (under a day). ✅ Item 0 done; decision B still open.** This was not
+optional in the way the rest of the ordering is a preference: **item 5 imports months of history
+into a retrieval path that was returning nothing.** Backfill is justified by what recall does with
+the result, so fixing recall first is what makes the wave measurable — otherwise a successful
+import and a failed one look identical from the prompt.
+
+> **The client half is done and the store half is not.** Recall now answers inside its budget, but
+> what it answers *with* is still bounded by a store that has never had a global-scope lesson in
+> it — see *Cross-run memory had nothing to return* below. Wave 3 should not read an empty
+> cross-run result as a defect in whatever it just built.
 
 **Wave 3 — capture (~4–5 weeks).** Redactor fix, then 5, 6, 7. The real engineering. The redactor
 fix is not optional and comes first: bulk import multiplies whatever the scrubber misses by every
@@ -617,6 +649,42 @@ the plugin has, which makes this a Wave 3 prerequisite rather than a curiosity.
 Add to those the enum trap from item 9: `source` accepts five values and falls back to `Explicit`
 **silently**, so a plausible-but-wrong value is accepted and means something else.
 
+### Cross-run lessons arrive by two paths, and `recallCrossRun` governs only one
+
+Conflating them misreads what declining the lane costs.
+
+1. **The per-prompt query.** A `/v2/control/query` carrying `lesson` in `entry_types` and no
+   `prefer_current_run` comes back with lessons from other runs as well as this one, and costs
+   more than the same query with the field set. That difference is the only thing
+   `recallCrossRun` governs.
+2. **`session-start`** — `POST /v2/control/lessons {scope:"global", limit:5}` with **no
+   `run_id`**, once per session at a ~900 ms sub-budget, rendered as *Standing lessons (global)*.
+   Independent of `recallCrossRun` entirely.
+
+The trap: `recallCrossRun` defaults to `auto`, `recallAsync` defaults to **`false`**, and
+`recall-refresh` is only detached when `recallAsync` is on. So **at stock defaults the per-prompt
+overlay is requested on no path at all** — the blocking hook declines it and the refresh never
+runs. Path 2 is the only cross-run delivery a default install has. That is a defensible trade,
+but it was not written down anywhere, and "cross-run recall is off" and "cross-run memory is off"
+are different claims.
+
+Two smaller edges on the same rule: `auto` measures its slack through a helper that clamps to
+`timeoutMs` (default 4000) against a 3000 threshold, so `MUBIT_CC_TIMEOUT_MS` below 3000 declines
+the lane on **every** path including the refresh; and `on` is only coherent with `recallAsync` on
+or with the recall budget raised to fund it.
+
+### Cross-run memory had nothing to return, and that was never a plugin bug
+
+`POST /v2/control/lessons {scope:"global"}` returns an empty list, and has on every instance
+measured so far — nothing has ever been promoted to global scope. A server-side change that makes
+global scope reachable is **in review, not shipped**.
+
+This matters to Wave 3 in one specific way: **until it lands, every cross-run read returns
+nothing regardless of what the client does**, so a Wave 3 feature that depends on cross-run recall
+will measure as broken when it is merely unfed. Check the census before drawing a conclusion from
+an empty block — and note that item 0's fix is a latency fix, not a supply fix. It made recall
+answer; it did not give it more to answer with.
+
 ### Where the wire shape forces a design, write the asymmetry down
 
 Item 8's listing is re-filtered client-side and its export is passed through verbatim, and that
@@ -629,11 +697,12 @@ and pin it with a test.
 
 ## Open decisions
 
-Three, none of them blocking, all of them cheaper to settle before Wave 3 than during it.
+Two open, one settled. None blocking, all cheaper to settle before Wave 3 than during it.
 
 | | Decision | Recommendation |
 | --- | --- | --- |
-| **A** | **Item 0: `prefer_current_run` on the rung-1 body.** | Do it. Recall returns nothing today; this is a one-line request-body change with a measured 2.05 s → 0.25 s. The only open question is where the wider lesson search moves to — `recall-refresh` or session start. |
+| ~~**A**~~ | ~~**Item 0: `prefer_current_run` on the rung-1 body.**~~ | ✅ **Settled and shipped** in `144eab7`, as `recallCrossRun: auto` rather than an unconditional field. The "where does the wider search move to" question dissolved: it was already on `session-start`'s own route. |
+| **D** | **`recallAsync`'s default, now that it also decides whether any request asks for cross-run lessons.** | Decide deliberately. `recallAsync: false` means a default install never asks a per-prompt query for other runs' lessons on any path — the blocking hook declines, and the refresh that would ask is never spawned. That is fine while the store has no global lessons to return, and it stops being fine the moment the server-side promotion fix lands. Revisit it then, not now. |
 | **B** | **Item 4: swap the resume block off `/context`.** | Swap it, to `postQuery{mode:'direct_bypass', rank_by:'freshness', entry_types, limit}` assembled client-side. `/context` cannot rank a temporal question and spends the budget on the wrong sections first. The cost is a bulleted list instead of a prose briefing. Note it inherits the same lesson-lane latency as item 0 — tolerably, since it runs detached at 20 s — so **A makes B better** and should land first. |
 | **C** | **`plugin-scope-fix`: merge, carve up, or abandon.** | Decide before committing Wave 3 capacity to item 7, which is the only remaining item gated on it. PR #11 was closed with *"specific fixes will be carved out into their own PRs when asked for"*, and nothing has been carved out since. |
 
@@ -681,6 +750,12 @@ is item 7's cheapest first increment.
   branches conflict on a line each rather than all on the same one; keep them that way.
 - **Some sources carry NUL bytes.** Use `grep -a` on `lib/config.mjs` and `test/*.test.mjs`, and
   check anything you write with a heredoc for literal control bytes before committing.
+- **A comment-only edit to `lib/` still needs a rebuild.** The inline sourcemaps embed source
+  text, so `test/dist-freshness` fails on a pure comment change — reporting *"the code matches but
+  the inline sourcemap does not"* — while grepping `hooks/dist/` for the comment finds nothing,
+  because esbuild strips comments from emitted code but not from the map. One edit to
+  `lib/recall.mjs` dirtied four bundles by exactly one line each. Do not assume a docs commit is
+  build-free.
 - **Not every branch base runs the full check suite.** Confirm which checks apply to the branch
   you cut, and run the rest by hand.
 - **Raise `MUBIT_CC_RECALL_BUDGET_MS` for any manual end-to-end run** — 8000, with
@@ -698,6 +773,11 @@ feeder branches. Backend behaviour cited anywhere in this document is stated as 
 behaviour: this repository is public, and server internals do not belong in it.
 Claims about what the plugin does or does not do were checked in source rather than in docs, and
 the redaction gap in item 5 was probed against the live module on this branch's base.
+
+**Updated 2026-08-25, after wave 2.5.** Item 0 is marked shipped, its measured latency figures
+have been pulled out of shipped source and the README and left here as dated history, and three
+findings were added: the two cross-run delivery paths, the empty global scope behind them, and the
+sourcemap rebuild trap. Nothing in Wave 3 has been started.
 
 **Updated 2026-08-24, after waves 1 and 2.** The Shipped notes, item 0, *What waves 1 and 2
 learned* and *Open decisions* were written from inside the implementations rather than from the

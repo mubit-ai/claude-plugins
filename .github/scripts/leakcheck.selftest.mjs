@@ -92,7 +92,7 @@ const CASES = [
     // Git marks this binary. Every rule must still run over it.
     path: 'a/has-nul.mjs',
     body: Buffer.concat([
-      Buffer.from("const sentinel = ' ';\n// see crates/control/service/src/lib.rs\n"),
+      Buffer.from("const sentinel = ' ';\n// see crates/example/service/src/lib.rs\n"),
       Buffer.from([0x00]),
       Buffer.from("\n// naming it would let a client write a tenant-wide rule\n"),
     ]),

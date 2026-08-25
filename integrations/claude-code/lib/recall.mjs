@@ -18,10 +18,10 @@
  *
  * **Rung 2 is opt-in, and off by default** (`MUBIT_CC_RECALL_FALLBACK`). It buys the only
  * recall an instance with direct search disabled can serve, and it pays for it with a routing
- * LLM call on every prompt: measured median 5025 ms, tail past 11 s, against a 1500 ms recall
- * budget inside a 3 s hook timeout. Nearly every one of those aborts *after* spending the
- * call, so the default trades recall nobody was getting for latency everybody was paying.
- * Rung 1 answers in ~30-250 ms server-side and is the path the docs call the default.
+ * LLM call on every prompt, and that call routinely takes longer than the entire recall
+ * budget it has to fit inside. Nearly every one of those aborts *after* spending the call,
+ * so the default trades recall nobody was getting for latency everybody was paying. Rung 1
+ * sends no model call at all and is the path the docs call the default.
  *
  * So rung 3 is the *last* rung, not the first, and it is never reached by default — its
  * absence is asserted explicitly by the tests, because it is the first thing a well-meaning
@@ -97,24 +97,21 @@ const QUERY_LIMIT = 8;
  * `entry_types` above contains `lesson`, and that alone puts the query on a second retrieval
  * lane: alongside the run-scoped search, the server runs an unscoped one to surface lessons
  * learned in OTHER runs. The run-scoped search takes a bounded fast path. The unscoped one
- * cannot — there is no run to bound it by — so it scales with the size of the whole
- * instance, not with this run, and it gets slower as an instance accumulates data no matter
- * what this plugin does. Measured against a hosted instance, that one lane is ~1.7s of a
- * ~2.0s rung-1 call: with it, the mean is 2.07s and every request overruns the 1500ms
- * default; without it, 0.35s. It is the difference between recall landing and recall timing
- * out, and no value of `recallBudgetMs` can buy its way out — `HARNESS_BUDGET_MS` in
- * `prompt-recall` is capped at 2800ms by the host's own 3s `UserPromptSubmit` timeout.
+ * has no run to bound it by, which makes it the half of a recall least able to promise an
+ * answer inside a budget — and it is the same price whether it finds a lesson or finds
+ * nothing.
  *
- * So the threshold sits above that cap, deliberately: a blocking hook can never clear it and
- * always opts out, while the detached refresh (10s) and anything else with real slack always
- * clears it and keeps the overlay. The dial that decides this is a budget the caller already
- * has to set, not a new one to discover, and the rule reads the same way in both directions —
- * ask for the expensive lane only where there is room to pay for it.
+ * So the threshold sits above anything a blocking hook can offer: `prompt-recall` has to
+ * answer before the user's prompt goes out and therefore always opts out, while the detached
+ * refresh behind it always clears the threshold and keeps the overlay. The dial is a budget
+ * the caller already has to set, not a new one to discover, and the rule reads the same way
+ * in both directions — ask for the unbounded lane only where there is room to pay for it.
  *
- * What opting out costs is small and measurable: the overlay contributed exactly ONE item per
- * query in every measurement, and now that lessons carry a real timestamp and age on a
- * half-life, that item ranks *below* the run-scoped hits it arrives with (0.34 against 1.00).
- * Set `recallCrossRun: "on"` to pay for it on the blocking path anyway.
+ * Opting out here is NOT the same as going without cross-run memory, and the distinction is
+ * easy to lose: `session-start` fetches global-scope lessons once per session on their own
+ * bounded route, independent of this flag, and that is the path standing lessons actually
+ * arrive on. What this threshold decides is only whether the *per-prompt* overlay is asked
+ * for as well. Set `recallCrossRun: "on"` to pay for it on the blocking path anyway.
  */
 const CROSS_RUN_MIN_BUDGET_MS = 3000;
 
@@ -469,8 +466,8 @@ async function rungThree(cfg, o) {
  * so it declines to vote at all.
  *
  * 20 s is the right deadline for the same reason `recall-refresh` ignores `recallBudgetMs`:
- * nothing is waiting. Rung 3 costs two LLM calls and the runbook's own measurement puts an
- * agent-routed call at a 5 s median with a tail past 11 s.
+ * nothing is waiting. Rung 3 costs two LLM calls, and an agent-routed call is slow enough
+ * that no blocking budget could hold one.
  *
  * Never throws and never rejects — every failure is already a shape in `Outcome` (§4.9).
  *

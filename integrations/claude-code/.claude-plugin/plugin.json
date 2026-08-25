@@ -1,7 +1,7 @@
 {
   "name": "mubit-memory",
   "displayName": "Mubit Memory",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Persistent, typed, self-improving memory for Claude Code, backed by Mubit. Captures work involuntarily, recalls relevant lessons before every prompt, and attributes outcomes so memory improves with use.",
   "author": { "name": "Mubit AI", "url": "https://mubit.ai" },
   "homepage": "https://docs.mubit.ai/integrations/claude-code",

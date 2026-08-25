@@ -56,12 +56,29 @@ const EXEMPT_RE = /idempotency[-_]key/i;
 // ---------------------------------------------------------------------------
 
 /**
- * Kept aligned with the server's own redaction policy, so client and server
- * agree on what counts as a secret.
+ * Matched as a substring of the assignment's *name*, lowercased.
+ *
+ * Started aligned with the server's own redaction policy so client and server agreed on what
+ * counts as a secret. It is now deliberately wider in one direction: `passphrase` and
+ * `passwd` were added because a re-probe found `MY_PASSPHRASE=hunter2` surviving intact, and
+ * a client that scrubs more than the server is the safe side of that divergence — the server
+ * never sees what this removes.
  */
 const ASSIGNMENT_KEYWORDS = [
-  'secret', 'token', 'password', 'credential', 'assertion', 'signature', 'apikey', 'api_key',
+  'secret', 'token', 'password', 'passphrase', 'passwd', 'credential', 'assertion',
+  'signature', 'apikey', 'api_key',
 ];
+
+/**
+ * Matched only at the *end* of the name, and `pass` is the whole reason the distinction
+ * exists. `DB_PASS=` and `PGPASS=` are ordinary `.env` spellings that no substring in the
+ * list above reaches, and adding `pass` there instead would take `tests_passed=40`,
+ * `bypassed=true` and every other ordinary word that happens to contain it. Over-redaction is
+ * not a harmless failure here: the documented escape hatch for a scrub that mangles output is
+ * `MUBIT_CC_REDACT=0`, which turns stage 1 off wholesale, so making the scrub annoying is a
+ * way of turning it off.
+ */
+const ASSIGNMENT_NAME_SUFFIXES = ['pass'];
 
 /**
  * `NAME<sep>VALUE`, where NAME is a whole `[A-Za-z0-9_-]` token.
@@ -137,6 +154,16 @@ const RULES = [
   { kind: 'pem', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { kind: 'mubit-key', re: /mbt_[A-Za-z0-9_-]{8,}/g },
   { kind: 'openai-key', re: /sk-[A-Za-z0-9_-]{16,}/g },
+  // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+  // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+  // underscore where that rule expects a hyphen, so it fell through every rule in this table
+  // and, being short, under the `high-entropy` floor as well.
+  //
+  // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+  // safe to ship in client-side code — it is in committed source and in browser bundles, and
+  // redacting it would scrub something the user is deliberately looking at while calling a
+  // published value a secret.
+  { kind: 'stripe-key', re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
   { kind: 'github-token', re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
   { kind: 'aws-access-key', re: /AKIA[0-9A-Z]{16}/g },
   { kind: 'jwt', re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -180,7 +207,7 @@ function scrubAssignments(text, count) {
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
 
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -197,6 +224,17 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+
+/**
+ * Does this assignment's name say its value is a secret? Lowercased name in, so the two lists
+ * can be read as written.
+ * @param {string} lower
+ * @returns {boolean}
+ */
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))
+    || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 
 /**

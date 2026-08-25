@@ -128,15 +128,15 @@ claude plugin details mubit-memory
 Component inventory
   Skills (7)  auth, doctor, forget, recall, reflect, remember, setup
   Agents (1)  mubit-recall
-  Hooks (9)  SessionStart, UserPromptSubmit, PostToolUse, PostToolUseFailure, Stop,
-             SubagentStop, PreCompact, PostCompact, SessionEnd  (harness-only — no model context cost)
+  Hooks (10)  SessionStart, CwdChanged, UserPromptSubmit, PostToolUse, PostToolUseFailure,
+             Stop, SubagentStop, PreCompact, PostCompact, SessionEnd  (harness-only — no model context cost)
   MCP servers (1)  mubit  (tool schemas resolved at runtime; not counted)
 
 Projected token cost
   Always-on:   ~452 tok   added to every session
 ```
 
-Seven skills, one agent, nine hook events. That number is what the skill descriptions and the
+Seven skills, one agent, ten hook events. That number is what the skill descriptions and the
 agent cost you in every session; hooks cost nothing in context because they run in the harness,
 not the model.
 
@@ -239,6 +239,7 @@ What happens on its own:
 | When | What the plugin does |
 | --- | --- |
 | Session starts | Derives a run id from your directory, registers the agent, pulls up to 5 global lessons, and tells the model memory is active |
+| You `cd` into another repo | Moves the session to that repo's run, and flushes what the run you left had spooled. A `cd` inside one repo changes nothing |
 | Every prompt you send | Queries memory and injects what is relevant, within a 1500 ms budget and a 1500-token cap. **Zero LLM calls** — assembly is local |
 | Every tool call | Redacts and spools it. Zero network on the hot path |
 | Every tool failure | Captured — these produce the most useful lessons |
@@ -319,7 +320,7 @@ health and stuck ingest jobs — and reports the connection state by name.
 
 ---
 
-## Part 5 — The six commands
+## Part 5 — The seven commands
 
 You will not need most of these day to day. Capture is automatic; these are for the moments it
 is not enough.
@@ -332,6 +333,7 @@ is not enough.
 | `/mubit-memory:remember` | Something should outlive this session |
 | `/mubit-memory:reflect` | You want lessons extracted **now** rather than at session end |
 | `/mubit-memory:forget` | A stored lesson is wrong |
+| `/mubit-memory:dashboard` | You want to *look* at any of the above rather than ask about it |
 
 ### Saving something worth keeping
 
@@ -369,6 +371,44 @@ Reports each lesson with its id, type and scope. An empty result is a real answe
 There is no dry run and no undo. For a lesson that is merely *wrong* rather than harmful,
 prefer letting outcome attribution down-weight it.
 
+### Looking at all of it
+
+```
+/mubit-memory:dashboard
+```
+
+Opens a page on `127.0.0.1` — a random port, a token minted for that launch, and nothing on
+your network can reach it. Three tabs:
+
+- **Memory** — every lesson your instance holds. Filter instantly, or press *Search instance*
+  to ask it properly. There is a filter for lessons **visible outside the run that wrote
+  them**, which is the question nothing else here answers: a rule saved at global scope follows
+  you into every project, and one saved at run scope dies with the session.
+- **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
+  they cost, and how many were repeats rendered as a one-line pointer. This is read from disk,
+  so it works with the network off.
+- **Analytics** — those numbers as a trend, plus spool depth, ingest counts and breaker state.
+
+Three things it deliberately does not claim:
+
+- **No per-prompt latency.** The recall timing on the status marker is last-write-wins — it
+  describes the most recent prompt, not each one — so there is no honest per-prompt series to
+  plot and the page does not invent one.
+- **A blank in the `used` column means "could not be measured", not "was not used".** It is a
+  term-echo proxy, and its false negatives dominate.
+- **The Analytics trend starts empty.** Turn files are pruned six hours after they are written,
+  so the series is something the dashboard accumulates while it is open.
+
+It shuts itself down after about half an hour of no traffic. To stop it sooner:
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/bin/dashboard.mjs" --stop
+```
+
+This is the one command Claude cannot run for you — opening a browser window is a decision a
+person makes. It is also why it costs nothing until you type it: its description is not loaded
+into the model's context.
+
 ### The subagent, for bigger questions
 
 ```
@@ -402,6 +442,16 @@ Everything below is in `/plugin` → Mubit Memory → configure.
 
 `/clear` starts a fresh run (`-c1`, `-c2` …). Resume, compact and fork reuse the same one.
 
+A `cd` into a different repo moves the session onto that repo's run under `per-directory` and
+`git-branch`, and drains whatever the run you left still had spooled. `per-conversation` and
+`static` are not derived from a directory, so they do not move. A `cd` *within* one repo never
+moves anything — the id resolves through `git rev-parse --show-toplevel`.
+
+> The MCP server does not follow. It derives its run once, when the session starts it, and
+> pins every write to that value; moving it would need a server restart the plugin cannot ask
+> for. After a `cd`, what the hooks capture lands in the new repo's run while what
+> `/mubit-memory:remember` writes lands in the one you started in.
+
 ### How much context memory is allowed to spend
 
 `recallTokenBudget`, default `1500`. Raise it if recall keeps getting trimmed; lower it if you
@@ -412,11 +462,55 @@ want the context back.
 `reflectOnEnd`, default `true`. It is the only path that promotes a lesson beyond its own run.
 Turning it off to save a few seconds at exit trades away cross-session memory entirely.
 
+### A reminder before a dangerous command — off by default
+
+`preToolWarnings`, default **`false`**.
+
+Turn it on and, just before Claude runs an `rm` or a `git push`, the plugin checks the `rule`
+memories this run has already recalled. If one mentions the command, it is shown to Claude —
+and nothing else happens. Try it for a session:
+
+```bash
+MUBIT_CC_PRE_TOOL_WARNINGS=1 claude
+```
+
+Two things about it are worth understanding before you rely on it, because both are easy to
+assume the other way round.
+
+**It warns. It cannot stop anything.** Claude Code gives a pre-tool hook four decisions —
+allow, deny, ask, defer — and a fifth power that rewrites the command's arguments outright.
+This plugin uses none of them, on any code path, and its tests assert that absence across
+every branch and the shipped bundle rather than trusting it. What Claude sees is a note; it
+decides what to do with it, exactly as it does with any other recalled memory. A rule that
+says "never force-push to main" does not become a lock on force-pushing to main.
+
+**And it does not see every command.** The hook is registered with a filter so it is not a
+process spawn in front of every tool call in your session — Claude Code's own description of
+that field is *"Only runs if the tool call matches the pattern. Avoids spawning hooks for
+non-matching commands."* The docs also say the filter is best-effort and **fails open**:
+
+> The filter also fails open, running your hook regardless of pattern, when the Bash command
+> can't be parsed. Because the filter is best-effort, use the permission system rather than a
+> hook to enforce a hard allow or deny.
+
+Read that last sentence as written. **This is a memory-informed guardrail, not a security
+boundary.** If a command must never run, that belongs in `permissions.deny` in your
+`settings.json`, where the host enforces it — not in a Mubit rule, and not here. What this
+setting buys is that a lesson you already paid to learn shows up at the moment it applies
+instead of scrolling past twenty prompts earlier.
+
+One small thing that is *not* documented anywhere, so do not assume it: what Claude Code does
+with a pre-tool hook that times out. The published reference does not say. Nothing here rests
+on it — the plugin denies nothing at any exit it controls, and it exits 0 on every path,
+including the path where its own internal deadline fires — but if you write your own pre-tool
+hook, do not carry the assumption forward.
+
 ### Quieting it temporarily
 
 ```bash
 MUBIT_CC_CAPTURE=0 claude    # stop capturing, keep recall
 MUBIT_CC_RECALL=0 claude     # stop injecting, keep capturing
+MUBIT_CC_PRE_TOOL_WARNINGS=0 claude   # stop the pre-command reminders (already the default)
 ```
 
 ### Fewer MCP tools
@@ -427,8 +521,8 @@ MUBIT_CC_RECALL=0 claude     # stop injecting, keep capturing
 mubit_recall,mubit_learned
 ```
 
-> The bundled server currently registers all 21 tools regardless, so `/mcp` will show 21 and
-> `mcpTools` has no effect yet. Cosmetic — the ten in the default set are the ones the skills
+> The bundled server honours the allowlist: `/mcp` shows the ten in the default set, which
+> are the ones the skills
 > use. Fixed by the next `@mubit-ai/mcp` release.
 
 ---
@@ -449,7 +543,8 @@ Authorization: Bearer abc123...        ->  Authorization: [REDACTED:bearer]
 -----BEGIN RSA PRIVATE KEY-----        ->  [REDACTED:pem]
 ```
 
-Plus a catch-all: 32+ base64/hex characters with Shannon entropy ≥ 4.0. Git SHAs cannot trip it.
+Plus a catch-all for anything that merely looks like a secret: a long run of random-looking
+characters is redacted on sight. Hex-only strings are safe, so git SHAs survive it.
 
 **2. Path denylist — dropped entirely, not scrubbed.** A redacted `.env` is still a map of which
 secrets a project holds:
@@ -549,11 +644,11 @@ or delete the run server-side.
 
 Verified on this machine: `claude plugin validate` on both manifests; adding the local directory
 marketplace and listing it; a real `claude plugin install` from it, `claude plugin details`, and
-`claude plugin uninstall`; the plugin loading with 6 skills / 1 agent / MCP connected; and the
+`claude plugin uninstall`; the plugin loading with 7 skills / 1 agent / MCP connected; and the
 shape of the on-disk status marker. Every expected-output block above is a transcript.
 
-Not verified: installing from a pushed GitHub repo. The distribution repo's contents are built
-and `claude plugin validate` passes against them, but `mubit-ai/claude-plugins` has not been
-created on GitHub yet, so the clone-and-install path is untested end to end. Also unverified is
+Not verified: a fresh clone-and-install from GitHub. The transcripts above were produced from a
+local directory marketplace, so the install path most people take — `/plugin marketplace add
+mubit-ai/claude-plugins` — is exercised by its parts and not end to end here. Also unverified is
 any behaviour that needs a running Mubit: recall content, reflection output, and lesson
 promotion — those need a live instance and are covered separately.

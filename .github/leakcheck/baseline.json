@@ -1,0 +1,5 @@
+{
+  "_comment": "Findings that already exist in the tree, so the gate can be enforced before the backlog is cleared. Anything not listed here fails CI. Entries are keyed by rule + path + matched text, so a reflow does not resurrect one and moving a leak to another file does not hide it. Shrink this file; never grow it to make a build pass. Regenerate: node .github/scripts/leakcheck.mjs --update-baseline",
+  "generated_from": "0 findings",
+  "entries": {}
+}

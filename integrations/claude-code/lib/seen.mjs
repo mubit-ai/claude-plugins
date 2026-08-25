@@ -2,7 +2,7 @@
 /**
  * `lib/seen.mjs` — what this run has already injected, and when.
  *
- * Build-guide §7 (state layout + the TTL table), §5.2 (the recall path that reads and
+ * The state layout and its TTL table, and the recall path that reads and
  * writes it), §5.6 (the compaction reset).
  *
  * ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ export function readSeen(cfg, runId) {
     }
     return out;
   } catch {
-    // §4.9/§12.1-F14: an unreadable ${CLAUDE_PLUGIN_DATA} costs the saving, nothing else.
+    // §4.9/§12.1: an unreadable ${CLAUDE_PLUGIN_DATA} costs the saving, nothing else.
     return emptySeen();
   }
 }

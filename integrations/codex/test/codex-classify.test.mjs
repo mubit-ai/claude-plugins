@@ -10,8 +10,8 @@
  * sinks below every `Read` in retrieval, and a run reads as a sequence of file reads that
  * somehow ended with the code different.
  *
- * The names below were recorded from live `PreToolUse` payloads (`docs/harness-probe.md` §5),
- * not read off a documentation page.
+ * The names below were recorded from live `PreToolUse` payloads, not read off a
+ * documentation page.
  *
  * One name deserves its own note. **Codex renames its shell tool to `Bash` in hook payloads**,
  * with Claude Code's exact `tool_input: {command}` shape — so the existing row already covers

@@ -302,7 +302,7 @@ test('F11 SessionEnd finishes inside the three seconds Codex allows it', async (
   const ms = Date.now() - started;
 
   assertNeverBlocks(r, 'session-end under the Codex clamp');
-  // § docs/harness-probe.md §4, recorded verbatim: "clamping SessionEnd hook timeout to 3s".
+  // § Recorded verbatim from a live host: "clamping SessionEnd hook timeout to 3s".
   //   Under Claude Code this hook asks for eight seconds. Here it gets three whatever
   //   `hooks.json` says, and the process is killed at that boundary — which is why the
   //   detached hand-off is the default and this test is about the hook *returning*, not about

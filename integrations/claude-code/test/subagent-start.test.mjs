@@ -14,11 +14,10 @@
  *    parent's. So `prompt-recall` — the entire recall path — is inert inside the Agent tool,
  *    and every subagent a user spawns works with no injected memory at all. That is not a
  *    tuning problem; the hook that would have injected simply never runs for them.
- * 2. **`SubagentStart` can inject.** The host registry says "Exit code 0 - JSON
- *    additionalContext shown to subagent", the dispatch reads
- *    `u.additionalContext = e.hookSpecificOutput.additionalContext`, and a live subagent
- *    asked where it saw an injected token answered: a system message of its own, prefixed by
- *    the host with `SubagentStart hook additional context: `.
+ * 2. **`SubagentStart` can inject.** The host documents "Exit code 0 - JSON
+ *    additionalContext shown to subagent", it carries that `additionalContext` through to the
+ *    subagent, and a live subagent asked where it saw an injected token answered: a system
+ *    message of its own, prefixed by the host with `SubagentStart hook additional context: `.
  *
  * The host supplies that label, so the block must not restate it.
  *
@@ -208,7 +207,28 @@ test('the query is the parent turn\'s staged prompt, because the payload carries
     assert.equal(body.run_id, RUN_ID,
       'the query must read the PARENT run: a sub-run id has no memory stored against it, so '
       + 'querying one would return nothing for every subagent, forever');
+    // §5.2 — and the same text decides the fusion weights. The staged parent prompt is a
+    // diagnosis, so `auto` resolves it to `relevance`, exactly as it does for the parent's
+    // own `UserPromptSubmit`. One rule, one query text, three call sites.
+    assert.equal(body.rank_by, 'relevance');
   });
+
+// The parent's question is the only description of the subagent's task, so it is also the
+// only thing that can say whether the task is a handoff. A fan-out spawned off "where were
+// we?" wants the same recency emphasis its parent turn got — otherwise the parent is caught
+// up and every agent it spawns is not.
+test('a subagent spawned off a handoff prompt inherits freshness ranking', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir, 'where were we on the drain rewrite?');
+
+  await runHook('subagent-start', subagentStart(), { env: env(dir, server) });
+
+  const body = server.lastCall('POST', '/v2/control/query').body;
+  assert.equal(body.rank_by, 'freshness',
+    'the rule runs over the parent query, the same rule and the same text prompt-recall uses');
+});
 
 // No staged turn means no query text. Dialling anyway would spend a round trip per subagent
 // spawn on a search with nothing to search for.

@@ -44,15 +44,11 @@ export const userPromptSubmit = (over = {}) => base({
 /**
  * PreToolUse — the tool call as the host is *about* to run it.
  *
- * Read off Claude Code 2.1.235's own executor rather than imagined, by the `strings -a`
- * technique `hook-output.test.mjs:80-88` documents:
- *
- *     async function*Rrr(e,t,r,n,o,i,s=f_,a){ … let c={...Ly(n.session,Vt(),o,n),
- *       hook_event_name:"PreToolUse",tool_name:e,tool_input:r,tool_use_id:t}; … }
- *
- * and `Ly` — the shared base every hook input is spread from — supplies
- * `{session_id, transcript_path, cwd, prompt_id, permission_mode, agent_id, agent_type,
- * effort}`.
+ * Recorded off Claude Code 2.1.235 rather than imagined, the way `hook-output.test.mjs`
+ * establishes its constants: the event's own fields are `tool_name`, `tool_input` and
+ * `tool_use_id`, carried on the base every hook input shares — `session_id`,
+ * `transcript_path`, `cwd`, `prompt_id`, `permission_mode`, `agent_id`, `agent_type` and
+ * `effort`.
  *
  * So there is **no `tool_response` and no `duration_ms`**: the call has not run, which is the
  * entire point of the event. A hook that reaches for a result here reads `undefined` on every
@@ -132,7 +128,7 @@ export const postToolUseFailure = (over = {}) => base({
  * the renderer has to survive. The point of the table is that no two of these look alike:
  * `Read` buries its payload under `file.content`, `Bash` splits it across `stdout`/`stderr`,
  * and the rest are flat result objects with no text field at all. Any of them rendering to
- * an empty string is defect F1 coming back.
+ * an empty string is that defect coming back.
  *
  * @type {Record<string, {tool_input: Record<string, any>, tool_response: any, expect: string}>}
  */
@@ -213,13 +209,10 @@ export const stop = (over = {}) => base({
 /**
  * StopFailure — the turn ended on an API error.
  *
- * The field names are the host's own, read out of the Claude Code 2.1.235 Zod schema rather
- * than from the published hook reference, which spells two of them differently:
- *
- *     strings -a ~/.local/share/claude/versions/2.1.235 \
- *       | grep -o 'hook_event_name:wt("StopFailure").\{0,160\}'
- *     → hook_event_name:wt("StopFailure"), error:Mzc(), error_details:N().optional(),
- *       last_assistant_message:N().optional()
+ * The field names are the host's own, established against Claude Code 2.1.235 rather than
+ * taken from the published hook reference, which spells two of them differently. Beside the
+ * usual `hook_event_name` the payload carries `error`, an optional `error_details` and an
+ * optional `last_assistant_message`.
  *
  * So the error kind rides in **`error`**, not `reason` and not `error_type`. That distinction
  * is the whole payload as far as this plugin is concerned — a fixture with the wrong name
@@ -229,7 +222,7 @@ export const stop = (over = {}) => base({
  *
  * `error`'s vocabulary is the ten-value taxonomy plus a feature-flagged eleventh
  * (`account_on_hold`), and the host defaults a missing one to `"unknown"` on its way to the
- * matcher (`matchQuery: e.error ?? "unknown"`).
+ * matcher.
  *
  * @param {Record<string,any>} [over]
  */
@@ -314,13 +307,10 @@ export const sessionEnd = (over = {}) => base({
 /**
  * `CwdChanged` — fired after the working directory has already moved.
  *
- * The field names are `old_cwd` and `new_cwd`, read out of the shipping host (2.1.235):
- *
- *     {...Ly(e,Vt()), hook_event_name:"CwdChanged", old_cwd:t, new_cwd:r}
- *
- * Not `previous_cwd`, whatever the published reference says. The common `cwd` comes from the
- * host's own live getter and has therefore already moved by the time this fires, so it agrees
- * with `new_cwd` here — but `new_cwd` is the authority and the hook reads it first.
+ * The field names are `old_cwd` and `new_cwd`, established against the shipping host
+ * (2.1.235) — not `previous_cwd`, whatever the published reference says. The common `cwd` is
+ * read live, and has therefore already moved by the time this fires, so it agrees with
+ * `new_cwd` here — but `new_cwd` is the authority and the hook reads it first.
  *
  * @param {Record<string,any>} [over]
  */

@@ -3,7 +3,7 @@
  * `lib/breaker.mjs` — the connection-state classifier and the circuit breaker.
  *
  * Guide sections under test: §4.7 (breaker), §7 (state layout), §12.6 (test plan),
- * §1.1/§1.2 (status codes and the one unauthenticated route).
+ * §1.1/§1.2 (status codes, and which call is made before a key is set).
  *
  * Two rules dominate this file and both exist to stop the plugin from lying to the user:
  *   1. "A timeout is not a verdict."  A cold start, a laptop waking from sleep, and
@@ -182,7 +182,7 @@ test('classifyError: never produces a state outside the classifiable ConnState v
   }
 });
 
-// §4.7/C1b — a breaker exists to stop dialing a server that is failing. An unconfigured
+// §4.7 — a breaker exists to stop dialing a server that is failing. An unconfigured
 // install never dialed one, so there is nothing to trip and nothing to cool down. Recording
 // it opened the breaker on a local config gap and then suppressed recall for the cooldown,
 // against an instance the user was one command away from having.
@@ -302,7 +302,7 @@ test('readBreaker: an empty state file degrades to a fresh closed breaker', asyn
 // "A timeout is not a verdict." — §4.7
 // ---------------------------------------------------------------------------
 
-// §4.7 / F4: one AbortError sets no state. It increments the streak and nothing else.
+// §4.7: one AbortError sets no state. It increments the streak and nothing else.
 test('timeout: a single AbortError increments timeoutStreak and leaves the state unchanged', async () => {
   const { cfg, B } = await setup();
   B.recordSuccess(cfg);
@@ -338,7 +338,7 @@ test('timeout: two consecutive timeouts still do not escalate', async () => {
   assert.equal(b.state, 'ready');
 });
 
-// §4.7 / F5: only `timeoutStreak >= 3` escalates, and only to `not_responding`.
+// §4.7: only `timeoutStreak >= 3` escalates, and only to `not_responding`.
 test('timeout: three consecutive timeouts escalate to not_responding', async () => {
   const { cfg, B } = await setup();
   B.recordSuccess(cfg);
@@ -360,7 +360,7 @@ test('timeout: ten timeouts still say not_responding, never unreachable or serve
   assert.equal(b.timeoutStreak, 10);
 });
 
-// §4.7 / F6: a success resets the streak, so intermittent slowness never accumulates into
+// §4.7: a success resets the streak, so intermittent slowness never accumulates into
 // a verdict across a whole session.
 test('timeout: a success resets timeoutStreak to zero', async () => {
   const { cfg, B } = await setup();
@@ -378,7 +378,7 @@ test('timeout: a success resets timeoutStreak to zero', async () => {
   assert.equal(b.state, 'ready');
 });
 
-// §4.7 + F7: "not a verdict" governs the *reported state*, not the breaker. A wedged
+// §4.7: "not a verdict" governs the *reported state*, not the breaker. A wedged
 // server that times out every request must still trip the failure counter, or every prompt
 // pays the full recall budget forever.
 test('timeout: timeouts still count toward the failure-count breaker', async () => {
@@ -393,7 +393,7 @@ test('timeout: timeouts still count toward the failure-count breaker', async () 
 // auth_failed is sticky and does not feed the breaker — §4.7
 // ---------------------------------------------------------------------------
 
-// §4.7 / F3: ten consecutive 401s leave `failures` empty and the breaker closed. Opening
+// §4.7: ten consecutive 401s leave `failures` empty and the breaker closed. Opening
 // on a 401 hides the one error the user can actually fix by pasting a key.
 test('auth_failed: ten consecutive 401s record no failures and never open the breaker', async () => {
   const { cfg, B } = await setup();
@@ -480,7 +480,7 @@ test('breaker: failures older than the window expire and no longer count', async
   assert.equal(B.allowRequest(cfg), true, 'two fresh failures are below the threshold of 3');
 });
 
-// §4.7 / F8: after the cooldown exactly one half-open probe dials; a second short-circuits.
+// §4.7: after the cooldown exactly one half-open probe dials; a second short-circuits.
 //
 // One of the three tests that sleeps through a cooldown, so one of the three that takes the
 // short one. It is also the sharpest case for why the default is long: it needs two
@@ -498,7 +498,7 @@ test('breaker: after the cooldown exactly one half-open probe is allowed', async
   assert.equal(B.allowRequest(cfg), true, 'a further cooldown earns another single probe');
 });
 
-// §4.7 / F9: a successful probe closes the breaker and clears the failure window.
+// §4.7: a successful probe closes the breaker and clears the failure window.
 test('breaker: a successful half-open probe closes it and clears failures', async () => {
   const { cfg, B } = await setup(PROBE_COOLDOWN);
   for (let i = 0; i < 3; i++) B.recordFailure(cfg, 'unreachable');
@@ -533,7 +533,7 @@ test('breaker: a failed half-open probe re-opens with a fresh openedAt', async (
 });
 
 // ---------------------------------------------------------------------------
-// Cold-start suppression — §4.7, §4.8 (marker.cold_start_until), F20
+// Cold-start suppression — §4.7, §4.8 (marker.cold_start_until)
 // ---------------------------------------------------------------------------
 
 // §4.7: within `coldStartGraceMs` of the run's first SessionStart the failure is still

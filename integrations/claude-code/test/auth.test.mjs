@@ -11,8 +11,8 @@
  * asserts:
  *
  *   1. **A key is never reported as good without being checked against the server.**
- *      `GET /v2/core/health` is the one route the access policy allowlists, so it
- *      answers `OK` for a wrong key, an expired key, and no key at all. Validating
+ *      `GET /v2/core/health` reports whether the instance is up, not whether your key
+ *      is good, so a green health check proves nothing about the credential. Validating
  *      against it would make `/auth` a machine for producing false confidence — the
  *      exact failure the `doctor` skill then has to talk the user back out of.
  *   2. **The four outcomes stay distinct.** "Your key is wrong" and "your network is
@@ -89,9 +89,9 @@ test('a good key against a healthy instance is ready', async () => {
 /**
  * The assertion this whole file is built around.
  *
- * `/v2/core/health` is unauthenticated by design — it is the readiness probe the plugin
- * uses before a key exists. So a check that stops there reports success for a key the
- * server would reject on every subsequent call.
+ * `/v2/core/health` is the readiness probe, and the plugin makes it before a key exists —
+ * that is the whole point of it, and it is why its verdict says nothing about the key. A
+ * check that stops there reports success for a key that is rejected on every later call.
  */
 test('a rejected key is auth_failed, even though health says OK', async () => {
   const { verifyCredentials } = await mod('bin/auth.src.mjs');
@@ -475,8 +475,11 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
       }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
-        mubitApiKey: key, minimaUrl: 'https://api.minima.sh',
-        instanceId: 'mnm-abcdef', projectId: 'proj_1', namespace: 'ns_1', region: 'eu',
+        // The console returns fields the plugin does not read alongside the ones it does;
+        // `extraField` stands in for those, so the parse is still exercised against a
+        // response wider than the contract.
+        mubitApiKey: key, extraField: 'ignored',
+        projectId: 'proj_1', namespace: 'ns_1', region: 'eu',
       }));
     });
   });

@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * What the model is actually handed — build-guide §8.1, §8.2, §3.5.
+ * What the model is actually handed — §8.1, §8.2, §3.5.
  *
  * Every other MCP test in this suite stubs the server out. `test/launch.test.mjs` swaps
  * `./server.js` for a module that snapshots `process.env`, which proves the launcher sets
@@ -25,21 +25,32 @@ import { join } from 'node:path';
 
 import { mcpListTools, PLUGIN_ROOT } from './helpers/harness.mjs';
 
-/** §8.2 — the curated ten, in the guide's order. */
+/**
+ * §8.2 — the curated set, in the guide's order, with the three promoted verbs after it.
+ *
+ * The first ten are the original curation. `mubit_strategies`, `mubit_checkpoint` and
+ * `mubit_memory_health` were excluded on the theory that a hook already covered them, and
+ * for the first two that was never quite true: nothing in the plugin reads the pattern
+ * *across* lessons, and the only checkpoint anyone gets is the involuntary one at
+ * `PreCompact` — a user cannot name a marker before doing something risky. The third was
+ * excluded while `skills/doctor/SKILL.md` was telling its reader to POST the same route by
+ * hand. Each now ships with a skill that makes it reachable.
+ */
 const DEFAULT_ALLOWLIST = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ];
 
 /**
- * The eleven §8.2 excludes: a hook already does the job better, or there is no Claude Code
+ * The eight §8.2 excludes: a hook already does the job better, or there is no Claude Code
  * surface for it at all. Named rather than derived, so this file states the contract
  * outright instead of restating whatever the server happens to register.
  */
 const EXCLUDED = [
-  'mubit_remember', 'mubit_context', 'mubit_checkpoint', 'mubit_memory_health',
+  'mubit_remember', 'mubit_context',
   'mubit_register_agent', 'mubit_list_agents', 'mubit_step_outcome', 'mubit_ingest_status',
-  'mubit_strategies', 'mubit_handoff', 'mubit_feedback',
+  'mubit_handoff', 'mubit_feedback',
 ];
 
 /** The remedy every failure in this file shares. Stated once. */
@@ -56,8 +67,8 @@ const PROSE_REMEDY = '\n  Descriptions are authored in `../mcp/src/tools.ts` and
 
 /**
  * Phrases that tell a model *when* to act, rather than what the call does. Copied verbatim
- * from the surface probe that scores this plugin (`probes/mcp-surface.mjs`) so the gate and
- * the score cannot disagree about what counts as guidance.
+ * from the surface probe that scores this plugin, so the gate and the score cannot disagree
+ * about what counts as guidance.
  */
 const TRIGGER = /\buse (this )?(tool )?(when|for|after|before|if)\b|\bcall (this|it) (when|after|before)\b|\bwhen (you|the user|a )\b/i;
 
@@ -78,18 +89,18 @@ const RETRIEVAL = ['mubit_recall', 'mubit_lessons', 'mubit_diagnose', 'mubit_der
 let _default;
 const defaultSurface = () => (_default ??= mcpListTools());
 
-// §8.2 — a blank `mcpTools` means the curated ten. Not none, and not all 21.
-test('tools/list advertises exactly the curated ten', async () => {
+// §8.2 — a blank `mcpTools` means the curated set. Not none, and not all 21.
+test('tools/list advertises exactly the curated set', async () => {
   const { names } = await defaultSurface();
 
   assert.deepEqual(names, [...DEFAULT_ALLOWLIST].sort(),
-    `the server advertised ${names.length} tools, not the curated ten (§8.2).\n`
+    `the server advertised ${names.length} tools, not the curated ${DEFAULT_ALLOWLIST.length} (§8.2).\n`
     + `  advertised: ${names.join(', ')}${REMEDY}`);
 });
 
-// §3.5 — the cost of getting this wrong, stated as the thing it costs: eleven tool schemas
+// §3.5 — the cost of getting this wrong, stated as the thing it costs: eight tool schemas
 // resident in every session, forever, for verbs a hook already covers.
-test('none of the eleven excluded tools is advertised', async () => {
+test('none of the eight excluded tools is advertised', async () => {
   const { names } = await defaultSurface();
   const leaked = EXCLUDED.filter((n) => names.includes(n));
 
@@ -123,13 +134,13 @@ test('a user-supplied MUBIT_MCP_TOOLS is honoured verbatim', async () => {
 //
 // The expected value comes from the plugin's own package.json, not the bundled server's,
 // which lives outside PLUGIN_ROOT and is absent from a published checkout — the same trap
-// `realToolNames()` in launch.test.mjs documents. The two are held equal by
-// `scripts/set-version.mjs` and asserted by manifests.test.mjs ('version lockstep'), so
-// reading the local one costs nothing and works everywhere this test can run.
+// `realToolNames()` in launch.test.mjs documents. The two are held equal at release time and
+// asserted by manifests.test.mjs ('version lockstep'), so reading the local one costs nothing
+// and works everywhere this test can run.
 // §3.5 — `skills.test.mjs` already holds every SKILL.md to this bar: the description "is
 // what the model reads when deciding whether to invoke the skill; it is always loaded and
 // counts against contextCost, so it must actually describe the trigger". Tool descriptions
-// are the same surface with a higher bill — ten of them, resident in every request of every
+// are the same surface with a higher bill — every one of them resident in every request of every
 // session — and they were the one model-facing surface that never got the treatment: the
 // audit scored 0 of 21 carrying a trigger, mean length 91 characters, all of them endpoint
 // summaries. This asserts it on the artifact a user actually runs, not on the source, because
@@ -147,7 +158,7 @@ test('every advertised tool description says WHEN to use it', async () => {
     + `  confirm…" does not count: the trigger must be when/for/after/before/if.${PROSE_REMEDY}`);
 });
 
-// The curated ten overlap: four of them read memory, two of them write a lesson, two of them
+// The curated set overlaps: four of them read memory, two of them write a lesson, two of them
 // score one. A trigger alone still leaves the model choosing between near-synonyms, so each
 // must also say which neighbour to prefer or when calling it is wrong.
 test('every advertised tool description says which tool to prefer, or when not to call it', async () => {
@@ -157,7 +168,7 @@ test('every advertised tool description says which tool to prefer, or when not t
   assert.deepEqual(missing, [],
     `${missing.length} of ${tools.length} advertised descriptions carry no negative condition: `
     + `${missing.join(', ')}.\n`
-    + '  These ten are the entire surface a default install sees. Say which neighbour to prefer,\n'
+    + '  These are the entire surface a default install sees. Say which neighbour to prefer,\n'
     + '  or the case where this tool is the wrong one: "prefer …", "rather than …", "do not …",\n'
     + `  "never …".${PROSE_REMEDY}`);
 });
@@ -192,4 +203,72 @@ test('serverInfo reports the bundled server\'s real version', async () => {
     + 'ship in lockstep. The launcher inlines the version at build time (esbuild.config.mjs '
     + 'defines __MUBIT_MCP_VERSION__) and hands it over as MUBIT_MCP_VERSION — rebuild with '
     + '`npm run build`.');
+});
+
+// ---------------------------------------------------------------------------
+// §8.2 — the three verbs promoted into the allowlist
+// ---------------------------------------------------------------------------
+
+/** The promoted three: excluded until a skill existed to reach each of them. */
+const PROMOTED = ['mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health'];
+
+/**
+ * The two description gates above, asserted on the promoted three by name.
+ *
+ * Those gates iterate whatever `tools/list` advertises, so once the launcher bundle is
+ * rebuilt they cover these anyway. That is exactly why this exists as well: a tool promoted
+ * into the default surface has to clear the bar *before* it starts costing every session, and
+ * a gate that only notices after the rebuild notices a session too late. The three
+ * descriptions were checked against the bundle when they were promoted and all three pass —
+ * this is the assertion, not the assumption.
+ *
+ * Launched with an explicit `MUBIT_MCP_TOOLS` rather than off `defaultSurface()`: the
+ * allowlist is honoured verbatim (asserted two tests up), so this reads the shipped
+ * descriptions whatever the committed launcher's compiled-in default happens to be.
+ */
+test('the three promoted tools describe when to use them, and what to prefer instead', async () => {
+  const { tools } = await mcpListTools({ extra: { MUBIT_MCP_TOOLS: PROMOTED.join(',') } });
+
+  assert.deepEqual(tools.map((t) => t.name).sort(), [...PROMOTED].sort(),
+    `the server did not advertise the promoted three: ${tools.map((t) => t.name).join(', ')}${REMEDY}`);
+
+  const noTrigger = tools.filter((t) => !TRIGGER.test(String(t.description ?? ''))).map((t) => t.name);
+  assert.deepEqual(noTrigger, [],
+    `${noTrigger.join(', ')} carry no usage trigger. These three were excluded from the default `
+    + 'surface until a skill existed to reach them; being advertised means every session now '
+    + `pays for their schemas, so each has to say when it is the right call.${PROSE_REMEDY}`);
+
+  const noNegative = tools.filter((t) => !NEGATIVE.test(String(t.description ?? ''))).map((t) => t.name);
+  assert.deepEqual(noNegative, [],
+    `${noNegative.join(', ')} carry no negative condition. Each of the three sits beside a near `
+    + 'neighbour it will be confused with — strategies with lessons, checkpoint with learned, '
+    + `memory_health with status — and only the description can settle it.${PROSE_REMEDY}`);
+});
+
+/**
+ * The neighbour each one is confused with, named in the description rather than merely
+ * implied — the same argument as the retrieval-four test above, for the same reason.
+ *
+ * `mubit_memory_health` is the sharpest case: it and `mubit_status` both answer "is memory
+ * working", one about the store and one about the connection, and the two have opposite
+ * fixes. A model that picks the wrong one reports a healthy connection to a user whose store
+ * is empty.
+ */
+test('each promoted tool names the neighbour it competes with', async () => {
+  const { tools } = await mcpListTools({ extra: { MUBIT_MCP_TOOLS: PROMOTED.join(',') } });
+  const byName = new Map(tools.map((t) => [t.name, String(t.description ?? '')]));
+
+  /** @type {Array<[string, string]>} */
+  const pairs = [
+    ['mubit_strategies', 'mubit_lessons'],
+    ['mubit_checkpoint', 'mubit_learned'],
+    ['mubit_memory_health', 'mubit_status'],
+  ];
+
+  const silent = pairs.filter(([name, neighbour]) => !(byName.get(name) ?? '').includes(neighbour));
+  assert.deepEqual(silent, [],
+    `${silent.map(([n, o]) => `${n} never names ${o}`).join('; ')}.\n`
+    + '  strategies is the pattern across lessons and mubit_lessons reads the individual ones;\n'
+    + '  a checkpoint is run state where mubit_learned is knowledge; memory_health inspects the\n'
+    + `  store where mubit_status inspects the connection.${PROSE_REMEDY}`);
 });

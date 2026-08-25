@@ -2,7 +2,7 @@
 /**
  * `lib/config.mjs` — the one resolution function that sees every setting.
  *
- * Build-guide §4.1 (module API + the frozen `Config`), §6.1 (environment
+ * The module API and the frozen `Config`, the environment
  * variables and defaults), §6.2 (`userConfig` keys and the env var each maps
  * to), §6.3 (the `CLAUDE_PLUGIN_OPTION_*` injection guard) and §7
  * (`config.json`, 300 s TTL).
@@ -40,20 +40,40 @@ import { dataDir as resolveDataRoot, readJson, writeJsonAtomic } from './state.m
 // ---------------------------------------------------------------------------
 
 /**
- * §8.2 — ten of the MCP server's twenty-one tools. A blank `mcpTools` /
- * `MUBIT_MCP_TOOLS` means this curated set, never "none": the excluded eleven
+ * §8.2 — thirteen of the MCP server's twenty-one tools. A blank `mcpTools` /
+ * `MUBIT_MCP_TOOLS` means this curated set, never "none": the excluded eight
  * are excluded because a hook already does the job better, not because tools
  * are off by default.
+ *
+ * The last three were promoted out of that exclusion. `mubit_checkpoint` is the
+ * voluntary half of what `PreCompact` does involuntarily — a marker a user names
+ * before risky work, which a hook firing on the host's schedule cannot be asked
+ * for. `mubit_strategies` reads the pattern across many lessons where every other
+ * retrieval verb reads individual ones. `mubit_memory_health` answers the route
+ * the doctor skill used to tell its reader to POST by hand.
+ *
+ * `mcp/src/launch.mjs` carries the same list, and the two must move together:
+ * this one is what a resolved config reports, that one is the launcher's floor.
  */
 const DEFAULT_MCP_TOOLS = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ];
 
 /** §7: `config.json` — cached resolved config, keyed by an input hash. */
 const CACHE_FILE = 'config.json';
 const CACHE_TTL_MS = 300 * 1000;
-const CACHE_VERSION = 1;
+/**
+ * Bumped to 2 for `resumeBlock` (W2-2).
+ *
+ * `loadConfig` returns a cached blob **verbatim**, without re-running any of the coercers
+ * below, so a config written by the previous version is missing every key added since — and
+ * a missing boolean reads `undefined`, which is falsy. Without this bump, every install would
+ * spend the 300 s TTL after an upgrade with the feature silently off, and the one report that
+ * reached anybody would be "it works on a fresh machine".
+ */
+const CACHE_VERSION = 2;
 
 /** §4.1: env_tags ride on every ingested item, so the cap is a payload-size guarantee. */
 const MAX_ENV_TAGS = 8;
@@ -141,7 +161,7 @@ export const MODE = 'hosted';
 
 /**
  * §1.2: `Authorization: Bearer <key>`. Absent — not empty — when no key is
- * configured, so §12.1-F3's 401 is unambiguous.
+ * configured, so the 401 that follows is unambiguous.
  * @param {Record<string, any>} cfg
  * @returns {Record<string, string>}
  */
@@ -358,6 +378,17 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const endpoint = endpointRaw.trim();   // blank means unconfigured: nothing is sent
   const apiKey = str(pick('apiKey', 'MUBIT_API_KEY'), '').trim();
   const userId = str(pick('userId', 'MUBIT_CC_USER_ID'), '').trim();
+  // Who the work is attributed to — the neighbour of `userId` that must never be confused
+  // with it. `userId` reaches the wire as `user_id`, which the server enforces as a *query
+  // filter*; `actorId` reaches it inside `metadata_json`, where it is a label and nothing
+  // else. `lib/recall.mjs` sends no `user_id` at all, so a detected login placed there would
+  // scope every captured entry out of the recall that is meant to find it.
+  //
+  // Detection deliberately does not happen here. It costs two `git` spawns, and the answer
+  // would land in the 300 s `config.json` cache keyed by an input hash that has no way to
+  // notice it went stale. `lib/actor.mjs` owns the ladder, `hooks/src/drain.mjs` — detached
+  // and unbudgeted — is the only caller of it, and it caches under its own 30-day TTL.
+  const actorId = str(pick('actorId', 'MUBIT_CC_ACTOR_ID'), '').trim();
   const runStrategy = str(pick('runStrategy', 'MUBIT_CC_RUN_STRATEGY'), 'per-directory').trim()
     || 'per-directory';
   const capture = bool(pick('capture', 'MUBIT_CC_CAPTURE'), true);
@@ -398,6 +429,24 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // Operators who would rather pay it can opt back in.
   const recallFallback = enumOf(pick('recallFallback', 'MUBIT_CC_RECALL_FALLBACK'),
     ['none', 'agent_routed'], 'none');
+  // §5.2 — how the server fuses semantic, lexical and recency scores for a recall query.
+  // `relevance` is the server's own default and barely counts recency, which is why "where
+  // were we?" answers with the most *similar* memory rather than the most recent one;
+  // `freshness` makes recency dominant and `balanced` sits between them. The exact weights
+  // are the instance's own and are operator-tunable, so they are not restated here — a query
+  // with `explain: true` reports the ones actually used. Costs nothing either way: it is a
+  // field on a request the plugin already sends, and there is real event time to rank on
+  // because every captured item carries `occurrence_time`.
+  //
+  // `auto` is the default and decides per prompt (`lib/rank.mjs`): a temporal or handoff
+  // question gets `freshness`, everything else `relevance`. Pinning `relevance` turns the
+  // rule off; `balanced` is reachable only from here, because a two-way rule cannot justify
+  // a third class from prompt text alone.
+  //
+  // Note: this is inert under `recallAssemble: "server"`. `/context` accepts no `rank_by`
+  // field at all, so rung 3 always ranks at the service's defaults.
+  const recallRankBy = enumOf(pick('recallRankBy', 'MUBIT_CC_RECALL_RANK_BY'),
+    ['auto', 'relevance', 'balanced', 'freshness'], 'auto');
   // §5.2 — carry-forward recall. On, `prompt-recall` renders the block the PREVIOUS turn's
   // detached refresh left in `runs/<run_id>/carry.json` and returns without dialling, so the
   // prompt never waits on the endpoint and `recallBudgetMs` stops being a tuning parameter
@@ -407,6 +456,20 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // manifest fields are real but static, so a flag expressed there would need two competing
   // registrations and would cost a second process per prompt to everyone, opted in or not.
   const recallAsync = bool(pick('recallAsync', 'MUBIT_CC_RECALL_ASYNC'), false);
+  // §5.2 — whether recall may ask the server for its cross-run lesson overlay: lessons
+  // learned in OTHER runs, surfaced alongside this run's own memory. It is real value, and it
+  // is billed on a lane that cannot be bounded by a run id, so its cost tracks the size of the
+  // whole instance and grows on its own as one fills up. On a hosted instance today it is
+  // ~1.7s of a ~2.0s recall — five times the rest of the query put together, for the one
+  // extra item it returned in every measurement.
+  //
+  // `auto` (the default) spends it where there is room and declines it where there is not,
+  // reading the budget the caller already passed rather than asking anyone to choose: a hook
+  // answering inside the host's prompt timeout declines, `recallAsync`'s detached refresh
+  // takes it. `on` pays for it everywhere — coherent only with `recallAsync` on, or a
+  // `timeoutMs` and a `recallBudgetMs` raised together to fund it. `off` never asks.
+  const recallCrossRun = enumOf(pick('recallCrossRun', 'MUBIT_CC_RECALL_CROSS_RUN'),
+    ['auto', 'on', 'off'], 'auto');
   const reflectOnEnd = bool(pick('reflectOnEnd', 'MUBIT_CC_REFLECT_ON_END'), true);
   // §5.7 runs in a process the host is free to take away: under `--print` Claude Code emits
   // its result and *cancels* SessionEnd about a second in, and interactive sessions are
@@ -428,7 +491,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // through some other front end can turn it back on with `MUBIT_CC_STATUSLINE=1` — which is
   // what keeps this a default rather than a hard-coded answer.
   const statusLine = bool(pick('statusLine', 'MUBIT_CC_STATUSLINE'), host(e) !== 'codex');
-  // HS-7 stage 1 — `PreToolUse`, warnings only. **Default false, and deliberately so.**
+  // `PreToolUse`, warnings only. **Default false, and deliberately so.**
   //
   // Every other setting here changes what the plugin costs or what it remembers. This one
   // changes what it is allowed to put in front of a tool call, which is the only surface
@@ -437,20 +500,39 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // one — but an unasked-for warning in front of `rm` is still an unasked-for warning, and it
   // would be blamed on the plugin rather than on the lesson that produced it.
   //
-  // Off by default is also what makes the next step of HS-7 runnable: an operator can turn it
-  // on for one run, measure how often it fires and on what, and decide from data whether the
+  // Off by default is also what makes the next step runnable: an operator can turn it on for
+  // one run, measure how often it fires and on what, and decide from data whether the
   // matching is good enough to be worth anyone's attention.
   const preToolWarnings = bool(pick('preToolWarnings', 'MUBIT_CC_PRE_TOOL_WARNINGS'), false);
+  // The resume briefing. On, `SessionStart` spawns a detached child that asks
+  // `/v2/control/context` what the next agent on this run needs to know, and the first
+  // substantive prompt of the session renders it above ordinary recall.
+  //
+  // **Default ON, and it is the only one of these opt-ins that is.** The three that ship off
+  // are off because they cost something on EVERY prompt: `recallAsync` a second process,
+  // `recallAssemble: "server"` two LLM calls, `preToolWarnings` text in front of a tool call.
+  // This costs one process and two LLM calls **per session** — paid at the one moment the
+  // model knows least about what it is walking into, and never again. The README row states
+  // that cost out loud rather than leaving it to be discovered.
+  const resumeBlock = bool(pick('resumeBlock', 'MUBIT_CC_RESUME_BLOCK'), true);
   const mcpToolsRaw = pick('mcpTools', 'MUBIT_MCP_TOOLS');
   const mcpTools = list(mcpToolsRaw, DEFAULT_MCP_TOOLS);
-  // §8.2 — the ceiling on what an MCP write may claim for itself. The bundled SDK
-  // hard-codes `lesson_scope: "session"` on `mubit_learned`, and the control plane surfaces
-  // every lesson whose scope is not `run` to other runs, so the shipped default was a
-  // cross-run write dressed as a session-local one. `mcp/src/egress.mjs` clamps it to this.
-  // `org` is deliberately absent: it is promotion-only (§1.6), and a client that could name
-  // it could write a tenant-wide rule.
+  // §8.2 — the ceiling on what an MCP write may claim for itself. The bundled SDK stamps a
+  // fixed `lesson_scope` on `mubit_learned` regardless of the caller, and that default is
+  // wider than a run-local write, so `mcp/src/egress.mjs` holds it down to this. The widest
+  // scope is deliberately absent from the list: it is not a value a client sets for itself.
   const mcpLessonScope = enumOf(pick('mcpLessonScope', 'MUBIT_MCP_LESSON_SCOPE'),
     ['run', 'session', 'global'], 'run');
+  // Pinned context. On (the default), a constraint the user pins for this run with
+  // `/mubit-memory:pin` is rendered above the recalled block on every prompt, including the
+  // prompts recall itself skips: an open breaker, `recall: false`, a two-word answer.
+  //
+  // A switch rather than a budget, because the budget is not the user's problem to manage —
+  // `lib/pins.mjs` caps the set at five pins, 200 characters each and 240 rendered tokens, at
+  // write time *and* at render time. What a user might reasonably want is for the feature not
+  // to exist, and off means exactly that: the cache on disk becomes invisible and the injected
+  // block goes back to being byte-for-byte what it was before pins existed.
+  const pins = bool(pick('pins', 'MUBIT_CC_PINS'), true);
 
   // §6.1 environment-only rows -------------------------------------------
   const only = (envVar, key) => {
@@ -466,6 +548,13 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const recallBudgetMs = int(only('MUBIT_CC_RECALL_BUDGET_MS', 'recallBudgetMs'), 1500);
   const recallSections = list(only('MUBIT_CC_RECALL_SECTIONS', 'recallSections'),
     ['mental_models', 'active_rules', 'lessons', 'facts', 'working_memory', 'traces']);
+  // What the once-per-session briefing may cost, against `recallTokenBudget`'s 1500 per
+  // prompt. Lower because the two are spent in the same message on the first prompt of a
+  // session and the briefing is the wider, older half of it — and because a resume that does
+  // not fit on a screen is not a resume. Environment-only: there is no plausible reason to
+  // put this in front of a user at enable time when the flag above already answers the
+  // question they actually have.
+  const resumeTokenBudget = int(only('MUBIT_CC_RESUME_TOKENS', 'resumeTokenBudget'), 1000);
   const policyTtlMs = int(only('MUBIT_CC_POLICY_TTL_MS', 'policyTtlMs'), 86400000);
   const denyGlobs = list(only('MUBIT_CC_CAPTURE_DENY', 'denyGlobs'), []);
   const respectGitignore = bool(only('MUBIT_CC_RESPECT_GITIGNORE', 'respectGitignore'), true);
@@ -490,6 +579,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     mode: MODE,
     apiKey,
     userId,
+    actorId,
     runStrategy,
     runId,
     capture,
@@ -502,8 +592,12 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     recallAssemble,
     recallRepeatMode,
     recallFallback,
+    recallRankBy,
     recallAsync,
+    recallCrossRun,
     recallSections,
+    resumeBlock,
+    resumeTokenBudget,
     policyTtlMs,
     outcomeMode,
     reflectOnEnd,
@@ -512,6 +606,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    pins,
     denyGlobs,
     respectGitignore,
     maxParamBytes,
@@ -600,7 +695,7 @@ function readUserFileRaw(projectDir) {
   }
 }
 
-/** §12.1-F14: a malformed project file falls through to the default. */
+/** §12.1: a malformed project file falls through to the default. */
 function parseUserFile(raw) {
   if (!raw || !raw.trim()) return {};
   try {

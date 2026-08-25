@@ -28,10 +28,19 @@ import {
   CODEX_ROOT, SHARED_ROOT, mcpListTools, mcpDrive, fakeMubit, makeDataDir,
 } from './helpers/codex-fixtures.mjs';
 
-/** §8.2 — the curated ten. A blank allowlist means these, never "none" and never all 21. */
+/**
+ * §8.2 — the curated set. A blank allowlist means these, never "none" and never all 21.
+ *
+ * The Claude Code plugin's `mcp/src/launch.mjs` is the single source of this list and both
+ * plugins bundle it, so a promotion there reaches Codex without anyone editing this tree.
+ * `mubit_strategies`, `mubit_checkpoint` and `mubit_memory_health` arrived that way, each with
+ * a skill of its own — which is the part that does not travel for free, since Codex has no
+ * `tools:` grant and the prose is the only place the qualified name appears.
+ */
 const DEFAULT_ALLOWLIST = [
   'mubit_archive', 'mubit_dereference', 'mubit_diagnose', 'mubit_forget', 'mubit_learned',
   'mubit_lessons', 'mubit_outcome', 'mubit_recall', 'mubit_reflect', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ].sort();
 
 const CODEX_SERVER = join(CODEX_ROOT, 'mcp', 'dist', 'server.js');
@@ -77,13 +86,13 @@ test('the launcher is this plugin`s own build, not a copy of the other one', () 
 // tools/list
 // ===========================================================================
 
-test('tools/list advertises exactly the curated ten', async () => {
+test('tools/list advertises exactly the curated set', async () => {
   const { names, server } = await mcpListTools();
-  // § The eleven excluded verbs are excluded because a hook already does the job better, not
+  // § The eight excluded verbs are excluded because a hook already does the job better, not
   //   because tools are off by default. Advertising all 21 spends the model's window on
   //   schemas for tools it has no surface to use.
   assert.deepEqual(names, DEFAULT_ALLOWLIST,
-    `the Codex plugin advertises ${names.length} tools, not the curated ten. Under Codex the `
+    `the Codex plugin advertises ${names.length} tools, not the curated ${DEFAULT_ALLOWLIST.length}. Under Codex the `
     + 'model sees each as `mcp__mubit__<name>`, and every skill in this plugin names them that '
     + `way.\n  got:      ${names.join(', ')}\n  expected: ${DEFAULT_ALLOWLIST.join(', ')}`);
   assert.ok(server?.name, 'the server did not identify itself in `initialize`.');
@@ -125,8 +134,8 @@ test('the initialize frame carries the instructions block', async () => {
   //   the rollout records no tool catalogue to check against. That is a Codex-side question
   //   this suite cannot settle — but the frame is still emitted, because the day Codex starts
   //   surfacing it is not a day anyone will remember to come back and add it. What the plugin
-  //   *relies* on instead is SessionStart's additionalContext, which docs/harness-probe.md §7
-  //   proves lands.
+  //   *relies* on instead is SessionStart's additionalContext, which a live probe proved
+  //   lands.
   assert.ok(String(init?.instructions ?? '').trim(),
     'the launcher stopped filling in `instructions`. It costs nothing to emit and is the only '
     + 'thing that would work if Codex starts surfacing it.');
@@ -136,8 +145,8 @@ test('the initialize frame carries the instructions block', async () => {
 
 test('the server refuses to start rather than write into the poisoned default run', async () => {
   // § The facade maps `session_id` onto the control-plane `run_id`, and the upstream server
-  //   defaults it to the literal "default" — which collapses every user, project and machine
-  //   into one shared run. An unset `static` pin is the realistic way to reach it. Starting
+  //   defaults it to the literal "default" — a fallback rather than a run of anyone's. An
+  //   unset `static` pin is the realistic way to reach it. Starting
   //   anyway would be worse than not starting: the hooks in the same session fail the same
   //   derivation and capture nothing, so the MCP writes would be the only thing landing, and
   //   landing in the wrong place.

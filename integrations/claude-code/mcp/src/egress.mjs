@@ -1,33 +1,31 @@
 // @ts-check
 /**
- * `mcp/src/egress.mjs` — the missing egress stage on the MCP write path (§8.3).
+ * `mcp/src/egress.mjs` — the egress stage on the MCP write path (§8.3).
  *
- * Every other outbound call this plugin makes goes through `lib/http.mjs`, which refuses a
- * poisoned run id (§4.3) and scrubs the body first (§7). The MCP server is the one
- * exception: it is a vendored bundle that dials the endpoint itself, and nothing in this
- * repo ever saw the request. Two things went out through that gap.
+ * Every other outbound call this plugin makes goes through `lib/http.mjs`, which checks the
+ * run id (§4.3) and scrubs the body first (§7). The MCP server is the one exception: it is a
+ * vendored bundle that dials the endpoint itself, so nothing in this repo ever saw the
+ * request. Two things about a write were therefore outside this plugin's control.
  *
- *   1. **Scope.** `mubit_learned` is the only lesson-writing tool a default install
- *      exposes, and the bundled SDK hard-codes `lesson_scope: "session"` on it. Server-side
- *      the cross-run overlay admits every lesson whose scope is not `"run"`, so a `session`
- *      lesson is read by *other runs* exactly as a `global` one is. It is not "narrower than
- *      global"; on the read side it is the same lane. A benchmark harness found this the
- *      expensive way — lessons one task wrote were injected into five unrelated ones.
+ *   1. **Scope.** `mubit_learned` is the only lesson-writing tool a default install exposes,
+ *      and the bundled SDK stamps a fixed `lesson_scope` on it regardless of the caller. The
+ *      plugin promises that an agent-written lesson stays in the run that wrote it unless a
+ *      user says otherwise, and a constant baked into a build is not a promise this repo can
+ *      keep on its own.
  *
- *   2. **The run id.** Every write tool takes an optional `session_id` that the server
- *      prefers over the run the launcher derived, so an agent can write into any run it can
- *      name. Closing the second hole is what makes the first one worth closing.
+ *   2. **The run id.** Every write tool takes an optional `session_id`, so without a guard
+ *      the run a write lands in is whatever the caller passed rather than the one the
+ *      launcher derived — and an MCP write would stop matching the hook captures beside it.
  *
- * **Why here and not where the bug is.** The constant lives inside a 5.9 MB vendored bundle
- * (`mcp/dist/server.js`) whose TypeScript source is not in this repo; hand-editing a build
- * artefact would be discarded by the first real rebuild. The seam is the launcher: it is
- * real source this repo owns, it runs to completion in the same process *before* it imports
- * the server, and the server's transport dials with global `fetch`. So the launcher installs
- * a guard on `globalThis.fetch` and the vendored bundle stays byte-identical.
+ * **Why here and not where the constant is.** It lives inside a vendored bundle whose source
+ * is not in this repo; hand-editing a build artefact would be discarded by the first real
+ * rebuild. The seam is the launcher: it is real source this repo owns, it runs to completion
+ * in the same process *before* it imports the server, and the server's transport dials with
+ * global `fetch`. So the launcher installs a guard on `globalThis.fetch` and the vendored
+ * bundle stays untouched.
  *
- * The same seam carries the correction back. An extra key on the ingest **response**
- * survives the bundle's `response.json()` → `compactResponse` (a denylist of five dead
- * envelope fields, not an allowlist) → `asText` into the tool result the model reads.
+ * The same seam carries the correction back: an extra key on the ingest **response** survives
+ * the bundle's own response handling and reaches the tool result the model reads.
  *
  * **The one rule.** This code sits in the request path of every call the server makes,
  * including shapes it has never seen. It must never be able to fail a write: every branch
@@ -35,11 +33,11 @@
  */
 
 /**
- * The scope lattice, widest last. `run` is the only scope the cross-run overlay skips, so
- * every step up this list is a step out of the run that wrote the lesson.
+ * The scope lattice, widest last. Every step up this list is a step out of the run that wrote
+ * the lesson.
  *
- * `org` is here to be clamped, never to be chosen: it is promotion-only (§1.6) and must
- * never be client-written, so it is absent from `CEILINGS` below.
+ * The widest scope is here to be clamped, never to be chosen: it is not a value a client sets
+ * for itself, so it is absent from `CEILINGS` below.
  */
 const LATTICE = ['run', 'session', 'global', 'org'];
 
@@ -90,8 +88,8 @@ const RESHAPED_HEADERS = ['content-length', 'content-encoding'];
  *
  * The fallback is the *narrowest* scope on purpose. The value this setting overrides is the
  * bundled SDK's hard-coded `session`, so "unparseable — keep what the SDK sent" would let a
- * typo silently reinstate the leak. `org` is unrecognised here for the same reason it is
- * absent from `CEILINGS`: a client that could name it could write a tenant-wide rule.
+ * typo silently widen every write. The widest scope is unrecognised here for the same reason
+ * it is absent from `CEILINGS`: it is not a value a client sets for itself.
  *
  * @param {unknown} value
  * @returns {'run'|'session'|'global'}

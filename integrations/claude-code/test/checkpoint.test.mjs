@@ -87,7 +87,7 @@ const preCompactPayload = (transcriptPath, over = {}) =>
 // ---------------------------------------------------------------------------
 
 // §5.6 — the PreCompact request body, verbatim. `run_id` is the only mandatory field
-// on StateCheckpointPayload (§1.3), but the label is what makes the anchor findable.
+// on a `POST /v2/control/checkpoint` body (§1.3), but the label is what makes the anchor findable.
 test('--pre posts /v2/control/checkpoint with run_id, agent_id, label, snapshot and metadata', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
@@ -213,6 +213,46 @@ test('--pre spools a checkpoint-intent item even when the checkpoint POST 500s',
   assert.ok(item.item_id, 'item_id is required (§1.3)');
   assert.ok(item.content_type, 'content_type is required (§1.3)');
   assert.ok(!JSON.stringify(item).includes(fx.SECRETS.mubitKey), 'the spooled item is redacted too');
+});
+
+// The PreCompact anchor is an ingest item like any other, so it wears the actor like any
+// other — otherwise the one memory that survives a compaction is the one nobody is
+// attributed for. And, as everywhere else, the actor rides in `metadata_json`: `user_id` is
+// a *retrieval scope* the server enforces as a query filter, and recall never sends one, so
+// an actor put there would hide this anchor from the recall meant to find it.
+test('--pre stamps the actor on the anchor item, in metadata and not in user_id', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const transcript = writeTranscript(dataDir, { bytes: 16 * 1024 });
+
+  const r = await runHook('checkpoint', preCompactPayload(transcript), {
+    env: env(dataDir, server.url, { MUBIT_CC_ACTOR_ID: 'ada' }),
+    args: ['--pre'],
+  });
+  assertHookContract(r);
+
+  const item = readJsonFile(spoolFiles(dataDir, RUN_ID)[0]);
+  assert.equal(JSON.parse(item.metadata_json).actor, 'ada',
+    'the anchor must carry the actor in metadata_json');
+  assert.ok(!('user_id' in item),
+    `the actor must not mint a user_id: ${JSON.stringify(item.user_id)}`);
+});
+
+// Nothing known means no key, not an empty one — an `"actor": ""` on every anchor is a
+// field that is always there and never says anything.
+test('--pre omits the actor key entirely when no actor is known', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const transcript = writeTranscript(dataDir, { bytes: 16 * 1024 });
+
+  const r = await runHook('checkpoint', preCompactPayload(transcript),
+    { env: env(dataDir, server.url), args: ['--pre'] });
+  assertHookContract(r);
+
+  const meta = JSON.parse(readJsonFile(spoolFiles(dataDir, RUN_ID)[0]).metadata_json);
+  assert.ok(!('actor' in meta), `expected no actor key at all, got ${JSON.stringify(meta.actor)}`);
 });
 
 // §5.6 — PreCompact stdout carries the id so the user can find the anchor later.
@@ -412,4 +452,30 @@ test('--pre leaves the seen-set alone', async (t) => {
   assertHookContract(r);
   assert.equal(existsSync(seenPath(dataDir)), true,
     'the model still has the whole transcript when --pre runs');
+});
+
+// The same reset, applied to the resume briefing. A session that compacted before its
+// first substantive prompt has one still on disk describing the run in the shape it had
+// before the transcript was rewritten. `session-start` re-anchors a compacted run through the
+// checkpoint id instead, which is the same job against a conversation that is actually there.
+test('--post clears an un-injected resume briefing along with the seen-set', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const resumePath = join(runDir(dataDir), 'resume.json');
+  mkdirSync(runDir(dataDir), { recursive: true });
+  writeFileSync(resumePath, JSON.stringify({
+    run_id: RUN_ID, written_at: Date.now(), block: '## Working memory\n- Left mid-batch.',
+    ref_ids: ['ref_wm_1'],
+  }));
+
+  const r = await runHook('checkpoint', fx.postCompact(), {
+    env: env(dataDir, server.url), args: ['--post'],
+  });
+
+  assertHookContract(r);
+  assert.equal(existsSync(resumePath), false,
+    'a briefing that survives a compaction describes a session the model can no longer read, '
+    + 'and would be injected on the first prompt after it as if nothing had happened');
+  assert.equal(server.requests.length, 0, '--post still dials nothing (§5.6)');
 });

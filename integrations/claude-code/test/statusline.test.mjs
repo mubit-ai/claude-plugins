@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `bin/statusline.mjs` — build-guide §10 (and §16.2 for the degradation path).
+ * `bin/statusline.mjs` — the status line (§10, and §16.2 for the degradation path).
  *
  * The status line is the only part of this plugin that runs on every frame of the
  * host UI. Three properties matter more than anything it prints:
@@ -43,7 +43,7 @@ function statuslineScript() {
   if (existsSync(src)) return src;
   return assert.fail(
     `bin/statusline.mjs does not exist yet (nor bin/statusline.src.mjs) under ${PLUGIN_ROOT}.\n` +
-    '  Build-guide §10 defines it; §11.2 bundles statusline.src.mjs → statusline.mjs.');
+    '  §10 defines it; §11.2 bundles statusline.src.mjs → statusline.mjs.');
 }
 
 /**
@@ -219,7 +219,7 @@ test('renders the documented shape: glyph, run, mode, recall, saved, lessons', a
 });
 
 // ---------------------------------------------------------------------------
-// MUB-2 — the line has to be able to say "recall is dead"
+// The line has to be able to say "recall is dead"
 // ---------------------------------------------------------------------------
 
 // A run of dry recalls used to render as `recall 0/0 tok` beside a green ●: a healthy-looking
@@ -252,6 +252,40 @@ test('a dry streak under the threshold does not cry wolf', async () => {
   assertNoStackTrace(r);
   assert.doesNotMatch(r.line, /recall dry/);
   assert.match(r.line, /recall 6\/1\.2k tok/);
+});
+
+// §16.2 — reflect is the only call that widens a lesson past `run` scope, so a failed one
+// costs the session its cross-session memory. It failed 12 times over four days in silence:
+// the failure logs at `warn`, the success at `info`, so at the default level a healthy and a
+// broken instance print the same nothing.
+test('a failed reflect is named on the line', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  seedMarker(dataDir, runId, {
+    reflect: { at: 1, lessons_stored: 0, status: 'failed', attempts: 2 },
+  });
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.match(r.line, /reflect failed/);
+  // A content verdict, not a ConnState: reflect fails on instances that answer everything
+  // else, so it must not repaint the glyph as a connection fault.
+  assert.match(r.line, /^● /, 'a failed reflect must not change the connection glyph');
+});
+
+// The skip reasons are all deliberate — disabled, nothing ingested, spool undrained. A line
+// that reports intended behaviour as a fault teaches the user to ignore the line.
+test('a deliberately skipped reflect is not reported as a fault', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  for (const status of ['ok', 'skipped:disabled', 'skipped:not-ingested', 'skipped:undrained']) {
+    seedMarker(dataDir, runId, { reflect: { at: 1, lessons_stored: 0, status, attempts: 0 } });
+    const r = await runStatusline({ env: e });
+    assertNoStackTrace(r);
+    assert.doesNotMatch(r.line, /reflect/, `"${status}" must not render as a fault`);
+  }
 });
 
 // A marker written before this field existed has no `dry_streak`. It must render exactly as
@@ -335,7 +369,7 @@ test('cold start renders ◍ warming rather than a failure glyph', async () => {
   assert.ok(r.line.includes('warming'), `expected the "warming" label, got: ${r.line}`);
 });
 
-// The decision phase-2-recall.md leaves open, now recorded: cold start suppresses
+// The question the design left open, now settled and recorded here: cold start suppresses
 // `not_responding` as well. §10 ranks ◍ warming *below* ◌ slow; §4.7 says failures inside the
 // grace window do not show a failure glyph at all. §4.7 wins, because the two sections answer
 // different questions — §10 ranks two simultaneous facts, §4.7 decides whether a fact is a

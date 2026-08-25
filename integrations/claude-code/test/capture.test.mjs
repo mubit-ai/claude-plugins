@@ -146,7 +146,7 @@ function assertRequiredItemFields(item) {
 }
 
 /**
- * The standing guard for defect F1.
+ * The standing guard for the dropped-tool-output defect.
  *
  * A tool item is `"<tool>(<params>) -> <output>"`. For a year every shipped item ended at
  * the arrow, because capture read `payload.tool_output` and the host sends `tool_response`:
@@ -154,11 +154,11 @@ function assertRequiredItemFields(item) {
  * because the only payload the tests had ever seen was one the tests wrote themselves.
  *
  * So: any item whose text reaches the arrow must carry something after it. Call this
- * wherever a fixture supplies a tool result — an empty tail there is F1, returned.
+ * wherever a fixture supplies a tool result — an empty tail there is that defect, returned.
  */
 function assertNonEmptyTail(item) {
   assert.ok(!/->\s*$/.test(item.text),
-    `captured item ends at the arrow with no tool output — that is defect F1: ${JSON.stringify(item.text)}`);
+    `captured item ends at the arrow with no tool output — the result was dropped: ${JSON.stringify(item.text)}`);
 }
 
 // What `capture` may cost on top of starting node — `assertWithinBudget` measures that floor
@@ -221,7 +221,7 @@ test('capture: PostToolUse writes exactly one correctly shaped spool item and is
   assert.equal(meta.execution_time_ms, 42, 'the host sends duration_ms, not execution_time_ms');
 });
 
-// F1 — the host's field is `tool_response`. Every shipped memory read
+// The host's field is `tool_response`. Every shipped memory read
 // `Read(file_path=X) -> ` because capture read a name nothing ever sends.
 test('capture: the tool result arrives as tool_response and lands in the item text', async (t) => {
   const dataDir = makeDataDir();
@@ -236,7 +236,7 @@ test('capture: the tool result arrives as tool_response and lands in the item te
     `tool_response must be rendered after the arrow: ${JSON.stringify(item.text)}`);
 });
 
-// F1 — `tool_output` is the older host's name for the same thing. Keeping it as a fallback
+// `tool_output` is the older host's name for the same thing. Keeping it as a fallback
 // costs one `??`, and nothing is gained by making an old payload shape fail.
 test('capture: the legacy tool_output field is still read as a fallback', async (t) => {
   const dataDir = makeDataDir();
@@ -254,7 +254,7 @@ test('capture: the legacy tool_output field is still read as a fallback', async 
     `tool_output must still be rendered after the arrow: ${JSON.stringify(item.text)}`);
 });
 
-// F1, standing regression — the six `tool_response` shapes taken off real transcripts. No
+// Standing regression — the six `tool_response` shapes taken off real transcripts. No
 // two of them look alike, and the renderer has to find the payload in all of them.
 test('capture: every recorded tool_response shape renders something after the arrow', async (t) => {
   const server = await mubit(t);
@@ -275,6 +275,104 @@ test('capture: every recorded tool_response shape renders something after the ar
     assert.ok(item.text.includes(rec.expect),
       `${tool}: the recorded response's payload is missing from the item: ${JSON.stringify(item.text)}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The actor rides in metadata, never in user_id
+// ---------------------------------------------------------------------------
+
+// THE regression for `lib/actor.mjs`, and the reason that module exists in the shape it does.
+//
+// Server-side, `user_id` is not an attribution tag: on capture it is stamped into the entry's
+// metadata, and on query it is **enforced as a filter**, defaulting to `actor::<accountId>`
+// when a client sends nothing. `lib/recall.mjs` never sends one — so an actor written into
+// `user_id` would scope every newly captured entry into a bucket recall never looks in, and
+// the memory would go silently invisible the moment attribution started working.
+//
+// Attribution therefore lives in `metadata_json`, which is free-form and rides on every
+// ingest item, and `cfg.userId` keeps the meaning it has always had.
+test('capture: the actor rides in metadata_json.actor and never touches user_id', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUse(), {
+    env: staticEnv(dataDir, server, {
+      MUBIT_CC_ACTOR_ID: 'ada',
+      // Set alongside, and to something else, so "the actor leaked into the scope" and
+      // "the scope was left alone" are distinguishable outcomes rather than one value.
+      MUBIT_CC_USER_ID: 'team-scope',
+    }),
+  });
+
+  assertHookContract(r);
+  const item = soleItem(dataDir, RUN_ID);
+  assertRequiredItemFields(item);
+
+  const meta = JSON.parse(item.metadata_json);
+  assert.equal(meta.actor, 'ada', 'the actor must reach the wire in metadata_json');
+  assert.equal(item.user_id, 'team-scope',
+    'user_id is a retrieval scope and belongs to cfg.userId alone — the actor must not have overwritten it');
+});
+
+// The same claim with nothing to hide behind: no `userId` configured means no `user_id` on
+// the wire at all, actor or no actor. Sending one here would scope the entry out of the
+// `actor::<accountId>` default that every recall query runs under.
+test('capture: an actor alone never puts a user_id on the wire', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUse(), {
+    env: staticEnv(dataDir, server, { MUBIT_CC_ACTOR_ID: 'ada' }),
+  });
+
+  assertHookContract(r);
+  const item = soleItem(dataDir, RUN_ID);
+  assert.equal(JSON.parse(item.metadata_json).actor, 'ada');
+  assert.ok(!('user_id' in item),
+    `an actor must not mint a user_id: ${JSON.stringify(item.user_id)}`);
+});
+
+// The production path. `MUBIT_CC_ACTOR_ID` is rung 1 of the ladder and almost nobody sets
+// it; what everyone actually gets is the value `drain` detected and cached. Capture reads
+// that cache and does nothing else — no `git`, no network — because it runs on every single
+// tool call.
+//
+// Proven behaviourally rather than by watching for a spawn: the repo this hook is pointed at
+// has `user.email = test@example.com`, so a capture that ran the detection ladder itself
+// would answer `test`. Only a cache read answers `grace`.
+test('capture: the actor is read from the cache, never detected on the hot path', async (t) => {
+  const dataDir = makeDataDir();
+  const projectDir = makeProjectDir({ git: true });
+  const server = await mubit(t);
+  writeFileSync(join(dataDir, 'actor.json'),
+    JSON.stringify({ v: 1, at: Date.now(), actor: 'grace', source: 'git-email' }));
+
+  const r = await runHook('capture', postToolUse(), {
+    env: baseEnv({
+      dataDir,
+      endpoint: server.url,
+      projectDir,
+      extra: { MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: RUN_ID },
+    }),
+  });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0, `capture must still issue ZERO HTTP; saw: ${server.summary()}`);
+  assert.equal(JSON.parse(soleItem(dataDir, RUN_ID).metadata_json).actor, 'grace',
+    'the hot path must answer from the cache, not from the ladder');
+});
+
+// A fresh data dir has no cache and no configured actor, and the answer is the absence of
+// the key — not `"actor": ""`, which would put an empty field on every item ever captured.
+test('capture: with no actor known the key is absent rather than empty', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUse(), { env: staticEnv(dataDir, server) });
+
+  assertHookContract(r);
+  const meta = JSON.parse(soleItem(dataDir, RUN_ID).metadata_json);
+  assert.ok(!('actor' in meta), `expected no actor key at all, got ${JSON.stringify(meta.actor)}`);
 });
 
 // §5.4 — "item_id is stable per tool call so a retried drain deduplicates."
@@ -483,12 +581,10 @@ test('capture --stop: always spawns a drain with --with-outcome <prompt_id>', as
 /**
  * The fifth mode, and the one whose whole job is to make a *later* decision possible.
  *
- * The host's own registry, read out of Claude Code 2.1.235 the way the constants in
- * `hook-output.test.mjs` are:
- *
- *     StopFailure: {summary: "When the turn ends due to an API error",
- *       description: "Fires **instead of Stop** when an API error (rate limit, auth failure,
- *       etc.) ended the turn. Fire-and-forget — hook output and exit codes are ignored."}
+ * The host's own registry, established against Claude Code 2.1.235 the way the constants in
+ * `hook-output.test.mjs` are, describes this event as firing **instead of Stop** when an API
+ * error — a rate limit, an auth failure — ended the turn, and as fire-and-forget: its output
+ * and its exit code are both ignored.
  *
  * "Instead of Stop" is the fact the whole ticket turns on. `capture --stop` is the only thing
  * in this plugin that ever writes `ended_at` / `outcome_pending`, so on a rate-limited turn
@@ -561,8 +657,8 @@ test('capture --stop-failure: closes the turn, stamps the API error, and starts 
 });
 
 // The mark is the host's value, copied through. The taxonomy is not a list this plugin can
-// keep: 2.1.235 ships ten values plus a feature-flagged eleventh (`account_on_hold`, behind
-// `fOr()`), so the same host is right about the list on one account and wrong on another.
+// keep: 2.1.235 ships ten values plus a feature-flagged eleventh (`account_on_hold`), so the
+// same host is right about the list on one account and wrong on another.
 // That is why the registration carries no matcher — and why the mark is whatever arrived.
 test('capture --stop-failure: records the error value the host sent, in or out of the taxonomy', async (t) => {
   const server = await mubit(t);
@@ -571,14 +667,14 @@ test('capture --stop-failure: records the error value the host sent, in or out o
   const rows = [
     { name: 'the common one', over: { error: 'rate_limit' }, expect: 'rate_limit' },
     { name: 'the taxonomy\'s own catch-all', over: { error: 'unknown' }, expect: 'unknown' },
-    // Present only where `fOr()` is on. A hard-coded matcher list would silently drop this
+    // Present only where that flag is on. A hard-coded matcher list would silently drop this
     // turn on the accounts that have it.
     { name: 'the feature-flagged eleventh', over: { error: 'account_on_hold' }, expect: 'account_on_hold' },
     // The list the plugin was handed is a snapshot of one host build. A value it has never
     // heard of must still close the turn and still suppress the outcome.
     { name: 'a value added after this plugin shipped', over: { error: 'context_window_exceeded' }, expect: 'context_window_exceeded' },
-    // The host itself defaults a missing one on the way to the matcher (`e.error ?? "unknown"`),
-    // so an absent field is `unknown` here too rather than an empty mark that reads as "no
+    // The host itself defaults a missing one to `unknown` on the way to the matcher, so an
+    // absent field is `unknown` here too rather than an empty mark that reads as "no
     // API error at all" — which would put the turn straight back into the outcome path.
     { name: 'no error field at all', over: { error: undefined }, expect: 'unknown' },
   ];
@@ -705,7 +801,7 @@ test('capture --subagent: attributes the item to the subagent agent_id', async (
 });
 
 /**
- * F2 — the tool set is the host's, not the plugin's.
+ * The tool set is the host's, not the plugin's.
  *
  * `hooks.json` now matches every tool, so what is worth remembering is decided here, in
  * code, where it can be tested. `Agent` — a delegated investigation, among the highest-value
@@ -744,7 +840,7 @@ test('capture: an Agent dispatch is captured and a TodoWrite is skipped', async 
     'TodoWrite carries no memory — it must be skipped in code now that the matcher lets it through');
 });
 
-// F2 — the whole skip list, each name and the reason it earns no memory. These arrive now
+// The whole skip list, each name and the reason it earns no memory. These arrive now
 // only because the matcher stopped filtering; every one of them is bookkeeping, or a
 // duplicate of something already captured. Anything NOT on this list is kept, including
 // tools that did not exist when it was written — that is the point of the inversion, so the

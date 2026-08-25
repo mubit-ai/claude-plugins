@@ -11,9 +11,9 @@
  * | `per-conversation`        | `cc-<host_session_id>`       | the host session id |
  * | `static`                  | `MUBIT_CC_RUN_ID`            | pinned; a config error when unset — never a silent default |
  *
- * The single most important rule in this file: the MCP server defaults
- * `MUBIT_DEFAULT_SESSION_ID` to the literal `"default"`, which collapses
- * every user, project and machine into one shared run. **No input may ever make
+ * The single most important rule in this file: `"default"` is the bundled server's
+ * placeholder for `MUBIT_DEFAULT_SESSION_ID`, and it identifies nothing — a run id has to
+ * name one project on one machine. **No input may ever make
  * this module emit `"default"`** — not a blank session id, not a missing project
  * dir, not that variable sitting in the surrounding shell (which this module
  * never reads). Where an honest answer is impossible, `deriveRunId` throws a
@@ -46,7 +46,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
 import { dataDir, readJson, runDir, safeSegment, writeJsonAtomic } from './state.mjs';
@@ -246,8 +246,8 @@ function staticRunId(cfg) {
   }
   if (FORBIDDEN_RUN_IDS.has(pinned.toLowerCase())) {
     throw new Error(
-      `MUBIT_CC_RUN_ID is ${JSON.stringify(pinned)}, which collapses every user and project `
-      + 'into one shared Mubit run. Pin a real run id.');
+      `MUBIT_CC_RUN_ID is ${JSON.stringify(pinned)}, which identifies no project. `
+      + 'Pin a real run id.');
   }
   // The run id names a directory as well as a run. A pin carrying a path separator or a dot
   // segment would mean two different things at once — one value on the wire, another after
@@ -559,7 +559,7 @@ export function saveSessionMap(sessionId, record) {
 
 /**
  * §4.3: the mapped record, or `null`. A missing file, an empty file and a file
- * truncated by a SIGKILL are all "no record" — never a throw (§12.1-F14), because
+ * truncated by a SIGKILL are all "no record" — never a throw (§12.1), because
  * the caller's answer to `null` is simply to derive.
  * @param {string} sessionId
  * @returns {(SessionRecord & Record<string, any>)|null}
@@ -874,4 +874,67 @@ function endpointHash(endpoint) {
 /** @returns {string} */
 function safeCwd() {
   try { return process.cwd(); } catch { return '.'; }
+}
+
+// ---------------------------------------------------------------------------
+// Observing which runs exist
+// ---------------------------------------------------------------------------
+
+/**
+ * Every run this data dir has a status marker for, with what the marker says about when it
+ * was last touched.
+ *
+ * This is the *observation* half of run resolution, and it is deliberately not the deciding
+ * half. `bin/activity.mjs` and `bin/pin.mjs` both have to answer "which run is this session",
+ * and neither can call `deriveRunId`: derivation is what a hook does from a payload it was
+ * handed, and re-running it from a CLI would compute an answer rather than read the one the
+ * hooks actually used — and, on `source: 'clear'`, would increment and persist `clear_count`
+ * a second time. So both observe instead, and this is the scan they share.
+ *
+ * What they do NOT share is the policy on top, which is why that stayed in each command:
+ * `activity` breaks a tie on the higher `-c<n>` (a pre-clear marker and its successor can be
+ * stamped inside one millisecond, and answering with the run the user just cleared would
+ * report it as this session), while `pin` refuses a marker older than a day and refuses the
+ * fallback run id outright (a pin is a standing constraint and needs a run to belong to).
+ * Folding those together would mean one command silently inheriting the other's rules.
+ *
+ * Markers are enumerated from `status/`, never from `runs/`: the marker is the only file
+ * guaranteed to exist, because a session that recalled and never captured has no `runs/<id>/`
+ * at all. `health.json` shares the directory and is the endpoint probe cache, not a run.
+ *
+ * A marker truncated by a SIGKILL still names a run, so it is reported with the file's mtime
+ * rather than dropped — the name is the run id, and that is the part being asked for. Total:
+ * an unreadable data dir is an empty list, never a throw.
+ *
+ * @param {string} root  the resolved data dir
+ * @returns {Array<{runId: string, at: number, clearCount: number}>}
+ */
+export function scanRunMarkers(root) {
+  /** @type {Array<{runId: string, at: number, clearCount: number}>} */
+  const out = [];
+  try {
+    const dir = join(str(root), 'status');
+    if (!str(root) || !existsSync(dir)) return out;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.json') || name === 'health.json') continue;
+      // The file name IS the run id — `updateMarker` writes `status/<run_id>.json`.
+      const runId = name.slice(0, -'.json'.length);
+      if (!runId) continue;
+      const path = join(dir, name);
+      let at = 0;
+      try {
+        at = Number(JSON.parse(readFileSync(path, 'utf8'))?.updated_at) || 0;
+      } catch { /* truncated after a SIGKILL; fall back to the file's own clock */ }
+      if (!Number.isFinite(at) || at <= 0) {
+        try { at = statSync(path).mtimeMs; } catch { at = 0; }
+      }
+      out.push({ runId, at, clearCount: Number(/-c(\d+)$/.exec(runId)?.[1] ?? 0) });
+    }
+  } catch { /* §4.9: an unreadable data dir is no runs, not a crash */ }
+  return out;
+}
+
+/** @param {any} v @returns {string} */
+function str(v) {
+  return typeof v === 'string' ? v : '';
 }

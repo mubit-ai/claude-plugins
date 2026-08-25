@@ -55,6 +55,7 @@
 import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
+import { rankForRecall } from '../../lib/rank.mjs';
 import { CONN_STATES } from '../../lib/breaker.mjs';
 import { writeCarry } from '../../lib/carry.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
@@ -115,12 +116,18 @@ await runHook('recall-refresh', {
     // is one turn behind would re-render at full price the entry the user is looking at.
     const seen = readSeen(cfg, runId).ids;
 
+    const query = prompt.slice(0, MAX_QUERY_CHARS);
+
     const outcome = await recallBlock(cfg, {
       runId,
       agentId,
-      query: prompt.slice(0, MAX_QUERY_CHARS),
+      query,
       deadline: started + REFRESH_BUDGET_MS,
       seen,
+      // §5.2 — the same rule over the same query text `prompt-recall` would have used.
+      // Carry-forward moves WHEN the call happens, never what it asks for: a handoff prompt
+      // ranked by similarity in the background is the same bug, one turn later.
+      rankBy: rankForRecall(cfg, query),
       // The refresh runs detached but carries the spawning turn's payload, so it tags against
       // the directory that turn was sent in rather than wherever this process happens to sit.
       projectDir: resolveProjectDir(cfg, payload),

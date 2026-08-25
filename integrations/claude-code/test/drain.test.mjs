@@ -15,12 +15,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  existsSync, mkdirSync, readdirSync, statSync, utimesSync, writeFileSync,
+  existsSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir,
+  runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir, makeProjectDir,
   readJsonFile, readJsonDir, spoolFiles, waitFor,
 } from './helpers/harness.mjs';
 import { stop, spoolItem, PROMPT_ID } from './helpers/fixtures.mjs';
@@ -277,12 +277,12 @@ test('drain: a 2xx unlinks the batch, advances the marker, and records the job_i
   assert.ok(captured.reduce((a, b) => a + b, 0) >= 3, `marker.captured did not advance: ${JSON.stringify(marker.captured)}`);
 });
 
-// §5.5 step 6 / F1 — a transport failure records a breaker failure and LEAVES the spool alone.
+// §5.5 step 6 — a transport failure records a breaker failure and LEAVES the spool alone.
 // The spool is keyed by run_id, not session, so nothing is lost by waiting.
 test('drain: a network failure leaves every spool file in place', async (t) => {
   const dataDir = makeDataDir();
   seedSpool(dataDir, 4);
-  // Nothing is listening on port 1 — ECONNREFUSED, the F1 scenario.
+  // Nothing is listening on port 1 — ECONNREFUSED, the nothing-listening scenario.
   const r = await runHook('drain', stop(), { env: envFor(dataDir, 'http://127.0.0.1:1') });
 
   assertHookContract(r);
@@ -295,7 +295,7 @@ test('drain: a network failure leaves every spool file in place', async (t) => {
     `recordFailure did not run: ${JSON.stringify(breakers[0].json)}`);
 });
 
-// §5.5 step 6 / F16 — a non-retryable 4xx means the payload is bad, not the server.
+// §5.5 step 6 — a non-retryable 4xx means the payload is bad, not the server.
 // Retrying a 422 forever is how a spool becomes unbounded.
 test('drain: a 422 quarantines the batch under spool/rejected/ and never retries it', async (t) => {
   const dataDir = makeDataDir();
@@ -354,7 +354,7 @@ test('drain --with-outcome: posts one outcome carrying the turn\'s recalled entr
   const body = server.lastCall('POST', '/v2/control/outcome').body;
   assert.equal(body.run_id, RUN_ID);
   assert.equal(body.reference_id, 'global');
-  assert.ok(body.reference_id.length > 0, 'RecordOutcomeRequest.reference_id must be non-empty (§1.3)');
+  assert.ok(body.reference_id.length > 0, 'reference_id must be non-empty on an outcome (§1.3)');
   assert.equal(body.outcome, 'success');
   assert.equal(body.signal, 0.2);
   assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
@@ -663,4 +663,208 @@ test('drain --run: a "default" pin drains nothing', async (t) => {
   assertHookContract(r);
   assert.equal(server.requests.length, 0, `saw unexpected HTTP: ${server.summary()}`);
   assert.equal(spoolFiles(dataDir, RUN_ID).length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// The actor cache — drain is its only writer
+// ---------------------------------------------------------------------------
+
+// `lib/actor.mjs` splits detection from reading precisely so that the `git` spawns land
+// here, in the one process nothing is waiting on, and never on `capture`'s per-tool-call
+// path. If the drainer stops writing the cache, capture reads an empty file forever and
+// every memory the plugin stores goes unattributed — quietly, with nothing failing.
+test('drain: resolves the actor once and caches it for capture to read', async (t) => {
+  const dataDir = makeDataDir();
+  // A real repo, so the ladder has something to find: `makeProjectDir({git:true})` sets
+  // `user.email = test@example.com`, and rung 3 takes the local-part.
+  const projectDir = makeProjectDir({ git: true });
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+
+  const r = await runHook('drain', { ...stop(), cwd: projectDir }, {
+    env: baseEnv({
+      dataDir,
+      endpoint: server.url,
+      projectDir,
+      extra: { MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: RUN_ID },
+    }),
+  });
+
+  assertHookContract(r);
+  const cached = readJsonFile(join(dataDir, 'actor.json'));
+  assert.equal(cached.v, 1);
+  assert.equal(cached.actor, 'test', `expected the git email local-part, got ${JSON.stringify(cached.actor)}`);
+  assert.equal(typeof cached.at, 'number');
+  // Recorded so "why does it think I am that?" is answerable from the file alone.
+  assert.ok(String(cached.source).length > 0, 'the record must name the rung that answered');
+});
+
+// The drainer ships memory. A machine with no git, no configured actor and no `$USER` has
+// nothing to attribute to, and that must cost the name and nothing else (§4.9).
+test('drain: an unresolvable actor costs the name, not the batch', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const ids = seedSpool(dataDir, 2);
+
+  const r = await runHook('drain', stop(), {
+    // `projectDir` is the data dir, which is not a repo, so every git rung is skipped by the
+    // `hasGitDir` guard before it can spawn anything.
+    env: envFor(dataDir, server.url, { USER: '', USERNAME: '', LOGNAME: '' }),
+  });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  assert.deepEqual(server.lastCall('POST', '/v2/control/ingest').body.items.map((i) => i.item_id), ids);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0, 'the batch still committed');
+  assert.equal(existsSync(join(dataDir, 'actor.json')), false,
+    'a failed detection is not cached — a 30-day negative would outlive the fix for it');
+});
+
+// ---------------------------------------------------------------------------
+// The pin refresh
+// ---------------------------------------------------------------------------
+
+/**
+ * `refreshPins` lives here for the same reason `resolveActor` does: this is the one process in
+ * the plugin that is detached, unbudgeted and has nothing waiting on it. `readPins`, on the
+ * blocking side, is a single `readJson` — and it can only be that because the network half is
+ * down here.
+ */
+
+const pinsPath = (dataDir) => join(runDir(dataDir), 'pins.json');
+
+/** A cache old enough that a refresh is due. */
+function seedPins(dataDir, endpoint, pins, over = {}) {
+  mkdirSync(runDir(dataDir), { recursive: true });
+  writeFileSync(pinsPath(dataDir), JSON.stringify({
+    v: 1,
+    run_id: RUN_ID,
+    endpoint,
+    at: Date.now() - 10 * 60 * 1000,
+    pins: pins.map((text, i) => ({ slug: `p${i}`, text, at: Date.now() - 10 * 60 * 1000 })),
+    ...over,
+  }));
+}
+
+test('drain: refreshes the pin cache from the instance in its unbudgeted tail', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/variables/list': {
+      json: {
+        variables: [
+          { name: 'cc.pin.vendored', value_json: '"no vendored server edits"' },
+          { name: 'somebody.else', value_json: '"not ours"' },
+        ],
+      },
+    },
+  });
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['a stale constraint']);
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  server.assertCalled('POST', '/v2/control/variables/list', 1);
+  assert.equal(server.lastCall('POST', '/v2/control/variables/list').body.run_id, RUN_ID);
+
+  const cached = readJsonFile(pinsPath(dataDir));
+  assert.deepEqual(cached.pins.map((p) => p.text), ['no vendored server edits'],
+    'the cache is the instance\'s answer, narrowed to this plugin\'s namespace');
+  assert.equal(cached.run_id, RUN_ID);
+  assert.equal(cached.endpoint, server.url,
+    'the reader refuses a cache from another endpoint, so the writer has to stamp one');
+});
+
+/**
+ * **The most dangerous bug this ticket could ship.**
+ *
+ * A refresh that emptied the cache when `variables/list` failed would silently remove the
+ * user's standing constraint on a network blip — and the next prompt would look entirely
+ * normal, with a full recall block and nothing to suggest anything had been dropped. The user
+ * would discover it by being burned by exactly the thing they pinned against.
+ *
+ * So a failed refresh writes **nothing**. Byte-identical is the assertion, not "still has some
+ * pins": a rewrite that happened to preserve the contents would still have moved `at`, which
+ * is what decides when the next refresh is due.
+ */
+test('drain: a failed variables/list leaves the previous pin cache byte-identical', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/variables/list': { status: 503, json: { error: 'upstream down' } },
+  });
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['no vendored server edits']);
+  const before = readFileSync(pinsPath(dataDir), 'utf8');
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  assert.equal(readFileSync(pinsPath(dataDir), 'utf8'), before,
+    'a blip must not be able to clear a constraint the user is relying on');
+});
+
+// A successful list that returns nothing is a different answer entirely, and it does
+// overwrite: that is how `pin clear` in one terminal reaches the other.
+test('drain: an empty variables/list clears the cache, because that is how a cleared pin travels', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/variables/list': { json: { variables: [] } },
+  });
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['cleared elsewhere']);
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  assert.deepEqual(readJsonFile(pinsPath(dataDir)).pins, []);
+});
+
+// The TTL is a refresh cadence, and the drainer is spawned per prompt. Without the floor this
+// would be one request per keystroke-worth-of-typing on a path that has no business
+// generating traffic proportional to typing.
+test('drain: a cache refreshed a moment ago is not re-fetched', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['fresh'], { at: Date.now() });
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  server.assertNotCalled('POST', '/v2/control/variables/list');
+});
+
+// The switch has to reach the network half too, or a user who turned pins off would still be
+// paying a request per drain for a feature they cannot see.
+test('drain: pins turned off means no variables call at all', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url, { MUBIT_CC_PINS: '0' }),
+  }));
+
+  server.assertNotCalled('POST', '/v2/control/variables/list');
+  assert.ok(!existsSync(pinsPath(dataDir)), 'nothing writes a cache for a feature that is off');
+});
+
+/**
+ * The refresh is skipped when the connection state is anything but `ready`, and the reason is
+ * the *verdict* rather than the traffic.
+ *
+ * `recordSuccess` clears the state for the whole endpoint — the breaker is per instance, not
+ * per route. So a successful `variables/list` issued in the tail, moments after a 500 on
+ * `/v2/control/ingest`, would reset `server_error` to `ready` and the status line would stop
+ * showing the failure that just happened. A pin is not worth erasing a diagnosis for.
+ */
+test('drain: a failed ingest is not whitewashed by a successful pin refresh', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/ingest': { status: 500, json: { error: 'internal' } },
+  });
+  seedSpool(dataDir, 2);
+  seedPins(dataDir, server.url, ['a stale constraint']);
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  server.assertNotCalled('POST', '/v2/control/variables/list');
+  assert.equal(readJsonFile(pinsPath(dataDir)).pins.length, 1,
+    'and the pin the user set is still there, unrefreshed and still rendering');
 });

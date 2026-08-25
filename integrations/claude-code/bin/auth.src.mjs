@@ -18,10 +18,9 @@
  *
  * ## Why the key is checked against an authenticated route
  *
- * `GET /v2/core/health` is the one route the access policy allowlists — it answers `OK`
- * for a wrong key, an expired key, and no key at all, because the plugin needs it as a
- * readiness probe *before* a key exists. Validating a key against it would make this
- * command a machine for producing false confidence. So health answers "is anything
+ * `GET /v2/core/health` reports whether the instance is reachable, not whether your key is
+ * good — the plugin needs it as a readiness probe *before* a key exists. Validating a key
+ * against it would make this command a machine for producing false confidence. So health answers "is anything
  * there?", and a second, authenticated call answers "is this key good?". Two questions,
  * two calls, and the failure modes stay distinguishable.
  *

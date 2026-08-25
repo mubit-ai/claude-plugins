@@ -30,24 +30,28 @@ cd ../codex       && npm test    # 243
 
 ## The load-bearing trick
 
-`test/fixtures/codex-hook-schemas/*.json` are draft-07 JSON Schemas **extracted from the Codex
-binary** — eleven inputs and ten outputs, one per hook event (`SessionEnd` has no output
-schema). `codex-payload.test.mjs` validates every fixture and every hook's stdout against them,
-in both directions.
+`test/fixtures/observed/payloads/*.json` are payloads **the host itself wrote**, into a
+recorder hook, during a real session. `codex-payload.test.mjs` checks every fixture against
+them, and every hook's stdout against the output contract.
 
 The reason is worth stating, because it is why this suite is arranged differently from its
 sibling: **a fixture written beside an implementation cannot falsify that implementation.**
 Whatever shape the code reads, the fixture will have — the two are written by the same person
 in the same hour, and they agree by construction. Nine tests can pass on a payload Codex would
-never send. A schema the *host* wrote can say no, and every one of these is
-`additionalProperties: false`.
+never send. A payload the *host* wrote can say no.
+
+What a recording cannot do is prove a field optional, or reject one the host would accept but
+has not been seen sending. And five of the eleven events do not fire in a scripted one-turn
+session, so they have no recording at all — `codex-payload.test.mjs` names them rather than
+passing over them, because a gap nothing states is indistinguishable from coverage.
 
 It has already earned that twice. The first draft of `preCompact()` carried a
 `permission_mode` — the two compaction events are the only turn-scoped events without one — and
 `permissionRequest()` carried a `tool_use_id`, which it has none of, and which is precisely why
 that event is treated as read-only.
 
-Re-extract per `docs/harness-probe.md`, Appendix.
+Re-record with `node test/helpers/codex-record.mjs --update`. It costs a model turn, which is
+why it is a script you run deliberately rather than something the suite does.
 
 ## Gate map
 
@@ -62,7 +66,7 @@ Re-extract per `docs/harness-probe.md`, Appendix.
 | `codex-classify.test.mjs` | `shell`, `apply_patch`, `update_plan`, `view_image`, `web_search`, `collaborationspawn_agent`, `mcp__mubit__*` → real intents, never `unclassified` |
 | `codex-skills.test.mjs` | Codex frontmatter (`name`, `description`, and none of the keys Codex does not read), `mcp__mubit__` prefixes, and the content guards |
 | `codex-mcp.test.mjs` | real stdio `tools/list` against the committed bundle, the `instructions` frame, and that the two copies of the vendored server are byte-identical |
-| `codex-failure.test.mjs` | F1–F15: unparseable stdin, absent env, unwritable data dir, a misbehaving endpoint, hostile payloads, the three-second SessionEnd → exit 0, a JSON object on stdout, **never exit 2** |
+| `codex-failure.test.mjs` | unparseable stdin, absent env, unwritable data dir, a misbehaving endpoint, hostile payloads, the three-second SessionEnd → exit 0, a JSON object on stdout, **never exit 2** |
 
 ## `codex-failure.test.mjs` is the important one
 
@@ -78,8 +82,8 @@ and both are silent:
   a hook can defend against — but the plugin must not be confusable with "capture is off", so
   every path leaves a local marker and `mubit-memory:doctor` reads it.
 - **`SessionEnd` gets three seconds**, clamped by the host whatever the registration says, where
-  the same hook asks for eight under Claude Code. `F11` asserts the hook *returns* inside it and
-  `F12` asserts the detached child finishes the work after the hook process is killed.
+  the same hook asks for eight under Claude Code. One case asserts the hook *returns* inside it
+  and another that the detached child finishes the work after the hook process is killed.
 
 ## The harness
 

@@ -2,7 +2,7 @@
 /**
  * `lib/breaker.mjs` — the connection-state classifier and the circuit breaker.
  *
- * Build-guide §4.7 (states, thresholds, cold start), §7 (`breaker/<endpoint_hash>.json`),
+ * The breaker: states, thresholds, cold start, and `breaker/<endpoint_hash>.json`,
  * §6.1 (`MUBIT_CC_BREAKER_*`).
  *
  * Every hook is a short-lived process, so the breaker lives in a file — one file per

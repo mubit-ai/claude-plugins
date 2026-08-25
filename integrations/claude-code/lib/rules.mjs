@@ -107,7 +107,7 @@ export function recordRules(cfg, runId, entries) {
     const merged = dedupe([...incoming, ...readRules(cfg, runId)]).slice(0, MAX_RULES);
 
     const dir = runDir(cfg, runId);
-    // §12.1-F14: a read-only ${CLAUDE_PLUGIN_DATA} costs the warnings, nothing else.
+    // §12.1: a read-only ${CLAUDE_PLUGIN_DATA} costs the warnings, nothing else.
     if (!ensureDir(dir)) return 0;
     const ok = writeJsonAtomic(join(dir, RULES_FILE), {
       version: VERSION,

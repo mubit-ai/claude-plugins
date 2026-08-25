@@ -35,6 +35,7 @@
 
 import { join } from 'node:path';
 
+import { readActor } from '../../lib/actor.mjs';
 import { envTags, host } from '../../lib/config.mjs';
 import { firstUserText, toolCallRecord } from '../../lib/codex-rollout.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
@@ -149,7 +150,7 @@ const TERM_MAX_CHARS = 24;
  * The mark `--stop-failure` writes on the turn file, and the whole reason that mode exists.
  *
  * `lib/outcome.mjs` reads this key and posts nothing for the turn. It is deliberately NOT
- * `outcome: "failure"`, which build-guide §5.5 originally called for ("On a StopFailure turn:
+ * `outcome: "failure"`, which the original design called for ("On a StopFailure turn:
  * outcome 'failure', signal -0.3"): -0.3 against the turn's recalled ids is a claim that the
  * *memory* was wrong, and a rate limit is not evidence about memory. See the fifth row of
  * `decideOutcome`'s table.
@@ -165,10 +166,10 @@ const API_ERROR_KEY = 'api_error';
 const MAX_API_ERROR_CHARS = 64;
 
 /**
- * What the host itself substitutes for a missing `error` on the way to the matcher
- * (`matchQuery: e.error ?? "unknown"`), and the taxonomy's own catch-all. An empty mark would
- * read as "no API error at all" and put the turn straight back into the outcome path, so
- * there is no path out of `--stop-failure` with a blank one.
+ * What the host itself substitutes for a missing `error` on the way to the matcher, and the
+ * taxonomy's own catch-all. An empty mark would read as "no API error at all" and put the
+ * turn straight back into the outcome path, so there is no path out of `--stop-failure` with
+ * a blank one.
  */
 const API_ERROR_UNKNOWN = 'unknown';
 
@@ -313,11 +314,11 @@ function capture(rawPayload, cfg, mode) {
 /**
  * The `StopFailure` payload's error kind, as the host spells it.
  *
- * The field is **`error`** — read out of Claude Code 2.1.235's own Zod schema
- * (`hook_event_name: wt("StopFailure"), error: …, error_details: …optional(),
- * last_assistant_message: …optional()`), not from the published hook reference, which calls
- * it `error_type` in one place and `reason` in another. Reading the wrong name here would
- * stamp every API-failed turn `unknown` while every test agreed with it.
+ * The field is **`error`** — observed on the live payload from Claude Code 2.1.235, which
+ * carries `error` beside an optional `error_details` and `last_assistant_message`. It is not
+ * the name in the published hook reference, which calls it `error_type` in one place and
+ * `reason` in another. Reading the wrong name here would stamp every API-failed turn
+ * `unknown` while every test agreed with it.
  *
  * @param {Record<string, any>} payload
  * @returns {string} never empty
@@ -443,7 +444,7 @@ function buildToolItem(payload, cfg, mode) {
  *
  * When the user **allows** the call, `PostToolUse` fires and records the whole episode, so
  * this item is redundant and cheap. When the user **denies** it, no `PostToolUse` ever
- * fires — observed live, `docs/harness-probe.md` §5 — and this is the only trace anywhere
+ * fires — observed live against a real session — and this is the only trace anywhere
  * that the attempt happened. "We tried this and were not allowed to" is precisely the class
  * of fact a model cannot re-derive by reading the codebase, and without this mode a coding
  * agent rediscovers the same forbidden operation once a session, forever.
@@ -593,6 +594,14 @@ function buildTurnItem(payload, cfg, runId, mode) {
  */
 function item(o) {
   const cfg = o.cfg ?? {};
+  // Who this is attributed to. A pure cache read — `lib/actor.mjs` keeps the detection
+  // ladder, which shells out to git, on `drain`'s side of the line and nowhere near here.
+  //
+  // It goes into `metadata_json` and it must NEVER go into `user_id`. `user_id` is a
+  // retrieval *scope* the server enforces as a filter on query, and `lib/recall.mjs` sends
+  // none — so an actor written there would scope every item this hook captures out of the
+  // recall meant to find it, silently, for as long as attribution was switched on.
+  const actor = attempt(() => readActor(cfg), '');
   /** @type {Record<string, any>} */
   const out = {
     item_id: clamp(o.id || `cc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, MAX_ID_CHARS),
@@ -609,12 +618,16 @@ function item(o) {
     // would be half a fix: the memory would land in the right run wearing the wrong labels.
     env_tags: attempt(
       () => envTags(cfg, resolveProjectDir(cfg, o.payload)), ['tool:claude-code']),
+    // Both merged here rather than at each call site, so *every* ingest item this hook
+    // writes carries them uniformly, and both omitted entirely when unknown rather than
+    // written empty — a field that is always present and never says anything is worse
+    // than an absent one.
+    //
     // `model` rides on the payload of ten of Codex's eleven events and was recorded nowhere,
     // so memory could not say which model produced a lesson — or notice that two of them
-    // disagreed about the same thing. Added here rather than in each builder so every item
-    // type gets it at once, and omitted when absent: Claude Code sends it on SessionStart
-    // only, and an empty string would read as "the host said the model is blank".
-    metadata_json: safeJson(withModel(o.metadata, o.payload)),
+    // disagreed about the same thing. Claude Code sends it on SessionStart only, and an
+    // empty string would read as "the host said the model is blank".
+    metadata_json: safeJson(withActor(withModel(o.metadata, o.payload), actor)),
   };
   const userId = str(cfg.userId);
   if (userId) out.user_id = userId;
@@ -633,6 +646,18 @@ function withModel(metadata, payload) {
   if ('model' in base) return base;
   const model = clamp(str(payload?.model), 128);
   return model ? { ...base, model } : base;
+}
+
+/**
+ * `metadata` plus who it is attributed to, when the actor is known.
+ *
+ * @param {Record<string, any>} metadata
+ * @param {string} actor
+ * @returns {Record<string, any>}
+ */
+function withActor(metadata, actor) {
+  const base = isObject(metadata) ? metadata : {};
+  return actor ? { ...base, actor } : base;
 }
 
 // ---------------------------------------------------------------------------

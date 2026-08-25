@@ -4,7 +4,7 @@
  *
  * Guide sections under test:
  *   §5.5 step 7  the outcome call: the four cases, the weak signal, the stable key
- *   §1.3         `RecordOutcomeRequest.reference_id` must be non-empty
+ *   §1.3         `reference_id` must be non-empty on an outcome
  *   §6.1         `outcomeMode` — `off` and `explicit` silence the implicit path
  *
  * The fact this file exists to protect: **two hooks post this outcome** — `drain.mjs` for a
@@ -74,8 +74,9 @@ describe('the constants live in exactly one place', () => {
     assert.equal(m.SIGNAL_FAILURE, -0.3);
   });
 
-  // Exactly 0.0: attributed reinforcement counts any signal >= 0 as one reinforcement, so
-  // this value is only safe alongside an empty `entry_ids[]` (asserted below).
+  // Exactly 0.0: a zero signal says "nothing to report about this memory", which is only an
+  // honest claim when no entry ids ride along with it — so this value is paired with an empty
+  // `entry_ids[]` (asserted below) and never with a populated one.
   it('SIGNAL_UNUSED is exactly 0', async () => {
     const m = await O();
     assert.equal(m.SIGNAL_UNUSED, 0);
@@ -92,7 +93,7 @@ describe('the constants live in exactly one place', () => {
     assert.equal(m.OUTCOME_UNUSED, 'neutral');
   });
 
-  // §1.3: `RecordOutcomeRequest.reference_id` must be non-empty, so run-level attribution
+  // §1.3: `reference_id` must be non-empty on an outcome, so run-level attribution
   // uses a sentinel and puts the real ids in `entry_ids[]`.
   it('RUN_LEVEL_REFERENCE is the non-empty run-level sentinel', async () => {
     const m = await O();
@@ -156,9 +157,8 @@ describe('decideOutcome — the five cases, one row each', () => {
     });
   }
 
-  // THE assertion behind the neutral record. Attributed reinforcement counts any signal at
-  // or above zero as one reinforcement, so naming the entries here would credit exactly the
-  // memories nothing showed were read.
+  // THE assertion behind the neutral record: naming entries here would credit exactly the
+  // memories nothing showed were read, which is the opposite of what attribution is for.
   it('the neutral record never names the entries it could not credit', async () => {
     const { decideOutcome } = await O();
     const d = decideOutcome(turn({ used_evidence: evidence(false) }));

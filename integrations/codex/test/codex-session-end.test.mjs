@@ -8,7 +8,7 @@
  *
  * **The budget was sized for the wrong host.** The inline deadline is 6800 ms, which sits
  * inside Claude Code's `SessionEnd.timeout: 8`. Codex clamps SessionEnd to **3 s** whatever
- * `hooks.json` asks for — recorded in `docs/harness-probe.md` and asserted by
+ * `hooks.json` asks for — recorded against a live host and asserted by
  * `codex-failure.test.mjs` — so 6800 ms is 2.4× the ceiling. Worse, the sub-budgets nested
  * inside it (`DRAIN_MS` 3500, `REFLECT_MS` 4000) are each larger than the whole clamp, so the
  * arithmetic that carves the deadline up hands the drain a window that has already expired.

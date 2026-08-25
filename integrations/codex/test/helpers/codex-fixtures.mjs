@@ -4,14 +4,19 @@
  *
  * Two things live here and nothing else:
  *
- *   1. **One builder per Codex hook event.** Each returns a payload shaped exactly as
- *      `codex exec` writes it — recorded in `docs/harness-probe.md` §5, not invented.
- *   2. **A draft-07 validator, and the host's own schemas to run it against.** This is the
- *      load-bearing part. A fixture written beside the implementation cannot falsify that
- *      implementation: whatever shape the code expects, the fixture will have. A fixture
- *      checked against `test/fixtures/codex-hook-schemas/*.json` — extracted verbatim from
- *      the Codex binary — can, because those schemas were written by the host and every one
- *      of them is `additionalProperties: false`.
+ *   1. **One builder per Codex hook event.** Each returns a payload shaped as `codex exec`
+ *      writes it — observed, not invented.
+ *   2. **The recordings to check them against.** This is the load-bearing part. A fixture
+ *      written beside the implementation cannot falsify that implementation: whatever shape
+ *      the code expects, the fixture will have. A fixture checked against
+ *      `test/fixtures/observed/payloads/*.json` — written by the host itself, into a
+ *      recorder hook, during a real session — can.
+ *
+ *      What a recording proves is one-sided: it pins the fields an event was *seen* to carry,
+ *      not the fields it *may* carry. It cannot prove a field optional. It still catches the
+ *      mistake a hand-written Codex fixture actually makes, which is inventing a field the
+ *      host has never sent. See `test/fixtures/observed/README.md`, and
+ *      `test/helpers/codex-record.mjs` for how to re-record.
  *
  * Everything else — `makeDataDir`, `fakeMubit`, `runHook`, `assertHookContract`,
  * `mcpListTools` — is the Claude Code suite's harness, re-exported. There is deliberately no
@@ -38,8 +43,8 @@ export const SHARED_ROOT = resolve(CODEX_ROOT, '..', 'claude-code');
 /** Absolute path to the repo root. */
 export const REPO_ROOT = resolve(CODEX_ROOT, '..', '..');
 
-/** Where the schemas extracted from the Codex binary live. */
-export const SCHEMA_DIR = join(CODEX_ROOT, 'test', 'fixtures', 'codex-hook-schemas');
+/** Where the recordings of what the host actually sent live. */
+export const OBSERVED_DIR = join(CODEX_ROOT, 'test', 'fixtures', 'observed');
 
 /**
  * The eleven events Codex 0.146.0 dispatches, in the order its own `HookEventsToml` lists
@@ -101,195 +106,153 @@ export function codexMod(relPath) {
 }
 
 // ---------------------------------------------------------------------------
-// The schemas Codex itself carries
+// What the host was recorded sending
 // ---------------------------------------------------------------------------
 
 /** @type {Map<string, any>} */
-const _schemas = new Map();
+const _observed = new Map();
+
+/** `'session-start.command.input'` → `'SessionStart'`. The inverse of `schemaSlug`. */
+export function eventOfTitle(title) {
+  const slug = String(title).replace(/\.command\.(input|output)$/, '');
+  return CODEX_EVENTS.find((e) => schemaSlug(e) === slug) ?? '';
+}
+
+/** Whether a title names an output rather than an input. */
+export function isOutputTitle(title) {
+  return String(title).endsWith('.command.output');
+}
 
 /**
- * One extracted schema, by title — e.g. `'post-tool-use.command.input'`.
+ * The recorded payload for one event, or `null` if that event has no recording.
  *
- * Fails loudly rather than skipping. A skipped schema check is indistinguishable from a
- * passing one, and these files are the only thing in the suite the implementation did not
- * write.
- *
- * @param {string} title
- * @returns {any}
+ * `null` is a real answer here rather than an error: five of the eleven events do not fire in
+ * a scripted one-turn session, so their absence is expected and documented. What must never
+ * happen is the whole corpus going missing and every check below passing vacuously — which is
+ * why `codex-payload.test.mjs` asserts the covered set by name.
  */
-export function hostSchema(title) {
-  if (_schemas.has(title)) return _schemas.get(title);
-  const p = join(SCHEMA_DIR, `${title}.json`);
-  if (!existsSync(p)) {
-    const have = existsSync(SCHEMA_DIR) ? readdirSync(SCHEMA_DIR).join(', ') : '(no directory)';
-    throw new Error(
-      `no extracted schema for "${title}" at ${p}\n`
-      + `  Present: ${have}\n`
-      + '  These are extracted from the Codex binary; see docs/harness-probe.md, Appendix.');
-  }
-  const parsed = JSON.parse(readFileSync(p, 'utf8'));
-  _schemas.set(title, parsed);
+export function observedPayload(event) {
+  if (_observed.has(event)) return _observed.get(event);
+  const p = join(OBSERVED_DIR, 'payloads', `${event}.json`);
+  const parsed = existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
+  _observed.set(event, parsed);
   return parsed;
 }
 
-/** Every extracted schema title on disk, sorted. */
-export function hostSchemaTitles() {
-  if (!existsSync(SCHEMA_DIR)) return [];
-  return readdirSync(SCHEMA_DIR).filter((f) => f.endsWith('.json'))
+/** Every event with a recording, sorted. */
+export function observedEvents() {
+  const dir = join(OBSERVED_DIR, 'payloads');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((f) => f.endsWith('.json'))
     .map((f) => f.slice(0, -'.json'.length)).sort();
 }
 
-// ---------------------------------------------------------------------------
-// A draft-07 validator, in about eighty lines
-// ---------------------------------------------------------------------------
-
-/**
- * Validate `value` against one of the extracted schemas and return the errors as paths.
- *
- * This covers exactly the keywords Codex's generated schemas use — `type`, `const`, `enum`,
- * `properties`, `required`, `additionalProperties`, `$ref` into `#/definitions/*`, `allOf`,
- * and the bare `true` schema (`"tool_input": true`) — and nothing else. A schema keyword
- * that turns up later and is not handled here is reported as an error rather than ignored,
- * so the validator cannot quietly stop validating.
- *
- * `additionalProperties: false` is why this matters: it is what turns "my fixture has a
- * `prompt_id` field" from a harmless extra into a failure, which is precisely the mistake
- * a hand-written Codex fixture is most likely to make.
- *
- * @param {any} value
- * @param {any} schema  a whole document (its `definitions` resolve `$ref`)
- * @param {string} [path]
- * @returns {string[]} human-readable errors, empty when valid
- */
-export function schemaErrors(value, schema, path = '$') {
-  return check(value, schema, schema, path);
+/** The host's recorded verdicts on outputs a hook returned. */
+export function outputAcceptance() {
+  const p = join(OBSERVED_DIR, 'output-acceptance.json');
+  if (!existsSync(p)) throw new Error(`no recorded output verdicts at ${p}`);
+  return JSON.parse(readFileSync(p, 'utf8'));
 }
 
-const KNOWN = new Set([
-  '$schema', 'title', 'description', 'definitions', 'default',
-  'type', 'const', 'enum', 'properties', 'required', 'additionalProperties', '$ref', 'allOf',
-]);
-
-function check(value, schema, root, path) {
-  if (schema === true) return [];
-  if (schema === false) return [`${path}: schema is \`false\` — nothing validates`];
-  if (!schema || typeof schema !== 'object') return [`${path}: not a schema: ${JSON.stringify(schema)}`];
-
-  /** @type {string[]} */
+/**
+ * Every field in `value` the host has never been recorded sending for this event.
+ *
+ * This is the half of `additionalProperties: false` a recording can still do. It cannot say a
+ * field is required — seeing one once does not make it mandatory — but it can say a field was
+ * invented, and inventing one is the mistake a fixture written next to the implementation
+ * actually makes. It caught `permission_mode` on the first draft of `preCompact()` and
+ * `tool_use_id` on `permissionRequest()`.
+ *
+ * Nested objects are walked one level, which is as deep as any Codex payload goes.
+ *
+ * @param {string} event
+ * @param {any} value
+ * @returns {string[]} empty when nothing was invented
+ */
+export function observedKeyErrors(event, value) {
+  const seen = observedPayload(event);
+  if (!seen || value === null || typeof value !== 'object') return [];
   const errs = [];
-
-  for (const k of Object.keys(schema)) {
-    if (!KNOWN.has(k)) errs.push(`${path}: unhandled schema keyword \`${k}\` — teach the validator`);
-  }
-
-  if (schema.$ref) {
-    const target = deref(schema.$ref, root);
-    if (!target) return [`${path}: cannot resolve $ref ${schema.$ref}`];
-    return check(value, target, root, path);
-  }
-
-  if (Array.isArray(schema.allOf)) {
-    for (const sub of schema.allOf) errs.push(...check(value, sub, root, path));
-  }
-
-  if (schema.type !== undefined) {
-    const want = Array.isArray(schema.type) ? schema.type : [schema.type];
-    if (!want.some((t) => isType(value, t))) {
-      errs.push(`${path}: expected type ${want.join('|')}, got ${typeName(value)}`);
-      return errs;   // every keyword below assumes the type held
-    }
-  }
-
-  if (schema.const !== undefined && value !== schema.const) {
-    errs.push(`${path}: expected const ${JSON.stringify(schema.const)}, got ${JSON.stringify(value)}`);
-  }
-
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
-    errs.push(`${path}: ${JSON.stringify(value)} is not one of ${JSON.stringify(schema.enum)}`);
-  }
-
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const props = schema.properties ?? {};
-    for (const req of schema.required ?? []) {
-      if (!Object.prototype.hasOwnProperty.call(value, req)) {
-        errs.push(`${path}: missing required property \`${req}\``);
-      }
-    }
-    for (const [k, v] of Object.entries(value)) {
-      if (Object.prototype.hasOwnProperty.call(props, k)) {
-        errs.push(...check(v, props[k], root, `${path}.${k}`));
-      } else if (schema.additionalProperties === false) {
-        errs.push(`${path}: property \`${k}\` is not in the schema, and additionalProperties is false`);
-      } else if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
-        errs.push(...check(v, schema.additionalProperties, root, `${path}.${k}`));
+  for (const k of Object.keys(value)) {
+    if (!(k in seen)) { errs.push(`$.${k}: the host has never been recorded sending this field`); continue; }
+    const a = value[k];
+    const b = seen[k];
+    if (a && b && typeof a === 'object' && typeof b === 'object' && !Array.isArray(a) && !Array.isArray(b)) {
+      for (const k2 of Object.keys(a)) {
+        if (!(k2 in b)) errs.push(`$.${k}.${k2}: the host has never been recorded sending this field`);
       }
     }
   }
-
   return errs;
 }
 
-function deref(ref, root) {
-  const m = /^#\/definitions\/(.+)$/.exec(String(ref));
-  if (!m) return null;
-  return root?.definitions?.[m[1]] ?? null;
-}
-
-function isType(v, t) {
-  switch (t) {
-    case 'null': return v === null;
-    case 'boolean': return typeof v === 'boolean';
-    case 'string': return typeof v === 'string';
-    case 'number': return typeof v === 'number' && Number.isFinite(v);
-    case 'integer': return Number.isInteger(v);
-    case 'array': return Array.isArray(v);
-    case 'object': return !!v && typeof v === 'object' && !Array.isArray(v);
-    default: return false;
-  }
-}
-
-function typeName(v) {
-  if (v === null) return 'null';
-  if (Array.isArray(v)) return 'array';
-  return typeof v;
+/**
+ * Which output channels an event has, from the plugin's own contract table.
+ *
+ * These used to be read off the host's output schemas. They are asserted rather than read
+ * now — see `test/fixtures/codex-output-rules.json` for what that trade cost and what
+ * `observed/output-acceptance.json` still verifies.
+ */
+export function outputCapabilities(event) {
+  const caps = outputRules().capabilities ?? {};
+  const c = caps[event];
+  if (!c) throw new Error(`no output capabilities recorded for "${event}"`);
+  return c;
 }
 
 /**
- * Assert a payload validates, with the failures listed.
+ * Assert a payload is one the host could have sent, or an output it would accept.
+ *
+ * Input titles check against the recording; output titles check against the contract, which
+ * is what `assertOutputAccepted` does. The signature is unchanged from when both halves were
+ * a schema, because every caller wants the same thing from it: "is this a shape the host
+ * deals in, or did we make it up?"
+ *
  * @param {any} value
  * @param {string} title  e.g. `'session-start.command.input'`
  * @param {string} what   what the caller is validating, for the message
  */
 export function assertValid(value, title, what) {
-  const errs = schemaErrors(value, hostSchema(title));
+  const event = eventOfTitle(title);
+  assert.ok(event, `"${title}" does not name a Codex event`);
+
+  if (isOutputTitle(title)) { assertOutputAccepted(event, value, what); return; }
+
+  assert.equal(value?.hook_event_name, event,
+    `${what} carries hook_event_name ${JSON.stringify(value?.hook_event_name)}, but it is `
+    + `meant to be a ${event} payload. A hook that serves several events reads that field to `
+    + 'know which one it was handed.');
+
+  if (!observedPayload(event)) return;
+  const errs = observedKeyErrors(event, value);
   assert.deepEqual(errs, [],
-    `${what} does not satisfy the host's own ${title} schema, so it is not a payload Codex `
-    + `would ever send — a test built on it proves nothing:\n  ${errs.join('\n  ')}`);
+    `${what} carries fields the host has never been recorded sending on ${event}, so it is `
+    + `not a payload Codex would send — a test built on it proves nothing:\n  ${errs.join('\n  ')}`);
 }
 
 // ---------------------------------------------------------------------------
-// The rules the schemas do not encode
+// What a hook may answer with
 // ---------------------------------------------------------------------------
 
 /**
- * `test/fixtures/codex-output-rules.json` — the semantic rules Codex applies to a hook's
- * stdout *after* the JSON Schema has accepted it.
+ * `test/fixtures/codex-output-rules.json` — the constraints this plugin holds its own hook
+ * output to, and the channels each event has.
  *
- * This exists because the schemas are a superset of the runtime contract, and we found that
- * out the expensive way: `suppressOutput` is a declared property of every output schema and
- * is rejected on three events, so `assertValid` passed on output that made a real session
- * print `PostToolUse hook returned unsupported suppressOutput`.
+ * It is a separate thing from the wire format, and that was learned the expensive way: an
+ * output can be well-formed and still be refused. `suppressOutput` is the case that reached a
+ * user — accepted on most events, refused on `PreToolUse` and `PostToolUse`, where a real
+ * session prints `PostToolUse hook returned unsupported suppressOutput`. A check that looked
+ * only at the shape went green on it.
+ *
+ * `observed/output-acceptance.json` is the recorded half: a real session's verdict on an
+ * output a hook actually returned. `codex-payload.test.mjs` cross-checks the two.
  */
 let _rules = null;
 
 function outputRules() {
   if (_rules) return _rules;
   const p = join(CODEX_ROOT, 'test', 'fixtures', 'codex-output-rules.json');
-  if (!existsSync(p)) {
-    throw new Error(
-      `no output-rule table at ${p}\n`
-      + '  It is extracted from the Codex binary; see its own `_provenance` block.');
-  }
+  if (!existsSync(p)) throw new Error(`no output-rule table at ${p}`);
   _rules = JSON.parse(readFileSync(p, 'utf8'));
   return _rules;
 }
@@ -380,7 +343,7 @@ export function assertOutputAccepted(event, value, what) {
 
 /**
  * The fields every turn-scoped Codex payload carries. Recorded, not invented — see
- * `docs/harness-probe.md` §5.
+ * `test/fixtures/observed/payloads/`.
  *
  * `session_id` and `turn_id` are UUIDv7s in the shape Codex actually emits, because the run
  * id and the turn file are both derived from them and a shape that sanitises differently
@@ -626,7 +589,7 @@ export const BUILDERS = Object.freeze({
 // ---------------------------------------------------------------------------
 
 /**
- * A Codex rollout file's worth of lines, as recorded in `docs/harness-probe.md` §8.
+ * A Codex rollout file's worth of lines, as recorded from a live session.
  *
  * The envelope is `{"type":"response_item","payload":{"type":"message",role,content:[…]}}`,
  * where Claude Code's is `{"type":…,"message":{role,content:[…]}}`. The content item's own

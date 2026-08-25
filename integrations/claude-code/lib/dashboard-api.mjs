@@ -284,9 +284,19 @@ async function createdAtIndex(cfg, run, lessonCount) {
  * clamps to 1 when it is 0**, so an omitted limit does not mean "the default", it means one
  * entry. The limit here is therefore always explicit.
  *
+ * The last five parameters are `ListActivityRequest` fields the dashboard never needed and
+ * `lib/activity.mjs` does. Every one of them is emitted **only when set**, which is not
+ * fastidiousness: an unconditional `user_id: ''` is read server-side by
+ * `effective_logical_user_scope` and becomes a retrieval filter nobody asked for — the same
+ * shape as the trap on the ingest side, where filling `user_id` made new captures
+ * unrecallable. `exclude_derived: false` is likewise absent rather than false, so a request
+ * body says only what the caller actually asked for.
+ *
  * @param {Record<string, any>} cfg
  * @param {{run?: string, limit?: number, pageToken?: string, projection?: string,
- *          entryTypes?: string[], sort?: string}} [params]
+ *          entryTypes?: string[], sort?: string, excludeDerived?: boolean,
+ *          createdAfter?: string, createdBefore?: string, userId?: string,
+ *          agentId?: string}} [params]
  * @returns {Promise<Record<string, any>>}
  */
 export async function fetchActivity(cfg, params = {}) {
@@ -302,6 +312,11 @@ export async function fetchActivity(cfg, params = {}) {
   if (Array.isArray(params.entryTypes) && params.entryTypes.length) {
     req.entry_types = params.entryTypes.map(String);
   }
+  if (params.excludeDerived === true) req.exclude_derived = true;
+  if (str(params.createdAfter)) req.created_after = str(params.createdAfter);
+  if (str(params.createdBefore)) req.created_before = str(params.createdBefore);
+  if (str(params.userId)) req.user_id = str(params.userId);
+  if (str(params.agentId)) req.agent_id = str(params.agentId);
 
   const res = await request(cfg, 'POST', EXTRA_ROUTES.activity, req, READ_ONLY);
   if (!res.ok) return mapError(cfg, res);

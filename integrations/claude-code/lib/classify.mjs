@@ -3,7 +3,7 @@
  * `lib/classify.mjs` — tool event -> `{intent, importance, contentType}`, plus the lesson
  * templates the `remember` skill expands.
  *
- * Build-guide §4.5 (the mapping table), §1.5 (why `intent` is mandatory), §1.6 (the type
+ * The mapping table, why `intent` is mandatory, and the type
  * inventory); spec §6.2 (categorisation).
  *
  * ---------------------------------------------------------------------------
@@ -129,10 +129,9 @@ const MCP = /** @type {[string, string]} */ (['tool_output', 'low']);
  *
  * Failures are `high` on purpose, and it overrides every row above. A failed approach is
  * the highest-value thing a coding agent can remember — it is the one class of knowledge
- * the model cannot re-derive by reading the codebase — and the server turns a streak of
- * them into an extracted lesson for free: the negative-streak reflection threshold
- * defaults to 3. Grading failures `low` would both bury them in
- * retrieval and starve the auto-reflection trigger that feeds on them.
+ * the model cannot re-derive by reading the codebase — and a run of them is what reflection
+ * turns into a durable lesson. Grading failures `low` would both bury them in retrieval and
+ * starve the reflection that feeds on them.
  */
 const FAILURE = /** @type {[string, string]} */ (['trace', 'high']);
 
@@ -240,7 +239,7 @@ export function classifyTurn(prompt, lastAssistantMessage, opts = {}) {
  *
  * ## Why this is a copy and not an import
  *
- * Build-guide §4.5 says to **import** the MCP module "rather than copying the constants,
+ * The rule is to **import** the MCP module "rather than copying the constants,
  * so the two surfaces cannot drift". That is the right instinct and the wrong mechanism
  * here, for two reasons that are both hard blockers:
  *

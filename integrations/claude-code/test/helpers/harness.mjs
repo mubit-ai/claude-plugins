@@ -130,6 +130,18 @@ export function baseEnv(o) {
     MUBIT_CC_LOG_LEVEL: 'error',
     // Tests must never inherit the MCP server's poisoned default (§4.3).
     MUBIT_DEFAULT_SESSION_ID: '',
+    // The resume briefing ships ON, and it is pinned off here for the same category of
+    // reason as the line above it — a shipped default that would otherwise make unrelated
+    // suites nondeterministic. `session-start` spawns a DETACHED child, and that child dials
+    // the same `fakeMubit` at a moment nothing in a test controls. Without this pin,
+    // `session-start.test.mjs`'s exact-call-sequence assertion ("health → register → lessons,
+    // and nothing else") is a coin flip, and so is `attribution.test.mjs` and every other
+    // suite that runs that hook. Filtering `/v2/control/context` out of those assertions
+    // instead would hide the very race they exist to catch.
+    //
+    // The cost is that no ordinary suite sees the shipped default, so
+    // `test/session-resume.test.mjs` deletes this key by hand in the one test that asserts it.
+    MUBIT_CC_RESUME_BLOCK: '0',
   };
   return { ...env, ...(o.extra ?? {}) };
 }
@@ -324,6 +336,13 @@ export function defaultRoutes() {
     },
     'POST /v2/control/memory_health': { json: { healthy: true } },
     'POST /v2/control/diagnose': { json: { findings: [] } },
+    // The pin refresh the detached drainer makes in its tail (`lib/pins.mjs`). Answering it
+    // here rather than in each drain fixture keeps a 404 out of every suite that spawns a
+    // drain for some other reason — an unrouted request is recorded AND counts as a failure
+    // against the breaker, which would make the pin refresh look like an instance fault.
+    'POST /v2/control/variables/list': { json: { variables: [] } },
+    'POST /v2/control/variables/set': { json: { success: true } },
+    'POST /v2/control/variables/delete': { json: { success: true } },
   };
 }
 
@@ -557,7 +576,7 @@ export function assertHookContract(r) {
 // ---------------------------------------------------------------------------
 
 /**
- * Drive the plugin's MCP server over real newline-delimited JSON-RPC — build-guide §8.
+ * Drive the plugin's MCP server over real newline-delimited JSON-RPC (§8).
  *
  * Everything else in this file stubs the server out: `test/launch.test.mjs` swaps
  * `./server.js` for a module that snapshots `process.env`, which is the right tool for the

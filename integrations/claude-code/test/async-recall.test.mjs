@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `recallAsync` — the carry-forward recall path (§5.2, and item 6 of the hook-surface handoff).
+ * `recallAsync` — the carry-forward recall path (§5.2).
  *
  * ---------------------------------------------------------------------------
  * What is being claimed, and what would falsify it
@@ -17,24 +17,24 @@
  *      with it unset the hook still dials on the turn and still injects on the turn. The rest
  *      of this suite's 929 assertions are the real proof of that; the one here is the
  *      structural half — no carry file, no refresh process.
- *   2. **Attribution is correct by construction.** The handoff worried that "the turn that
- *      receives the block is not the turn that requested it". Under carry-forward the write
- *      happens on the synchronous *read*, against the prompt id in hand, so the ids land on
- *      the turn that was actually given them. `recalledLandsOnTheReceivingTurn` is the most
- *      valuable assertion in this file.
+ *   2. **Attribution is correct by construction.** The obvious worry about carrying a block
+ *      forward is that the turn which receives it is not the turn that requested it. It is
+ *      not so: the write happens on the synchronous *read*, against the prompt id in hand,
+ *      so the ids land on the turn that was actually given them.
+ *      `recalledLandsOnTheReceivingTurn` is the most valuable assertion in this file.
  *   3. **The wall clock stops tracking the endpoint.** Pinned against a real loopback server
  *      with `delayMs`, so no test sleeps and no test guesses.
  *
  * ---------------------------------------------------------------------------
  * Why not `"async": true` in `hooks.json`
  * ---------------------------------------------------------------------------
- * `async` and `asyncRewake` are real host manifest fields — extracted from Claude Code
- * 2.1.235, `"If true, hook runs in background without blocking"` — but they are **static
- * manifest fields**. They cannot be conditioned on a runtime config key, so a flag-gated
- * `recallAsync` expressed that way would need two registrations that no-op against each
- * other: two processes per prompt, forever, for everyone including people who never opt in.
- * Carry-forward is runtime-flippable, needs no manifest change, and is testable offline.
- * Do not "simplify" this into a manifest flag.
+ * `hooks.json` does have a documented way to say "run this hook in the background without
+ * blocking" — but it is a **static manifest field**. It cannot be conditioned on a runtime
+ * config key, so a flag-gated `recallAsync` expressed
+ * that way would need two registrations that no-op against each other: two processes per
+ * prompt, forever, for everyone including people who never opt in. Carry-forward is
+ * runtime-flippable, needs no manifest change, and is testable offline. Do not "simplify"
+ * this into a manifest flag.
  *
  * ---------------------------------------------------------------------------
  * The seen-set interaction, which is the easy thing to get wrong
@@ -48,7 +48,7 @@
  *     the next full-price block degrades them to pointers naming text that exists nowhere in
  *     the transcript. That is `lib/seen.mjs`'s own worst case.
  *   - **Nobody marks** → every carry-forward is assembled against an empty seen-set and the
- *     whole HS-3 saving reverts, with no test failing.
+ *     whole seen-set saving reverts, with no test failing.
  *
  * The answer is the synchronous reader, against the current run, *before* it spawns the
  * refresh — so the child's `readSeen` already contains this turn's ids. `refreshMarksNothing`
@@ -343,6 +343,12 @@ test('recall-refresh writes the carried block, and writes neither the turn nor t
   assert.ok(String(carry.block).includes('poll the job'), 'the refresh exists to produce a block');
   assert.deepEqual(carry.ref_ids, ['ref_rule_1']);
 
+  // §5.2 — the refresh runs the same ladder, so it must send the same fusion weights. The
+  // fixture prompt is a diagnosis, so `auto` resolves it to `relevance` here too: a hook
+  // that dials on a user's behalf and quietly ranks it differently from the one the user
+  // waits on is two recall behaviours wearing one name.
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.rank_by, 'relevance');
+
   assert.equal(existsSync(seenPath(dataDir)), false,
     'marking here would record a memory as shown before any turn has shown it — the next '
     + 'full-price block would then degrade it to a pointer naming text the model never got');
@@ -352,7 +358,7 @@ test('recall-refresh writes the carried block, and writes neither the turn nor t
 });
 
 // The point of moving the call off the prompt: it is no longer paced by `recallBudgetMs`.
-// A 1.4-2.3 s endpoint against a 1500 ms budget is the runbook's documented complaint, and
+// A 1.4-2.3 s endpoint against a 1500 ms budget is the documented complaint, and
 // here the same endpoint answers inside the refresh's own, far larger, budget.
 test('recall-refresh is not bounded by recallBudgetMs — a slow endpoint still lands', async (t) => {
   const server = await fakeMubit({
@@ -372,6 +378,42 @@ test('recall-refresh is not bounded by recallBudgetMs — a slow endpoint still 
     + 'the entire trade, and getting it wrong reproduces the empty recall it was meant to fix');
   assert.ok(carry.fetch_ms >= 700,
     `the refresh must record what it actually spent; got ${carry.fetch_ms}ms`);
+});
+
+// The rule reads the prompt this process was spawned with, which is the same text the
+// synchronous half would have queried on. Carry-forward moves *when* the call happens, never
+// *what* it asks for — a handoff question ranked by similarity in the background is the same
+// bug, just one turn later and harder to see.
+test('recall-refresh ranks a handoff prompt by freshness, exactly as the blocking path would', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { json: ONE } });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('recall-refresh', userPromptSubmit({ prompt: 'catch me up on where we left off' }), {
+    env: env(dataDir, server, ASYNC_ON),
+  });
+
+  assertHookContract(r);
+  const body = server.lastCall('POST', '/v2/control/query').body;
+  assert.equal(body.rank_by, 'freshness',
+    'the detached half must not fall back to default fusion weights');
+  assert.equal(body.query, 'catch me up on where we left off');
+});
+
+// The whole point of moving recall off the prompt is that the expensive lane becomes
+// affordable again. If the detached half inherited the blocking half's opt-out, `recallAsync`
+// would buy latency and quietly pay for it in coverage — the cross-run lessons would be gone
+// from every path at once and nothing would say so.
+test('recall-refresh keeps the cross-run lesson overlay the blocking path declines', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { json: ONE } });
+  t.after(() => server.close());
+
+  assertHookContract(await runHook('recall-refresh', userPromptSubmit(), {
+    env: env(makeDataDir(), server, ASYNC_ON),
+  }));
+
+  assert.equal(server.lastCall('POST', '/v2/control/query').body.prefer_current_run, undefined,
+    'a process no prompt is waiting on is exactly where a ~1.7s lane belongs');
 });
 
 // A failed refresh writes no block. The alternative — an empty carry file — would be read by
@@ -503,7 +545,7 @@ test('recallAsync: the receiving turn marks seen, so the NEXT block degrades the
   const block = c.json.hookSpecificOutput.additionalContext;
   assert.ok(!block.includes('poll the job'),
     'the refresh reads the seen-set the reader has already written, so a repeat is degraded. '
-    + 'Marking after the spawn instead reverts the whole HS-3 saving with no test failing');
+    + 'Marking after the spawn instead reverts the whole seen-set saving with no test failing');
   assert.ok(block.includes('ref_rule_1'),
     'a degraded repeat keeps its reference id — dropping it would break attribution for '
     + 'exactly the memories that keep proving relevant');
@@ -588,7 +630,7 @@ test('recallAsync: the injected wrapper says the block is one turn old', async (
     + 'question; the blocking path never had to say it, so nothing else does');
 });
 
-// §4.7/F7 — the breaker still governs whether a process is spawned to dial a server already
+// §4.7 — the breaker still governs whether a process is spawned to dial a server already
 // known to be down. It must NOT stop a block that is already on disk from being rendered:
 // that block cost a round trip nobody has to repeat.
 test('recallAsync: a tripped breaker renders the carried block but starts no refresh', async (t) => {
@@ -619,5 +661,5 @@ test('recallAsync: a tripped breaker renders the carried block but starts no ref
     'the block was already paid for; refusing to render it spends the round trip twice');
   assert.equal(refreshSpawns(file).length, 0,
     'spawning a process per prompt to dial a server the breaker has already given up on is '
-    + 'the cost F7 exists to avoid');
+    + 'the cost the breaker exists to avoid');
 });

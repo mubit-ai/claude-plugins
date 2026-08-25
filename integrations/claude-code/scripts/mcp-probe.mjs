@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Speak real stdio MCP to the plugin's server and report what it exposes — build-guide §8.
+ * Speak real stdio MCP to the plugin's server and report what it exposes.
  *
  * This is the manual counterpart to `test/launch.test.mjs`. The tests stub the server out to
  * assert the launcher's env ordering; this drives the whole chain the way Claude Code does:
@@ -190,7 +190,7 @@ function report(r, opt) {
 }
 
 function usage() {
-  process.stdout.write(`mcp-probe — speak real stdio MCP to the plugin's server (build-guide §8)
+  process.stdout.write(`mcp-probe — speak real stdio MCP to the plugin's server
 
   --server <path>   run the plugin launcher with ./server.js redirected at <path>
   --entry  <path>   run <path> as the server outright (default: mcp/dist/index.js)

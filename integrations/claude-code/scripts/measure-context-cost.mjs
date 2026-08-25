@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Measure the plugin's always-loaded context surface — build-guide §3.5, phase 4 §19.
+ * Measure the plugin's always-loaded context surface.
  *
  * `marketplace.json` shipped `{"value": 2100, "cached": 0}` as a placeholder. A declared
  * context budget that nobody measured is worse than none: the number is the one thing a
@@ -75,13 +75,14 @@ const LAUNCHER = join(PLUGIN_ROOT, 'mcp', 'dist', 'index.js');
 const STAMP = join(PLUGIN_ROOT, 'scripts', 'context-cost.json');
 const MARKETPLACE = join(REPO_ROOT, '.claude-plugin', 'marketplace.json');
 
-/** The host prefixes a plugin-provided server's tools with this. 30 chars, ten times over. */
+/** The host prefixes a plugin-provided server's tools with this. 30 chars, once per tool. */
 const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
-/** §8.2 — the curated ten a blank `mcpTools` resolves to. Kept in sync by verify-manifests. */
+/** §8.2 — the curated set a blank `mcpTools` resolves to. Kept in sync by verify-manifests. */
 const DEFAULT_ALLOWLIST = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ];
 
 const HANDSHAKE_MS = 20_000;
@@ -360,7 +361,7 @@ function report(r) {
   if (!r.allowlistHonoured) {
     process.stdout.write(
       `\nThis server registers all ${b.toolSchemas.count} tools, so \`mcpTools\` is inert and every\n`
-      + `user pays for every tool. With the curated ten honoured the same surface costs\n`
+      + `user pays for every tool. With the curated set honoured the same surface costs\n`
       + `${r.curatedValue} tokens, ${r.value - r.curatedValue} fewer.\n`
       + 'The server is bundled from the in-repo @mubit-ai/mcp, which reads MUBIT_MCP_TOOLS (§8.1).\n'
       + 'A server that ignores it is a stale bundle — rebuild:\n'

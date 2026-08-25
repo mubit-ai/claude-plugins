@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Skills and the subagent — build-guide §9.
+ * Skills and the subagent.
  *
  * A skill is markdown with YAML frontmatter, so it is testable as data. Two kinds of
  * assertion live here:
@@ -39,18 +39,42 @@ const SERVER_BUNDLE = join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js');
 /** §3.2 matcher note — `.mcp.json` names the server `mubit`. */
 const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
-/** §2/§9 — the skills the plugin ships. `auth` is the seventh and `dashboard` the eighth. */
-const SKILLS = ['recall', 'remember', 'reflect', 'forget', 'doctor', 'setup', 'auth', 'dashboard'];
+/**
+ * §2/§9 — the skills the plugin ships, in the order they arrived. The first eight are the
+ * original set. Of the rest, three grant an MCP tool that used to sit outside the default
+ * allowlist — an allowlisted tool with nothing to invoke it is schema cost with no surface —
+ * and `activity` runs a bundled script instead, the way `auth` and `dashboard` do.
+ *
+ * One name per line on purpose: four branches append to this list at once, and a single-line
+ * array makes every one of those a conflict on the same line.
+ */
+const SKILLS = [
+  'recall',
+  'remember',
+  'reflect',
+  'forget',
+  'doctor',
+  'setup',
+  'auth',
+  'dashboard',
+  'strategies',
+  'checkpoint',
+  'memory-health',
+  'activity',
+  'pin',
+];
 
 /**
- * The two skills that call no MCP tool, and cannot.
+ * The skills that call no MCP tool, and cannot.
  *
  * `auth` runs `bin/auth.mjs` to obtain a credential, which is precisely the thing that has to
- * exist before any MCP tool works. `dashboard` runs `bin/dashboard.mjs`, a local HTTP server
- * that proxies the control API itself — an MCP grant would be a second, weaker path to the
- * same data. Both are skipped by name rather than by accident.
+ * exist before any MCP tool works. `dashboard` runs `bin/dashboard.mjs` and `activity` runs
+ * `bin/activity.mjs`, both of which talk to the control API themselves — an MCP grant would be
+ * a second, weaker path to the same data. `pin` runs `bin/pin.mjs` because the bundled server
+ * registers twenty-one tools and not one of them touches variables, so there is no tool a
+ * `tools:` grant could name. All four are skipped by name rather than by accident.
  */
-const NO_MCP_SKILLS = ['auth', 'dashboard'];
+const NO_MCP_SKILLS = ['auth', 'dashboard', 'activity', 'pin'];
 const MCP_SKILLS = SKILLS.filter((s) => !NO_MCP_SKILLS.includes(s));
 
 // ---------------------------------------------------------------------------
@@ -124,14 +148,13 @@ function skillFile(name) {
 
 function loadSkill(name) {
   const text = readOrFail(skillFile(name), `skills/${name}/SKILL.md`,
-    'The plugin ships one skill each for recall, remember, reflect, forget, doctor, setup, auth '
-    + 'and dashboard.');
+    `The plugin ships one skill each for: ${SKILLS.join(', ')}.`);
   return parseFrontmatter(text, `skills/${name}/SKILL.md`);
 }
 
 function loadAgent() {
   const p = join(AGENTS_DIR, 'mubit-recall.md');
-  const text = readOrFail(p, 'agents/mubit-recall.md', 'Build-guide §9.4 defines the Haiku recall subagent.');
+  const text = readOrFail(p, 'agents/mubit-recall.md', 'The plugin ships a Haiku recall subagent at this path.');
   return parseFrontmatter(text, 'agents/mubit-recall.md');
 }
 
@@ -202,7 +225,7 @@ for (const name of SKILLS) {
 // §2/§9 — exactly this set. An extra skill is extra always-loaded context that §3.5's
 // contextCost estimate does not account for.
 test('exactly the documented skills ship — no more, no fewer', () => {
-  assert.ok(existsSync(SKILLS_DIR), `skills/ does not exist yet: ${SKILLS_DIR} (build-guide §9)`);
+  assert.ok(existsSync(SKILLS_DIR), `skills/ does not exist yet: ${SKILLS_DIR}`);
   const dirs = readdirSync(SKILLS_DIR, { withFileTypes: true })
     .filter((d) => d.isDirectory()).map((d) => d.name).sort();
   assert.deepEqual(dirs, [...SKILLS].sort(),
@@ -238,7 +261,7 @@ test('agents/mubit-recall.md declares none of hooks, mcpServers, permissionMode'
 // match a plugin-provided server, so the skill loses the tool it was written around.
 test('every tools: entry across skills and agents is fully qualified', () => {
   const files = allMarkdown();
-  assert.ok(files.length > 0, `no skills or agents exist yet under ${PLUGIN_ROOT} (build-guide §9)`);
+  assert.ok(files.length > 0, `no skills or agents exist yet under ${PLUGIN_ROOT}`);
 
   let granted = 0;
   for (const { rel, text } of files) {
@@ -263,7 +286,7 @@ test('every tool named by a skill or agent exists in the bundled MCP server', ()
 
   const files = allMarkdown();
   assert.ok(files.length > 0,
-    `no skills or agents exist yet under ${PLUGIN_ROOT} (build-guide §9) — this check would otherwise pass vacuously`);
+    `no skills or agents exist yet under ${PLUGIN_ROOT} — this check would otherwise pass vacuously`);
 
   for (const { rel, text } of files) {
     const tools = toolsOf(parseFrontmatter(text, rel).fm) ?? [];
@@ -355,7 +378,8 @@ test('reflect/SKILL.md explains that background extraction never widens scope', 
 // makes the guard itself the disclosure once it ships — and it only ever catches the terms
 // someone thought to enumerate. Pinning the whole configuration story to two hosted settings
 // leaves no room for a local-stack walkthrough to be correct, without naming one.
-// `scripts/check-mirror-clean.mjs` keeps the denylist, and is not published.
+// The denylist itself lives outside this repository, where enumerating the terms is not
+// itself the disclosure.
 test('setup/SKILL.md configures a hosted instance in two settings, and installs nothing', () => {
   const { body } = loadSkill('setup');
   assert.match(body, /endpoint/i, 'setup must tell the user to set an endpoint');
@@ -571,4 +595,235 @@ test('remember/SKILL.md names the setting that widens what an agent may write', 
   const { body } = loadSkill('remember');
   assert.match(body, /mcpLessonScope|MUBIT_MCP_LESSON_SCOPE/,
     'remember/SKILL.md does not name the setting that raises the scope ceiling (§6.2)');
+});
+
+// ---------------------------------------------------------------------------
+// §9 — the three skills that carry a promoted tool
+// ---------------------------------------------------------------------------
+
+/**
+ * Each of these three exists so that a tool promoted into the default allowlist has somewhere
+ * to be invoked from. That makes one sentence in each of them load-bearing: the sentence that
+ * separates the new tool from the neighbour it will otherwise be confused with. Without it the
+ * skill is a second, vaguer route to a tool the model already had, and the promotion has
+ * bought a schema in every session for nothing.
+ */
+
+// The tool's own description says it clusters lessons and to "prefer mubit_lessons to read the
+// individual lessons themselves". A skill that only says "finds patterns" sends the model here
+// for single-lesson questions, which is the one thing it answers badly.
+test('strategies/SKILL.md separates the pattern from the lessons it is a pattern over', () => {
+  const { body } = loadSkill('strategies');
+  assert.match(body, /across/i,
+    'strategies must say the answer is a pattern *across* lessons, not one of them (§9)');
+  assert.match(body, /mubit_lessons/,
+    'strategies must name mubit_lessons as the tool that reads the individual lessons — '
+    + 'the two are near-synonyms until one of them says so');
+});
+
+// `snapshot` is stored byte-for-byte with nothing extracting from it, so a model that writes a
+// headline has written a checkpoint that restores nothing.
+test('checkpoint/SKILL.md says the snapshot is stored verbatim, and is run state not knowledge', () => {
+  const { body } = loadSkill('checkpoint');
+  assert.match(body, /verbatim/i, 'checkpoint must say the snapshot is stored verbatim (§9)');
+  assert.match(body, /unsummaris|unsummariz|not summaris|not summariz/i,
+    'checkpoint must say nothing summarises it — a one-line snapshot restores nothing');
+  assert.match(body, /run state, not knowledge/i,
+    'checkpoint must draw the line in those words: a checkpoint is run state, not knowledge');
+  assert.match(body, /\/mubit-memory:remember/,
+    'checkpoint must send knowledge to /mubit-memory:remember, or the two writes get swapped '
+    + 'and memory fills with state that expires');
+});
+
+// The split this skill exists to state. Both tools fail as "memory is not working" and their
+// fixes are opposites: an empty store behind a healthy connection and a full store behind a
+// dead endpoint look identical from the status line.
+test('memory-health/SKILL.md states the store/connection split against mubit_status', () => {
+  const { body } = loadSkill('memory-health');
+  assert.match(body, /mubit_status/,
+    'memory-health must name mubit_status — it is the tool it will be confused with (§9)');
+  assert.match(body, /store/i, 'memory-health must say it inspects the store');
+  assert.match(body, /connection/i,
+    'memory-health must say mubit_status inspects the connection; without the second half the '
+    + 'first half is not a distinction');
+});
+
+// ---------------------------------------------------------------------------
+// §9 — activity
+// ---------------------------------------------------------------------------
+
+/**
+ * Like `auth` and `dashboard`, this skill runs a bundled script rather than calling an MCP
+ * tool, so its grant is `allowed-tools` (a Bash permission rule) and not `tools` (the MCP
+ * grant). A `tools:` entry naming a Bash command matches nothing and fails silently, and the
+ * host then prompts for approval on every run.
+ */
+test('activity/SKILL.md grants exactly the Bash permission it needs, and no MCP tools', () => {
+  const { fm } = loadSkill('activity');
+
+  const allowed = fm['allowed-tools'];
+  assert.ok(allowed, 'activity must declare allowed-tools so the host does not prompt on every run');
+  const text = Array.isArray(allowed) ? allowed.join(' ') : String(allowed);
+
+  assert.match(text, /Bash\(/, 'the grant is a Bash permission rule');
+  assert.match(text, /bin\/activity\.mjs/, 'the rule must name the script, not hand the skill a shell');
+  assert.match(text, /\$\{CLAUDE_PLUGIN_ROOT\}/,
+    'the plugin is installed at a path nobody can predict — a relative path resolves elsewhere');
+
+  assert.equal(toolsOf(fm), undefined,
+    'the command talks to the control API itself; an MCP grant would be a second, weaker path to it');
+});
+
+/**
+ * The second skill in the set the model may not invoke, for the same two reasons as the first.
+ *
+ * Pulling a copy of everything an instance holds into a transcript is a thing a person decides
+ * to do. It is also what makes this skill free: a `disable-model-invocation: true` skill's
+ * description is not loaded into context, so it costs nothing until somebody types it — and
+ * `/mubit-memory:doctor` already owns the cheaper, model-facing "is capture working" question.
+ */
+test('activity/SKILL.md is user-invocable but never model-invocable', () => {
+  const { fm } = loadSkill('activity');
+  assert.equal(fm['disable-model-invocation'], true,
+    'nothing in a conversation should decide on its own to export somebody\'s memory');
+});
+
+/**
+ * The guard that matters most, because without it the model will describe an export as
+ * "filtered activity" — the exact false claim the module's design exists to prevent.
+ *
+ * `/v2/control/activity/export` accepts neither `exclude_derived` nor `projection`. An export
+ * is therefore always everything in scope, and a user who asked for "an export of my
+ * non-derived entries" is asking for two different operations. A skill that blurs the two
+ * produces a reply asserting a filter that never ran.
+ */
+test('activity/SKILL.md keeps the listing and the export distinguishable', () => {
+  const { body } = loadSkill('activity');
+  assert.match(body, /never filtered|not filtered|accepts no `?exclude_derived/i,
+    'the skill must say outright that an export carries no filter');
+  assert.match(body, /verbatim|byte for byte/i,
+    'and that its content is what the instance holds rather than something this client shaped');
+  assert.match(body, /never describe an export as/i,
+    'the instruction has to be an instruction, not an implication — this is the sentence that '
+    + 'stops "here is your filtered export"');
+});
+
+/**
+ * Writing a file is the only irreversible thing this command does, and the model is what
+ * decides whether it happens.
+ */
+test('activity/SKILL.md forbids --out unless the user asked for a file, and requires naming the path', () => {
+  const { body } = loadSkill('activity');
+  assert.match(body, /Do not pass `--out` unless/i,
+    'an export is a complete copy of somebody\'s memory; creating one is their decision');
+  assert.match(body, /absolute path/i,
+    'a file the user cannot find is a file they cannot delete — the reply has to name it');
+  assert.match(body, /refuses to overwrite/i, 'the second run of this command is the first one again');
+  assert.match(body, /data dir/i,
+    'an export inside the data dir sits outside the TTL sweep and is never mentioned again');
+});
+
+/**
+ * The corrections are worth nothing if they stop at the terminal. When the instance ignores a
+ * filter, that fact is the finding — and the model is the thing that decides whether the user
+ * ever hears it.
+ */
+test('activity/SKILL.md tells the model to relay the findings rather than summarise them away', () => {
+  const { body } = loadSkill('activity');
+  assert.match(body, /did not honour/i,
+    'the skill must name the "the instance ignored this" line as something to pass on');
+  assert.match(body, /incomplete|prefix/i,
+    'a truncated scan reported as a complete answer is the same lie as an unhonoured filter');
+  assert.match(body, /Relay|rather than summaris/i,
+    'the model\'s default is to compress a note out of existence; this is what stops it');
+});
+
+// `scripts/mubit-inspect.mjs` is not in `files` and is not shipped: it carries untested copies
+// of data-dir discovery and the marker/turn join that `lib/dashboard-data.mjs` now owns with
+// tests behind it, and its HTTP paths have neither breaker discipline nor a deadline. The
+// question it answers — per-prompt cost — is real, so the skill has to route the reader at the
+// surface that does ship it rather than leaving a gap somebody fills with the unshipped script.
+test('activity/SKILL.md routes the per-prompt question at the dashboard, not at a script that does not ship', () => {
+  const { body } = loadSkill('activity');
+  assert.match(body, /Turns/,
+    'per-prompt cost lives in the dashboard\'s Turns tab; this skill cannot answer it');
+  assert.ok(!body.includes('mubit-inspect'),
+    'mubit-inspect.mjs is not in package.json `files` — naming it sends a user to a path that '
+    + 'does not exist in an installed plugin');
+});
+
+// ---------------------------------------------------------------------------
+// §9 — pin
+// ---------------------------------------------------------------------------
+
+/**
+ * Like `auth` and `dashboard`, this skill runs a bundled script rather than calling an MCP
+ * tool — and here that is not a choice. The bundled server registers twenty-one tools and not
+ * one of them touches variables, so there is no tool a `tools:` grant could name.
+ */
+test('pin/SKILL.md grants exactly the Bash permission it needs, and no MCP tools', () => {
+  const { fm } = loadSkill('pin');
+
+  const allowed = fm['allowed-tools'];
+  assert.ok(allowed, 'pin must declare allowed-tools so the host does not prompt on every run');
+  const text = Array.isArray(allowed) ? allowed.join(' ') : String(allowed);
+
+  assert.match(text, /Bash\(/, 'the grant is a Bash permission rule');
+  assert.match(text, /bin\/pin\.mjs/, 'the rule must name the script, not hand the skill a shell');
+  assert.match(text, /\$\{CLAUDE_PLUGIN_ROOT\}/,
+    'the plugin is installed at a path nobody can predict — a relative path resolves elsewhere');
+
+  assert.equal(toolsOf(fm), undefined,
+    'there is no variables tool in the bundled server; a tools: entry here would name nothing');
+});
+
+/**
+ * **The one thing this skill exists to do, and the one it can get wrong.**
+ *
+ * Unlike `dashboard`, `pin` is model-invocable — deliberately. When the user says "for the
+ * rest of this, don't touch the vendored server", the model is who notices, and if it cannot
+ * reach `pin` it writes a *lesson* instead: a durable, cross-session claim about a project
+ * where the sentence stops being true the moment the task ends. That is the exact failure this
+ * skill was built to remove, so the description has to draw the line hard enough that a model
+ * choosing between the two commands chooses correctly from the description alone.
+ */
+test('pin/SKILL.md is model-invocable and draws the line against remember', () => {
+  const { fm, body } = loadSkill('pin');
+
+  assert.notEqual(fm['disable-model-invocation'], true,
+    'the model is who notices a standing constraint; a user-only skill would never be reached '
+    + 'in the moment that matters, and a lesson would be written instead');
+
+  const description = String(fm.description ?? '');
+  assert.match(description, /run\b/i,
+    'the description must say a pin is scoped to this run — that is the whole distinction');
+  assert.match(description, /remember/,
+    'the description is where a model chooses between the two commands, so it has to name the '
+    + 'other one; without it a durable lesson gets written as a pin, or worse, the reverse');
+
+  assert.match(body, /cross-session|every future session/i,
+    'the body must say what a lesson is, or "durable" is an adjective with no consequence');
+  assert.match(body, /\bclear/i,
+    'a pin that outlives its task spends tokens enforcing a rule that is no longer true');
+});
+
+// The caps are refusals a user will hit, and a refusal with no reason reads as a bug. The
+// reason is specific and is the whole argument for the feature being cheap.
+test('pin/SKILL.md states the caps and why a pin is expensive', () => {
+  const { body } = loadSkill('pin');
+  assert.match(body, /\b5\b|\bfive\b/i, 'the pin count cap must be stated');
+  assert.match(body, /200/, 'the per-pin character cap must be stated');
+  assert.match(body, /every prompt|each prompt/i,
+    'a pin is paid in full on every prompt — that is why the caps are tight, and a cap with no '
+    + 'reason gets worked around by shortening the user\'s words');
+});
+
+// §9.3 — the trust rule every script-running skill states.
+test('pin/SKILL.md says it never installs anything, and is not a permission boundary', () => {
+  const { body } = loadSkill('pin');
+  assert.match(body, /never\s+(attempt\s+to\s+)?install|do not install|don't install/i,
+    'a memory plugin running installers is a trust failure (§9.3)');
+  assert.match(body, /permission/i,
+    'a pin is text in front of the model, not a boundary — a user who reads it as one will '
+    + 'stop using the permission system for something that actually has to hold');
 });

@@ -46,8 +46,8 @@ function env(dataDir, endpoint, extra = {}) {
       MUBIT_CC_RUN_STRATEGY: 'static',
       MUBIT_CC_RUN_ID: RUN_ID,
       // Every assertion in this file is about the BODY — what it sends, in what order, and
-      // what it writes. Since MUB-10 that body runs in a detached child by default, so this
-      // switch keeps it here where the assertions can see it. The hand-off itself, and the
+      // what it writes. That body now runs in a detached child by default, so this switch
+      // keeps it here where the assertions can see it. The hand-off itself, and the
       // fact the body survives the hook being killed, are `session-end-detach.test.mjs`.
       MUBIT_CC_SESSION_END_DETACH: '0',
       ...extra,
@@ -164,6 +164,100 @@ test('issues POST /v2/control/reflect BY DEFAULT with no opt-in env', async (t) 
   assert.equal(body.last_n_items, 200);
 });
 
+// ---------------------------------------------------------------------------
+// §5.7 step 4 — the 504 retry
+// ---------------------------------------------------------------------------
+
+/*
+ * Why reflect, alone among this hook's calls, retries.
+ *
+ * 12 reflect failures were logged over four days and every one was an HTTP 504. A reflection
+ * over a real run finishes close to the point where it is given up on, so the call sits on a
+ * cliff where latency variance alone decides it: the identical request, issued four times in
+ * a row, returned 504, 504, 200, 504.
+ *
+ * So the second attempt is not hoping the server reconsidered — it is re-rolling a throw.
+ * These three tests pin the policy: retry a 5xx, stop at two, and never retry a verdict a
+ * repeat cannot change.
+ */
+
+test('retries reflect once on 504 and keeps the second attempt\'s lessons', async (t) => {
+  const server = await fakeMubit({
+    // fakeMubit walks an array of replies and holds the last, so this is "504 then 200".
+    'POST /v2/control/reflect': [
+      { status: 504, json: { error: 'request could not be processed' } },
+      { json: { lessons: [], summary: 'ok', confidence: 0.9, degraded: false, lessons_stored: 3 } },
+    ],
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/reflect', 2);
+
+  const marker = readMarker(dataDir);
+  assert.equal(marker.reflect.status, 'ok',
+    'a 504 that succeeds on retry is a successful reflect, not a failed one');
+  assert.equal(marker.reflect.lessons_stored, 3);
+  assert.equal(marker.reflect.attempts, 2,
+    'the marker records how many attempts it took — one 504 is invisible otherwise');
+
+  // The retry must be the same request. A retry that quietly narrows its own evidence
+  // would make the second attempt succeed for a reason we did not intend.
+  const [first, second] = server.calls('POST', '/v2/control/reflect');
+  assert.deepEqual(second.body, first.body, 'the retry must re-send an identical body');
+});
+
+test('stops after two reflect attempts when the 504 persists', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/reflect': { status: 504, json: { error: 'request could not be processed' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  // §5.7 — a failing reflect is best-effort. It costs scope promotion, never the hook.
+  assertHookContract(r);
+  assert.deepEqual(r.json, { suppressOutput: true });
+  server.assertCalled('POST', '/v2/control/reflect', 2);
+
+  const marker = readMarker(dataDir);
+  assert.equal(marker.reflect.status, 'failed');
+  assert.equal(marker.reflect.attempts, 2, 'two attempts, and no third');
+  assert.equal(marker.reflect.lessons_stored, 0);
+  assert.match(String(marker.last_error ?? ''), /504/,
+    'the marker keeps the reason, so the doctor skill can name it');
+
+  // The captures were already committed before reflect was attempted (§5.7): a reflect that
+  // fails twice must still not cost the session its ingest.
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0);
+});
+
+test('does not retry reflect on 403 — an identical request cannot fix auth', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/reflect': { status: 403, json: { error: 'request could not be processed' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/reflect', 1);
+  assert.equal(readMarker(dataDir).reflect.attempts, 1,
+    'a 4xx is a verdict about the request, not a dice throw — going again only doubles the cost');
+});
+
 // §5.7 — "Runs INLINE, not detached." The ingest is deliberately slow: a detached
 // drain would let the hook exit first and this count would still be 0. There is no
 // `waitFor` here on purpose — that is the assertion.
@@ -260,9 +354,8 @@ function seedMeasuredTurn(dataDir, promptId, used, over = {}) {
 }
 
 // §5.5 step 7: injected and the reply carried none of the memory's vocabulary. Recorded at
-// exactly 0.0 with an EMPTY entry_ids[] — attributed reinforcement counts any signal >= 0 as
-// one reinforcement, so naming the entries here would credit precisely the memories nothing
-// showed were read.
+// exactly 0.0 with an EMPTY entry_ids[] — naming the entries here would credit precisely the
+// memories nothing showed were read.
 test('an ignored injection flushes as neutral 0.0 with no entry_ids', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
@@ -398,8 +491,8 @@ for (const row of [
  * THE test for this ticket, on the flush side — and the one that has to exist because of
  * *how* `StopFailure` fires.
  *
- * The host's registry (Claude Code 2.1.235): `StopFailure` "fires **instead of** Stop when an
- * API error … ended the turn". So `capture --stop` never runs on a rate-limited turn, and
+ * The host's registry (Claude Code 2.1.235) has `StopFailure` firing **instead of** Stop when
+ * an API error ended the turn. So `capture --stop` never runs on a rate-limited turn, and
  * `capture --stop-failure` is what closes it — `outcome_pending: true`, exactly like any
  * other closed turn, because hiding the turn from the sweep is not the same as deciding
  * about it. This flush therefore genuinely picks the turn up, reads it, and posts nothing;
@@ -585,7 +678,7 @@ test('marker gains reflect {at, lessons_stored, status} from the response', asyn
   assert.ok(marker.reflect.at >= before);
 });
 
-// §5.7 "Failure" / §12.1 F29 — a failed reflect is best-effort. What must NOT happen is
+// §5.7 "Failure" / §12.1 — a failed reflect is best-effort. What must NOT happen is
 // losing the drain with it: the captures are already gone from the spool's perspective.
 test('a failed reflect is logged, marked failed, exits 0 — and the drain still commits', async (t) => {
   const server = await fakeMubit({ 'POST /v2/control/reflect': { status: 500, json: { error: 'llm down' } } });
@@ -613,13 +706,9 @@ test('a failed reflect is logged, marked failed, exits 0 — and the drain still
 
 /**
  * §1.4 / §5.7 "Expectation-setting". A reflect that stores 3 lessons has NOT made them
- * cross-session durable. Promotion past `run` scope is gated three more ways, all in the
- * same server-side loop:
- *
- *   1. not a rule           — `lesson.is_rule` entries never scope-promote
- *   2. validation `Active`  — pending/rejected candidates must earn trust first 
- *   3. recurrence           — the normalized key must recur
- *                             the promotion threshold times, default 3 
+ * cross-session durable. Storing a lesson and that lesson outliving its own run are two
+ * different events; only the first is anything this hook can see, and nothing in the reflect
+ * response says whether the second will follow.
  *
  * One reflect per session is the NECESSARY condition, not the sufficient one. So the hook
  * reports a count and nothing more — a marker or systemMessage promising durability would

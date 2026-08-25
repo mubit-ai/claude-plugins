@@ -2,10 +2,9 @@
 /**
  * `lib/config.mjs`.
  *
- * Protects build-guide §4.1 (the module API and the frozen `Config` shape),
- * §6.1 (environment variables and their defaults), §6.2 (`userConfig` keys and
- * the env var each maps to), §6.3 (the `CLAUDE_PLUGIN_OPTION_*` injection
- * guard), §7 (`config.json`, 300 s TTL) and §12.6.
+ * Protects the module API and the frozen `Config` shape, every environment variable
+ * and its default, each `userConfig` key and the env var it maps to, the
+ * `CLAUDE_PLUGIN_OPTION_*` injection guard, and the 300 s `config.json` cache.
  *
  * `loadConfig(env = process.env)` takes its environment as an argument, so most
  * of this file drives it with explicit env objects. `process.env` is patched to
@@ -277,7 +276,7 @@ test('precedence: the built-in default is the floor', async () => {
   assert.equal(cfg.runStrategy, 'per-directory');
 });
 
-// §4.1/§12.1-F14: a malformed project file cannot take the plugin down.
+// §4.1/§12.1: a malformed project file cannot take the plugin down.
 test('precedence: a corrupt .mubit-cc.json falls through to the default', async () => {
   const config = await lib('config.mjs');
   const dataDir = makeDataDir();
@@ -379,7 +378,7 @@ test('the endpoint is used verbatim, whatever host it names', async () => {
 // §1.2 authHeaders
 // ===========================================================================
 
-// §1.2: header is `Authorization: Bearer <key>`; §12.1-F3 depends on it being
+// §1.2: header is `Authorization: Bearer <key>`; §12.1 depends on it being
 // absent (not empty) when no key is configured, so a 401 is unambiguous.
 test('authHeaders(): {} when there is no key', async () => {
   const config = await lib('config.mjs');
@@ -474,15 +473,18 @@ test('envTags(): caps at 8 tags', async () => {
 // ===========================================================================
 
 /**
- * Every `userConfig` key declared in build-guide §3.1, the §6.2 env var it maps
- * to, and the resolved `Config` field it lands in. Booleans are asserted with
- * the `0`/`1` convention §6.1 uses for env vars and the `"false"` a JSON
+ * Every `userConfig` key the manifest declares, the env var it maps to, and the
+ * resolved `Config` field it lands in. Booleans are asserted with the `0`/`1`
+ * convention the env vars use and the `"false"` a JSON
  * boolean stringifies to when the host exports it as an option.
  */
 const USER_CONFIG_ROWS = [
   { key: 'endpoint', env: 'MUBIT_ENDPOINT', field: 'endpoint', raw: 'https://mubit.example.com', want: 'https://mubit.example.com' },
   { key: 'apiKey', env: 'MUBIT_API_KEY', field: 'apiKey', raw: 'mbt_acme_kid_secret', want: 'mbt_acme_kid_secret' },
-  { key: 'userId', env: 'MUBIT_CC_USER_ID', field: 'userId', raw: 'eldar@mubit.ai', want: 'eldar@mubit.ai' },
+  { key: 'userId', env: 'MUBIT_CC_USER_ID', field: 'userId', raw: 'you@example.com', want: 'you@example.com' },
+  // The neighbour of `userId` it must never be confused with: `actorId` is attribution, and
+  // rides along with what you save; `userId` narrows what a search can return.
+  { key: 'actorId', env: 'MUBIT_CC_ACTOR_ID', field: 'actorId', raw: 'ada', want: 'ada' },
   { key: 'runStrategy', env: 'MUBIT_CC_RUN_STRATEGY', field: 'runStrategy', raw: 'git-branch', want: 'git-branch' },
   { key: 'capture', env: 'MUBIT_CC_CAPTURE', field: 'capture', raw: '0', optRaw: 'false', want: false },
   { key: 'recall', env: 'MUBIT_CC_RECALL', field: 'recall', raw: '0', optRaw: 'false', want: false },
@@ -490,6 +492,10 @@ const USER_CONFIG_ROWS = [
   { key: 'recallTokenBudget', env: 'MUBIT_CC_RECALL_TOKENS', field: 'recallTokenBudget', raw: '900', want: 900 },
   { key: 'recallAssemble', env: 'MUBIT_CC_RECALL_ASSEMBLE', field: 'recallAssemble', raw: 'server', want: 'server' },
   { key: 'recallRepeatMode', env: 'MUBIT_CC_RECALL_REPEAT_MODE', field: 'recallRepeatMode', raw: 'full', want: 'full' },
+  // Asserted at a concrete mode rather than at `auto`: `auto` is the default, so a row that
+  // set it there would pass just as well against a key `loadConfig` never reads. `freshness`
+  // is also the value an operator most plausibly pins, since it is the whole point of the key.
+  { key: 'recallRankBy', env: 'MUBIT_CC_RECALL_RANK_BY', field: 'recallRankBy', raw: 'freshness', want: 'freshness' },
   // Asserted ON rather than off: the default is already false, so a row that set it to false
   // would pass just as well against a key `loadConfig` never reads.
   { key: 'recallAsync', env: 'MUBIT_CC_RECALL_ASYNC', field: 'recallAsync', raw: '1', optRaw: 'true', want: true },
@@ -506,6 +512,11 @@ const USER_CONFIG_ROWS = [
   // proven here. Its default is asserted separately below, and again in `pre-tool.test.mjs`
   // against the running hook — this is the stage that can put text in front of a tool call.
   { key: 'preToolWarnings', env: 'MUBIT_CC_PRE_TOOL_WARNINGS', field: 'preToolWarnings', raw: '1', optRaw: 'true', want: true },
+  // Asserted OFF, because on is the default and a row that set it to true would pass
+  // just as well against a key `loadConfig` never reads. The default itself is asserted below
+  // and, against the running hooks, in `session-resume.test.mjs` — which is the only place in
+  // the repo that can see it, since `baseEnv` pins the flag off for every other suite.
+  { key: 'resumeBlock', env: 'MUBIT_CC_RESUME_BLOCK', field: 'resumeBlock', raw: '0', optRaw: 'false', want: false },
 ];
 
 for (const row of USER_CONFIG_ROWS) {
@@ -541,6 +552,10 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.mode, 'hosted');
   assert.equal(cfg.apiKey, '');
   assert.equal(cfg.userId, '');
+  // Empty by default, and detection deliberately stays out of `resolveAll`: a subprocess
+  // result cached for 300 s under an input hash that cannot invalidate it is a bug waiting
+  // to happen, and `drain` — detached, unbudgeted — is where the ladder belongs.
+  assert.equal(cfg.actorId, '');
   assert.equal(cfg.runStrategy, 'per-directory');
   assert.equal(cfg.capture, true);
   assert.equal(cfg.recall, true);
@@ -551,6 +566,11 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   // §5.2: a memory already injected this run is repeated as a one-line pointer rather than
   // in full. `full` is the pre-seen-set behaviour and costs up to 1500 tokens every prompt.
   assert.equal(cfg.recallRepeatMode, 'pointer');
+  // §5.2: `auto` decides per prompt — a handoff question ("where were we?") is ranked by
+  // recency, everything else by similarity. Defaulting to `relevance` would keep the bug;
+  // defaulting to `freshness` would rank every ordinary question by recency, which is the
+  // same mistake pointed the other way.
+  assert.equal(cfg.recallRankBy, 'auto');
   // Carry-forward recall is opt-in. Default-on would hand every install a first prompt with
   // no memory and a turn of staleness on every prompt after it, in exchange for latency
   // most instances do not have a problem with.
@@ -565,6 +585,14 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   // changes for an existing user until they ask for it — which is also what makes "measure
   // how often it fires" a safe thing to run.
   assert.equal(cfg.preToolWarnings, false);
+  // On, and the only opt-in feature in this table that ships on. The three above it are off
+  // because each costs something on EVERY prompt; this costs one detached process and two LLM
+  // calls once per session, at the one moment the model knows least about what it is walking
+  // into. A session that has none of it is the status quo this feature exists to end.
+  assert.equal(cfg.resumeBlock, true);
+  // §6.1 — environment-only. Lower than `recallTokenBudget` because the two are spent in the
+  // same message on the first prompt of a session.
+  assert.equal(cfg.resumeTokenBudget, 1000);
   assert.equal(cfg.maxParamBytes, 4096);
   assert.equal(cfg.maxOutputBytes, 8192);
   assert.equal(cfg.batchMaxItems, 32);
@@ -578,8 +606,8 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.ok(Array.isArray(cfg.mcpTools), 'mcpTools must be an array');
   assert.ok(cfg.mcpTools.length > 0, 'a blank MUBIT_MCP_TOOLS means the curated set, not none');
   assert.equal(cfg.mcpLessonScope, 'run',
-    'the ceiling on an agent-written lesson defaults to the run it was written in — a wider\n'
-    + 'default is the cross-run leak the MCP egress guard exists to close');
+    'the ceiling on an agent-written lesson defaults to the run it was written in — the\n'
+    + 'narrowest scope, which is what the MCP egress guard is there to hold it to');
   assert.ok(Array.isArray(cfg.denyGlobs), 'denyGlobs must be an array');
 });
 
@@ -682,7 +710,7 @@ test('loadConfig(): a config.json older than the 300 s TTL is not served', async
   assert.ok(statSync(p).mtimeMs > agedMtime, 'the expired cache was not refreshed');
 });
 
-// §7/§12.1-F14: a corrupt cache is a bad day, not an outage.
+// §7/§12.1: a corrupt cache is a bad day, not an outage.
 test('loadConfig(): a corrupt config.json is ignored', async () => {
   const config = await lib('config.mjs');
   const dataDir = makeDataDir();
@@ -714,8 +742,8 @@ test('loadConfig(): an unrecognised mcpLessonScope falls back to run', async () 
   }
 });
 
-// The three the control plane accepts from a client. `org` is promotion-only (§1.6) and is
-// deliberately absent: a client that could name it could write a tenant-wide rule.
+// The three scopes a client may set. The widest one is not among them: it is not a value a
+// client sets for itself, so there is nothing here for it to be clamped down from.
 test('loadConfig(): mcpLessonScope accepts run, session and global — and nothing else', async () => {
   const config = await lib('config.mjs');
   const projectDir = makeProjectDir();

@@ -2,7 +2,7 @@
 /**
  * `lib/state.mjs` — the durable surface under `${CLAUDE_PLUGIN_DATA}`.
  *
- * Build-guide §4.8 (module API) and §7 (state layout + TTL table).
+ * The module API, the on-disk state layout and its TTL table.
  *
  * Every hook is a short-lived process, so anything that must survive a process
  * boundary goes through here. Three rules hold everywhere in this file:
@@ -152,8 +152,11 @@ export function writeJsonAtomic(p, value, opts = {}) {
  * `session-end.mjs` — never on a blocking hook's critical path — and gated to
  * at most once an hour by an `O_EXCL` `prune.lock`.
  *
- * The sweep is a scalpel: `config.json`, `breaker/*` and `policy/*` are owned by
- * their own TTL logic and are never touched here.
+ * The sweep is a scalpel: `config.json`, `actor.json`, `breaker/*` and `policy/*`
+ * are owned by their own TTL logic and are never touched here. `actor.json` is
+ * `lib/actor.mjs`'s 30-day record of the detected actor id, and it is written only
+ * by `drain.mjs`; expiring it from here on a different schedule would un-attribute
+ * every capture between the sweep and the next drain.
  *
  * @param {Record<string, any>} [cfg]
  * @returns {void}
@@ -208,6 +211,19 @@ export function pruneStale(cfg = {}) {
       // (`lib/seen.mjs`). It also expires entry by entry on every read; this is the sweep
       // for a run nobody comes back to, whose whole file would otherwise outlive its turns.
       expire(join(rd, 'seen.json'), 6 * HOUR);
+      // runs/<run_id>/resume.json — 1 h. The briefing is already consume-once and
+      // already carries its own 30 min injectability window (`lib/resume.mjs`), so this is
+      // the sweep for the file nobody ever came back to read: a session that was started and
+      // abandoned before its first prompt leaves one behind, and it would otherwise sit in
+      // the data directory for as long as the run does.
+      expire(join(rd, 'resume.json'), 1 * HOUR);
+      // runs/<run_id>/pins.json — 7 d. Longer than the seen-set and the turns because a pin
+      // is scoped to a *run*, and under the default `per-directory` strategy a run is a
+      // project someone comes back to for weeks. It is a cache either way: the next drain
+      // re-derives it from the instance, and a sweep that fired early would only cost the
+      // prompts between it and that drain. Kept in the table rather than left out so a run
+      // nobody returns to does not leave a file behind for ever.
+      expire(join(rd, 'pins.json'), 7 * DAY);
       // runs/<run_id>/drain.lock — 60 s, stolen after
       expire(join(rd, 'drain.lock'), 60 * SEC);
       // runs/<run_id>/checkpoints.json — 30 d; jobs.json — 24 h
@@ -221,7 +237,7 @@ export function pruneStale(cfg = {}) {
       }
     }
   } catch {
-    // §12.1-F14: an unusable DATA dir costs the sweep, nothing else.
+    // §12.1: an unusable DATA dir costs the sweep, nothing else.
   }
 }
 

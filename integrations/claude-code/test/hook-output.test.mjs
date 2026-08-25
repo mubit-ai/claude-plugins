@@ -28,14 +28,14 @@
  * host. `drain.mjs` is deliberately absent — it is spawned detached by other hooks, never by
  * the host, so nothing ever reads its stdout.
  *
- * The two host rules this encodes, both read out of the shipped binary (see the extraction
- * commands on each constant):
+ * The two host rules this encodes, both established against a running Claude Code rather
+ * than taken from the published reference (the constants below record what it accepts):
  *
  *   1. `hookSpecificOutput.hookEventName` must be a name the host knows. Validation runs
- *      before dispatch, and a name outside the union fails the WHOLE object.
- *   2. It must also equal the event that fired:
- *      `if (i && e.hookSpecificOutput.hookEventName !== i) throw Error("Hook returned
- *      incorrect event name: expected '" + i + "' but got ...")`.
+ *      before dispatch, and a name outside the accepted set fails the WHOLE object.
+ *   2. It must also equal the event that fired. Borrowing a neighbouring event's name is
+ *      rejected outright — the host answers with an "incorrect event name" error naming the
+ *      event it expected — never coerced, and never quietly let through.
  *
  * Together those are stronger than either alone: a hook registered on an event outside the
  * accepted set has **no `hookSpecificOutput` channel at all** — not under its own name, which
@@ -55,34 +55,25 @@ import {
 import * as fx from './helpers/fixtures.mjs';
 
 // ---------------------------------------------------------------------------
-// The host's contract, copied verbatim from the shipping binary
+// The host's contract, as Claude Code actually enforces it
 // ---------------------------------------------------------------------------
 
-/** The Claude Code build these constants were read out of. */
+/** The Claude Code build these constants were established against. */
 const HOST_VERSION = '2.1.233';
 
 /**
- * The `hookEventName` values the host does something with, from its dispatch switch.
- * Re-derive (read-only) with:
+ * The `hookEventName` values the host does something with — the ones it both validates and
+ * then acts on.
  *
- *     V=~/.local/share/claude/versions/2.1.233
- *     strings -a "$V" \
- *       | grep -o 'switch(e.hookSpecificOutput.hookEventName){.\{0,4000\}' | head -1 \
- *       | grep -o 'case"[A-Za-z]*"'
+ * Validating and acting are two different sets, and the validating one is a strict superset:
+ * it also accepts `CwdChanged`, `FileChanged`, `Notification` and `WorktreeCreate`, which
+ * pass the schema and are then dropped on the floor. `CwdChanged` is one this plugin
+ * registers, so that distinction is load-bearing here rather than trivia: its hook has to
+ * deliver its effect by writing state, because anything it said would be accepted and
+ * discarded. The rejection a name outside the validating set earns reads
+ * `(root): Invalid input`, which names neither the field nor the value.
  *
- * That prints four extra labels — `allow`, `deny`, `ask`, `defer` — which belong to the
- * nested `permissionDecision` switch inside `case"PreToolUse"` and are not event names.
- *
- * The zod union that runs *first*, and whose rejection reads `(root): Invalid input`, is a
- * strict superset: it adds `CwdChanged`, `FileChanged`, `Notification` and `WorktreeCreate`,
- * which validate and then fall through the switch. `CwdChanged` is one this plugin registers,
- * so that distinction is load-bearing here rather than trivia: its hook has to deliver its
- * effect by writing state, because anything it said would be accepted and discarded.
- *
- *     strings -a "$V" | grep -o 'hookEventName:[A-Za-z0-9_$]*("[A-Za-z]*")' \
- *       | grep -o '"[A-Za-z]*"' | sort -u
- *
- * The dispatch set is the one pinned here, because passing validation only to be ignored is
+ * The acted-on set is the one pinned here, because passing validation only to be ignored is
  * indistinguishable from never having emitted anything.
  *
  * Neither set contains `PreCompact`, `PostCompact` or `SessionEnd`. Those events are real and
@@ -96,10 +87,8 @@ const ACCEPTED_HOOK_EVENT_NAMES = Object.freeze([
 ]);
 
 /**
- * The top-level keys of the same schema, from the "Expected schema:" block the host prints
- * when it rejects an output:
- *
- *     strings -a "$V" | grep -o 'continue:"boolean (optional)".\{0,300\}'
+ * The top-level keys of the same schema, taken from the "Expected schema:" block the host
+ * itself prints when it rejects an output.
  *
  * Unknown keys are stripped rather than rejected, so an invented top-level field does not
  * fail — it is simply ignored, which is the quieter half of the same bug.

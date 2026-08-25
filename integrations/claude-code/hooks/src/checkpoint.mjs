@@ -56,8 +56,8 @@
  *
  * — so every re-anchor this hook emitted was discarded, silently, on every compaction since
  * the first release. `--pre` was never affected because `systemMessage` is a top-level field
- * and never reaches that union. `test/hook-output.test.mjs` holds the accepted set, the
- * command that re-derives it from the host binary, and the gate that now covers every hook.
+ * and never reaches that union. `test/hook-output.test.mjs` holds the accepted set and the
+ * gate that now covers every hook.
  *
  * So the re-anchor moved to `hooks/src/session-start.mjs`, which fires with
  * `source === "compact"` after a compaction and whose `SessionStart` name **is** accepted. It
@@ -73,6 +73,7 @@
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { readActor } from '../../lib/actor.mjs';
 import { clearCarry } from '../../lib/carry.mjs';
 import { classifyTurn } from '../../lib/classify.mjs';
 import { envTags } from '../../lib/config.mjs';
@@ -81,6 +82,7 @@ import { postCheckpoint } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
 import { deriveAgentId, deriveRunId, resolveProjectDir, turnNumber } from '../../lib/runid.mjs';
+import { clearResume } from '../../lib/resume.mjs';
 import { clearSeen } from '../../lib/seen.mjs';
 import { appendItem } from '../../lib/spool.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
@@ -323,6 +325,11 @@ function postcompact(payload, cfg) {
   // are already baked in — clearing the set alone would leave a block promising that the full
   // entries are earlier in a transcript that no longer exists.
   clearCarry(cfg, runId);
+  // …and the resume briefing, if this session's first substantive prompt never arrived before
+  // the compaction did. It describes a session in the shape it had before the transcript was
+  // rewritten, and `session-start` re-anchors a compacted run through the checkpoint id below
+  // instead — which is the same job done against a conversation that is actually there.
+  clearResume(cfg, runId);
 
   const latest = readHistory(cfg, runId).at(-1);
   const checkpointId = str(latest?.checkpoint_id);
@@ -616,6 +623,13 @@ function spoolSummary(cfg, runId, payload, snap, label) {
     () => classifyTurn('', '', { event: 'PreCompact', trigger: str(payload.trigger) }),
     { intent: 'checkpoint', importance: 'medium', contentType: 'text' });
 
+  // The anchor is an ingest item like any other, so it wears the actor like any other —
+  // otherwise the one memory that survives a compaction is the one nobody is attributed for.
+  // A pure cache read (`lib/actor.mjs`); the detection ladder lives in `drain`. And as
+  // everywhere else it goes in `metadata_json`, never in `user_id`: that field is a
+  // retrieval scope the server enforces as a query filter, and recall sends none.
+  const actor = attempt(() => readActor(cfg), '');
+
   appendItem(cfg, runId, {
     // §1.3: `item_id` and `content_type` are REQUIRED — a missing one is a 422 for the whole
     // batch. Derived from (session, counter) and never from a clock, so a retried drain
@@ -644,6 +658,9 @@ function spoolSummary(cfg, runId, payload, snap, label) {
       snapshot_bytes: snap.bytes,
       redactions: snap.redactions + num(body.redactions),
       truncated: snap.truncated || !!body.truncated,
+      // Omitted entirely when unknown — `"actor": ""` is a field that is always there and
+      // never says anything.
+      ...(actor ? { actor } : {}),
     }),
     ...(str(cfg?.userId) ? { user_id: str(cfg.userId) } : {}),
   });

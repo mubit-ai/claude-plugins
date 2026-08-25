@@ -44,13 +44,15 @@
 import { renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
+import { resolveActor } from '../../lib/actor.mjs';
 import { readBreaker } from '../../lib/breaker.mjs';
 import { loadConfig } from '../../lib/config.mjs';
 import { postIngest, postOutcome } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
-import { deriveAgentId, deriveRunId, turnKey } from '../../lib/runid.mjs';
+import { refreshPins } from '../../lib/pins.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import {
   acquireDrainLock, batchIdempotencyKey, commitBatch, readBatch, releaseDrainLock, spoolStats,
 } from '../../lib/spool.mjs';
@@ -176,8 +178,8 @@ async function main() {
     // than making it unlikely.
     //
     // It is still checked: a run id names a directory under the data dir as well as a run,
-    // and `"default"` is the value that collapses every user and project into one shared
-    // run (§4.3). An unusable pin drains nothing — the spool waits.
+    // and `"default"` is the placeholder that names no project (§4.3). An unusable pin
+    // drains nothing — the spool waits.
     runId = usableRunId(pinnedRun);
     if (!runId) {
       log(cfg, 'error', `drain: refusing the pinned run id ${JSON.stringify(pinnedRun)}`);
@@ -225,6 +227,48 @@ async function main() {
   } finally {
     clearTimeout(hardStop);
     letGo();
+  }
+
+  // Who the work belongs to, refreshed at most once every 30 days (`lib/actor.mjs`).
+  //
+  // This is the one caller of the detection ladder, and this is the only place in the plugin
+  // that can afford it: the ladder shells out to `git` twice on a cache miss, and every other
+  // hook is either blocking or on the per-tool-call path. `capture` and `checkpoint` only
+  // ever *read* the cache this writes.
+  //
+  // It sits here, in the same unbudgeted tail as the TTL sweep, rather than up beside
+  // `loadConfig`: the drainer's job is shipping memory, and a once-a-month cache miss must
+  // not put up to two 2000 ms `git` timeouts in front of the ingest that a user is waiting
+  // to see land. The cost of running late is one uncredited item on a fresh install.
+  try {
+    resolveActor(cfg, resolveProjectDir(cfg, payload));
+  } catch {
+    // §4.9: a name is never worth a drain. The items ship either way.
+  }
+
+  // The run's pinned context, refreshed at most once a minute (`lib/pins.mjs`).
+  //
+  // It sits beside `resolveActor` for exactly the same reason. `hooks/src/prompt-recall.mjs`
+  // renders pins on a hook that blocks every prompt inside a 1500 ms budget, so its half of
+  // this is one `readJson` and cannot be anything more — which means the dial has to happen
+  // somewhere, and this is the only process in the plugin that can afford one.
+  //
+  // After the items have shipped, in the same unbudgeted tail as the actor and the TTL sweep:
+  // the drainer's job is memory, and a slow control-plane call must not sit in front of an
+  // ingest a user is waiting to see land. Running late costs one prompt's worth of staleness
+  // in a cache whose whole design says a stale pin still renders.
+  //
+  // Skipped when the breaker is not reporting `ready`. That guard is about the *verdict*, not
+  // the traffic: `recordSuccess` clears the connection state for the whole endpoint, so a
+  // successful `variables/list` issued moments after a 500 on `/v2/control/ingest` would
+  // whitewash the failure the status line is meant to be showing. The instance has just said
+  // it is unwell; the pins can wait for the drain that finds it well again, and until then a
+  // stale pin still renders.
+  try {
+    if (readBreaker(cfg).state === 'ready') await refreshPins(cfg, runId);
+  } catch {
+    // §4.9: a pin is never worth a drain. A failed refresh leaves the previous cache alone,
+    // which is the behaviour that matters — see `lib/pins.mjs`.
   }
 
   // §7's TTL sweep runs only from here and from `session-end` — never on a blocking hook's
@@ -298,7 +342,7 @@ async function drainSpool(cfg, runId, agentId, promptId, started) {
     }
 
     if (isRejectedPayload(res)) {
-      // §5.5 step 6 / F16: the payload is bad, not the server. Quarantine and never retry.
+      // §5.5 step 6: the payload is bad, not the server. Quarantine and never retry.
       quarantine(cfg, runId, batch, res);
       rejected += batch.length;
       continue;

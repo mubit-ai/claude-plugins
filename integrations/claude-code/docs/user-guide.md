@@ -521,8 +521,8 @@ MUBIT_CC_PRE_TOOL_WARNINGS=0 claude   # stop the pre-command reminders (already 
 mubit_recall,mubit_learned
 ```
 
-> The bundled server currently registers all 21 tools regardless, so `/mcp` will show 21 and
-> `mcpTools` has no effect yet. Cosmetic — the ten in the default set are the ones the skills
+> The bundled server honours the allowlist: `/mcp` shows the ten in the default set, which
+> are the ones the skills
 > use. Fixed by the next `@mubit-ai/mcp` release.
 
 ---
@@ -543,7 +543,8 @@ Authorization: Bearer abc123...        ->  Authorization: [REDACTED:bearer]
 -----BEGIN RSA PRIVATE KEY-----        ->  [REDACTED:pem]
 ```
 
-Plus a catch-all: 32+ base64/hex characters with Shannon entropy ≥ 4.0. Git SHAs cannot trip it.
+Plus a catch-all for anything that merely looks like a secret: a long run of random-looking
+characters is redacted on sight. Hex-only strings are safe, so git SHAs survive it.
 
 **2. Path denylist — dropped entirely, not scrubbed.** A redacted `.env` is still a map of which
 secrets a project holds:
@@ -643,11 +644,11 @@ or delete the run server-side.
 
 Verified on this machine: `claude plugin validate` on both manifests; adding the local directory
 marketplace and listing it; a real `claude plugin install` from it, `claude plugin details`, and
-`claude plugin uninstall`; the plugin loading with 6 skills / 1 agent / MCP connected; and the
+`claude plugin uninstall`; the plugin loading with 7 skills / 1 agent / MCP connected; and the
 shape of the on-disk status marker. Every expected-output block above is a transcript.
 
-Not verified: installing from a pushed GitHub repo. The distribution repo's contents are built
-and `claude plugin validate` passes against them, but `mubit-ai/claude-plugins` has not been
-created on GitHub yet, so the clone-and-install path is untested end to end. Also unverified is
+Not verified: a fresh clone-and-install from GitHub. The transcripts above were produced from a
+local directory marketplace, so the install path most people take — `/plugin marketplace add
+mubit-ai/claude-plugins` — is exercised by its parts and not end to end here. Also unverified is
 any behaviour that needs a running Mubit: recall content, reflection output, and lesson
 promotion — those need a live instance and are covered separately.

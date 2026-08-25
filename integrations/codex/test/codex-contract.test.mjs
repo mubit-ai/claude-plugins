@@ -15,20 +15,18 @@
  *      five events can emit context at all; setting it elsewhere is warned about and discarded.
  *   3. **`tool_response` is schema-`true`** — any JSON type — and the code handled the string
  *      and object cases it had seen.
- *   4. **The rule table's own extraction**, which had no count check and a recipe that
- *      truncated any message containing a hyphen.
+ *   4. **The rule table**, which nothing held to a size or to the events it must cover.
  *   5. **`assertWithinBudget` was exported and called zero times.** A budget nothing measures
  *      is a comment.
  */
 
 import test from 'node:test';
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
   assert, assertOutputAccepted, assertValid, assertWithinBudget, baseEnv, CODEX_ROOT,
-  CODEX_EVENTS, fakeMubit, makeDataDir, makeProjectDir, runHook, schemaSlug,
+  CODEX_EVENTS, fakeMubit, makeDataDir, makeProjectDir, outputCapabilities, runHook, schemaSlug,
   postToolUse, preToolUse, permissionRequest, sessionStart, sessionEnd, stop, subagentStart,
   subagentStop, userPromptSubmit, preCompact, postCompact,
 } from './helpers/codex-fixtures.mjs';
@@ -154,24 +152,15 @@ test('a hook that fails still writes nothing but JSON', async (t) => {
 /** The five events whose output schema carries `additionalContext` at all. */
 const CAN_EMIT_CONTEXT = ['PreToolUse', 'PostToolUse', 'SessionStart', 'SubagentStart', 'UserPromptSubmit'];
 
-test('the five events that can emit context are the five the host says', () => {
-  // § Read off the host's own output schemas rather than asserted from memory, so the list
-  //   above cannot drift away from what Codex will accept.
+test('the five events that can emit context are the five the contract lists', () => {
+  // § Read off the output contract rather than asserted from memory, so the list above cannot
+  //   drift away from it. `codex-payload.test.mjs` is where the contract itself is held to
+  //   what a real session was recorded accepting.
   for (const event of CODEX_EVENTS) {
     if (event === 'SessionEnd') continue;               // no output wire type at all
-    const schema = JSON.parse(readFileSync(
-      join(CODEX_ROOT, 'test', 'fixtures', 'codex-hook-schemas', `${schemaSlug(event)}.command.output.json`),
-      'utf8'));
-    // § `hookSpecificOutput` is `{allOf: [{$ref}], default: null}` on most events and a bare
-    //   `$ref` on others, so both spellings have to resolve — a resolver that handled only one
-    //   would report "does not emit context" for half the list and look like a real finding.
-    const hso = schema.properties?.hookSpecificOutput;
-    const refOf = (n) => /#\/definitions\/(.+)$/.exec(String(n?.$ref ?? ''))?.[1];
-    const name = refOf(hso) ?? (Array.isArray(hso?.allOf) ? hso.allOf.map(refOf).find(Boolean) : undefined);
-    const def = name ? schema.definitions?.[name] : hso;
-    const emits = !!def?.properties?.additionalContext;
+    const emits = outputCapabilities(event).emitsAdditionalContext;
     assert.equal(emits, CAN_EMIT_CONTEXT.includes(event),
-      `${event}: the schema ${emits ? 'DOES' : 'does not'} carry additionalContext, and the `
+      `${event}: the contract ${emits ? 'DOES' : 'does not'} carry additionalContext, and the `
       + `list in this file says ${CAN_EMIT_CONTEXT.includes(event) ? 'it does' : 'it does not'}.`);
   }
 });
@@ -279,65 +268,33 @@ test('every JSON type of tool_response is survivable', async (t) => {
 });
 
 // ===========================================================================
-// 4. The rule table's own extraction
+// 4. The rule table, against a session that actually ran
 // ===========================================================================
 
 const RULES_PATH = join(CODEX_ROOT, 'test', 'fixtures', 'codex-output-rules.json');
 const rulesDoc = () => JSON.parse(readFileSync(RULES_PATH, 'utf8'));
 
-test('the rule table holds the number of rules it says it holds', () => {
+test('the rule table still covers every event that has a rule', () => {
   const doc = rulesDoc();
   const all = Object.values(doc.rules).reduce((n, rs) => n + rs.length, 0);
-  const named = Object.entries(doc.rules)
-    .filter(([k]) => k !== '*').reduce((n, [, rs]) => n + rs.length, 0);
 
-  // § The extraction had no count check at all, so a recipe that silently matched three lines
-  //   instead of twenty would have produced a table that passed every test under it.
-  assert.equal(all, doc._provenance.rule_count,
-    'the table and its own provenance block disagree about how many rules it holds.');
-  assert.equal(named, doc._provenance.rule_count_named_events);
-  assert.ok(all >= 20, `only ${all} rules — the recorded extraction found 20.`);
-});
-
-test('every rule message is one the binary actually contains', () => {
-  const doc = rulesDoc();
-  const binary = resolveCodexBinary();
-  if (!binary) {
-    // § Loudly, and by name. A silent skip here is indistinguishable from a pass, and this is
-    //   the check that keeps the table honest.
-    t_skip('no codex binary found on this machine, so the rule table was NOT re-verified '
-      + 'against it. The messages below are the ones a user sees; a stale table is a gate '
-      + 'asserting yesterday`s contract.');
-    return;
-  }
-
-  const extracted = extractMessages(binary);
-  assert.ok(extracted.length >= 20,
-    `the corrected recipe found only ${extracted.length} messages in ${binary}. The recipe is `
-    + `in this file's _provenance block; read _provenance.recipe_note before widening it.`);
-
-  for (const [event, rules] of Object.entries(doc.rules)) {
-    if (event === '*') continue;    // its event name is interpolated at runtime
-    for (const rule of rules) {
-      // § A prefix, not an equality: three of the extracted lines carry trailing bytes from
-      //   whatever string the linker packed next to them, because these have no separator.
-      assert.ok(extracted.some((line) => line.startsWith(rule.message)),
-        `the table claims Codex says "${rule.message}", and no string in the binary starts `
-        + 'with it. Either the host changed its wording — in which case a user now sees a '
-        + 'message this suite has never heard of — or the table was edited by hand.');
-    }
+  // § A count floor, because the failure mode this replaces was a table that shrank without
+  //   anyone noticing and went on passing every test written under it. The cross-check that
+  //   the table is *right* is in codex-payload.test.mjs, against a recorded session.
+  assert.ok(all >= 20, `only ${all} rules — the table has held at least 20 since it was written.`);
+  for (const event of ['PreToolUse', 'PostToolUse', 'PermissionRequest']) {
+    assert.ok((doc.rules[event] ?? []).length > 0,
+      `${event} lost its rules. It is one of the events whose output the host refuses, so an `
+      + 'empty row means nothing here can see that refusal coming.');
   }
 });
 
-test('the recorded recipe is the corrected one', () => {
-  const doc = rulesDoc();
-  // § The old recipe ended the match at `[a-zA-Z:.,= ]`, which cut every message at its first
-  //   hyphen — including `…deny without a non-empty permissionDecisionReason`, which lost
-  //   everything from `non-` on. A recipe that cannot reproduce the table is not provenance.
-  assert.doesNotMatch(doc._provenance.recipe, /\[a-zA-Z:\.,= \]/,
-    'the provenance still records the truncating recipe.');
-  assert.ok(doc.rules.PreToolUse.some((r) => r.message.includes('non-empty permissionDecisionReason')),
-    'the hyphenated message is the one the old recipe lost; it must be in the table.');
+test('every event has its output channels recorded', () => {
+  const caps = rulesDoc().capabilities ?? {};
+  for (const event of CODEX_EVENTS) {
+    assert.ok(caps[event], `${event} has no capability row, so outputCapabilities() throws on `
+      + 'it and any test that asks about its channels fails for the wrong reason.');
+  }
 });
 
 // ===========================================================================
@@ -384,41 +341,3 @@ test('prompt-recall stays inside its budget', async (t) => {
 
 // ---------------------------------------------------------------------------
 
-/** Where the `codex` on PATH keeps its real binary, or `''`. */
-function resolveCodexBinary() {
-  const recorded = rulesDoc()._provenance.binary;
-  const roots = ['/opt/homebrew/lib/node_modules', '/usr/local/lib/node_modules'];
-  for (const root of roots) {
-    const p = join(root, recorded);
-    if (existsSync(p)) return p;
-  }
-  try {
-    const which = execFileSync('which', ['codex'], { encoding: 'utf8' }).trim();
-    return which && existsSync(which) ? which : '';
-  } catch {
-    return '';
-  }
-}
-
-/** The rejection messages the binary carries, by the corrected recipe. */
-function extractMessages(binary) {
-  const EVENTS = 'PreToolUse|PostToolUse|PermissionRequest|SessionStart|SessionEnd'
-    + '|UserPromptSubmit|SubagentStart|SubagentStop|Stop|PreCompact|PostCompact';
-  let strings;
-  try {
-    strings = execFileSync('strings', ['-n', '2', binary], { encoding: 'utf8', maxBuffer: 1 << 30 });
-  } catch {
-    return [];
-  }
-  const re = new RegExp(`(?:${EVENTS}) hook (?:returned|denied) [\\s\\S]*?(?=(?:${EVENTS}) hook |$)`, 'g');
-  const out = new Set();
-  for (const line of strings.split('\n')) {
-    for (const m of line.matchAll(re)) out.add(m[0].trimEnd());
-  }
-  return [...out];
-}
-
-/** `node:test` has no bare `skip()` outside a context, so say it where it will be read. */
-function t_skip(why) {
-  console.error(`\n  SKIPPED (loudly): ${why}\n`);
-}

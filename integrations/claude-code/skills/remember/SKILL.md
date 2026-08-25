@@ -52,8 +52,13 @@ reflecting seconds after a write reports zero lessons where reflecting a minute 
 reports them.
 
 Note the one place the tool is narrower than the table: `mubit_learned` is the low-boilerplate
-path and writes every entry as `success` / `session`. Use the table to decide what the entry
+path, and every entry it writes is stored as `success` at `run` scope. The plugin clamps it
+there on purpose — anything wider is read back by unrelated projects — and `run` is not the
+memory loss it sounds like. The default `runStrategy` is `per-directory`, so the run id is
+stable for a project: a lesson written here is recalled here tomorrow. It simply stops
+following you into work it has nothing to do with. Use the table to decide what the entry
 *is* and to word it accordingly, and let scope widening happen the way it is supposed to —
 through the explicit reflect path, which is the only thing that promotes a lesson beyond its
-own run. If you need an exact type/scope pair written directly, that is `mubit_remember`,
-which is off by default and restored via the `mcpTools` setting.
+own run. To raise the ceiling on what any MCP write may claim, set `mcpLessonScope`
+(`MUBIT_MCP_LESSON_SCOPE`). If you need an exact type/scope pair written directly, that is
+`mubit_remember`, which is off by default and restored via the `mcpTools` setting.

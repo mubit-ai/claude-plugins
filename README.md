@@ -5,7 +5,7 @@ plugin today:
 
 | Plugin | Version | What it does |
 | --- | --- | --- |
-| [`mubit-memory`](integrations/claude-code/) | 0.11.0 | Persistent, typed, self-improving memory for Claude Code — involuntary capture, pre-prompt recall, and outcome attribution. |
+| [`mubit-memory`](integrations/claude-code/) | 0.12.0 | Persistent, typed, self-improving memory for Claude Code — involuntary capture, pre-prompt recall, and outcome attribution. |
 
 ## Install
 

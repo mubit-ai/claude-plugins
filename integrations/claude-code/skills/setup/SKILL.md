@@ -16,7 +16,7 @@ Two values, and nothing else:
 
 | Setting | Value |
 | --- | --- |
-| `endpoint` | the user's Mubit instance URL, e.g. `https://eu.mubit.ai` |
+| `endpoint` | the user's Mubit instance URL, e.g. `https://api.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
 **If either is missing, run `/mubit-memory:auth`.** It opens the console, signs the user in,

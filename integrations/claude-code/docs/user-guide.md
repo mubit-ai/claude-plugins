@@ -167,7 +167,7 @@ survives plugin updates. Once per machine, not once per release.
 
 | Setting | Value |
 | --- | --- |
-| `endpoint` | your instance URL, e.g. `https://eu.mubit.ai` |
+| `endpoint` | your instance URL, e.g. `https://api.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
 Both are needed: an endpoint with no key gets `auth_failed` on every call, and no endpoint at
@@ -210,7 +210,7 @@ the instance is still starting, the status line shows `◍ warming` rather than 
 Handy for a quick trial or a per-project override. Plugin settings win over these.
 
 ```bash
-export MUBIT_ENDPOINT="https://eu.mubit.ai"
+export MUBIT_ENDPOINT="https://api.mubit.ai"
 export MUBIT_API_KEY="mbt_..."
 ```
 
@@ -380,17 +380,23 @@ prefer letting outcome attribution down-weight it.
 Opens a page on `127.0.0.1` — a random port, a token minted for that launch, and nothing on
 your network can reach it. Three tabs:
 
-- **Memory** — every lesson your instance holds. Filter instantly, or press *Search instance*
-  to ask it properly. There is a filter for lessons **visible outside the run that wrote
-  them**, which is the question nothing else here answers: a rule saved at global scope follows
-  you into every project, and one saved at run scope dies with the session.
+- **Memory** — every lesson your instance holds, across **every run** unless you switch to
+  *This run*. Filter instantly, or press *Search instance* to ask it properly. There is a filter
+  for lessons **visible outside the run that wrote them**, which is the question nothing else
+  here answers: a rule saved at global scope follows you into every project, and one saved at
+  run scope dies with the session. `session` and `global` are separately selectable, and
+  *scope not recorded* is its own bucket rather than being folded into `run`.
 - **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
   they cost, and how many were repeats rendered as a one-line pointer. This is read from disk,
   so it works with the network off.
 - **Analytics** — those numbers as a trend, plus spool depth, ingest counts and breaker state.
 
-Three things it deliberately does not claim:
+Four things it deliberately does not claim:
 
+- **A lesson with no project tag is unattributed, not local.** The `repo:` tag is written by the
+  capture hooks; a lesson you saved through `/mubit-memory:remember`, and every lesson reflection
+  writes, carries none. Those land in *No project tag*, which is a large bucket and is never
+  shown as belonging to the project you have open.
 - **No per-prompt latency.** The recall timing on the status marker is last-write-wins — it
   describes the most recent prompt, not each one — so there is no honest per-prompt series to
   plot and the page does not invent one.
@@ -451,6 +457,32 @@ moves anything — the id resolves through `git rev-parse --show-toplevel`.
 > pins every write to that value; moving it would need a server restart the plugin cannot ask
 > for. After a `cd`, what the hooks capture lands in the new repo's run while what
 > `/mubit-memory:remember` writes lands in the one you started in.
+
+
+### Sharing one run between Codex and Claude Code
+
+The run id is already harness-independent. `per-directory` derives
+`cc-<slug>-<sha256(git root)[:8]>` from the project, not from the host, so a Codex session and
+a Claude Code session opened on the same checkout land on the same run and see each other's
+pins and lessons. The `cc-` prefix reads as "Claude Code" for historical reasons only — it
+means "the run for this directory", and renaming it would strand every run already stored under
+it. What distinguishes the two harnesses is the *agent role* recorded on each entry, `codex` or
+`claude-code`.
+
+They diverge only when the **path** diverges: a second clone, or the same repo on another
+machine where the home directory has a different name. To pin one run across paths, harnesses
+and machines:
+
+```bash
+export MUBIT_CC_RUN_STRATEGY=static
+export MUBIT_CC_RUN_ID=team-<project>
+```
+
+Set both in the same place for both tools — a shell profile, or the `--env` flags the codex
+integration's `setup` writes into its registrations — and re-run setup so the hooks inherit
+them. `static` does not fall back: with `MUBIT_CC_RUN_ID` unset it raises a config error rather
+than quietly writing into a derived run, because a run that is silently un-shared is
+indistinguishable from memory that does not work.
 
 ### How much context memory is allowed to spend
 

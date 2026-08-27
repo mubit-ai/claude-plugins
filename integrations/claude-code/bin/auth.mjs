@@ -5,6 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { hostname } from "node:os";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,6 +33,39 @@ var SEC = 1e3;
 var MIN = 60 * SEC;
 var HOUR = 60 * MIN;
 var DAY = 24 * HOUR;
+function liveDataDir(home, env = {}) {
+  const root = join(home, ".claude", "plugins", "data");
+  try {
+    const codexHome = typeof env.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join(home, ".codex");
+    const pinned = JSON.stringify(JSON.parse(readFileSync(join(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    if (pinned && pinned[1]) return pinned[1];
+  } catch {
+  }
+  try {
+    let best = "";
+    let bestAt = -1;
+    for (const name of readdirSync(root)) {
+      if (!name.startsWith("mubit-memory")) continue;
+      const dir = join(root, name);
+      let at = 0;
+      try {
+        for (const f of readdirSync(join(dir, "status"))) {
+          if (!f.endsWith(".json") || f === "health.json") continue;
+          at = Math.max(at, statSync(join(dir, "status", f)).mtimeMs);
+        }
+      } catch {
+      }
+      if (existsSync(join(dir, "credentials.json"))) at += 1e15;
+      if (at > bestAt) {
+        bestAt = at;
+        best = dir;
+      }
+    }
+    if (best && bestAt > 0) return best;
+  } catch {
+  }
+  return join(root, "mubit-memory");
+}
 function writeJsonAtomic(p, value, opts = {}) {
   const tmp = `${p}.tmp-${process.pid}`;
   try {
@@ -168,7 +202,7 @@ async function verifyCredentials(opts) {
     return {
       ok: false,
       state: "unreachable",
-      detail: `Nothing answered at ${endpoint}. Check the endpoint, and that the instance is running.`
+      detail: `Could not reach ${endpoint}: ${health.cause}.`
     };
   }
   if (health.status >= 500) {
@@ -185,7 +219,11 @@ async function verifyCredentials(opts) {
     body: "{}"
   });
   if (probe.transportError) {
-    return { ok: false, state: "unreachable", detail: `Lost the connection to ${endpoint} while checking the key.` };
+    return {
+      ok: false,
+      state: "unreachable",
+      detail: `Lost the connection to ${endpoint} while checking the key: ${probe.cause}.`
+    };
   }
   if (probe.status === 401 || probe.status === 403) {
     return { ok: false, state: "auth_failed", detail: "The instance rejected that key. Issue a new one in the console." };
@@ -204,11 +242,41 @@ async function dial(fetchImpl, url, { method = "GET", headers = {}, body, timeou
   try {
     const res = await fetchImpl(url, { method, headers, body, signal: ac.signal });
     return { status: res.status, transportError: false };
-  } catch {
-    return { status: 0, transportError: true };
+  } catch (err) {
+    return { status: 0, transportError: true, cause: transportCause(err) };
   } finally {
     clearTimeout(timer);
   }
+}
+function SANDBOX_BLOCKED() {
+  const env = typeof process === "object" && process ? process.env || {} : {};
+  if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
+  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+}
+function transportCause(err) {
+  const HINTS = {
+    ENOTFOUND: "that hostname does not resolve \u2014 check the endpoint for a typo (ENOTFOUND)",
+    EAI_AGAIN: "the DNS lookup failed \u2014 check the network, or the endpoint for a typo (EAI_AGAIN)",
+    ECONNREFUSED: "nothing is listening on that port (ECONNREFUSED)",
+    EHOSTUNREACH: "the host is unreachable from this network (EHOSTUNREACH)",
+    ENETUNREACH: "the network is unreachable (ENETUNREACH)",
+    ECONNRESET: "the connection was reset in flight (ECONNRESET)",
+    CERT_HAS_EXPIRED: "its TLS certificate has expired (CERT_HAS_EXPIRED)",
+    DEPTH_ZERO_SELF_SIGNED_CERT: "its TLS certificate is self-signed and not trusted (DEPTH_ZERO_SELF_SIGNED_CERT)",
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: "its TLS certificate could not be verified (UNABLE_TO_VERIFY_LEAF_SIGNATURE)"
+  };
+  let cur = (
+    /** @type {any} */
+    err
+  );
+  for (let i = 0; i < 8 && cur && typeof cur === "object"; i++) {
+    const code = typeof cur["code"] === "string" ? cur["code"].toUpperCase() : "";
+    if (HINTS[code]) return SANDBOX_BLOCKED() || HINTS[code];
+    const name = typeof cur["name"] === "string" ? cur["name"] : "";
+    if (name === "AbortError" || name === "TimeoutError") return "it did not answer in time";
+    cur = cur["cause"];
+  }
+  return "nothing answered \u2014 check the endpoint, and that the instance is running";
 }
 async function authenticateWithKey(opts) {
   const endpoint = normalizeEndpoint(opts?.endpoint);
@@ -288,13 +356,14 @@ async function runBrowserAuth(opts = {}) {
   });
   await new Promise((res, rej) => {
     server.once("error", rej);
-    server.listen(0, "127.0.0.1", res);
+    server.listen(0, "127.0.0.1", () => res(void 0));
   });
   server.unref();
-  const port = (
-    /** @type {any} */
-    server.address().port
-  );
+  const addr = server.address();
+  if (addr === null || typeof addr === "string") {
+    throw new Error("the local callback server did not bind a TCP port");
+  }
+  const port = addr.port;
   const timer = setTimeout(
     () => fail(new Error("timed out waiting for browser authorization")),
     timeoutMs
@@ -333,9 +402,7 @@ function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }
 function endpointFor(payload = {}) {
   const explicit = typeof payload.mubitEndpoint === "string" ? payload.mubitEndpoint.trim() : "";
   if (explicit) return normalizeEndpoint(explicit);
-  const region = typeof payload.region === "string" ? payload.region.trim().toLowerCase() : "";
-  const KNOWN = { eu: "https://eu.mubit.ai", us: "https://us.mubit.ai" };
-  return KNOWN[region] ?? DEFAULT_ENDPOINT;
+  return DEFAULT_ENDPOINT;
 }
 function repoIdentity(cwd = process.cwd()) {
   try {
@@ -456,12 +523,19 @@ function resolveDataDirFrom(env = process.env) {
   const e = env ?? {};
   if (e.MUBIT_CC_DATA_DIR) return e.MUBIT_CC_DATA_DIR;
   if (e.CLAUDE_PLUGIN_DATA) return e.CLAUDE_PLUGIN_DATA;
-  const home = e.HOME || ".";
-  return `${home}/.claude/plugins/data/mubit-memory`;
+  return liveDataDir(e.HOME || ".", e);
+}
+function realPath(p) {
+  try {
+    return p ? realpathSync(p) : p;
+  } catch {
+    return p;
+  }
 }
 var selfPath = fileURLToPath(import.meta.url);
-var entryPath = process.argv[1] ? resolve(process.argv[1]) : "";
-if (entryPath === selfPath) {
+var selfReal = realPath(selfPath);
+var entryPath = process.argv[1] ? realPath(resolve(process.argv[1])) : "";
+if (entryPath === selfReal) {
   process.exitCode = await main().catch((err) => {
     console.log(`Authentication could not run: ${err?.message ?? err}`);
     return 1;

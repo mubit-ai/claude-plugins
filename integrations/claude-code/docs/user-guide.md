@@ -167,7 +167,7 @@ survives plugin updates. Once per machine, not once per release.
 
 | Setting | Value |
 | --- | --- |
-| `endpoint` | your instance URL, e.g. `https://eu.mubit.ai` |
+| `endpoint` | your instance URL, e.g. `https://api.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
 Both are needed: an endpoint with no key gets `auth_failed` on every call, and no endpoint at
@@ -210,7 +210,7 @@ the instance is still starting, the status line shows `◍ warming` rather than 
 Handy for a quick trial or a per-project override. Plugin settings win over these.
 
 ```bash
-export MUBIT_ENDPOINT="https://eu.mubit.ai"
+export MUBIT_ENDPOINT="https://api.mubit.ai"
 export MUBIT_API_KEY="mbt_..."
 ```
 

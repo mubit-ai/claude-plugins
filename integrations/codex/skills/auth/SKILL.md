@@ -28,7 +28,7 @@ Two values, which are the whole of the plugin's setup:
 
 | Setting | Value |
 | --- | --- |
-| `endpoint` | the user's Mubit instance URL, e.g. `https://eu.mubit.ai` |
+| `endpoint` | the user's Mubit instance URL, e.g. `https://api.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
 They land in `<data-dir>/credentials.json`, owner-only (mode 600), where the data directory is

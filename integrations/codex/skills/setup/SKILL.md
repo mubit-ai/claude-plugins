@@ -162,7 +162,7 @@ Two values, and nothing else:
 
 | Setting | Value |
 | --- | --- |
-| `endpoint` | the user's Mubit instance URL, e.g. `https://eu.mubit.ai` |
+| `endpoint` | the user's Mubit instance URL, e.g. `https://api.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
 Precedence, highest first: `MUBIT_ENDPOINT` / `MUBIT_API_KEY` in the environment, then

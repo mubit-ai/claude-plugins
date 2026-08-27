@@ -857,11 +857,54 @@ function withMs(res, started) {
   return { ...res, ms: Date.now() - started };
 }
 
+/**
+ * The actionable sentence for a transport failure, or `''` when the error is not one.
+ *
+ * Node flattens a failed connection to `TypeError: fetch failed` and hides the errno one or
+ * more `cause` levels down, so the chain is walked the same eight levels `causeChain()` in
+ * `lib/breaker.mjs` walks. The codes below are the ones with wording worth printing; the
+ * authority on which errno means *unreachable* rather than *timeout* stays
+ * `UNREACHABLE_CODES` / `TIMEOUT_CODES` there, and `test/http.test.mjs` holds the two in step.
+ *
+ * @param {any} err
+ * @returns {string}
+ */
+function NETWORK_HINT(err) {
+  /** @type {Record<string, string>} */
+  const HINTS = {
+    ENOTFOUND: 'no such host — the endpoint name does not resolve; check it for a typo',
+    EAI_AGAIN: 'the DNS lookup failed — check the network, or the endpoint for a typo',
+    ECONNREFUSED: 'nothing is listening there — check the port, and that the instance is running',
+    EHOSTUNREACH: 'the host is unreachable from this network',
+    ENETUNREACH: 'the network is unreachable',
+    ENETDOWN: 'the network is down',
+    ECONNRESET: 'the connection was reset in flight',
+    ETIMEDOUT: 'the connection timed out',
+    UND_ERR_CONNECT_TIMEOUT: 'the connection timed out',
+    UND_ERR_HEADERS_TIMEOUT: 'the instance accepted the connection but sent no headers in time',
+    CERT_HAS_EXPIRED: "the instance's TLS certificate has expired",
+    DEPTH_ZERO_SELF_SIGNED_CERT: "the instance's TLS certificate is self-signed and not trusted",
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: "the instance's TLS certificate could not be verified",
+  };
+  let cur = err;
+  for (let i = 0; i < 8 && cur && typeof cur === 'object'; i++) {
+    const code = typeof cur.code === 'string' ? cur.code.toUpperCase() : '';
+    if (HINTS[code]) return `${HINTS[code]} (${code})`;
+    cur = cur.cause;
+  }
+  return '';
+}
+
 /** @param {any} err */
 function messageOf(err) {
   try {
     if (!err) return 'unknown error';
     if (typeof err === 'string') return err;
+    // A transport failure surfaces as a bare `TypeError: fetch failed`, whose only actionable
+    // part is a code one or two `cause` levels down. Printing just the wrapper told the user
+    // their request failed and nothing whatsoever about why, or what to change.
+    const hint = NETWORK_HINT(err);
+    if (hint) return hint;
     const parts = [];
     if (err.name) parts.push(String(err.name));
     if (err.message) parts.push(String(err.message));

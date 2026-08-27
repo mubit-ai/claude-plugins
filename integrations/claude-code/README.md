@@ -65,7 +65,7 @@ set two values in the plugin's settings (`/plugin` → Mubit Memory → configur
 
 | Setting | Value |
 | --- | --- |
-| `endpoint` | your instance URL, e.g. `https://eu.mubit.ai` |
+| `endpoint` | your instance URL, e.g. `https://api.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
 There the key is marked sensitive, so it goes to your OS keychain rather than to a file. That is

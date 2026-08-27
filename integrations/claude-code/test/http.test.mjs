@@ -145,6 +145,77 @@ test('request: a refused connection returns {ok:false, state:"unreachable"} with
   assert.equal(r.state, 'unreachable');
 });
 
+// A transport failure arrives as `TypeError: fetch failed` with the only actionable part —
+// the errno — buried in the `cause` chain. Reporting the wrapper told the user their request
+// failed and nothing whatsoever about why, or what to change.
+test('request: the error names the errno and what to do about it, not "fetch failed"', async (t) => {
+  const { cfg, http } = await setupDead(t);
+  const r = await noThrow(() => http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN },
+    { timeoutMs: 1000 }), 'request(ECONNREFUSED)');
+
+  assert.match(r.error, /ECONNREFUSED/);
+  assert.match(r.error, /nothing is listening there/);
+  assert.ok(!/fetch failed/.test(r.error), 'the flattened wrapper is not the message');
+});
+
+test('request: a name that does not resolve reads differently from a dead port', async (t) => {
+  const http = await lib('http.mjs');
+  const { loadConfig } = await lib('config.mjs');
+  const dataDir = makeDataDir();
+  // `.invalid` is reserved by RFC 2606 precisely so it can never resolve.
+  const cfg = loadConfig(baseEnv({ dataDir, endpoint: 'https://nothing.invalid' }));
+
+  const r = await noThrow(() => http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN },
+    { timeoutMs: 4000 }), 'request(ENOTFOUND)');
+
+  assert.equal(r.ok, false);
+  assert.match(r.error, /ENOTFOUND|EAI_AGAIN/);
+  assert.match(r.error, /does not resolve|DNS lookup failed/);
+});
+
+// The wording table in `NETWORK_HINT` and the classification sets in `lib/breaker.mjs` are two
+// views of one errno list, and they drift silently: a code the breaker calls `unreachable` but
+// http has no sentence for degrades to `TypeError: fetch failed` again. TLS codes are the
+// deliberate exception — they are a rejected handshake, not a classified transport state.
+test('the hinted errnos are the ones the breaker classifies', async (t) => {
+  const { UNREACHABLE_CODES, TIMEOUT_CODES } = await lib('breaker.mjs');
+  const http = await lib('http.mjs');
+  const { loadConfig } = await lib('config.mjs');
+  const cfg = loadConfig(baseEnv({ dataDir: makeDataDir(), endpoint: 'https://x.invalid' }));
+
+  const TLS_ONLY = new Set([
+    'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  ]);
+
+  // `lib/http.mjs` reaches for the global `fetch` on purpose — it is the one network primitive
+  // and has no injection seam — so the only way to hand it a chosen errno is to swap the global.
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+
+  /** Every code `NETWORK_HINT` has wording for, read back through the public surface. */
+  const hinted = [];
+  for (const code of [
+    ...UNREACHABLE_CODES, ...TIMEOUT_CODES, ...TLS_ONLY, 'ENOSPC',
+  ]) {
+    globalThis.fetch = () => Promise.reject(Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('inner'), { code }),
+    }));
+    const r = await http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN },
+      { timeoutMs: 1000, record: false });
+    // The un-hinted path still echoes the code, but only from inside the flattened
+    // `TypeError: fetch failed (CODE)` wrapper — which is the thing this fix replaces.
+    if (r.error.includes(code) && !r.error.includes('fetch failed')) hinted.push(code);
+  }
+
+  for (const code of hinted) {
+    assert.ok(UNREACHABLE_CODES.has(code) || TIMEOUT_CODES.has(code) || TLS_ONLY.has(code),
+      `${code} has wording in lib/http.mjs but no classification in lib/breaker.mjs`);
+  }
+  assert.ok(hinted.includes('ENOTFOUND') && hinted.includes('ECONNREFUSED'),
+    'the two commonest transport failures must both be hinted');
+  assert.ok(!hinted.includes('ENOSPC'), 'a non-network errno gets no network sentence');
+});
+
 // §4.7: a socket that is accepted and then never answered is the timeout path.
 test('request: a hung socket returns {ok:false, state:"not_responding"} without throwing', async (t) => {
   const { cfg, http } = await setup(t, { routes: { 'POST /v2/control/query': { hang: true } } });
@@ -248,7 +319,7 @@ test('no endpoint: every call refuses without dialing and without touching the b
   const { loadConfig } = await lib('config.mjs');
   const { breakerPath } = await lib('breaker.mjs');
 
-  for (const endpoint of ['', '   ', 'eu.mubit.ai', 'htp://nope']) {
+  for (const endpoint of ['', '   ', 'api.mubit.ai', 'htp://nope']) {
     const cfg = loadConfig(baseEnv({ dataDir, endpoint }));
 
     const h = await noThrow(() => http.health(cfg), `health(${JSON.stringify(endpoint)})`);

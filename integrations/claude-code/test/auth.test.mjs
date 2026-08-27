@@ -160,6 +160,28 @@ test('a transport failure names what went wrong, not just that it went wrong', a
     + 'used to print the same sentence');
 });
 
+// Codex runs an unapproved command inside seatbelt with the network switched off, and DNS is
+// what fails first there — so a healthy endpoint reports ENOTFOUND and the user is sent off to
+// fix a URL that was never wrong.
+test('inside the Codex sandbox the network is blamed, not the endpoint', async (t) => {
+  const { verifyCredentials } = await mod('bin/auth.src.mjs');
+  const before = process.env.CODEX_SANDBOX_NETWORK_DISABLED;
+  t.after(() => {
+    if (before === undefined) delete process.env.CODEX_SANDBOX_NETWORK_DISABLED;
+    else process.env.CODEX_SANDBOX_NETWORK_DISABLED = before;
+  });
+  process.env.CODEX_SANDBOX_NETWORK_DISABLED = '1';
+
+  const res = await verifyCredentials({
+    endpoint: 'https://nothing.invalid', apiKey: KEY, fetchImpl: fetch, timeoutMs: 4000,
+  });
+
+  assert.equal(res.state, 'unreachable');
+  assert.match(res.detail, /no network access/);
+  assert.match(res.detail, /Approve the command/);
+  assert.ok(!/typo/.test(res.detail), 'the endpoint is not the thing to go and fix');
+});
+
 test('a timeout says it did not answer in time, not that the host is wrong', async () => {
   const { verifyCredentials } = await mod('bin/auth.src.mjs');
   const server = await fakeMubit({ 'GET /v2/core/health': { hang: true } });

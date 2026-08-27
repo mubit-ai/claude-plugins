@@ -173,6 +173,25 @@ test('request: a name that does not resolve reads differently from a dead port',
   assert.match(r.error, /does not resolve|DNS lookup failed/);
 });
 
+// Inside seatbelt DNS fails before anything else, so the endpoint is never the evidence.
+test('request: the Codex sandbox is named as the cause, ahead of the errno', async (t) => {
+  const { cfg, http } = await setupDead(t);
+  const before = process.env.CODEX_SANDBOX;
+  t.after(() => {
+    if (before === undefined) delete process.env.CODEX_SANDBOX;
+    else process.env.CODEX_SANDBOX = before;
+  });
+  process.env.CODEX_SANDBOX = 'seatbelt';
+
+  const r = await noThrow(() => http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN },
+    { timeoutMs: 1000 }), 'request(sandboxed)');
+
+  assert.match(r.error, /no network access/);
+  assert.match(r.error, /Approve the command/);
+  assert.ok(!/check the port/.test(r.error),
+    'a sandboxed process has no evidence about the endpoint to offer');
+});
+
 // The wording table in `NETWORK_HINT` and the classification sets in `lib/breaker.mjs` are two
 // views of one errno list, and they drift silently: a code the breaker calls `unreachable` but
 // http has no sentence for degrades to `TypeError: fetch failed` again. TLS codes are the

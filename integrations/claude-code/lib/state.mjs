@@ -230,9 +230,15 @@ export function pruneStale(cfg = {}) {
       expire(join(rd, 'checkpoints.json'), 30 * DAY);
       expire(join(rd, 'jobs.json'), 24 * HOUR);
       // runs/<run_id>/flushed-<session_id>.marker — 7 d
+      // runs/<run_id>/flush-<session_id>.lock — 90 s, stolen after. A released lease is
+      // unlinked by its holder; this is the sweep for one whose holder was killed, which is
+      // the case the lease exists to survive in the first place.
       for (const e of dirEntries(rd)) {
-        if (e.isFile() && e.name.startsWith('flushed-') && e.name.endsWith('.marker')) {
+        if (!e.isFile()) continue;
+        if (e.name.startsWith('flushed-') && e.name.endsWith('.marker')) {
           expire(join(rd, e.name), 7 * DAY);
+        } else if (e.name.startsWith('flush-') && e.name.endsWith('.lock')) {
+          expire(join(rd, e.name), 90 * SEC);
         }
       }
     }

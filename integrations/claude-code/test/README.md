@@ -70,7 +70,7 @@ under ~10 seconds.
 | `redact.test.mjs` | patterns, denylist, caps, scrub-before-cap, self-reference |
 | `breaker.test.mjs` | five states, "a timeout is not a verdict", half-open |
 | `http.test.mjs` | pre-flight guards, never-throws, retry policy |
-| `spool.test.mjs` | file-per-item under concurrency, lock stealing, `claimOnce` |
+| `spool.test.mjs` | file-per-item under concurrency, lock stealing, `claimOnce`, the flush lease |
 | `classify.test.mjs` | tool → intent table, never `unclassified`, lesson templates |
 | `outcome.test.mjs` | the implicit outcome rule as a pure decision: the four cases, measured-`false` vs unmeasured, the derived key |
 | `hook.test.mjs` | exit-code discipline, budgets, `spawnDetached` |
@@ -112,6 +112,9 @@ reasonable person would "fix" them in the wrong direction:
 - **A 401 must not open the breaker.** Hiding it behind a cooldown hides the only error the
   user can fix.
 - **`claimOnce` returns `true` when it fails.** Losing a batch is worse than sending it twice.
+- **One flush per session is two properties, not one.** `claimOnce` answers "already"; a
+  lease answers "right now". The second matters because reflect is not idempotent, and it has
+  to be a lease rather than a second marker so a killed flush blocks no later one.
 - **The recall hook must never call `/v2/control/context` by default.** That call costs two LLM
   calls per prompt; the absence is asserted explicitly.
 - **The `PreToolUse` hook must never deny, and exit 2 is a deny.** The host blocks the tool call

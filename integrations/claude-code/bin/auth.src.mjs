@@ -37,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 import {
   clearCredentials, credentialsPath, readCredentials, writeCredentials,
 } from '../lib/credentials.mjs';
+import { liveDataDir } from '../lib/state.mjs';
 
 /** Where keys are issued. `MUBIT_CONSOLE_URL` overrides it for staging. */
 export const CONSOLE_URL = 'https://console.mubit.ai';
@@ -673,13 +674,19 @@ function authTimeoutFrom(env = {}, deps = {}) {
   return Number.isFinite(raw) && raw > 0 ? raw : 120000;
 }
 
-/** Mirrors `lib/state.mjs` `dataDir()` without importing the hook surface. */
+/**
+ * Mirrors `lib/state.mjs` `dataDir()`, minus its `cfg` rung — this command has no resolved
+ * config, and asking for one before the user is signed in is the wrong way round.
+ *
+ * The final fallback is `liveDataDir()` itself rather than a fourth hand-copy of it: nothing
+ * pins `MUBIT_CC_DATA_DIR` into a command the user typed, and looking in the bare directory
+ * left `--status` reporting no credentials on a machine that had them.
+ */
 function resolveDataDirFrom(env = process.env) {
   const e = env ?? {};
   if (e.MUBIT_CC_DATA_DIR) return e.MUBIT_CC_DATA_DIR;
   if (e.CLAUDE_PLUGIN_DATA) return e.CLAUDE_PLUGIN_DATA;
-  const home = e.HOME || '.';
-  return `${home}/.claude/plugins/data/mubit-memory`;
+  return liveDataDir(e.HOME || '.', e);
 }
 
 // ---------------------------------------------------------------------------

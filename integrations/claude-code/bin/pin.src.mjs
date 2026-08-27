@@ -378,12 +378,18 @@ export function pickRun(cfg, explicit = '') {
   }
   if (runId) return { ok: true, runId };
 
+  // Naming the directory is the whole point. "Send one prompt first" is useless advice to
+  // someone who already has, and the commonest cause of an empty scan is not a session that
+  // has written nothing but a command that inherited no `MUBIT_CC_DATA_DIR` and is looking
+  // somewhere the hooks never write.
   return {
     ok: false,
     state: 'no_run',
-    detail: 'Could not tell which Mubit run this session is using — no hook has written a run '
-      + 'marker yet. Send one prompt first, or name the run: pin --run <run_id> "…". '
-      + '/mubit-memory:doctor prints the current run id.',
+    detail: `Could not tell which Mubit run this session is using — no run marker in `
+      + `${str(cfg?.dataDir) || '(no data directory resolved)'}. If the session has been `
+      + 'sending prompts, that is not the directory its hooks are writing to: '
+      + '/mubit-memory:doctor prints the one they use, and MUBIT_CC_DATA_DIR overrides it. '
+      + 'Otherwise send one prompt first, or name the run: pin --run <run_id> "…".',
   };
 }
 

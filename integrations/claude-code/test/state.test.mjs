@@ -580,3 +580,102 @@ test('log(): does not throw when the log directory cannot be created', async () 
   inData(dir, () => log.log(cfg, 'error', 'this cannot be written anywhere'));
   assert.ok(true);
 });
+
+// ---------------------------------------------------------------------------
+// dataDir / liveDataDir — §4.8, and the directory a command actually finds
+// ---------------------------------------------------------------------------
+
+/** A fake `$HOME` with the named `mubit-memory*` directories under it. */
+function fakeHome(dirs = {}) {
+  const home = tempDir('mubit-home-');
+  const root = join(home, '.claude', 'plugins', 'data');
+  for (const [name, spec] of Object.entries(dirs)) {
+    const dir = join(root, name);
+    mkdirSync(join(dir, 'status'), { recursive: true });
+    if (spec.creds) writeFileSync(join(dir, 'credentials.json'), '{}');
+    for (const [file, at] of Object.entries(spec.markers ?? {})) {
+      const p = join(dir, 'status', file);
+      writeFileSync(p, '{}');
+      utimesSync(p, at / 1000, at / 1000);
+    }
+  }
+  return { home, root };
+}
+
+test('dataDir: an explicitly pinned directory is honoured verbatim, search or no search', async () => {
+  const { dataDir } = await lib('state.mjs');
+  const { home } = fakeHome({ 'mubit-memory-mubit': { creds: true } });
+
+  assert.equal(dataDir({}, { HOME: home, MUBIT_CC_DATA_DIR: '/pinned/by/setup' }),
+    '/pinned/by/setup', 'MUBIT_CC_DATA_DIR outranks everything; setup recorded it');
+  assert.equal(dataDir({}, { HOME: home, CLAUDE_PLUGIN_DATA: '/from/the/host' }),
+    '/from/the/host');
+  assert.equal(dataDir({ dataDir: '/from/config' }, { HOME: home }), '/from/config');
+});
+
+// The reported defect: `pin list` said "no hook has written a run marker yet" in a session
+// whose hooks had written one for every prompt — because the hooks were writing to
+// `mubit-memory-mubit` and the bare-name fallback scanned `mubit-memory`, which nothing uses.
+test('dataDir: with nothing pinned, the suffixed directory the hooks use is found', async () => {
+  const { dataDir } = await lib('state.mjs');
+  const now = Date.now();
+  const { home, root } = fakeHome({
+    'mubit-memory': {},
+    'mubit-memory-mubit': { markers: { 'cc-proj-1234abcd.json': now - 1000 } },
+  });
+
+  assert.equal(dataDir({}, { HOME: home }), join(root, 'mubit-memory-mubit'));
+});
+
+test('dataDir: a signed-in directory outranks a livelier one that holds no credentials', async () => {
+  const { dataDir } = await lib('state.mjs');
+  const now = Date.now();
+  const { home, root } = fakeHome({
+    'mubit-memory-inline': { markers: { 'cc-a-1111aaaa.json': now } },
+    'mubit-memory-mubit': { creds: true, markers: { 'cc-b-2222bbbb.json': now - 10 * MIN } },
+  });
+
+  assert.equal(dataDir({}, { HOME: home }), join(root, 'mubit-memory-mubit'),
+    'the install that was actually authenticated is the live one');
+});
+
+test('dataDir: what setup pinned into the Codex registrations outranks the search', async () => {
+  const { dataDir } = await lib('state.mjs');
+  const now = Date.now();
+  const { home } = fakeHome({
+    'mubit-memory-mubit': { creds: true, markers: { 'cc-a-1111aaaa.json': now } },
+  });
+  const codexHome = join(home, '.codex');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(join(codexHome, 'hooks.json'), JSON.stringify({
+    hooks: [{ command: 'env MUBIT_CC_DATA_DIR="/recorded/by/setup" node hook.mjs' }],
+  }));
+
+  assert.equal(dataDir({}, { HOME: home }), '/recorded/by/setup',
+    'a recorded answer is not a guess, so it beats the liveliest candidate');
+});
+
+test('dataDir: no ~/.claude at all still answers with the bare name, never an error', async () => {
+  const { dataDir } = await lib('state.mjs');
+  const home = tempDir('mubit-home-empty-');
+
+  assert.equal(dataDir({}, { HOME: home }),
+    join(home, '.claude', 'plugins', 'data', 'mubit-memory'));
+});
+
+test('liveDataDir stays in step with the codex integration copy of the same search', async () => {
+  const { liveDataDir } = await lib('state.mjs');
+  const boot = await import(pathToFileURL(
+    join(PLUGIN_ROOT, '..', 'codex', 'lib', 'boot.mjs')).href);
+  const now = Date.now();
+  const { home, root } = fakeHome({
+    'mubit-memory': {},
+    'mubit-memory-inline': { markers: { 'cc-a-1111aaaa.json': now } },
+    'mubit-memory-mubit': { creds: true, markers: { 'cc-b-2222bbbb.json': now - 10 * MIN } },
+  });
+
+  // Two copies on purpose — boot.mjs is loaded unbundled and ships only the codex lib/, so it
+  // cannot import this one. Nothing but a test keeps them agreeing.
+  assert.equal(liveDataDir(home, {}), join(root, 'mubit-memory-mubit'));
+  assert.equal(boot.claudeCodeDataDir({ HOME: home }), join(root, 'mubit-memory-mubit'));
+});

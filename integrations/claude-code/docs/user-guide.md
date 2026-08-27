@@ -380,17 +380,23 @@ prefer letting outcome attribution down-weight it.
 Opens a page on `127.0.0.1` — a random port, a token minted for that launch, and nothing on
 your network can reach it. Three tabs:
 
-- **Memory** — every lesson your instance holds. Filter instantly, or press *Search instance*
-  to ask it properly. There is a filter for lessons **visible outside the run that wrote
-  them**, which is the question nothing else here answers: a rule saved at global scope follows
-  you into every project, and one saved at run scope dies with the session.
+- **Memory** — every lesson your instance holds, across **every run** unless you switch to
+  *This run*. Filter instantly, or press *Search instance* to ask it properly. There is a filter
+  for lessons **visible outside the run that wrote them**, which is the question nothing else
+  here answers: a rule saved at global scope follows you into every project, and one saved at
+  run scope dies with the session. `session` and `global` are separately selectable, and
+  *scope not recorded* is its own bucket rather than being folded into `run`.
 - **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
   they cost, and how many were repeats rendered as a one-line pointer. This is read from disk,
   so it works with the network off.
 - **Analytics** — those numbers as a trend, plus spool depth, ingest counts and breaker state.
 
-Three things it deliberately does not claim:
+Four things it deliberately does not claim:
 
+- **A lesson with no project tag is unattributed, not local.** The `repo:` tag is written by the
+  capture hooks; a lesson you saved through `/mubit-memory:remember`, and every lesson reflection
+  writes, carries none. Those land in *No project tag*, which is a large bucket and is never
+  shown as belonging to the project you have open.
 - **No per-prompt latency.** The recall timing on the status marker is last-write-wins — it
   describes the most recent prompt, not each one — so there is no honest per-prompt series to
   plot and the page does not invent one.

@@ -460,7 +460,156 @@ test('analytics: the payload carries no latency series, because none is recorded
 // Proxying
 // ---------------------------------------------------------------------------
 
-test('lessons: the route returns the joined lessons the page renders', async (t) => {
+/**
+ * One `ActivityEntry` carrying the metadata a lesson actually has.
+ *
+ * `projection: 'full'` is what keeps `metadata_json` intact. Under the compact projection the
+ * server overwrites it with `{entry_type, created_at}`, and every field the lessons route
+ * would have returned — scope included — is gone. That is the whole reason the census asks for
+ * `full`, and a fixture that fakes a compact row cannot catch it going wrong.
+ *
+ * @param {Record<string, any>} [meta] merged into `metadata_json`
+ * @param {Record<string, any>} [over] merged onto the entry itself
+ */
+function lessonActivity(meta = {}, over = {}) {
+  return {
+    id: 'a3c1f0de-0000-4000-8000-000000000001',
+    run_id: 'cc-other-00000001',
+    entry_type: 'lesson',
+    content: 'Run the migration first.',
+    source: 'reflection',
+    created_at: '2026-08-19T15:03:18Z',
+    reference_id: 'ref_lesson_1',
+    referenceable: true,
+    ...over,
+    metadata_json: JSON.stringify({
+      entry_type: 'lesson',
+      lesson_type: 'rule',
+      scope: 'global',
+      importance: 'high',
+      source_run_id: 'cc-other-00000001',
+      ...meta,
+    }),
+  };
+}
+
+/** A page of the activity route, in the shape `fetchActivity` reads. */
+function activityPage(entries, next = '', total = entries.length) {
+  return { json: { entries, next_page_token: next, total_visible: total } };
+}
+
+/**
+ * The headline bug, and the only route change that fixes it.
+ *
+ * The page pinned every lessons call to the current run, so the instance took the
+ * `nexus.list(run_id, limit)` branch instead of `list_global(limit)` and a `global` lesson
+ * written by another run could not appear at all — which is the exact opposite of the question
+ * the scope filter exists to answer. An empty `run` means every run, and nothing else needs to
+ * be spelled: a second `allRuns` parameter would just be a second way to get this wrong again.
+ */
+test('lessons: with no run the census asks the instance for every run, so a lesson from another run can appear', async (t) => {
+  const { call, upstream } = await setup(t, {
+    routes: { 'POST /v2/control/activity': activityPage([lessonActivity()]) },
+  });
+
+  const body = await (await call('/api/lessons')).json();
+  const req = upstream.lastCall('POST', '/v2/control/activity')?.body;
+  assert.ok(!('run_id' in req), `an absent run means every run; body was ${JSON.stringify(req)}`);
+  assert.deepEqual(req.entry_types, ['lesson']);
+  assert.equal(req.projection, 'full', 'compact overwrites metadata_json and the scope is gone');
+  assert.equal(body.source, 'activity');
+  assert.equal(body.lessons.length, 1);
+  assert.equal(body.lessons[0].scope, 'global');
+  assert.equal(body.lessons[0].leaksScope, true);
+});
+
+// `currentRun` is a rendering context, not a filter. The moment it narrows the query, D1 is
+// back: the tab can only show what the current run wrote, and "did this rule follow me here
+// from somewhere else" becomes unanswerable.
+test('lessons: currentRun marks a foreign lesson without narrowing the query', async (t) => {
+  const { call, upstream } = await setup(t, {
+    routes: { 'POST /v2/control/activity': activityPage([lessonActivity()]) },
+  });
+
+  const body = await (await call(`/api/lessons?currentRun=${RUN}`)).json();
+  const req = upstream.lastCall('POST', '/v2/control/activity')?.body;
+  assert.ok(!('run_id' in req), `currentRun must not reach the wire; body was ${JSON.stringify(req)}`);
+  assert.equal(body.lessons[0].fromOtherRun, true,
+    'the lesson was written by cc-other-00000001, and that is what the page has to be able to say');
+
+  const own = await (await call('/api/lessons?currentRun=cc-other-00000001')).json();
+  assert.equal(own.lessons[0].fromOtherRun, false);
+});
+
+/**
+ * The back-compat pin.
+ *
+ * The census answers with `created_at` natively, so there is no join to report on — but the
+ * page reads `joined`/`dated` to decide whether to say "this instance records no lesson
+ * dates", and `joinError` is the only place a failed join can surface. Dropping any of the
+ * four would silently change what the header claims.
+ */
+test('lessons: the response still carries lessons, joined, dated and joinError', async (t) => {
+  const { call } = await setup(t, {
+    routes: { 'POST /v2/control/activity': activityPage([lessonActivity()]) },
+  });
+
+  const body = await (await call('/api/lessons')).json();
+  for (const key of ['lessons', 'joined', 'dated', 'joinError']) {
+    assert.ok(key in body, `\`${key}\` is what the page renders the date column from`);
+  }
+  assert.equal(body.joined, true);
+  assert.equal(body.dated, 1, 'the activity route carries created_at, so every row is dated');
+});
+
+/**
+ * The filter the user guide promises, working.
+ *
+ * Scope is applied here and not on the wire, for two reasons that both end in an empty list.
+ * `ListActivityRequest` has no scope field at all, and on the lessons route the scope filter
+ * runs *after* `limit` — so asking upstream for `scope=global` filters an already-truncated
+ * set and reliably answers with nothing.
+ */
+test('lessons: scope=leak returns only the lessons visible outside their own run', async (t) => {
+  const { call, upstream } = await setup(t, {
+    routes: {
+      'POST /v2/control/activity': activityPage([
+        lessonActivity({ scope: 'run' }, { id: 'l-run', reference_id: 'ref-run' }),
+        lessonActivity({ scope: 'session' }, { id: 'l-session', reference_id: 'ref-session' }),
+        lessonActivity({ scope: 'global' }, { id: 'l-global', reference_id: 'ref-global' }),
+        lessonActivity({ scope: undefined }, { id: 'l-bare', reference_id: 'ref-bare' }),
+      ]),
+    },
+  });
+
+  const leaks = await (await call('/api/lessons?scope=leak')).json();
+  assert.deepEqual(leaks.lessons.map((l) => l.id).sort(), ['ref-global', 'ref-session']);
+  assert.equal(leaks.hidden, 2, 'and the page has to be able to say how many it is not showing');
+
+  const req = upstream.lastCall('POST', '/v2/control/activity')?.body;
+  assert.ok(!('scope' in req), `scope is never filtered on the wire; body was ${JSON.stringify(req)}`);
+
+  const bare = await (await call('/api/lessons?scope=unknown')).json();
+  assert.deepEqual(bare.lessons.map((l) => l.id), ['ref-bare']);
+  assert.equal(bare.lessons[0].scope, 'run',
+    'the instance would call it a run lesson, and the page must not contradict it');
+  assert.equal(bare.lessons[0].scopeKnown, false,
+    'but "the server defaulted it" and "we never saw the metadata" are different facts');
+
+  const runs = await (await call('/api/lessons?scope=run')).json();
+  assert.deepEqual(runs.lessons.map((l) => l.id).sort(), ['ref-bare', 'ref-run'],
+    'an entry with no recorded scope is a run entry as far as the instance is concerned');
+});
+
+/**
+ * The fallback, and why the page is told which route answered.
+ *
+ * The two have different fidelity — the lessons route carries no `created_at` and reports the
+ * *scoped* `source_run_id` — so a page that cannot say where a row came from cannot say what a
+ * missing row means. The array route here is consumed one reply per call: the census sees the
+ * empty page, and the join behind `fetchLessons` sees the second.
+ */
+test('lessons: an empty census falls back to the lessons route and says which source answered', async (t) => {
   const { call, upstream } = await setup(t, {
     routes: {
       'POST /v2/control/lessons': {
@@ -472,21 +621,54 @@ test('lessons: the route returns the joined lessons the page renders', async (t)
           }],
         },
       },
-      'POST /v2/control/activity': {
-        json: {
-          entries: [{ id: 'a3c1f0de-0000-4000-8000-000000000001', created_at: '2026-08-19T15:03:18Z' }],
-          next_page_token: '', total_visible: 1,
-        },
-      },
+      'POST /v2/control/activity': [
+        activityPage([]),
+        activityPage([{ id: 'a3c1f0de-0000-4000-8000-000000000001', created_at: '2026-08-19T15:03:18Z' }]),
+      ],
     },
   });
 
   const body = await (await call(`/api/lessons?run=${RUN}`)).json();
+  assert.equal(body.source, 'lessons');
   assert.equal(body.lessons.length, 1);
   assert.equal(body.lessons[0].id, 'a3c1f0de-0000-4000-8000-000000000001');
   assert.equal(body.lessons[0].createdAt, '2026-08-19T15:03:18Z');
   assert.equal(body.lessons[0].leaksScope, true, 'a global lesson is visible outside the run that wrote it');
   upstream.assertCalled('POST', '/v2/control/lessons', 1);
+});
+
+/**
+ * The Activity half of the same bug.
+ *
+ * The route sent no `entry_types` and no `projection`, so it got the compact default — and the
+ * compact projection overwrites `metadata_json` with `{entry_type, created_at}`. Every activity
+ * row therefore reached the page with no scope at all, and both non-empty options of the scope
+ * dropdown matched zero rows. A person filtering by scope in Activity mode saw "No activity
+ * matches." every single time, which reads as an empty instance.
+ */
+test('activity: entryTypes and projection reach the wire, and a lesson row carries its scope', async (t) => {
+  const { call, upstream } = await setup(t, {
+    routes: {
+      'POST /v2/control/activity': activityPage([
+        lessonActivity(),
+        { id: 't1', entry_type: 'trace', content: 'ran the migration', created_at: '2026-08-19T15:00:00Z' },
+      ]),
+    },
+  });
+
+  const body = await (await call(
+    `/api/activity?run=${RUN}&entryTypes=lesson,trace&projection=full&sort=asc`)).json();
+  const req = upstream.lastCall('POST', '/v2/control/activity')?.body;
+  assert.deepEqual(req.entry_types, ['lesson', 'trace']);
+  assert.equal(req.projection, 'full');
+  assert.equal(req.sort, 'asc');
+
+  const lesson = body.entries.find((e) => e.entry_type === 'lesson');
+  assert.equal(lesson.scope, 'global');
+  assert.equal(lesson.leaksScope, true);
+  assert.equal(lesson.scopeKnown, true);
+  assert.equal(body.entries.find((e) => e.entry_type === 'trace').scope, undefined,
+    'scope is a lesson property; inventing one for a trace would be a fiction the page renders');
 });
 
 test('routing: an unknown path is 404 with the documented error shape', async (t) => {

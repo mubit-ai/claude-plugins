@@ -85,12 +85,14 @@ export function walk(dir, base = dir, acc = []) {
  * @param {string} pluginRoot
  * @returns {{outDir: string, ok: boolean, stderr: string, cleanup: () => void}}
  */
-export function rebuildInto(pluginRoot) {
+export function rebuildInto(pluginRoot, extraEnv = {}) {
   const outDir = mkdtempSync(join(tmpdir(), 'mubit-dist-check-'));
   const r = spawnSync(process.execPath, [join(pluginRoot, 'esbuild.config.mjs')], {
     cwd: pluginRoot,
     encoding: 'utf8',
-    env: { ...process.env, MUBIT_CC_BUILD_OUTDIR: outDir, MUBIT_CC_BUILD_SKIP_SERVER: '1' },
+    env: {
+      ...process.env, MUBIT_CC_BUILD_OUTDIR: outDir, MUBIT_CC_BUILD_SKIP_SERVER: '1', ...extraEnv,
+    },
   });
   return {
     outDir,

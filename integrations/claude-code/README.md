@@ -88,13 +88,15 @@ failure glyph while the instance comes up — see [Connection states](#connectio
 
 ## What you get
 
-### Nine hook registrations
+### Ten hook registrations
 
 | Event | Runs | Timeout | What it does |
 | --- | --- | --- | --- |
-| `SessionStart` (`startup\|resume\|clear\|compact`) | `session-start.mjs` | 5 s | Derives the run id, checks health, registers the agent (heartbeats on `resume`), pulls up to 5 global lessons, injects a short steer block telling the model memory is active, that it need not open a turn by searching, and which tool to reach for when the injected memory falls short. On a `compact` source it also re-anchors the session to the checkpoint saved by `PreCompact`. |
-| `UserPromptSubmit` | `prompt-recall.mjs` | 3 s | Queries Mubit and injects recalled memory as `additionalContext`. Blocking, with a 1500 ms internal budget. Injects nothing at all when the result is empty. |
+| `SessionStart` (`startup\|resume\|clear\|compact`) | `session-start.mjs` | 5 s | Derives the run id, checks health, registers the agent (heartbeats on `resume`), pulls up to 5 global lessons, injects a short steer block telling the model memory is active, that it need not open a turn by searching, and which tool to reach for when the injected memory falls short. On a `compact` source it also re-anchors the session to the checkpoint saved by `PreCompact`. On `startup` and `resume` it spawns a detached `session-resume.mjs` that assembles the `resumeBlock` briefing — nothing here waits for it, and `UserPromptSubmit` renders it on the first substantive prompt. |
+| `CwdChanged` | `cwd-changed.mjs` | 5 s | Zero network. The run id is derived from a directory, so a `cd` into another repo mid-session has to move it — and drain the run being left, which nothing else in the plugin would ever revisit. A `cd` within one repo costs nothing: the id resolves through the git toplevel. |
+| `UserPromptSubmit` | `prompt-recall.mjs` | 3 s | Queries Mubit and injects recalled memory as `additionalContext`. Blocking, with a 1500 ms internal budget. Injects nothing at all when the result is empty. On the first substantive prompt of a session it also renders the `resumeBlock` briefing above that, from a file — no extra round trip, and it is consumed exactly once. |
 | `UserPromptSubmit` | `stage-prompt.mjs` | 3 s | Zero network. Stages the prompt so the `Stop` capture has both halves of the turn, and triggers the detached drain when the spool is full or stale. |
+| `PreToolUse` (`Bash`, and only `rm *` / `git push *`) | `pre-tool.mjs` | 3 s | **Off by default** (`preToolWarnings`). Zero network. Reads the `rule`-typed memories this run already recalled and, when one mentions the command about to run, shows it to the model as `additionalContext`. It warns and nothing else: it never allows, denies, asks, defers or rewrites a tool call, and it exits 0 on every path — including its error paths — because the host reads exit code 2 as "block this call". A memory-informed reminder, not a security boundary. |
 | `PostToolUse` (every tool) | `capture.mjs` | 3 s | Redacts and spools the tool call, whatever the tool was — built-in or any MCP server's. Zero network. A short skip list drops the handful that carry no memory (mode switches, list-only queries), and Mubit's own tool calls are suppressed. |
 | `PostToolUseFailure` | `capture.mjs --failure` | 3 s | Captures the failure — these produce the most useful lessons. |
 | `Stop` | `capture.mjs --stop` | 5 s | Writes the `Q: … / A: …` turn, spawns the drain, and attributes the turn's outcome to the memories that were recalled for it. |
@@ -103,12 +105,13 @@ failure glyph while the instance comes up — see [Connection states](#connectio
 | `PostCompact` | `checkpoint.mjs --post` | 5 s | Zero network. Records that the compaction happened; injects nothing, because Claude Code accepts no injected context on this event. The re-anchor arrives instead from `SessionStart`, which also fires on a `compact` source. |
 | `SessionEnd` | `session-end.mjs` | 8 s | Drains inline, flushes pending outcomes, then reflects. |
 
-(Nine events; `UserPromptSubmit` registers two commands.)
+(Thirteen events; `UserPromptSubmit` registers two commands, and `PreToolUse` registers two —
+one per `if` pattern.)
 
 Every hook exits 0, always. A memory layer has no business breaking a prompt — a dead server,
 an unwritable data dir, or a corrupt state file costs you a memory, never a turn.
 
-### Seven skills and one subagent
+### The skills and one subagent
 
 | Command | Use it for |
 | --- | --- |
@@ -119,22 +122,36 @@ an unwritable data dir, or a corrupt state file costs you a memory, never a turn
 | `/mubit-memory:remember` | Save a durable lesson, rule, or standing preference. |
 | `/mubit-memory:reflect` | Extract lessons from this session mid-flight, rather than waiting for `SessionEnd`. |
 | `/mubit-memory:forget` | Delete a lesson, or down-weight one that is merely wrong. |
+| `/mubit-memory:dashboard` | Open a local page over everything above: browse and search lessons, see what recall cost per prompt, watch ingest health. Loopback only, and one of the skills the model cannot invoke for you. |
+| `/mubit-memory:strategies` | Read the pattern *across* many lessons rather than any single one — what this project keeps doing, and keeps getting wrong. |
+| `/mubit-memory:checkpoint` | Save a named snapshot of where a run has got to, stored verbatim, before risky work. The half of `PreCompact` you can ask for. |
+| `/mubit-memory:memory-health` | Report what is actually stored: entry counts, staleness, contradictions. The store, not the connection. |
+| `/mubit-memory:activity` | The audit question: what does this instance actually hold, filtered by time, type, agent or origin — and an export of the whole record as JSONL you can keep. Prints to stdout; writes a file only if you ask. Also not model-invocable. |
+| `/mubit-memory:pin` | Pin a standing constraint for the rest of this run — "don't touch the vendored server" — so it is put in front of the model on every prompt, including the ones recall skips. Cleared when it stops being true; a durable, cross-session rule is `remember` instead. |
 | `@mubit-memory:mubit-recall` | Subagent: multi-angle memory search in an isolated context, returns a synthesis instead of raw evidence. |
 
-### Ten MCP tools
+### Thirteen MCP tools
 
-The bundled MCP server carries 21 tools and registers ten of them by default — the other
-eleven cost you nothing until you ask for them:
+The bundled MCP server carries 21 tools and registers thirteen of them by default — the other
+eight cost you nothing until you ask for them:
 
 ```
 mubit_learned   mubit_recall   mubit_outcome   mubit_reflect   mubit_lessons
 mubit_diagnose  mubit_archive  mubit_dereference  mubit_forget  mubit_status
+mubit_strategies  mubit_checkpoint  mubit_memory_health
 ```
 
-The other eleven are excluded because a hook already does the job better
-(`mubit_remember`, `mubit_context`, `mubit_checkpoint`, `mubit_register_agent`,
-`mubit_list_agents`) or because they have no Claude Code surface (the multi-agent
-orchestration group). Nothing is removed — restore any of them by name with `mcpTools`.
+The other eight are excluded because a hook already does the job better (`mubit_remember`,
+`mubit_context`) or because they have no Claude Code surface (`mubit_register_agent`,
+`mubit_list_agents` and the rest of the multi-agent orchestration group). Nothing is removed:
+restore any of them by name with `mcpTools`.
+
+The last three on that list were excluded until each had a skill to reach it. A checkpoint is
+not what `PreCompact` does — the hook fires when the window fills, which is the one moment you
+cannot ask for, and `mubit_checkpoint` is the marker you name yourself. `mubit_strategies`
+reads the pattern across many lessons where every other retrieval verb reads individual ones.
+`mubit_memory_health` answers the route `/mubit-memory:doctor` used to tell you to `POST` by
+hand.
 
 ### A status line
 
@@ -193,11 +210,10 @@ Authorization: Bearer abc123def456...     ->  Authorization: [REDACTED:bearer]
 ```
 
 The keyword list for `assignment` (`secret`, `token`, `password`, `credential`, `assertion`,
-`signature`, `apikey`, `api_key`) matches the terms Mubit itself treats as secret, so client
-and server agree on what counts as one. A final `high-entropy` rule catches
-anything else: a run of 32+ base64/hex characters with Shannon entropy >= 4.0 becomes
-`[REDACTED:high-entropy]`. Git SHAs cannot trip it — entropy over a 16-symbol alphabet is
-bounded by exactly 4.0 — and `idempotency-key` values are exempted by name so you can still
+`signature`, `apikey`, `api_key`) covers the terms that name a secret in practice. A final
+`high-entropy` rule catches anything else: a long enough run of random-looking characters
+becomes `[REDACTED:high-entropy]`. A hex-only string cannot trip it, so git SHAs survive
+— and a small set of routing values is exempt by name so you can still
 tell whether a batch was sent twice.
 
 ### Stage 2 — path denylist
@@ -263,19 +279,30 @@ that cache, and writing credentials invalidates it immediately rather than after
 | --- | --- | --- | --- |
 | `endpoint` | `""` | `MUBIT_ENDPOINT` | Your Mubit instance URL. Required — without it there is nothing to talk to. |
 | `apiKey` | `""` | `MUBIT_API_KEY` | `mbt_...` key, sent as `Authorization: Bearer`. Set it with `/mubit-memory:auth`, or via plugin settings to keep it in the OS keychain. |
-| `userId` | `""` | `MUBIT_CC_USER_ID` | Optional user/entity id for multi-user memory scoping. |
+| `userId` | `""` | `MUBIT_CC_USER_ID` | Optional user/entity id for multi-user memory scoping. A **retrieval scope**, not a name: it is sent as `user_id`, which the server stamps on capture and then *enforces as a filter* on query. Recall does not send one, so anything captured under a `userId` is invisible to this plugin's own recall — set it only when you mean to partition memory. To label who did the work, use `actorId`. |
+| `actorId` | `""` (detected) | `MUBIT_CC_ACTOR_ID` | Who captured memory is attributed to. Left blank it is detected — `git config github.user`, then the local-part of `git config user.email`, then `git config user.name`, then `$USER` — and cached for 30 days at `${CLAUDE_PLUGIN_DATA}/actor.json`. Detection runs only in the detached drainer, never on a hook that a prompt is waiting on, so the first capture in a brand-new data dir may go unattributed. The value rides in each item's metadata and, unlike `userId`, never narrows what recall can see. |
 | `runStrategy` | `per-directory` | `MUBIT_CC_RUN_STRATEGY` | How a session maps to a Mubit run. See [Run strategies](#run-strategies). |
 | `capture` | `true` | `MUBIT_CC_CAPTURE` | Capture tool activity. Off means the `PostToolUse`/`Stop` hooks spool nothing. |
 | `recall` | `true` | `MUBIT_CC_RECALL` | Inject recalled memory before each prompt. Off means `UserPromptSubmit` dials nothing. |
 | `redact` | `true` | `MUBIT_CC_REDACT` | Stage-1 pattern scrub. Turning it off is not recommended; stages 2 and 3 run regardless. |
 | `recallTokenBudget` | `1500` | `MUBIT_CC_RECALL_TOKENS` | Maximum tokens of recalled context injected per prompt. Sections are trimmed to fit, preferring non-stale entries. |
+| `subagentRecallTokenBudget` | `600` | `MUBIT_CC_SUBAGENT_RECALL_TOKENS` | Maximum tokens of recalled context injected into a **subagent** when it starts. `UserPromptSubmit` does not fire for a subagent, so without the `SubagentStart` hook a subagent gets no memory at all; with it, this is the ceiling. Kept below `recallTokenBudget` because a subagent's window is smaller and its task narrower, and because this is paid once per spawn — a fan-out of ten pays it ten times. Set to `0` to fall back to `recallTokenBudget`. |
 | `recallMaxPerSection` | `0` | `MUBIT_CC_RECALL_MAX_PER_SECTION` | Maximum items rendered per section of the injected block. `0` means no cap — the token budget and the server's own limit are what bound it. |
-| `recallAssemble` | `client` | `MUBIT_CC_RECALL_ASSEMBLE` | `client` assembles the context block locally for **0 LLM calls**. `server` uses `/v2/control/context`, which costs **2 LLM calls per prompt** and replaces the free path rather than adding to it. |
+| `recallRepeatMode` | `pointer` | `MUBIT_CC_RECALL_REPEAT_MODE` | What happens to a memory this run has already injected. `pointer` repeats it as its reference id plus its first clause — roughly 20 tokens against 200 — and keeps the id attributable, so `Stop` still reinforces it. `full` re-sends the whole entry on every prompt, which is what releases before 0.10 did. Recall injection is the plugin's largest recurring context cost: up to 1500 tokens on *every* prompt, against 356 tokens *once* for the whole MCP tool surface. Compaction resets the set, because after it the model has not seen any of it. |
+| `recallAssemble` | `client` | `MUBIT_CC_RECALL_ASSEMBLE` | `client` assembles the context block locally for **0 LLM calls**. `server` uses `/v2/control/context`, which costs **2 LLM calls per prompt** and replaces the free path rather than adding to it. It also silently gives up `recallRankBy`: `/v2/control/context` has no ranking field of any kind, so on this path every recall fuses at the server's default weights and a handoff question goes back to being answered by similarity. |
 | `recallFallback` | `none` | `MUBIT_CC_RECALL_FALLBACK` | What recall does when the instance has direct-access recall disabled. `none` returns nothing, for **0 LLM calls**. `agent_routed` pays **1 LLM call per prompt** to get recall anyway — typically several seconds, against a recall budget of 1500 ms, so most prompts spend the call and still inject nothing. See [When recall returns nothing](#when-recall-returns-nothing). |
+| `recallRankBy` | `auto` | `MUBIT_CC_RECALL_RANK_BY` | How the server weights semantic, lexical and recency scores for a recall query. Its default weighting barely counts recency, which is why "where were we?" has always answered with the most *similar* memory rather than the most recent one — there is real event time to rank on, it was simply never asked for. `auto` decides per prompt: a temporal or handoff question ("what changed", "catch me up", "pick up where we left off", "still failing") is sent as `freshness`, which makes recency dominant, and everything else as `relevance`. Pin `relevance` to turn the rule off, `freshness` to rank every prompt by recency, or `balanced` for the middle, which the rule never chooses on its own. The exact weights belong to your instance and are operator-tunable; a query with `explain: true` reports the ones actually used. It costs **0 extra LLM calls and 0 extra round trips** — it is one field on a request that is already being sent. **`recallAssemble: server` ignores it entirely**: `/v2/control/context` has no ranking field of any kind, so rung 3 always fuses at the default weighting, silently. |
+| `recallCrossRun` | `auto` | `MUBIT_CC_RECALL_CROSS_RUN` | Whether a **per-prompt** recall also asks for lessons learned in **other runs**. That half of the query has no run id to bound it, which makes it the half least able to promise an answer inside the recall budget, and it costs the same whether it finds a lesson or finds nothing. `auto` asks for it only where there is room to pay: the blocking `UserPromptSubmit` hook declines it, `recallAsync`’s detached refresh takes it — the same trade `recallAsync` already makes, without a second thing to tune. `on` asks everywhere, which is only coherent with `recallAsync` on or with `MUBIT_CC_RECALL_BUDGET_MS` raised to fund it; `off` never asks. Note that `auto` measures its slack against `MUBIT_CC_TIMEOUT_MS` too, so setting that below `3000` declines the lane on **every** path, refresh included. **This setting does not control standing lessons** — `SessionStart` fetches global-scope lessons once per session on their own route regardless of it. Costs **0 LLM calls** either way: it is one field on a request already being sent. |
+| `recallAsync` | `false` | `MUBIT_CC_RECALL_ASYNC` | Never make a prompt wait on recall. On, `UserPromptSubmit` injects the block that a **detached refresh retrieved just after the previous prompt** and returns without dialling — so the hook's wall clock is a file read, however slow the endpoint is, and `MUBIT_CC_RECALL_BUDGET_MS` stops being something you have to discover and tune. It costs one turn of staleness (the block says so, in the block) and the first prompt of a session gets no recalled memory — `SessionStart`'s standing lessons still land, so the session is not memoryless. Attribution is unaffected: the ids are staged against the turn that received the block. Off by default. |
 | `reflectOnEnd` | `true` | `MUBIT_CC_REFLECT_ON_END` | Reflect at `SessionEnd`. This is the only path that promotes a lesson beyond its own run, so turning it off to save a few seconds trades away cross-session memory entirely. See below. |
+| `sessionEndDetach` | `true` | `MUBIT_CC_SESSION_END_DETACH` | Let the end-of-session drain and reflection finish in a detached process. The host cancels the `SessionEnd` hook about a second into a teardown — under `--print` it always does — and anything still running inside the hook dies with it, including the reflect above. On, the hook stamps the marker `detached`, hands the work over and returns in milliseconds; the child reports a terminal `reflect.status` when it is done, usually a few seconds after the CLI has exited. Turn it off only where background processes are forbidden — the work then runs inline, where a teardown can cut it short. |
 | `outcomeMode` | `implicit` | `MUBIT_CC_OUTCOME_MODE` | `implicit`: a turn whose reply carried the recalled memory's own vocabulary is attributed to those memories; a turn that carried none of it is recorded as `neutral` against the run and attributed to no entry, so an injection nobody used is counted rather than being invisible. `explicit`: only the model's own `mubit_outcome` calls count. `off`: no attribution, and no measurement of it either. |
 | `statusLine` | `true` | `MUBIT_CC_STATUSLINE` | Render the status line. When false it prints an empty line and exits 0 rather than erroring per frame. |
-| `mcpTools` | `""` (the curated ten) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
+| `preToolWarnings` | `false` | `MUBIT_CC_PRE_TOOL_WARNINGS` | Show the model a matching stored `rule` just before an `rm` or `git push` runs. Warnings only — it never blocks, rewrites or asks about a tool call, and the filter that decides when it runs at all is best-effort, so treat it as a reminder and use Claude Code's permission system for anything that has to hold. Off by default: this is the one setting that can put text in front of a tool call. |
+| `resumeBlock` | `true` | `MUBIT_CC_RESUME_BLOCK` | Open a session with a briefing on where earlier work left off. `SessionStart` spawns a detached child that asks `/v2/control/context` for a sections block about this run, and the first substantive prompt of the session renders it above the ordinary recall block. **The one opt-in feature here that ships on**, because its cost is per *session* and not per prompt: one background process and **2 LLM calls once**, against the prompt where the model knows least about what it is walking into — nothing waits for it, and no prompt after the first pays anything. Only `startup` and `resume` sessions get one: `/clear` starts a fresh run with no history, and a compaction or a fork is already re-anchored. It renders as `<mubit-resume>` and says, in the block, that it is a briefing and not a task list. **How much it can describe depends on `runStrategy`.** `/v2/control/context` is *mostly* run-scoped — activity, working memory, rules and archived blocks all come from the run id you give it — but lessons also reach across runs, through linked runs and a session/global lesson lane. So under the default `per-directory` the block summarises everything this project has ever done; under `per-conversation`, where every session is its own run, a new session's own run is empty and the block falls back to whatever cross-run lessons apply — thinner, but not nothing. Set `MUBIT_CC_RESUME_TOKENS` to change its 1000-token ceiling. |
+| `mcpTools` | `""` (the curated thirteen) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
+| `mcpLessonScope` | `run` | `MUBIT_MCP_LESSON_SCOPE` | The widest scope a lesson written by an MCP tool may claim: `run`, `session` or `global`. Anything above `run` is read back by unrelated runs, so the default keeps an agent-written lesson in the run that wrote it — with `runStrategy: per-directory`, that is the project it was written in. Raise it if you want agent-written rules to follow you between projects; reflection promotes a lesson beyond its run either way. |
+| `pins` | `true` | `MUBIT_CC_PINS` | Put the constraints pinned with `/mubit-memory:pin` in front of the model on every prompt of the run. A pin is a sentence that is true for *this task* — "don't touch the vendored server", "no new dependencies until this PR lands" — and before this existed the only place to put one was memory, where it became a durable lesson and was recalled into every later session of a project where it had stopped being true. Pins render above the recalled block and, unlike recall, on the prompts recall skips: a two-word answer, an open circuit breaker, a recall that failed or found nothing. Capped at five pins, 200 characters each and 240 rendered tokens — tight, because a pin is unranked and never degrades to a pointer, so it is the most expensive context the plugin injects per unit of information. It costs **0 extra requests on the prompt path**: the hook reads one file, and the refresh rides in the detached drainer. Counted separately as `recall.pin_tokens`, so `recall.tokens` keeps meaning what recall cost. Off makes the feature invisible — the injected block is byte-for-byte what it was without it. |
 
 ### Environment-only settings
 
@@ -288,6 +315,7 @@ camelCase name in parentheses.
 | `MUBIT_CC_RUN_ID` (`runId`) | `""` | The pinned run id for `runStrategy: static`. Required there; unset is a config error, never a silent fallback. |
 | `MUBIT_CC_RECALL_BUDGET_MS` (`recallBudgetMs`) | `1500` | Wall-clock budget for pre-prompt recall. |
 | `MUBIT_CC_RECALL_SECTIONS` (`recallSections`) | `mental_models,active_rules,lessons,facts,working_memory,traces` | Which context sections to request. |
+| `MUBIT_CC_RESUME_TOKENS` (`resumeTokenBudget`) | `1000` | Token ceiling for the `resumeBlock` briefing. Lower than `recallTokenBudget` because the two are spent in the same message on the first prompt of a session — and because a resume that does not fit on a screen is not a resume. |
 | `MUBIT_CC_POLICY_TTL_MS` (`policyTtlMs`) | `86400000` (24 h) | How long a cached `direct_bypass` policy denial is honoured before retrying. Set it to `1` to re-probe on the next prompt, after an operator has enabled direct search. |
 | `MUBIT_CC_CAPTURE_DENY` (`denyGlobs`) | `""` | Extra denylist globs, appended to the built-in floor. |
 | `MUBIT_CC_RESPECT_GITIGNORE` (`respectGitignore`) | `1` | Drop captures for git-ignored paths. |
@@ -325,6 +353,84 @@ You can tell this is what is happening from the status line — `recall dry N` a
 consecutive empty recalls — or from `/mubit-memory:doctor`, which reads `recall.empty_reason`
 and names `policy_denied` specifically. Note that the connection state stays `ready`
 throughout, because nothing is wrong with the connection.
+
+### Pinning a constraint for one task
+
+Some rules are true for an afternoon. "Don't touch the vendored server." "No new dependencies
+until this PR lands." "Stay on 0.10." They are not lessons — a lesson is durable and crosses
+sessions, and saving one of these as a lesson means it comes back six months later in a project
+where it stopped being true the day the task ended. Until this existed there was nowhere else
+to put them, so that is exactly what happened.
+
+```
+/mubit-memory:pin don't touch the vendored server
+/mubit-memory:pin list
+/mubit-memory:pin clear vendored
+```
+
+A pin renders above the recalled block on every prompt of the run, in full, with a line telling
+the model which half is which — pins are an instruction, and the "may be out of date, verify
+before relying on it" caveat that guards recalled memory is about *retrieved* memory and would
+teach the model to second-guess a constraint the user set a minute ago.
+
+It also renders where recall does not: on a two-word answer, with `recall` switched off, on a
+recall that failed or came back empty, and while the circuit breaker is open. That last one is
+the case it was built for — the endpoint being down does not make a standing constraint less
+true, and it is exactly when the model has nothing else to go on.
+
+**It costs no requests on the prompt path.** The hook reads one file; the refresh from the
+instance rides in the detached drainer that is already running, at most once a minute. Pins are
+stored on your instance as run-scoped variables, so a second terminal in the same run sees
+them — and a pin the instance did not accept is not written locally at all, because a pin that
+exists only on one machine is one you believe is shared and is not.
+
+Five pins, 200 characters each, 240 rendered tokens, and the command refuses anything over that
+rather than truncating your words. They are tight because a pin has neither of the properties
+that make recall affordable: it is not ranked against the prompt, and it never degrades to a
+one-line pointer once the model has seen it. Six standing constraints is not a set of
+constraints, it is a document, and a document belongs in `CLAUDE.md` where it costs nothing per
+prompt. The pinned tokens are reported separately from `recall.tokens`, as `recall.pin_tokens`,
+so recall's own cost keeps meaning what it always did.
+
+Subagents do not get pins yet: `SubagentStart` injects its own, smaller recalled block and does
+not read them.
+
+### When recall is slow rather than empty
+
+A different symptom, with a different fix. If the status line shows `◌ not_responding` and
+`recall.empty_reason` is blank rather than `policy_denied`, the instance is answering — just
+not inside the budget. The call is abandoned after it has already been paid for.
+
+**This is not only a self-hosting problem.** Measured 2026-08-24, a rung-1 query against
+*hosted* Mubit took 2.0-2.6 s, against a `MUBIT_CC_RECALL_BUDGET_MS` of 1500. Self-hosted
+instances land in a similar range. On either, an ordinary session recalls nothing on every
+prompt and reports it as zeros.
+
+**The tell is the number, not the zero.** `mubit-inspect` printing `ms: 1507` — a figure
+sitting on the budget — is a timeout. A genuinely empty result returns fast and carries an
+`empty_reason`. `status/health.json` will still read `ok: true, state: ready`, because
+`/v2/core/health` is fast and the query path is not, so a healthy connection glyph does not
+clear this.
+
+**Raising the budget mostly cannot fix it.** The hook's hard stop is
+`min(recallBudgetMs + 400, 2800)` — capped at 2800 ms, because `UserPromptSubmit` has a 3 s
+host timeout. Past roughly 2400 the setting buys nothing, and every millisecond you do buy is
+a longer wait before every message you send.
+
+`MUBIT_CC_RECALL_ASYNC=1` removes the trade instead of tuning it. With it on, the hook injects
+the block a **detached refresh** retrieved just after your previous prompt and returns without
+dialling anything, so what it costs is one file read no matter how slow the endpoint is. The
+refresh is not bound by the prompt budget — nothing is waiting on it.
+
+What you give up:
+
+- **One turn of staleness.** The block was retrieved against your previous message. It says so,
+  in the block, so the model reads it as background rather than as an answer.
+- **The first prompt of a session recalls nothing.** `SessionStart`'s standing lessons still
+  land, so a fresh session is not memoryless.
+
+What you keep: attribution. The recalled ids are staged against the turn that *received* the
+block, so `Stop` reinforces exactly the memories the model actually had.
 
 ### Turning off `reflectOnEnd`
 
@@ -406,7 +512,7 @@ of three escalates, and only ever to `not_responding` — never to `unreachable`
 | Status line shows a glyph but no counters | No hook has written the marker for this run yet | Normal for the first few seconds of a session |
 | Status line never appears at all | A plugin cannot register `statusLine`; the shipped entry is inert | Add it to your own `~/.claude/settings.json` — see [A status line](#a-status-line) |
 | `/mcp` lists 21 tools instead of ten | You are on 0.9.1 or older, whose bundled MCP server predates the allowlist patch and registers everything | Upgrade. On an older version it is not cosmetic: every session pays for all 21 tool schemas |
-| A saved lesson never becomes visible in a later session | `mubit_learned` writes every entry as `success` / `session`; only the explicit reflect path widens scope, over several sessions | Keep `reflectOnEnd` on, and run `/mubit-memory:reflect` at meaningful checkpoints |
+| A saved lesson never becomes visible in another project | `mubit_learned` writes every entry as `success` at `run` scope; only the explicit reflect path widens it | Keep `reflectOnEnd` on and run `/mubit-memory:reflect` at meaningful checkpoints, or raise `mcpLessonScope` |
 | A just-saved memory is not findable a second later | `mubit_learned` returns when the write is **queued**, not stored. Embedding and indexing happen after the call returns | Wait. Reflecting or searching immediately honestly returns nothing, and that is not a fault |
 | Hook captures and `/mubit-memory:remember` writes land in different runs | `runStrategy: per-conversation` | Use `per-directory` |
 | `Config error: MUBIT_CC_RUN_STRATEGY=static requires MUBIT_CC_RUN_ID` | `static` with no pin | Set `MUBIT_CC_RUN_ID`, or pick another strategy |
@@ -430,4 +536,4 @@ safe to attach to an issue.
 
 - Documentation: <https://docs.mubit.ai/integrations/claude-code>
 - Source: <https://github.com/mubit-ai/claude-plugins>
-- License: Apache-2.0
+- License: Apache-2.0 — [`LICENSE`](LICENSE); third-party code bundled into the MCP server is attributed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)

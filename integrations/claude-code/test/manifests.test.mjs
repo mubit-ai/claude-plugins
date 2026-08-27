@@ -709,3 +709,42 @@ test('marketplace.json source points at integrations/claude-code and declares co
   assert.equal(typeof entry.contextCost.value, 'number', 'contextCost.value must be a number');
   assert.ok(entry.contextCost.value > 0, 'contextCost.value must be a real estimate, not 0');
 });
+
+// ---------------------------------------------------------------------------
+// §8.2 — the one list, written down five times
+// ---------------------------------------------------------------------------
+
+/**
+ * The curated allowlist is a literal in `lib/config.mjs` (`DEFAULT_MCP_TOOLS`), a second
+ * literal in `mcp/src/launch.mjs` (`DEFAULT_ALLOWLIST`, the launcher's floor for the case
+ * where config resolution hands back an empty list), and a third at the top of this file.
+ *
+ * Nothing compared them until now, and that is how `f3534e5` was able to promote three tools
+ * through twenty-three files while `mcp/src/instructions.mjs` kept describing the set it had
+ * replaced. A copy nobody checks is not a copy, it is a fork.
+ *
+ * Read out of source text rather than imported: `mcp/src/launch.mjs` does its work at module
+ * scope — it resolves config, derives a run id and imports the 5.9 MB server — so importing
+ * it to read one constant would start a server this test has no use for.
+ */
+function literalList(relPath, name) {
+  const src = readFileSync(join(PLUGIN_ROOT, relPath), 'utf8');
+  const m = new RegExp(`${name}\\s*=\\s*\\[([^\\]]*)\\]`).exec(src);
+  assert.ok(m, `${relPath} no longer declares ${name} as an array literal, so the copies of the `
+    + 'curated allowlist can no longer be compared');
+  return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+}
+
+test('every copy of the curated allowlist is the same list', () => {
+  const fromConfig = literalList('lib/config.mjs', 'DEFAULT_MCP_TOOLS');
+  const fromLauncher = literalList('mcp/src/launch.mjs', 'DEFAULT_ALLOWLIST');
+
+  assert.deepEqual(fromConfig, DEFAULT_ALLOWLIST,
+    'lib/config.mjs\'s DEFAULT_MCP_TOOLS and this file\'s copy have drifted. config.mjs is what a '
+    + 'real session resolves, so it wins — but a test asserting a different list is a test that '
+    + 'stopped describing the plugin.');
+  assert.deepEqual(fromLauncher, DEFAULT_ALLOWLIST,
+    'mcp/src/launch.mjs\'s DEFAULT_ALLOWLIST has drifted from the curated set. It is the floor the '
+    + 'launcher falls back to when config resolution returns an empty list, so a session that takes '
+    + 'that path would be offered a different tool set from every other session.');
+});

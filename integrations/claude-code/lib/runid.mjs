@@ -148,25 +148,33 @@ const TOUCH_INTERVAL_MS = 60 * 1000;
  * whenever the mapping changes — which is what makes two successive `/clear`s
  * yield `-c1` then `-c2`.
  *
+ * `persist: false` reads the map without writing it back, for the one caller that
+ * is not a hook. Only a hook is handed `SessionStart.source`, and that field is
+ * what makes a `/clear` a new run — so a caller without it can honour the
+ * mapping but must never overwrite it with an answer derived from less.
+ *
  * @param {Record<string, any>} cfg     a `loadConfig()` result
  * @param {Record<string, any>} [payload] the hook's stdin payload
+ * @param {{persist?: boolean}} [options] `persist: false` to derive read-only
  * @returns {string}
  * @throws {Error} when `static` has no usable pin, or when a derivation could
  *   only answer with `"default"` / a bare prefix. Throwing is the honest answer;
  *   a silent default is not.
  */
-export function deriveRunId(cfg, payload = {}) {
+export function deriveRunId(cfg, payload = {}, options = {}) {
   const c = isObject(cfg) ? cfg : {};
   const p = isObject(payload) ? payload : {};
-  return assertUsableRunId(resolveRunId(c, p));
+  const persist = !(isObject(options) && options.persist === false);
+  return assertUsableRunId(resolveRunId(c, p, persist));
 }
 
 /**
  * @param {Record<string, any>} cfg
  * @param {Record<string, any>} payload
+ * @param {boolean} persist  write the record back, as every hook does
  * @returns {string}
  */
-function resolveRunId(cfg, payload) {
+function resolveRunId(cfg, payload, persist) {
   const strategy = normaliseStrategy(cfg.runStrategy);
   const source = normaliseSource(payload.source);
   const sessionId = hostSessionId(payload);
@@ -202,12 +210,14 @@ function resolveRunId(cfg, payload) {
     runId = reusableRun(cfg, payload, prev, strategy) || deriveFresh(cfg, payload, strategy);
   }
 
-  rememberRun(cfg, payload, sessionId, prev, {
-    run_id: runId,
-    clear_count: clear,
-    strategy,
-    source,
-  });
+  if (persist) {
+    rememberRun(cfg, payload, sessionId, prev, {
+      run_id: runId,
+      clear_count: clear,
+      strategy,
+      source,
+    });
+  }
   return runId;
 }
 

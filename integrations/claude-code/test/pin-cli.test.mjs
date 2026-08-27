@@ -346,6 +346,78 @@ test('pin: with no run to be found it says what to do, and dials nothing', async
   assert.match(out.text(), /--run/, 'the escape hatch has to be in the message that needs it');
 });
 
+// A machine runs one plugin data directory for every session at once, so "the newest marker"
+// stops meaning "this session" the moment a second session is answering a prompt. Guessing
+// there writes the pin to somebody else's run and reports success for it.
+test('pin: two live runs are refused by name rather than guessed between', async (t) => {
+  const server = await fakeMubit(routes());
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const now = Date.now();
+  seedMarker(dir, 'cc-mine-11111111', now - 64_000);
+  seedMarker(dir, 'cc-theirs-22222222', now);
+  const out = sink();
+
+  const code = await CLI.main(['add', 'no new dependencies'], env(dir, server), { log: out.log });
+  assert.equal(code, 1);
+  assert.equal(server.requests.length, 0, `saw: ${server.summary()}`);
+  assert.match(out.text(), /cc-mine-11111111/, 'the caller has to be told which runs it is between');
+  assert.match(out.text(), /cc-theirs-22222222/);
+  assert.match(out.text(), /--run/, 'the escape hatch has to be in the message that needs it');
+});
+
+test('pin --run: names the run even while two are live', async (t) => {
+  const server = await fakeMubit(routes());
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const now = Date.now();
+  seedMarker(dir, 'cc-mine-11111111', now - 64_000);
+  seedMarker(dir, 'cc-theirs-22222222', now);
+
+  assert.equal(await CLI.main(['--run', 'cc-mine-11111111', 'add', 'mine'],
+    env(dir, server), { log: sink().log }), 0);
+  assert.equal(server.lastCall('POST', '/v2/control/variables/set').body.run_id, 'cc-mine-11111111');
+});
+
+// §4.3: a `/clear` leaves the pre-clear marker on disk beside `-c1`, and a subagent writes
+// `-sub-<short>`. Both name the session that is already the answer. Reading either as a second
+// session would make pinning refuse for the rest of any run that had ever been cleared.
+test('pin: a /clear successor is the same session, not a rival', async (t) => {
+  const server = await fakeMubit(routes());
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const now = Date.now();
+  seedMarker(dir, RUN_ID, now - 2_000);
+  seedMarker(dir, `${RUN_ID}-c1`, now);
+
+  assert.equal(await CLI.main(['add', 'after the clear'], env(dir, server), { log: sink().log }), 0);
+  assert.equal(server.lastCall('POST', '/v2/control/variables/set').body.run_id, `${RUN_ID}-c1`);
+});
+
+test('pin: a subagent sub-run is the same session, not a rival', async (t) => {
+  const server = await fakeMubit(routes());
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const now = Date.now();
+  seedMarker(dir, `${RUN_ID}-sub-ab12cd34`, now - 2_000);
+  seedMarker(dir, RUN_ID, now);
+
+  assert.equal(await CLI.main(['add', 'parent still'], env(dir, server), { log: sink().log }), 0);
+  assert.equal(server.lastCall('POST', '/v2/control/variables/set').body.run_id, RUN_ID);
+});
+
+test('pin: a run left behind earlier today is not a rival', async (t) => {
+  const server = await fakeMubit(routes());
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const now = Date.now();
+  seedMarker(dir, 'cc-thismorning-99999999', now - 3 * 60 * 60 * 1000);
+  seedMarker(dir, RUN_ID, now);
+
+  assert.equal(await CLI.main(['add', 'only one live'], env(dir, server), { log: sink().log }), 0);
+  assert.equal(server.lastCall('POST', '/v2/control/variables/set').body.run_id, RUN_ID);
+});
+
 // §4.3 / F21 again, from the surface a person types at.
 test('pin: refuses to write into the shared "default" run', async (t) => {
   const server = await fakeMubit(routes());

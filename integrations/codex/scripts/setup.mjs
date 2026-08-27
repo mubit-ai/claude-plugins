@@ -197,12 +197,33 @@ if (!withPreTool) console.log('  (PreToolUse omitted: the warnings it exists for
 
 // --- 2. register the MCP server ------------------------------------------------
 spawnSync('codex', ['mcp', 'remove', 'mubit'], { stdio: 'ignore' });
-// `--env` matters as much here as the pin in the hook commands does. The MCP server derives
-// the run id itself, with the same strategy the hooks use, so a server reading a different
-// data directory would write /mubit-memory:remember into a run pre-prompt recall never reads.
+// `--env` matters as much here as the pin in the hook commands does. Codex registers the
+// server itself, so whatever is not passed here is simply absent — there is no host putting
+// `CLAUDE_*` variables in its environment the way Claude Code does, and `mcp/src/launch.mjs`
+// bridges exactly three `MUBIT_CC_*` names onto the host names `lib/` reads.
+//
+// Two of the three ride here, and the third deliberately does not:
+//
+//   `MUBIT_CC_DATA_DIR` — the MCP server derives the run id itself, with the same strategy
+//   the hooks use, so a server reading a different data directory would write
+//   /mubit-memory:remember into a run pre-prompt recall never reads.
+//
+//   `MUBIT_CC_PLUGIN_ROOT` — `lib/redact.mjs`'s `selfRoots()` builds the list of paths that
+//   mark an item as being about the plugin itself, and the install root is one of them.
+//   Unset, the server cannot recognise its own install path; under Codex that path lives
+//   inside `$CODEX_HOME`, so it carries the user's home directory into anything the
+//   suppression fails to catch.
+//
+//   `MUBIT_CC_PROJECT_DIR` — NOT passed, on purpose. `codex mcp add` writes to
+//   `$CODEX_HOME/config.toml`: one registration serves every project on the machine, so a
+//   project directory pinned at setup time would be wrong everywhere except the directory it
+//   was taken in. Falling back to the launch cwd is the correct answer, and the run id is
+//   unaffected either way because `directoryRunId` resolves through
+//   `git rev-parse --show-toplevel` before it hashes.
 const add = spawnSync('codex', [
   'mcp', 'add', 'mubit',
   '--env', `MUBIT_CC_DATA_DIR=${dataDir}`,
+  '--env', `MUBIT_CC_PLUGIN_ROOT=${root}`,
   '--', 'node', join(root, 'mcp/dist/index.js'),
 ], { encoding: 'utf8' });
 console.log((add.stdout || add.stderr || '').trim());

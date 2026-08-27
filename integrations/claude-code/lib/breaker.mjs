@@ -83,14 +83,14 @@ const DEFAULT_COOLDOWN_MS = 120000;
 // ---------------------------------------------------------------------------
 
 /** §4.7: `ECONNREFUSED, ENOTFOUND, EHOSTUNREACH, ECONNRESET`, plus their obvious cousins. */
-const UNREACHABLE_CODES = new Set([
+export const UNREACHABLE_CODES = new Set([
   'ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ECONNRESET',
   'ENETUNREACH', 'ENETDOWN', 'EHOSTDOWN', 'EADDRNOTAVAIL', 'ECONNABORTED',
   'EAI_AGAIN', 'EPIPE',
 ]);
 
 /** §4.7 "AbortError / deadline exceeded". `UND_ERR_*_TIMEOUT` is undici's own spelling. */
-const TIMEOUT_CODES = new Set([
+export const TIMEOUT_CODES = new Set([
   'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT',
   'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
 ]);

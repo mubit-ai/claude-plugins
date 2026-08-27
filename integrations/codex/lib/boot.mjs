@@ -194,6 +194,11 @@ const DATA_DIR_PREFIX = 'mubit-memory';
  * `MUBIT_CC_DATA_DIR` in the registrations it writes, which outranks everything here — so on
  * a set-up install this function is never consulted at all.
  *
+ * `liveDataDir()` in `integrations/claude-code/lib/state.mjs` is the same algorithm, copied
+ * rather than shared. This module is loaded unbundled at runtime by `scripts/setup.mjs`, and
+ * the codex package ships only its own `lib/`, so an import across integrations here would be
+ * a dead path in the published plugin. Keep the two in step by hand.
+ *
  * @param {Record<string, string|undefined>} env
  * @returns {string}
  */

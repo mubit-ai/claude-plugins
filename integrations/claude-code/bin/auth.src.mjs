@@ -31,12 +31,14 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { hostname } from 'node:os';
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
   clearCredentials, credentialsPath, readCredentials, writeCredentials,
 } from '../lib/credentials.mjs';
+import { liveDataDir } from '../lib/state.mjs';
 
 /** Where keys are issued. `MUBIT_CONSOLE_URL` overrides it for staging. */
 export const CONSOLE_URL = 'https://console.mubit.ai';
@@ -176,7 +178,7 @@ export async function verifyCredentials(opts) {
     return {
       ok: false,
       state: 'unreachable',
-      detail: `Nothing answered at ${endpoint}. Check the endpoint, and that the instance is running.`,
+      detail: `Could not reach ${endpoint}: ${health.cause}.`,
     };
   }
   if (health.status >= 500) {
@@ -195,7 +197,11 @@ export async function verifyCredentials(opts) {
     body: '{}',
   });
   if (probe.transportError) {
-    return { ok: false, state: 'unreachable', detail: `Lost the connection to ${endpoint} while checking the key.` };
+    return {
+      ok: false,
+      state: 'unreachable',
+      detail: `Lost the connection to ${endpoint} while checking the key: ${probe.cause}.`,
+    };
   }
   if (probe.status === 401 || probe.status === 403) {
     return { ok: false, state: 'auth_failed', detail: 'The instance rejected that key. Issue a new one in the console.' };
@@ -216,7 +222,10 @@ export async function verifyCredentials(opts) {
  * that never got an answer is a different thing from an answer that said no — the whole
  * point of the state table above.
  *
- * @returns {Promise<{status: number, transportError: boolean}>}
+ * @param {typeof fetch} fetchImpl
+ * @param {string} url
+ * @param {{ method?: string, headers?: Record<string, string>, body?: string, timeoutMs?: number }} [opts]
+ * @returns {Promise<{status: number, transportError: boolean, cause?: string}>}
  */
 async function dial(fetchImpl, url, { method = 'GET', headers = {}, body, timeoutMs } = {}) {
   const ac = new AbortController();
@@ -224,11 +233,60 @@ async function dial(fetchImpl, url, { method = 'GET', headers = {}, body, timeou
   try {
     const res = await fetchImpl(url, { method, headers, body, signal: ac.signal });
     return { status: res.status, transportError: false };
-  } catch {
-    return { status: 0, transportError: true };
+  } catch (err) {
+    return { status: 0, transportError: true, cause: transportCause(err) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Codex runs an unapproved command inside seatbelt with the network switched off, and DNS is
+ * what fails first there — so a perfectly healthy endpoint reports ENOTFOUND. Reading that
+ * as a bad endpoint sends the reader off to fix a URL that was never wrong; the fix is to
+ * approve the command. No network error carries information about the endpoint in here.
+ *
+ * @returns {string}
+ */
+function SANDBOX_BLOCKED() {
+  const env = (typeof process === 'object' && process) ? (process.env || {}) : {};
+  if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return '';
+  return 'this process has no network access — Codex ran it inside its sandbox. Approve the '
+    + 'command and run it again; the endpoint is almost certainly fine';
+}
+
+/**
+ * The actionable half of a transport failure, which lives in the `cause` chain rather than in
+ * the `TypeError: fetch failed` wrapper. A name that does not resolve and an instance that is
+ * switched off are different problems with different fixes, and used to print identically.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function transportCause(err) {
+  /** @type {Record<string, string>} */
+  const HINTS = {
+    ENOTFOUND: 'that hostname does not resolve — check the endpoint for a typo (ENOTFOUND)',
+    EAI_AGAIN: 'the DNS lookup failed — check the network, or the endpoint for a typo (EAI_AGAIN)',
+    ECONNREFUSED: 'nothing is listening on that port (ECONNREFUSED)',
+    EHOSTUNREACH: 'the host is unreachable from this network (EHOSTUNREACH)',
+    ENETUNREACH: 'the network is unreachable (ENETUNREACH)',
+    ECONNRESET: 'the connection was reset in flight (ECONNRESET)',
+    CERT_HAS_EXPIRED: 'its TLS certificate has expired (CERT_HAS_EXPIRED)',
+    DEPTH_ZERO_SELF_SIGNED_CERT:
+      'its TLS certificate is self-signed and not trusted (DEPTH_ZERO_SELF_SIGNED_CERT)',
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+      'its TLS certificate could not be verified (UNABLE_TO_VERIFY_LEAF_SIGNATURE)',
+  };
+  let cur = /** @type {any} */ (err);
+  for (let i = 0; i < 8 && cur && typeof cur === 'object'; i++) {
+    const code = typeof cur['code'] === 'string' ? cur['code'].toUpperCase() : '';
+    if (HINTS[code]) return SANDBOX_BLOCKED() || HINTS[code];
+    const name = typeof cur['name'] === 'string' ? cur['name'] : '';
+    if (name === 'AbortError' || name === 'TimeoutError') return 'it did not answer in time';
+    cur = cur['cause'];
+  }
+  return 'nothing answered — check the endpoint, and that the instance is running';
 }
 
 // ---------------------------------------------------------------------------
@@ -378,10 +436,17 @@ export async function runBrowserAuth(opts = {}) {
 
   await new Promise((res, rej) => {
     server.once('error', rej);
-    server.listen(0, '127.0.0.1', res);
+    server.listen(0, '127.0.0.1', () => res(undefined));
   });
   server.unref();
-  const port = /** @type {any} */ (server.address()).port;
+  // `address()` is `AddressInfo | string | null`, and only the first carries a port. The old
+  // cast silently produced `port=undefined` in the sign-in URL for the other two, which fails
+  // in the browser with nothing pointing back here.
+  const addr = server.address();
+  if (addr === null || typeof addr === 'string') {
+    throw new Error('the local callback server did not bind a TCP port');
+  }
+  const port = addr.port;
 
   const timer = setTimeout(
     () => fail(new Error('timed out waiting for browser authorization')),
@@ -430,21 +495,18 @@ function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }
 /**
  * Turn the console's answer into the `endpoint` the plugin stores.
  *
- * An explicit endpoint wins. Otherwise a known region maps to its host, and anything
- * else falls back to the default — deriving `https://<whatever>.mubit.ai` from an
- * unrecognised region would produce a DNS failure that reads like a network problem
- * instead of a mapping this client has not been taught yet.
- *
  * @param {Record<string, any>} payload
  * @returns {string}
  */
 export function endpointFor(payload = {}) {
   const explicit = typeof payload.mubitEndpoint === 'string' ? payload.mubitEndpoint.trim() : '';
   if (explicit) return normalizeEndpoint(explicit);
-
-  const region = typeof payload.region === 'string' ? payload.region.trim().toLowerCase() : '';
-  const KNOWN = { eu: 'https://eu.mubit.ai', us: 'https://us.mubit.ai' };
-  return KNOWN[region] ?? DEFAULT_ENDPOINT;
+  // No region map. eu.mubit.ai and us.mubit.ai are NXDOMAIN, so turning `payload.region` into
+  // one of them stored an endpoint that could never answer, and every later command then
+  // failed with `TypeError: fetch failed (ENOTFOUND)` far from the sign-in that caused it.
+  // A region is a routing hint for the console, not a hostname this side may invent: trust an
+  // endpoint only when the console names one outright.
+  return DEFAULT_ENDPOINT;
 }
 
 /**
@@ -613,13 +675,19 @@ function authTimeoutFrom(env = {}, deps = {}) {
   return Number.isFinite(raw) && raw > 0 ? raw : 120000;
 }
 
-/** Mirrors `lib/state.mjs` `dataDir()` without importing the hook surface. */
+/**
+ * Mirrors `lib/state.mjs` `dataDir()`, minus its `cfg` rung — this command has no resolved
+ * config, and asking for one before the user is signed in is the wrong way round.
+ *
+ * The final fallback is `liveDataDir()` itself rather than a fourth hand-copy of it: nothing
+ * pins `MUBIT_CC_DATA_DIR` into a command the user typed, and looking in the bare directory
+ * left `--status` reporting no credentials on a machine that had them.
+ */
 function resolveDataDirFrom(env = process.env) {
   const e = env ?? {};
   if (e.MUBIT_CC_DATA_DIR) return e.MUBIT_CC_DATA_DIR;
   if (e.CLAUDE_PLUGIN_DATA) return e.CLAUDE_PLUGIN_DATA;
-  const home = e.HOME || '.';
-  return `${home}/.claude/plugins/data/mubit-memory`;
+  return liveDataDir(e.HOME || '.', e);
 }
 
 // ---------------------------------------------------------------------------
@@ -628,10 +696,23 @@ function resolveDataDirFrom(env = process.env) {
 
 // Guarded the same way as `bin/statusline.src.mjs`: the tests import this module and
 // drive `main()` with injected dependencies, so it must not run itself on import.
-const selfPath = fileURLToPath(import.meta.url);
-const entryPath = process.argv[1] ? resolve(process.argv[1]) : '';
+/**
+ * `p` with its symlinks resolved, or `p` unchanged when it cannot be resolved.
+ *
+ * The module loader resolves symlinks in `import.meta.url` but `process.argv[1]` keeps them,
+ * so a plugin installed behind a symlinked cache directory (`~/.codex/plugins/cache/...`)
+ * failed the entry-point guard below: `main()` never ran, and the caller saw exit 0 with no
+ * output and no error to explain it.
+ */
+function realPath(p) {
+  try { return p ? realpathSync(p) : p; } catch { return p; }
+}
 
-if (entryPath === selfPath) {
+const selfPath = fileURLToPath(import.meta.url);
+const selfReal = realPath(selfPath);
+const entryPath = process.argv[1] ? realPath(resolve(process.argv[1])) : '';
+
+if (entryPath === selfReal) {
   // Unlike a hook, this command is allowed to fail loudly — the user is watching, and a
   // silent exit 0 after a failed login is worse than a message. But a stack trace is
   // still never the right output, so the exit code carries the verdict.

@@ -37,7 +37,7 @@ const PRUNE_INTERVAL_MS = HOUR;
 
 /**
  * §4.8 resolution order:
- *   `MUBIT_CC_DATA_DIR` -> `CLAUDE_PLUGIN_DATA` -> `~/.claude/plugins/data/mubit-memory`.
+ *   `MUBIT_CC_DATA_DIR` -> `CLAUDE_PLUGIN_DATA` -> `cfg.dataDir` -> `liveDataDir()`.
  *
  * `${CLAUDE_PLUGIN_DATA}` survives plugin updates; `${CLAUDE_PLUGIN_ROOT}` does
  * not (it is replaced wholesale), so nothing writable ever goes in ROOT.
@@ -54,7 +54,77 @@ export function dataDir(cfg = {}, env = process.env) {
   if (typeof host === 'string' && host) return host;
   if (cfg && typeof cfg.dataDir === 'string' && cfg.dataDir) return cfg.dataDir;
   const home = (typeof e.HOME === 'string' && e.HOME) ? e.HOME : safeHome();
-  return join(home, '.claude', 'plugins', 'data', 'mubit-memory');
+  return liveDataDir(home, e);
+}
+
+/**
+ * Where this machine's Mubit state actually lives, for a process nobody told.
+ *
+ * Hooks and the MCP server are launched with `MUBIT_CC_DATA_DIR` pinned into them by setup, but
+ * a command a model runs straight from the shell inherits none of that — and **the name the
+ * host picks carries a suffix**: a marketplace install writes `mubit-memory-<marketplace>`, a
+ * `--plugin-dir` session writes `mubit-memory-inline`, and the bare name is only one of
+ * several. Returning the bare name on that path sent these commands to scan a directory
+ * nothing writes to, and report "no hook has written a run marker yet" at a session whose
+ * hooks had been writing markers for every prompt.
+ *
+ * The preference order, and why each rung:
+ *
+ *   1. **What setup pinned into `$CODEX_HOME/hooks.json`.** That is the answer setup
+ *      *recorded*, not a guess, so it outranks any search: it is the directory the hooks
+ *      themselves are using.
+ *   2. **A directory holding `credentials.json`.** `/mubit-memory:auth` writes exactly one of
+ *      these, into the install the user actually authenticated. It is the strongest available
+ *      evidence of which install is live, and the liveliness of the rest is noise.
+ *   3. **The liveliest by `status/` mtime.** Every hook touches its data directory, so recency
+ *      is a good proxy for "in use" when nobody has authenticated yet.
+ *   4. **The bare name.** A machine with no Claude Code install at all wants a directory
+ *      rather than an error.
+ *
+ * Rungs 2–4 are the same algorithm as `claudeCodeDataDir()` in
+ * `integrations/codex/lib/boot.mjs`, deliberately copied rather than shared: that module is
+ * loaded unbundled at runtime by the codex integration's `scripts/setup.mjs`, and the codex
+ * package ships only its own `lib/`, so importing across integrations there would be a dead
+ * path in the published plugin. Keep the two in step by hand.
+ *
+ * @param {string} home
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {string}
+ */
+export function liveDataDir(home, env = {}) {
+  const root = join(home, '.claude', 'plugins', 'data');
+
+  try {
+    const codexHome = (typeof env.CODEX_HOME === 'string' && env.CODEX_HOME)
+      ? env.CODEX_HOME
+      : join(home, '.codex');
+    const pinned = JSON.stringify(JSON.parse(readFileSync(join(codexHome, 'hooks.json'), 'utf8')))
+      .match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    if (pinned && pinned[1]) return pinned[1];
+  } catch { /* no Codex registrations, or unreadable: fall through to the search */ }
+
+  try {
+    let best = '';
+    let bestAt = -1;
+    for (const name of readdirSync(root)) {
+      if (!name.startsWith('mubit-memory')) continue;
+      const dir = join(root, name);
+      let at = 0;
+      try {
+        for (const f of readdirSync(join(dir, 'status'))) {
+          if (!f.endsWith('.json') || f === 'health.json') continue;
+          at = Math.max(at, statSync(join(dir, 'status', f)).mtimeMs);
+        }
+      } catch { /* no status/ yet */ }
+      // A directory holding credentials outranks a livelier one that holds none: that is the
+      // install which was actually signed in.
+      if (existsSync(join(dir, 'credentials.json'))) at += 1e15;
+      if (at > bestAt) { bestAt = at; best = dir; }
+    }
+    if (best && bestAt > 0) return best;
+  } catch { /* no ~/.claude/plugins/data at all */ }
+
+  return join(root, 'mubit-memory');
 }
 
 function safeHome() {

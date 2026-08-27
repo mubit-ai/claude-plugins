@@ -132,6 +132,69 @@ test('nothing listening is unreachable, and is never blamed on the key', async (
     'a user whose VPN is down must not be told to re-issue their key');
 });
 
+test('a transport failure names what went wrong, not just that it went wrong', async () => {
+  const { verifyCredentials } = await mod('bin/auth.src.mjs');
+
+  // A port that was bound and then released: connection refused, immediately. A hardcoded low
+  // port will not do — the WHATWG "bad ports" list makes fetch refuse 1 and 9 before it ever
+  // opens a socket, so the failure carries no errno to report.
+  const probe = await fakeMubit();
+  const deadUrl = probe.url;
+  await probe.close();
+  const refused = await verifyCredentials({
+    endpoint: deadUrl, apiKey: KEY, fetchImpl: fetch, timeoutMs: 1500,
+  });
+  assert.equal(refused.state, 'unreachable');
+  assert.match(refused.detail, /ECONNREFUSED/,
+    'a port with nothing behind it must say so; the errno lives in the cause chain');
+
+  // A name that cannot resolve. `.invalid` is reserved by RFC 2606 for exactly this.
+  const noHost = await verifyCredentials({
+    endpoint: 'https://nothing.invalid', apiKey: KEY, fetchImpl: fetch, timeoutMs: 4000,
+  });
+  assert.equal(noHost.state, 'unreachable');
+  assert.match(noHost.detail, /ENOTFOUND|EAI_AGAIN/);
+
+  assert.notEqual(refused.detail, noHost.detail,
+    'a dead port and a dead name are different problems with different fixes, and both '
+    + 'used to print the same sentence');
+});
+
+// Codex runs an unapproved command inside seatbelt with the network switched off, and DNS is
+// what fails first there — so a healthy endpoint reports ENOTFOUND and the user is sent off to
+// fix a URL that was never wrong.
+test('inside the Codex sandbox the network is blamed, not the endpoint', async (t) => {
+  const { verifyCredentials } = await mod('bin/auth.src.mjs');
+  const before = process.env.CODEX_SANDBOX_NETWORK_DISABLED;
+  t.after(() => {
+    if (before === undefined) delete process.env.CODEX_SANDBOX_NETWORK_DISABLED;
+    else process.env.CODEX_SANDBOX_NETWORK_DISABLED = before;
+  });
+  process.env.CODEX_SANDBOX_NETWORK_DISABLED = '1';
+
+  const res = await verifyCredentials({
+    endpoint: 'https://nothing.invalid', apiKey: KEY, fetchImpl: fetch, timeoutMs: 4000,
+  });
+
+  assert.equal(res.state, 'unreachable');
+  assert.match(res.detail, /no network access/);
+  assert.match(res.detail, /Approve the command/);
+  assert.ok(!/typo/.test(res.detail), 'the endpoint is not the thing to go and fix');
+});
+
+test('a timeout says it did not answer in time, not that the host is wrong', async () => {
+  const { verifyCredentials } = await mod('bin/auth.src.mjs');
+  const server = await fakeMubit({ 'GET /v2/core/health': { hang: true } });
+
+  const res = await verifyCredentials({
+    endpoint: server.url, apiKey: KEY, fetchImpl: fetch, timeoutMs: 200,
+  });
+
+  assert.equal(res.state, 'unreachable');
+  assert.match(res.detail, /did not answer in time/);
+  await server.close();
+});
+
 test('a failing instance is server_error, distinct from a bad key', async () => {
   const { verifyCredentials } = await mod('bin/auth.src.mjs');
   const server = await fakeMubit({
@@ -252,10 +315,10 @@ test('normalizeEndpoint fixes what a user pastes', async () => {
   const { normalizeEndpoint, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
 
   const rows = [
-    ['https://eu.mubit.ai', 'https://eu.mubit.ai'],
-    ['https://eu.mubit.ai/', 'https://eu.mubit.ai'],
-    ['  https://eu.mubit.ai/  ', 'https://eu.mubit.ai'],
-    ['eu.mubit.ai', 'https://eu.mubit.ai'],
+    ['https://api.mubit.ai', 'https://api.mubit.ai'],
+    ['https://api.mubit.ai/', 'https://api.mubit.ai'],
+    ['  https://api.mubit.ai/  ', 'https://api.mubit.ai'],
+    ['api.mubit.ai', 'https://api.mubit.ai'],
     ['http://127.0.0.1:8899', 'http://127.0.0.1:8899'],
     ['', DEFAULT_ENDPOINT],
     [undefined, DEFAULT_ENDPOINT],
@@ -268,7 +331,7 @@ test('normalizeEndpoint fixes what a user pastes', async () => {
 
 test('a bare hostname is upgraded to https, never left as http', async () => {
   const { normalizeEndpoint } = await mod('bin/auth.src.mjs');
-  assert.ok(normalizeEndpoint('eu.mubit.ai').startsWith('https://'),
+  assert.ok(normalizeEndpoint('api.mubit.ai').startsWith('https://'),
     'silently sending a key over http would be worse than failing');
 });
 
@@ -387,11 +450,11 @@ test('--status distinguishes signed in from not, and exits accordingly', async (
   assert.equal(await main(['--status'], {}, { dataDir, log: (m) => lines.push(m) }), 1,
     'unconfigured is a non-zero exit, so a script can branch on it');
 
-  writeCredentials(dataDir, { endpoint: 'https://eu.mubit.ai', apiKey: KEY });
+  writeCredentials(dataDir, { endpoint: 'https://api.mubit.ai', apiKey: KEY });
   assert.equal(await main(['--status'], {}, { dataDir, log: (m) => lines.push(m) }), 0);
 
   assert.ok(!lines.join('\n').includes(KEY), '--status reports presence, never the key itself');
-  assert.match(lines.join('\n'), /eu\.mubit\.ai/);
+  assert.match(lines.join('\n'), /api\.mubit\.ai/);
 });
 
 test('--logout removes the stored credentials', async () => {
@@ -399,7 +462,7 @@ test('--logout removes the stored credentials', async () => {
   const { writeCredentials, readCredentials } = await lib('credentials.mjs');
   const dataDir = makeDataDir();
 
-  writeCredentials(dataDir, { endpoint: 'https://eu.mubit.ai', apiKey: KEY });
+  writeCredentials(dataDir, { endpoint: 'https://api.mubit.ai', apiKey: KEY });
   const code = await main(['--logout'], {}, { dataDir, log: () => {} });
 
   assert.equal(code, 0);
@@ -430,7 +493,7 @@ test('parseArgs defaults to the browser flow', async () => {
   assert.equal(parseArgs(['--paste']).mode, 'paste');
   assert.equal(parseArgs(['--status']).mode, 'status');
   assert.equal(parseArgs(['--logout']).mode, 'logout');
-  assert.equal(parseArgs(['--endpoint', 'https://eu.mubit.ai']).endpoint, 'https://eu.mubit.ai');
+  assert.equal(parseArgs(['--endpoint', 'https://api.mubit.ai']).endpoint, 'https://api.mubit.ai');
 });
 
 // ===========================================================================
@@ -714,17 +777,21 @@ test('the loopback port is released once the flow ends', async () => {
 // Mapping the console's answer onto the plugin's two settings
 // ---------------------------------------------------------------------------
 
-test('endpointFor maps a region, and falls back rather than guessing', async () => {
+test('endpointFor trusts an explicit endpoint, and never invents a host from a region', async () => {
   const { endpointFor, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
 
-  assert.equal(endpointFor({ region: 'eu' }), 'https://eu.mubit.ai');
-  assert.equal(endpointFor({ region: 'us' }), 'https://us.mubit.ai');
-  assert.equal(endpointFor({ region: 'EU' }), 'https://eu.mubit.ai', 'case is not meaningful');
+  // eu.mubit.ai and us.mubit.ai are NXDOMAIN. Mapping a region onto one of them stored an
+  // endpoint that could never answer, and the failure surfaced far from the sign-in.
+  for (const region of ['eu', 'us', 'EU', 'moon']) {
+    assert.equal(endpointFor({ region }), DEFAULT_ENDPOINT,
+      `region ${region} is a console routing hint, not a hostname this side may invent`);
+  }
   assert.equal(endpointFor({}), DEFAULT_ENDPOINT, 'no region means the default, not an error');
-  assert.equal(endpointFor({ region: 'moon' }), DEFAULT_ENDPOINT,
-    'an unknown region falls back; inventing https://moon.mubit.ai would fail confusingly');
+  assert.equal(DEFAULT_ENDPOINT, 'https://api.mubit.ai', 'the only host that resolves');
   assert.equal(endpointFor({ mubitEndpoint: 'https://custom.example.com' }),
     'https://custom.example.com', 'an explicit endpoint from the console always wins');
+  assert.equal(endpointFor({ mubitEndpoint: 'https://custom.example.com', region: 'eu' }),
+    'https://custom.example.com', 'an explicit endpoint outranks a region');
 });
 
 // ---------------------------------------------------------------------------

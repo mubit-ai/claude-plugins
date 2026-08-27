@@ -167,7 +167,7 @@ survives plugin updates. Once per machine, not once per release.
 
 | Setting | Value |
 | --- | --- |
-| `endpoint` | your instance URL, e.g. `https://eu.mubit.ai` |
+| `endpoint` | your instance URL, e.g. `https://api.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
 Both are needed: an endpoint with no key gets `auth_failed` on every call, and no endpoint at
@@ -210,7 +210,7 @@ the instance is still starting, the status line shows `◍ warming` rather than 
 Handy for a quick trial or a per-project override. Plugin settings win over these.
 
 ```bash
-export MUBIT_ENDPOINT="https://eu.mubit.ai"
+export MUBIT_ENDPOINT="https://api.mubit.ai"
 export MUBIT_API_KEY="mbt_..."
 ```
 
@@ -457,6 +457,32 @@ moves anything — the id resolves through `git rev-parse --show-toplevel`.
 > pins every write to that value; moving it would need a server restart the plugin cannot ask
 > for. After a `cd`, what the hooks capture lands in the new repo's run while what
 > `/mubit-memory:remember` writes lands in the one you started in.
+
+
+### Sharing one run between Codex and Claude Code
+
+The run id is already harness-independent. `per-directory` derives
+`cc-<slug>-<sha256(git root)[:8]>` from the project, not from the host, so a Codex session and
+a Claude Code session opened on the same checkout land on the same run and see each other's
+pins and lessons. The `cc-` prefix reads as "Claude Code" for historical reasons only — it
+means "the run for this directory", and renaming it would strand every run already stored under
+it. What distinguishes the two harnesses is the *agent role* recorded on each entry, `codex` or
+`claude-code`.
+
+They diverge only when the **path** diverges: a second clone, or the same repo on another
+machine where the home directory has a different name. To pin one run across paths, harnesses
+and machines:
+
+```bash
+export MUBIT_CC_RUN_STRATEGY=static
+export MUBIT_CC_RUN_ID=team-<project>
+```
+
+Set both in the same place for both tools — a shell profile, or the `--env` flags the codex
+integration's `setup` writes into its registrations — and re-run setup so the hooks inherit
+them. `static` does not fall back: with `MUBIT_CC_RUN_ID` unset it raises a config error rather
+than quietly writing into a derived run, because a run that is silently un-shared is
+indistinguishable from memory that does not work.
 
 ### How much context memory is allowed to spend
 

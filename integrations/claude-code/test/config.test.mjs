@@ -367,7 +367,7 @@ test('no configuration path can produce a loopback endpoint by default', async (
 
 test('the endpoint is used verbatim, whatever host it names', async () => {
   const config = await lib('config.mjs');
-  for (const url of ['https://mubit.example.com', 'https://eu.mubit.ai']) {
+  for (const url of ['https://mubit.example.com', 'https://api.mubit.ai']) {
     const cfg = load(config, envOf(makeDataDir(), makeProjectDir(), { MUBIT_ENDPOINT: url }));
     assert.equal(cfg.endpoint, url);
     assert.equal(cfg.mode, 'hosted', 'mode is a constant now — there is no second mode');

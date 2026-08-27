@@ -1,7 +1,7 @@
 {
   "name": "mubit-memory",
   "displayName": "Mubit Memory",
-  "version": "0.12.0",
+  "version": "0.12.4",
   "description": "Persistent, typed, self-improving memory for Claude Code, backed by Mubit. Captures work involuntarily, recalls relevant lessons before every prompt, and attributes outcomes so memory improves with use.",
   "author": { "name": "Mubit AI", "url": "https://mubit.ai" },
   "homepage": "https://docs.mubit.ai/integrations/claude-code",
@@ -10,7 +10,7 @@
   "keywords": ["memory", "mubit", "long-term-memory", "lessons", "recall", "rag"],
   "userConfig": {
     "endpoint": { "type": "string", "title": "Mubit endpoint", "default": "",
-      "description": "Your Mubit instance URL, e.g. https://eu.mubit.ai. Required." },
+      "description": "Your Mubit instance URL, e.g. https://api.mubit.ai. Required." },
     "apiKey": { "type": "string", "title": "API key", "default": "", "sensitive": true,
       "description": "Mubit API key (mbt_...). Set here, it is held in the OS keychain; /mubit-memory:auth stores it in the plugin's own data directory, readable only by you. Never in a settings file." },
     "userId": { "type": "string", "title": "User id", "default": "",

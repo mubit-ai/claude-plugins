@@ -754,7 +754,7 @@ describe('self-reference suppression (§4.4)', () => {
   /**
    * "Without this the plugin records its own traffic, recalls it, then records
    * the recall — and the store fills with
-   * `curl https://eu.mubit.ai/v2/control/context`." (§4.4)
+   * `curl https://api.mubit.ai/v2/control/context`." (§4.4)
    */
 
   // Our own MCP tools, under the plugin-qualified prefix.
@@ -794,8 +794,8 @@ describe('self-reference suppression (§4.4)', () => {
   // §4.4: Bash whose command mentions the endpoint host:port, /v2/control/,
   // /v2/core/, `mubit`, or `MUBIT_`.
   const BASH_DROP = [
-    ['the guide\'s own example', 'curl https://eu.mubit.ai/v2/control/context'],
-    ['endpoint host:port', 'curl -s https://eu.mubit.ai/healthz'],
+    ['the guide\'s own example', 'curl https://api.mubit.ai/v2/control/context'],
+    ['endpoint host:port', 'curl -s https://api.mubit.ai/healthz'],
     ['/v2/control/ path', 'curl -X POST https://api.example.com/v2/control/ingest -d @body.json'],
     ['/v2/core/ path', 'curl https://api.example.com/v2/core/health'],
     ['the word mubit', 'the mubit endpoint'],

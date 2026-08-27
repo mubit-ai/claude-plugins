@@ -489,6 +489,28 @@ test('the published package carries the install procedure it documents', () => {
   assert.ok(existsSync(join(CODEX_ROOT, 'lib', 'boot.mjs')));
 });
 
+test('the sign-in script ships, and the setup skill names it', () => {
+  // § `bin/auth.mjs` is shared with the Claude Code build and resolves the data directory by
+  //   search. Under Codex, setup has already *pinned* the answer into $CODEX_HOME/hooks.json,
+  //   so a hand-run auth could write credentials to a directory the hooks never read — no
+  //   error anywhere, and memory simply stays unauthenticated. scripts/login.mjs reads the pin
+  //   back out and writes where the hooks look.
+  assert.ok(existsSync(join(CODEX_ROOT, 'scripts', 'login.mjs')),
+    'scripts/login.mjs is missing; a Codex user has no way to store a key in the right place.');
+
+  const src = readOrFail(join(CODEX_ROOT, 'scripts', 'login.mjs'), 'the sign-in script.');
+  assert.match(src, /MUBIT_CC_DATA_DIR/,
+    'the script must read the pin, not repeat the search that made the pin necessary.');
+  assert.match(src, /setRawMode/,
+    'the key must not be echoed into the scrollback: a key in the scrollback is a key in the '
+    + 'scrollback.');
+
+  const skill = readOrFail(join(P.skills, 'setup', 'SKILL.md'), 'the setup skill.');
+  assert.match(skill, /scripts\/login\.mjs/,
+    'the setup skill must name the sign-in script, or a user follows /mubit-memory:auth into '
+    + 'the wrong directory.');
+});
+
 test('the setup skill`s by-hand fallback pins the data directory too', () => {
   const skill = readOrFail(join(P.skills, 'setup', 'SKILL.md'), 'the setup skill.');
   // § The skill offers a fallback for "an older install" where scripts/setup.mjs is missing.

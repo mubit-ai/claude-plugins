@@ -44,7 +44,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, realpathSync, unlinkSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -833,6 +833,22 @@ function defaultOpen(url) {
 const selfPath = fileURLToPath(import.meta.url);
 
 /**
+ * `p` with its symlinks resolved, or `p` unchanged when it cannot be resolved.
+ *
+ * The module loader resolves symlinks in `import.meta.url` but `process.argv[1]` keeps them,
+ * so a plugin installed behind a symlinked cache directory (`~/.codex/plugins/cache/...`)
+ * failed the entry-point guard below: `main()` never ran, and the caller saw exit 0 with no
+ * output and no error to explain it.
+ */
+function realPath(p) {
+  try { return p ? realpathSync(p) : p; } catch { return p; }
+}
+
+// Only the copy the guard compares is resolved: `deps.scriptPath ?? selfPath`
+// below re-launches this file by the path the user invoked, and wants it unresolved.
+const selfReal = realPath(selfPath);
+
+/**
  * @param {string[]} argv
  * @param {Record<string, string|undefined>} env
  * @param {{log?: (m: string) => void, openImpl?: (url: string) => any, fetchImpl?: typeof fetch,
@@ -1037,9 +1053,9 @@ function describe(url, cfg, reused) {
 
 // Guarded the same way as `bin/auth.src.mjs`: the tests import this module and drive `main()`
 // with injected dependencies, so it must not run itself on import.
-const entryPath = process.argv[1] ? resolve(process.argv[1]) : '';
+const entryPath = process.argv[1] ? realPath(resolve(process.argv[1])) : '';
 
-if (entryPath === selfPath) {
+if (entryPath === selfReal) {
   process.exitCode = await main().catch((err) => {
     console.log(`The dashboard could not start: ${err?.message ?? err}`);
     return 1;

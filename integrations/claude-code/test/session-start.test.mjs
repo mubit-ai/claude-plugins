@@ -16,7 +16,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -51,6 +51,13 @@ function seedSessionRecord(dataDir, sessionId, over = {}) {
   };
   writeFileSync(join(dataDir, 'sessions', `${sessionId}.json`), JSON.stringify(rec));
   return rec;
+}
+
+/** §7: `runs/<run_id>/checkpoints.json` — what `checkpoint --pre` leaves behind. */
+function seedCheckpoints(dataDir, runId, entries) {
+  const dir = join(dataDir, 'runs', runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'checkpoints.json'), JSON.stringify(entries));
 }
 
 /** The single status marker (§4.8). `status/health.json` is the health cache, not a marker. */
@@ -158,8 +165,20 @@ test('stdout is a SessionStart steer block plus a one-line systemMessage', async
   const ctx = out.additionalContext;
   assert.ok(ctx.includes(runId), `additionalContext must name the run, got:\n${ctx}`);
   assert.match(ctx, /hosted/, 'additionalContext must name the mode');
+  // §5.1 — the steer must carry BOTH halves, and the pair is the contract. This test used to
+  // assert only `/do not search/i`, which is how the plugin shipped a steer that told the
+  // model memory existed and never to reach for it: a negative with no positive beside it,
+  // against tool descriptions that said nothing about when to use them either (audit C1,
+  // C2). Between them the trained behaviour was to call no memory tool at all — so every
+  // measurement of those tools was really a measurement of this paragraph.
   assert.match(ctx, /injected automatically/i);
-  assert.match(ctx, /do not search/i);
+  assert.match(ctx, /no need to open a turn by searching/i,
+    `the steer must say recall is already injected, so turn one need not search:\n${ctx}`);
+  assert.match(ctx, /do search when the injected memory falls short/i,
+    `the steer must also say when searching IS right, or the negative stands alone:\n${ctx}`);
+  for (const tool of ['mubit_recall', 'mubit_diagnose', 'mubit_dereference']) {
+    assert.ok(ctx.includes(tool), `the steer must name ${tool} as the tool for its case:\n${ctx}`);
+  }
   // The lesson section renders what /v2/control/lessons returned.
   assert.match(ctx, /standing lessons/i);
   assert.ok(ctx.includes('Run the migration'), `lesson content must render, got:\n${ctx}`);
@@ -375,6 +394,73 @@ test('source=compact reuses the parent session record run', async (t) => {
   assert.deepEqual(outgoingRunIds(server), [MAPPED_RUN]);
 });
 
+// §5.6 — the post-compaction re-anchor is delivered HERE, not by `checkpoint --post`.
+// `PostCompact` is not a `hookSpecificOutput.hookEventName` Claude Code accepts (see
+// `test/hook-output.test.mjs`), so anything that hook injected was discarded whole. This is
+// the only hook that both runs after a compaction and has an accepted event name.
+test('source=compact re-anchors the session to the stored checkpoint', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSessionRecord(dataDir, fx.SESSION_ID);
+  seedCheckpoints(dataDir, MAPPED_RUN, [
+    { checkpoint_id: 'ckpt_older_1', token_estimate: 1200, at: 1765000000000 },
+    { checkpoint_id: 'ckpt_seeded_9', token_estimate: 3400, at: 1765000001000 },
+  ]);
+
+  const r = await runHook('session-start', fx.sessionStart({ source: 'compact', cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const out = r.json.hookSpecificOutput;
+  assert.equal(out.hookEventName, 'SessionStart', 'the one accepted channel after a compaction');
+  assert.ok(out.additionalContext.includes('ckpt_seeded_9'),
+    `the block must name the NEWEST stored checkpoint, got:\n${out.additionalContext}`);
+  assert.ok(!out.additionalContext.includes('ckpt_older_1'),
+    'only the newest anchor is worth the model\'s attention');
+  assert.match(out.additionalContext, /\/mubit-memory:recall/,
+    'and must say how to ask for what was compacted away');
+});
+
+// The same rule in the other direction: a fresh session is not a compacted one, and telling
+// it that a checkpoint "holds the pre-compaction context" for a conversation that never
+// compacted spends the model's attention on a claim about nothing.
+test('source=startup does not re-anchor, even with a stored checkpoint', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSessionRecord(dataDir, fx.SESSION_ID);
+  seedCheckpoints(dataDir, MAPPED_RUN, [
+    { checkpoint_id: 'ckpt_seeded_9', token_estimate: 3400, at: Date.now() },
+  ]);
+
+  const r = await runHook('session-start', fx.sessionStart({ source: 'startup', cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  assert.ok(!r.json.hookSpecificOutput.additionalContext.includes('ckpt_seeded_9'),
+    'a startup session was not compacted; there is nothing to re-anchor');
+});
+
+// §5.6 — with nothing stored there is nothing to anchor to. `--pre` never ran for this run,
+// its call failed, or §7's sweep took the file. Saying "checkpoint undefined holds your
+// context" is strictly worse than silence.
+test('source=compact with no stored checkpoint steers normally and names no anchor', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSessionRecord(dataDir, fx.SESSION_ID);
+
+  const r = await runHook('session-start', fx.sessionStart({ source: 'compact', cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /Mubit memory is active/, 'the ordinary steer block still ships');
+  assert.doesNotMatch(ctx, /checkpoint/i,
+    `no stored anchor must mean no anchor paragraph, got:\n${ctx}`);
+});
+
 // §4.3 `fork`: same rule as compact — the fork inherits the parent record's run.
 test('source=fork reuses the parent session record run', async (t) => {
   const server = await fakeMubit();
@@ -498,6 +584,60 @@ test('capture and recall both disabled emits {} with zero HTTP', async (t) => {
   assertHookContract(r);
   assert.deepEqual(r.json ?? {}, {});
   assert.equal(server.requests.length, 0, `expected no HTTP, saw: ${seq(server).join(', ')}`);
+});
+
+// §5.1 step 4 — health is the GATE, and a gate that is starved fails the whole hook, not one
+// section. With the sub-budget pinned at 400 ms a cold or loaded instance that answered
+// correctly in 700 ms read as `not_responding`: every session then opened by telling the model
+// memory was offline and recall was unavailable, while recall itself worked normally. The
+// budget must clear a realistic cold answer, not a warm one.
+test('a healthy instance that answers health slowly is ready, not offline', async (t) => {
+  const server = await fakeMubit({
+    // Correct answer (§1.2: the bare string `OK`), just slow.
+    'GET /v2/core/health': { text: 'OK', delayMs: 700 },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url, { MUBIT_CC_COLDSTART_GRACE_MS: '0' }) });
+
+  assertHookContract(r);
+  assert.equal(readMarker(dataDir).state, 'ready',
+    'a slow-but-correct health answer is not a server fault');
+
+  // The gate opened, so the steps it gates ran.
+  server.assertCalled('POST', '/v2/control/agents/register', 1);
+  server.assertCalled('POST', '/v2/control/lessons', 1);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /Mubit memory is active/,
+    `a healthy instance must get the active steer block, got:\n${ctx}`);
+  assert.doesNotMatch(ctx, /offline|unreachable/i,
+    'steering the model away from its own memory is the cost of a starved health budget');
+});
+
+// The other half of the same change: a bigger health slice must not be able to push the hook
+// past its harness budget. `budgetFor()` clamps each later sub-budget to what health left, so
+// a slow health AND a stalled lesson list still land inside HARNESS_BUDGET_MS.
+test('a slow health plus a stalled lessons call still fits the harness budget', async (t) => {
+  const server = await fakeMubit({
+    'GET /v2/core/health': { text: 'OK', delayMs: 700 },
+    'POST /v2/control/lessons': { delayMs: 5000, json: { lessons: [] } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url, { MUBIT_CC_COLDSTART_GRACE_MS: '0' }) });
+
+  assertHookContract(r);
+  assert.equal(readMarker(dataDir).state, 'ready');
+  const out = r.json.hookSpecificOutput;
+  assert.equal(out.hookEventName, 'SessionStart');
+  assert.ok(!/standing lessons/i.test(out.additionalContext),
+    'the lesson section is dropped, not waited for');
+  assert.ok(r.ms < 3200, `session-start took ${r.ms}ms, past its 3200ms harness budget`);
 });
 
 // §5.1 "Missing a sub-budget degrades that section only." Lessons stalls past its

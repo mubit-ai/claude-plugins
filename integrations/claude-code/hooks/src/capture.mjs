@@ -49,6 +49,60 @@ const PATH_KEYS = [
 ];
 
 /**
+ * The tools worth no memory. §3.2's matcher used to be an allowlist of eleven built-in tool
+ * names, which is a rule this plugin cannot keep correct: the host owns that set and renames
+ * it under us (`Task` -> `Agent`, `KillShell` -> `TaskStop`, `BashOutput` -> `TaskOutput`).
+ * What kept the allowlist working at all was the host's own legacy-alias table — it tests a
+ * matcher against a tool's current name AND its former ones, so `Task` went on quietly
+ * matching `Agent` long after the rename. That is a compatibility shim the plugin does not
+ * control, cannot see, and is one host release away from losing. Everything the allowlist
+ * had never heard of was dropped in the manifest, silently, with nothing to report the loss.
+ *
+ * So `hooks.json` now matches every tool and the decision lives here, where a test can reach
+ * it — and it is a *deny* list, so a tool that does not exist yet is captured by default.
+ * Each row, and why it is not an episode:
+ *
+ *   TodoWrite        the model rewriting its own checklist. The plan that matters is in the
+ *                    turn itself, which `Stop` already stores.
+ *   EnterPlanMode    a mode transition, and so is its twin below. The plan they bracket was
+ *   ExitPlanMode     written by the turn; the transition itself carries none of it.
+ *   ToolSearch       loading a tool's schema. It says what was looked up, never what was done.
+ *   ListAgents       who happens to be running right now; stale the moment it is stored.
+ *   TaskList         likewise an enumeration of current state, not a change to it.
+ *   CronList         likewise.
+ *   Monitor          a poll. One wait becomes fifty identical items at recall time.
+ *   ScheduleWakeup   a timer being set. Whatever it wakes up to is the episode, not this.
+ *   StructuredOutput the plumbing by which a subagent hands its result back. The result is
+ *                    already captured — at that subagent's `SubagentStop` — so storing this
+ *                    too buys a duplicate of the most-duplicated content there is.
+ *
+ * **Kept on purpose**, because each records a decision or a result rather than bookkeeping:
+ * `AskUserQuestion` (see below), `ReportFindings` (the findings ARE the content),
+ * `CronCreate`/`CronDelete` (durable config mutated — the same shape of act as `Write`),
+ * `EnterWorktree`/`ExitWorktree` (they decide where every later `Edit` lands, so an episode
+ * that omits them misreads), `LSP` (code intelligence — read-shaped, exactly like `Grep`),
+ * and `Workflow`. Absence from this list is the default; a name earns a row here only with a
+ * reason written next to it.
+ *
+ * `AskUserQuestion` is the one that looks like bookkeeping and is not, so it gets its own
+ * paragraph: its `tool_response` carries **what the human chose, and the options they turned
+ * down**. §4.5 already grades it `feedback` — "the one entry type that records what the
+ * human, not the model, decided" — and that is precisely the class of fact a model cannot
+ * re-derive by reading the codebase, which is the whole reason a memory layer exists. It was
+ * on this list in an early draft only because, before the `tool_response` fix, the payload
+ * looked empty. Do not tidy it back on.
+ *
+ * Applied to SUCCESSFUL calls only, for the same reason self-reference suppression is
+ * (step 2 below): a failure is the highest-value thing a coding agent can remember (§4.5),
+ * and "the todo write blew up" is a diagnostic nobody else is keeping.
+ */
+const SKIP_TOOLS = new Set([
+  'TodoWrite', 'EnterPlanMode', 'ExitPlanMode', 'ToolSearch',
+  'ListAgents', 'TaskList', 'CronList', 'Monitor', 'ScheduleWakeup',
+  'StructuredOutput',
+]);
+
+/**
  * How far into a nested `tool_input` the human-readable render descends before collapsing
  * to `{…}`. Deliberately shallower than `redactParams`' own depth-12 walk: everything this
  * renders has therefore already been through stage 1, which is what stops an 800-deep
@@ -62,6 +116,27 @@ const MAX_VALUE_CHARS = 4096;
 
 /** `item_id` is a wire value and a dedup key; keep it boring. */
 const MAX_ID_CHARS = 160;
+
+/**
+ * The used-signal's name, written onto every record it produces.
+ *
+ * A bare `0.4` on a turn file is unreadable a version later — nobody can tell whether it was
+ * a probability, a ratio, or a threshold somebody tuned. The version suffix is load-bearing
+ * too: when the method changes, old records stay interpretable instead of being silently
+ * pooled with new ones that were measured differently.
+ */
+const USED_SIGNAL_METHOD = 'memory-term-echo/v1';
+
+/** How many matched terms are kept as evidence. Enough to read; not a copy of the block. */
+const MAX_EVIDENCE_TERMS = 12;
+
+/** The reply is scanned, never stored. This bounds the scan on a pathological message. */
+const MAX_ANSWER_SCAN = 64 * 1024;
+
+/** Sanity bounds on terms read back from a turn file, which is editable local state. */
+const MAX_TERMS_READ = 64;
+const TERM_MIN_CHARS = 4;
+const TERM_MAX_CHARS = 24;
 
 // ---------------------------------------------------------------------------
 
@@ -102,6 +177,10 @@ function capture(rawPayload, cfg, mode) {
 
   // 1. capture disabled -> nothing to do.
   if (cfg && cfg.capture === false) return;
+
+  // 2a. §3.2: the matcher lets every tool through, so the bookkeeping tools are dropped
+  //     here. See `SKIP_TOOLS` for why an allowlist in the manifest could not do this job.
+  if (mode === 'tool' && SKIP_TOOLS.has(str(payload.tool_name).trim())) return;
 
   // 2. §4.4 self-reference suppression. Without it the plugin records its own traffic,
   //    recalls it, then records the recall.
@@ -182,7 +261,11 @@ function buildToolItem(payload, cfg, mode) {
     { text: '', redactions: 0, truncated: false },
   );
 
-  const rawTail = failed ? errorText(payload) : outputText(payload.tool_output);
+  // The host sends the result as **`tool_response`**. `tool_output` is the older name and
+  // is kept only as a fallback — reading it alone is what made every memory this plugin ever
+  // shipped read `Read(file_path=X) -> ` with nothing after the arrow: the plugin recorded
+  // that a file had been read and never what was in it.
+  const rawTail = failed ? errorText(payload) : outputText(payload.tool_response ?? payload.tool_output);
   const tail = attempt(
     () => redactText(rawTail, cfg, 'output'),
     { text: '', redactions: 0, truncated: false },
@@ -191,7 +274,14 @@ function buildToolItem(payload, cfg, mode) {
   const text = failed
     ? `${toolName}(${params.text}) FAILED: ${tail.text}`
     : `${toolName}(${params.text}) -> ${tail.text}`;
-  if (!text.trim()) return null;
+
+  // Both halves empty means the item is a tool name and two brackets — `Tool() -> `, which
+  // is not a memory. An empty TAIL alone is kept on purpose: `Bash(command=rm x) -> ` and
+  // `Write(file_path=…) -> ` are real episodes whose content is entirely in the params, and
+  // plenty of tools legitimately answer with nothing. Note the old test here was
+  // `!text.trim()`, which could never fire — `toolName` falls back to `'Tool'`, so the
+  // string always had characters in it.
+  if (!params.text.trim() && !tail.text.trim()) return null;
 
   return item({
     cfg,
@@ -208,7 +298,10 @@ function buildToolItem(payload, cfg, mode) {
       hook_event: str(payload.hook_event_name) || (failed ? 'PostToolUseFailure' : 'PostToolUse'),
       session_id: str(payload.session_id),
       prompt_id: str(payload.prompt_id),
-      execution_time_ms: finiteOr(payload.execution_time_ms, 0),
+      // The host names it `duration_ms`; `execution_time_ms` is the older payload name and
+      // stays as a fallback. The metadata key keeps the old spelling because it is already
+      // on the wire in every stored item.
+      execution_time_ms: finiteOr(payload.duration_ms ?? payload.execution_time_ms, 0),
       outcome: failed ? 'failure' : 'ok',
       truncated: !!(params.truncated || tail.truncated),
       redactions: num(scrubbed.redactions) + num(params.redactions) + num(tail.redactions),
@@ -359,7 +452,12 @@ function renderValue(v, depth) {
 }
 
 /**
- * `tool_output` arrives in half a dozen shapes depending on the tool.
+ * `tool_response` arrives in half a dozen shapes depending on the tool, and no two of them
+ * agree: `Read` buries the payload under `file.content`, `Bash` splits it across
+ * `stdout`/`stderr`, and most of the rest are flat result objects with no text field at all.
+ * The `JSON.stringify` at the bottom is the deliberate floor — an unknown shape rendered as
+ * JSON is still the tool's answer, and `redactText` caps it either way.
+ *
  * @param {any} v
  * @param {number} [depth]
  * @returns {string}
@@ -375,6 +473,10 @@ function outputText(v, depth = 0) {
       return v.map((x) => outputText(x, depth + 1)).filter(Boolean).join('\n');
     }
     if (typeof v.text === 'string') return v.text;
+    // `Read` — `{type: "text", file: {filePath, content, numLines, …}}`. Without this row the
+    // most-called tool in the session stores its JSON envelope instead of the file, and the
+    // envelope's keys eat the output cap the excerpt was supposed to get.
+    if (isObject(v.file) && typeof v.file.content === 'string') return v.file.content;
     if (typeof v.content === 'string') return v.content;
     if (Array.isArray(v.content)) return outputText(v.content, depth + 1);
     if (typeof v.output === 'string') return v.output;
@@ -391,7 +493,9 @@ function outputText(v, depth = 0) {
 function errorText(payload) {
   const direct = str(payload.error) || str(payload.tool_error) || str(payload.error_message);
   if (direct) return direct;
-  return outputText(payload.error ?? payload.tool_output);
+  // `PostToolUseFailure` carries `error`; the two result fields are the fallback, newest
+  // name first, for a host that reported the failure inside the result instead.
+  return outputText(payload.error ?? payload.tool_response ?? payload.tool_output);
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +522,10 @@ function readTurn(cfg, runId, promptId) {
  * `stage-prompt.mjs` and are what `drain --with-outcome` attributes against — writing a
  * fresh object here would silently delete the attribution the next step depends on.
  *
+ * This is also where the used-signal lands (§5.5), for the same reason: everything it needs
+ * — the staged terms and `last_assistant_message` — is in scope at one point in one function,
+ * and the file is already being rewritten. One read, one write, no new lifecycle.
+ *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {Record<string, any>} payload
@@ -431,7 +539,122 @@ function closeTurn(cfg, runId, payload) {
     session_id: str(payload.session_id),
     started_at: Date.now(),
   };
-  writeJsonAtomic(p, { ...base, ended_at: Date.now(), outcome_pending: true });
+  const evidence = attempt(() => usedEvidence(base, payload), null);
+  writeJsonAtomic(p, {
+    ...base,
+    // Absent when nothing was staged to look for. An absent key means "unmeasured" and the
+    // drain falls back to the old turn-completed reading; `used: false` means "measured, and
+    // nothing was found". Collapsing the two would report every turn from before this
+    // existed as an injection the model ignored.
+    ...(evidence ? { used_evidence: evidence } : {}),
+    ended_at: Date.now(),
+    outcome_pending: true,
+  });
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * The used-signal — what it can show, and what it cannot
+ * ---------------------------------------------------------------------------
+ * Recall injects on every prompt over 8 characters. The cost of that is measured; whether
+ * any of it was *read* is not, and this hook cannot answer that question — the plugin sees
+ * what the model said, never what it attended to. So this does not claim to measure use. It
+ * measures one observable proxy and records the raw ingredients of it:
+ *
+ *   **did the reply carry vocabulary that came from the injected block and not from the
+ *   prompt?**
+ *
+ * The prompt subtraction happens in `prompt-recall.mjs`, and it is the only reason the
+ * number is worth anything: retrieval matched the prompt in the first place, so an overlap
+ * with the prompt's own words is what you would see with the memory layer switched off.
+ *
+ * No score is emitted, deliberately. A ratio over a term list of arbitrary size has no
+ * calibration behind it, and a `0.4` would be read as one. What is recorded is the matched
+ * terms, the size of the set they were drawn from, and the method's name — the ingredients
+ * any later calibration would need, and none of the confidence it has not earned.
+ *
+ * **Its weaknesses, in order of how often they will bite:**
+ *
+ *  1. *False negatives dominate.* A model that reads "never run the migration twice" and
+ *     then simply does not run it twice has used the memory perfectly and echoed nothing.
+ *     Rules and prohibitions are the entries most likely to be used silently, which is
+ *     exactly the class this signal is worst at.
+ *  2. *Only the final message is visible.* Memory used in intermediate reasoning or in a
+ *     tool call it prompted is invisible here; `Stop` carries the last message and no more.
+ *  3. *False positives from shared subject matter.* Memory and reply are both about this
+ *     codebase, so a term can coincide without the memory having been read.
+ *  4. *Paraphrase defeats it entirely.* The match is lexical, with a left word boundary
+ *     only — `poll` matches `polling` — and nothing beyond that.
+ *
+ * **What it would take to falsify it:** a few dozen turns where a human reads the injected
+ * block and the reply and judges "used / not used", scored against `used_evidence.used`. If
+ * the two distributions do not separate — if the signal fires about as often on turns a
+ * human calls unused as on turns they call used — the method is noise and belongs deleted,
+ * not tuned. Tightening a threshold on a signal that has never been checked against a label
+ * is how this codebase acquired a 400 ms health budget that failed every trial it was given.
+ * Until that check exists, nothing may gate recall on this: it is a measurement, not a
+ * verdict, and `drain` treats it as one.
+ *
+ * §4.4: nothing from the reply is written down. The record carries only terms that
+ * `prompt-recall` already staged and already scrubbed, so a secret the assistant happened to
+ * print cannot land here — the reply is read, matched against, and dropped.
+ *
+ * @param {Record<string, any>} turn   the staged turn, as read
+ * @param {Record<string, any>} payload
+ * @returns {Record<string, any>|null} null when there was nothing to measure against
+ */
+function usedEvidence(turn, payload) {
+  const recall = isObject(turn.recall) ? turn.recall : null;
+  if (!recall || !Array.isArray(recall.terms)) return null;
+
+  const terms = recall.terms
+    .filter((t) => typeof t === 'string'
+      && t.length >= TERM_MIN_CHARS && t.length <= TERM_MAX_CHARS)
+    .map((t) => t.toLowerCase())
+    .slice(0, MAX_TERMS_READ);
+
+  const answer = str(payload.last_assistant_message) || str(payload.message);
+
+  /** @type {Record<string, any>} */
+  const out = {
+    method: USED_SIGNAL_METHOD,
+    at: Date.now(),
+    candidates: terms.length,
+    matched: 0,
+    terms: [],
+    answer_chars: answer.length,
+  };
+
+  // Both of these are "unmeasurable", not "unused", so neither sets `used`. An injection
+  // whose every distinctive word was already in the prompt cannot be told apart from one
+  // the model ignored, and saying otherwise would put a fabricated denominator on the wire.
+  if (terms.length === 0) { out.reason = 'no_distinct_terms'; return out; }
+  if (!answer.trim()) { out.reason = 'no_reply'; return out; }
+
+  const hits = matchTerms(terms, answer.slice(0, MAX_ANSWER_SCAN));
+  out.matched = hits.length;
+  out.terms = hits.slice(0, MAX_EVIDENCE_TERMS);
+  out.used = hits.length > 0;
+  return out;
+}
+
+/**
+ * Which of `terms` the reply carries.
+ *
+ * Every run of non-word characters becomes a single space, so the haystack is a stream of
+ * space-delimited words and a term preceded by a space is a match at a left word boundary.
+ * The *right* boundary is deliberately absent: `queue` matches `queued`, `idempotency`
+ * matches `idempotency_key`. English inflection is the common case, and demanding an exact
+ * match would turn ordinary suffixing into a false negative — the failure mode this signal
+ * already has too much of.
+ *
+ * @param {string[]} terms  lowercased
+ * @param {string} text
+ * @returns {string[]} the matched terms, in the order they were staged
+ */
+function matchTerms(terms, text) {
+  const hay = ` ${text.toLowerCase().replace(/[^a-z0-9_]+/g, ' ')} `;
+  return terms.filter((t) => hay.includes(` ${t}`));
 }
 
 // ---------------------------------------------------------------------------

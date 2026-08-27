@@ -19,24 +19,40 @@ cd integrations/claude-code
 node --test 'test/*.test.mjs'     # everything
 node --test test/redact.test.mjs  # one gate
 
-MUBIT_CC_TEST_TARGET=dist node --test 'test/*.test.mjs'   # against the shipped bundles
+npm run test:dist                 # everything, against the shipped bundles
 ```
 
 Quote the glob so Node expands it. `node --test test/` fails before `package.json` exists —
 Node treats the bare directory as a module path.
 
-By default, hook tests run `hooks/src/*.mjs` so you can iterate without rebuilding. Run once
-against `dist` before you commit — `hooks.json` points at `dist`, and a stale bundle is a bug
-that only shows up in a real session.
+By default, hook tests run `hooks/src/*.mjs` so you can iterate without rebuilding:
+`runHook()` resolves `hooks/src/<name>.mjs` unless `MUBIT_CC_TEST_TARGET=dist` (or a per-call
+`target: 'dist'`) redirects it at the bundle `hooks/hooks.json` actually points at.
 
-No framework, no dependencies, no network, no Docker, no real Mubit. `node:test` and
-`node:assert/strict`. The whole suite must stay under ~10 seconds.
+`npm run test:dist` is that redirect, and it is now **enforced rather than a habit**:
+`.github/workflows/claude-code-plugin-ci.yml` runs it as its own step, downstream of the
+rebuild and the `git diff --exit-code` freshness gate, so the bundles under test are provably
+byte-identical to what a marketplace fetch hands a user. The freshness gate alone only proves
+the artifacts were *built* from this source — esbuild can emit a bundle that Node then refuses
+to import, and the diff stays clean. `release.test.mjs` asserts that CI step exists, and
+resolves the script name out of `package.json`, so use the script rather than retyping the env
+var: that is what keeps this file and CI from drifting into two spellings.
+
+Still worth running locally before you commit. It costs ~6 s, and CI is the backstop, not the
+first line of defence.
+
+No framework, no dependencies, no Docker, no real Mubit, and no network beyond loopback:
+`fakeMubit()` is a real `node:http` server on `127.0.0.1:0` and hooks are real subprocesses
+dialling it, so the client stack under test is the whole client stack. Nothing is monkey-patched
+and nothing reaches the internet. `node:test` and `node:assert/strict`. The whole suite must stay
+under ~10 seconds.
 
 ## Gate map
 
 | File | Covers |
 |---|---|
 | `manifests.test.mjs` | manifests as data, version lockstep, allowlist ↔ the shipped MCP tool table |
+| `mcp-surface.test.mjs` | real stdio `tools/list` against `mcp/dist/` — the allowlist as the model sees it |
 | `state.test.mjs` | paths, atomic JSON, TTL pruning, markers, redacted logging |
 | `config.test.mjs` | precedence, loopback detection, env tags, frozen defaults |
 | `credentials.test.mjs` | the 0600 store, merge-not-replace, never throws |
@@ -47,16 +63,17 @@ No framework, no dependencies, no network, no Docker, no real Mubit. `node:test`
 | `http.test.mjs` | pre-flight guards, never-throws, retry policy |
 | `spool.test.mjs` | file-per-item under concurrency, lock stealing, `claimOnce` |
 | `classify.test.mjs` | tool → intent table, never `unclassified`, lesson templates |
+| `outcome.test.mjs` | the implicit outcome rule as a pure decision: the four cases, measured-`false` vs unmeasured, the derived key |
 | `hook.test.mjs` | exit-code discipline, budgets, `spawnDetached` |
-| `capture.test.mjs` | four modes, zero HTTP, one spool file, stable `item_id` |
+| `capture.test.mjs` | four modes, zero HTTP, one spool file, stable `item_id`, the Stop used-signal |
 | `stage-prompt.test.mjs` | turn staging, the write race with `prompt-recall` |
-| `drain.test.mjs` | batching, the 2xx/5xx/4xx split, idempotency |
+| `drain.test.mjs` | batching, the 2xx/5xx/4xx split, idempotency, "ignored" vs "not injected" |
 | `session-start.test.mjs` | the `source` table, sub-budgets, the offline steer block |
 | `assemble.test.mjs` | section mapping and order, budget, `sourceRefIds` |
-| `prompt-recall.test.mjs` | the three-rung ladder, policy cache, the `context` absence |
+| `prompt-recall.test.mjs` | the three-rung ladder, policy cache, the `context` absence, the staged turn |
 | `attribution.test.mjs` | `reference_id` → `entry_ids` end to end |
 | `checkpoint.test.mjs` | redacted snapshot, spooled anchor, visible failure |
-| `session-end.test.mjs` | the required reflect, once-marker, best-effort ordering |
+| `session-end.test.mjs` | the required reflect, once-marker, best-effort ordering, one outcome rule shared with `drain` |
 | `statusline.test.mjs` | network-free, glyph precedence, empty-state survival |
 | `launch.test.mjs` | run-id derivation, env-before-import, allowlist default |
 | `skills.test.mjs` | frontmatter, tool prefixes, load-bearing prose |
@@ -114,6 +131,14 @@ credential-shaped strings.
 
 ## House rules
 
+- **Which entry point a runner picks is not uniform, and the four rules are deliberate — say
+  which one you are following when you add a runner.** `runHook()` takes `src` and is redirected
+  wholesale by `MUBIT_CC_TEST_TARGET`, because a hook bundle is a faithful build of its source
+  and either can answer most questions. `statusline.test.mjs` prefers the built
+  `bin/statusline.mjs` and falls back to `src`. `launch.test.mjs` prefers `mcp/src/launch.mjs`
+  and falls back to `dist`. `mcp-surface.test.mjs` is dist-only and hard-errors without the
+  bundle — the *registered* tool table exists nowhere but the shipped server, which is how B1
+  shipped past a green suite.
 - Table-drive anything the guide gives as a table, one assertion per row.
 - Comment each test with the guide section it protects.
 - Never sleep for real windows. Shrink them with `MUBIT_CC_BREAKER_*`, `MUBIT_CC_BATCH_*`, and

@@ -314,33 +314,43 @@ test('[mirror of @mubit-ai/mcp tools suite] the curated default allowlist select
 // business and is tested in its suite; what matters here is what the bundle in `mcp/dist`
 // does, because that is the server a user actually runs.
 //
-// The check is deliberately two-sided rather than a bare `assert.match`. Until the patched
-// package ships, the bundled server ignores the allowlist and registers all 21 tools — so
-// asserting the patch is present would fail on a true statement about today's artifact. What
-// must always hold is that the recorded context cost describes the server as actually built:
-// claiming ten tools' worth of context while shipping twenty-one is the user-visible defect
-// (§3.5). `scripts/context-cost.json` already carries both facts, so this pins them together
-// and flips on its own the day a patched `@mubit-ai/mcp` is bundled.
-test('context-cost.json agrees with the bundled server about the allowlist', () => {
+// This assertion used to be two-sided — it checked only that `context-cost.json` *agreed*
+// with whatever the bundle did, so it stayed green while the plugin shipped 21 tools where
+// ten were configured, and was written to "flip on its own the day a patched @mubit-ai/mcp
+// is bundled". That day came: the bundle is now built from the in-repo `@mubit-ai/mcp`
+// (esbuild.config.mjs), so the accommodation is gone and the patch is simply required.
+// A server that ignores the allowlist is a defect, not a state to be recorded faithfully.
+test('the bundled server honours the allowlist, and context-cost.json says so', () => {
   const bundle = readFileSync(join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js'), 'utf8');
-  const honoursAllowlist = /MUBIT_MCP_TOOLS/.test(bundle);
-  const registered = realToolNames();
+  const defined = realToolNames();
+
+  assert.match(bundle, /MUBIT_MCP_TOOLS/,
+    'mcp/dist/server.js does not read MUBIT_MCP_TOOLS, so the allowlist is inert and every '
+    + 'session pays for all 21 tool schemas (§8.1, §3.5).\n'
+    + '  It is bundled from the in-repo @mubit-ai/mcp — rebuild both:\n'
+    + '    npm --prefix ../mcp ci && npm --prefix ../mcp run build\n'
+    + '    npm run build');
 
   const cost = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'scripts', 'context-cost.json'), 'utf8'));
 
-  assert.equal(cost.allowlistHonoured, honoursAllowlist,
-    `context-cost.json records allowlistHonoured=${cost.allowlistHonoured}, but mcp/dist/server.js `
-    + `${honoursAllowlist ? 'does' : 'does not'} read MUBIT_MCP_TOOLS. Re-measure with `
+  assert.equal(cost.allowlistHonoured, true,
+    `context-cost.json records allowlistHonoured=${cost.allowlistHonoured}. Re-measure with `
     + '`node scripts/measure-context-cost.mjs --write`.');
 
-  assert.deepEqual(cost.surface?.registered, registered.slice().sort(),
-    'context-cost.json was measured against a different tool table than mcp/dist/server.js '
-    + 'registers — re-measure with `node scripts/measure-context-cost.mjs --write`');
+  // `surface.registered` is the real `tools/list` answer, so under a blank `mcpTools` it is
+  // the curated ten — not the 21 the bundle *defines*. Both facts are checked, because
+  // "advertises ten" and "still carries all 21 for users who restore them" are separate
+  // promises and only the first one bounds the context cost.
+  assert.deepEqual(cost.surface?.registered, [...DEFAULT_ALLOWLIST].sort(),
+    'context-cost.json was measured against a tool surface that is not the curated ten — '
+    + 're-measure with `node scripts/measure-context-cost.mjs --write`');
 
-  // The consequence, stated so it cannot be lost: while the allowlist is inert, every session
-  // pays for all 21 schemas, not the curated 10.
-  const paidFor = honoursAllowlist ? DEFAULT_ALLOWLIST.length : registered.length;
-  assert.equal(cost.breakdown?.toolSchemas?.count, paidFor,
-    `every session pays for ${paidFor} tool schemas, but context-cost.json bills for `
+  for (const name of cost.surface?.registered ?? []) {
+    assert.ok(defined.includes(name),
+      `context-cost.json records "${name}" as advertised, but mcp/dist/server.js does not define it`);
+  }
+
+  assert.equal(cost.breakdown?.toolSchemas?.count, DEFAULT_ALLOWLIST.length,
+    `every session pays for ${DEFAULT_ALLOWLIST.length} tool schemas, but context-cost.json bills for `
     + `${cost.breakdown?.toolSchemas?.count}`);
 });

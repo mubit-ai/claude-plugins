@@ -22,12 +22,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import {
   fakeMubit, queryResponse, evidence, runHook, assertHookContract,
   baseEnv, makeDataDir, readJsonFile, readJsonDir,
 } from './helpers/harness.mjs';
-import { userPromptSubmit } from './helpers/fixtures.mjs';
+import { userPromptSubmit, PROMPT_ID, SECRETS } from './helpers/fixtures.mjs';
 
 const RUN_ID = 'cc-test-run-1';
 const PROMPT = 'why is the ingest job stuck in queued?';
@@ -60,6 +60,9 @@ function env(dataDir, server, extra = {}) {
 
 const policyDir = (d) => join(d, 'policy');
 const marker = (d) => readJsonFile(join(d, 'status', `${RUN_ID}.json`));
+const turnPath = (d, promptId = PROMPT_ID) =>
+  join(d, 'runs', RUN_ID, 'turns', `${promptId}.json`);
+const turn = (d, promptId = PROMPT_ID) => readJsonFile(turnPath(d, promptId));
 
 // ---------------------------------------------------------------------------
 // The regression test for the inverted ladder
@@ -680,4 +683,105 @@ test('the marker records which rung served', async (t) => {
   const rb = await runHook('prompt-recall', userPromptSubmit(), { env: env(dirB, denied, FALLBACK_ON) });
   assertHookContract(rb);
   assert.equal(marker(dirB).recall.rung, 2, '1 LLM call');
+});
+
+// ---------------------------------------------------------------------------
+// The staged turn — the denominator of any precision number
+// ---------------------------------------------------------------------------
+
+// §5.2 step 6 / §5.5: the marker is last-write-wins per RUN, so a 40-prompt session leaves
+// exactly one record of what recall cost. Everything the hook already computed — the rung,
+// the tokens, what the budget dropped — has to land on the TURN, or the plugin can report
+// what an injection cost only for whichever prompt happened to be last.
+test('the staged turn records what the injection cost, not only what it named', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const before = Date.now();
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) }));
+
+  const staged = turn(dir);
+  assert.deepEqual(staged.recalled, ['ref_rule_1', 'ref_lesson_1', 'ref_fact_1'],
+    'the existing attribution surface must survive being extended');
+
+  const rec = staged.recall;
+  assert.ok(rec && typeof rec === 'object', `the turn carries no recall record: ${JSON.stringify(staged)}`);
+  assert.equal(rec.rung, 1, 'which rung answered is a per-turn fact, not a per-run one');
+  assert.equal(rec.sources, 3);
+  assert.equal(rec.dropped, 0);
+  assert.equal(rec.empty_reason, '');
+  assert.ok(rec.tokens > 0, `tokens is the cost half of precision: ${JSON.stringify(rec)}`);
+  assert.ok(rec.chars > 0, 'chars is what was actually injected, independent of the 4-chars-per-token estimate');
+  assert.ok(rec.at >= before && rec.at <= Date.now() + 1000, `recall.at was ${rec.at}`);
+});
+
+// §5.5: the Stop-side used-signal can only look for the memory's OWN vocabulary in the
+// reply. A term the user already typed proves nothing — the model would have echoed it
+// with no memory at all — so the prompt's words are subtracted here, where the prompt is
+// in hand, rather than left to be re-derived at Stop.
+test('the staged terms are what the memory added, not what the prompt already said', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) }));
+
+  const terms = turn(dir).recall.terms;
+  assert.ok(Array.isArray(terms) && terms.length > 0, `no terms staged: ${JSON.stringify(terms)}`);
+  // From the evidence and nowhere near the prompt.
+  assert.ok(terms.includes('indexing'), `"indexing" is memory-only vocabulary: ${terms.join(', ')}`);
+  assert.ok(terms.includes('stored'), `"stored" is memory-only vocabulary: ${terms.join(', ')}`);
+  // In the prompt "why is the ingest job stuck in queued?" — an echo of either proves nothing.
+  assert.ok(!terms.includes('ingest'), `"ingest" came from the user, not the memory: ${terms.join(', ')}`);
+  assert.ok(!terms.includes('queued'), `"queued" came from the user, not the memory: ${terms.join(', ')}`);
+});
+
+// §5.2: an empty recall injects nothing, and the turn still records that — "injected
+// nothing" and "injected and was ignored" are different facts, and the empty record is
+// what keeps them apart downstream.
+test('an empty recall still stages the cost record, with no terms to match against', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: [] }) },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) }));
+
+  const staged = turn(dir);
+  assert.deepEqual(staged.recalled, []);
+  assert.equal(staged.recall.empty_reason, 'no_evidence');
+  assert.equal(staged.recall.tokens, 0);
+  assert.equal(staged.recall.chars, 0);
+  assert.deepEqual(staged.recall.terms, []);
+});
+
+// §4.4: the turn file is a new place for a secret to land. Evidence content is not
+// necessarily this plugin's own redacted capture — another client, or `mubit_remember`,
+// can put anything in the store — so what recall stages goes through the same scrub as
+// anything else the plugin writes down.
+test('a secret inside recalled evidence never reaches the staged terms', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': {
+      json: queryResponse({
+        evidence: [evidence({
+          id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', score: 0.9,
+          content: `Deploy with the publisher key ${SECRETS.openaiKey} exported first.`,
+        })],
+      }),
+    },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: env(dir, server) }));
+
+  const raw = readFileSync(turnPath(dir), 'utf8');
+  assert.ok(!raw.includes(SECRETS.openaiKey), `the staged turn carries a credential:\n${raw}`);
+  const terms = turn(dir).recall.terms;
+  assert.ok(!terms.some((tm) => SECRETS.openaiKey.toLowerCase().includes(tm)),
+    `a fragment of the credential survived as a term: ${terms.join(', ')}`);
+  assert.ok(!terms.includes('redacted'),
+    'the placeholder is not memory vocabulary; it must not become a term to match on');
 });

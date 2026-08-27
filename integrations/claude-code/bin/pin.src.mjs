@@ -45,6 +45,15 @@
  * ambiguity — two sessions in two projects on one machine — is real and is why `--run` exists,
  * and it is a far smaller ambiguity than a drifted derivation.
  *
+ * That ambiguity is now refused rather than guessed at. Every session on a machine shares one
+ * plugin data directory, so "two sessions at once" is the ordinary case, not the exotic one,
+ * and the guess is wrong precisely when it is least visible: the command reports success, and
+ * names a run in its output that nobody re-reads, while the pin renders in somebody else's
+ * session. When a second run's marker was touched within `MARKER_AMBIGUOUS_MS` of the newest,
+ * this answers `ambiguous_run` and names the candidates. That is the same trade the age cap
+ * above already makes — a loud failure the caller can act on beats a silent write to a run
+ * nothing reads.
+ *
  * Deliberately not extracted into `lib/runid.mjs`: another ticket in this wave needs the same
  * thing, and two branches editing one subtle function is a guaranteed conflict. Duplicate
  * small, extract afterwards.
@@ -65,6 +74,17 @@ const POISONED_RUN_ID = 'default';
 
 /** How far back a marker may have been touched and still name "the run I am in". */
 const MARKER_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How close behind the newest marker another session's marker may sit and still be a live
+ * rival for "the run I am in".
+ *
+ * Two markers this close together are two sessions whose hooks are both firing right now, and
+ * nothing in this directory says which of them typed the command. Five minutes is wide enough
+ * to cover a session that is mid-answer and writing no markers of its own, and narrow enough
+ * that yesterday's project is not a rival.
+ */
+const MARKER_AMBIGUOUS_MS = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // argv
@@ -345,8 +365,18 @@ export function pickRun(cfg, explicit = '') {
     return { ok: true, runId: named };
   }
 
-  const newest = newestMarker(cfg);
-  if (newest) return { ok: true, runId: newest };
+  const { runId, rivals } = newestMarker(cfg);
+  if (runId && rivals.length) {
+    return {
+      ok: false,
+      state: 'ambiguous_run',
+      detail: `More than one Mubit run is live in this data directory — ${[runId, ...rivals].join(', ')}`
+        + ' — so the most recently touched marker is not reliably the session that typed this. '
+        + 'Name the run this session is using: pin --run <run_id> "…". The SessionStart block at '
+        + 'the top of the conversation prints it, and so does /mubit-memory:doctor.',
+    };
+  }
+  if (runId) return { ok: true, runId };
 
   return {
     ok: false,
@@ -358,24 +388,57 @@ export function pickRun(cfg, explicit = '') {
 }
 
 /**
- * The most recently updated `status/<run_id>.json`.
+ * The most recently updated `status/<run_id>.json`, and any rival close enough behind it to be
+ * a second live session.
  *
  * `health.json` shares the directory and is not a run. A marker older than a day is not this
  * session either — answering with one would silently pin to a project the user left last week,
  * and "no run found, pass --run" is a far better failure than a pin nobody sees.
  *
+ * The rivals are the same judgement applied to the case this directory actually sees: every
+ * session on one machine shares one plugin data dir, so "newest marker" is only "this session"
+ * while this session is the only one running. A second session's hook firing in the seconds
+ * before the command is typed silently moves the pin to that session's run.
+ *
+ * A run and its own successors are not rivals. A `/clear` leaves the pre-clear marker on disk
+ * beside `-c1`, and a subagent writes `-sub-<short>`; both name the session that is already
+ * the answer, so they are folded together by `markerBase` before anything is compared.
+ *
  * @param {Record<string, any>} cfg
- * @returns {string}
+ * @returns {{runId: string, rivals: string[]}}
  */
 function newestMarker(cfg) {
-  let best = '';
-  let bestAt = 0;
-  for (const m of scanRunMarkers(str(cfg?.dataDir))) {
+  const now = Date.now();
+  const fresh = scanRunMarkers(str(cfg?.dataDir))
     // The fallback a run id takes when nothing configured one is never this session's.
-    if (m.runId === POISONED_RUN_ID) continue;
-    if (m.at > bestAt) { bestAt = m.at; best = m.runId; }
+    .filter((m) => m.runId !== POISONED_RUN_ID && m.at > 0 && now - m.at < MARKER_MAX_AGE_MS)
+    .sort((a, b) => b.at - a.at);
+
+  const [best, ...rest] = fresh;
+  if (!best) return { runId: '', rivals: [] };
+
+  const bestBase = markerBase(best.runId);
+  const rivals = [];
+  for (const m of rest) {
+    if (best.at - m.at >= MARKER_AMBIGUOUS_MS) break;
+    if (markerBase(m.runId) === bestBase) continue;
+    if (!rivals.includes(m.runId)) rivals.push(m.runId);
   }
-  return bestAt > 0 && Date.now() - bestAt < MARKER_MAX_AGE_MS ? best : '';
+  return { runId: best.runId, rivals };
+}
+
+/**
+ * The run id with the suffixes that mark a *continuation* of one session stripped off, so two
+ * markers that are one session compare equal.
+ *
+ * `-sub-<short>` comes off before `-c<n>`, because the sub-run form appends to a parent that
+ * may already carry the clear counter (§4.3).
+ *
+ * @param {string} runId
+ * @returns {string}
+ */
+function markerBase(runId) {
+  return str(runId).replace(/-sub-[^-]+$/, '').replace(/-c\d+$/, '');
 }
 
 // ---------------------------------------------------------------------------

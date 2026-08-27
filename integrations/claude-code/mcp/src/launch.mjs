@@ -144,7 +144,7 @@ function prepare(env) {
   /** @type {string} */
   let runId;
   try {
-    runId = deriveRunId(runConfig(cfg), {});
+    runId = deriveRunId(runConfig(cfg), hostPayload(env), { persist: false });
   } catch (err) {
     // `lib/runid.mjs` throws rather than answer `"default"` — an unset `static` pin is the
     // realistic case. Starting anyway would hand the server the poisoned literal and pool
@@ -214,12 +214,40 @@ function runConfig(cfg) {
   if (String(cfg.runStrategy ?? '').trim() !== 'per-conversation') return cfg;
 
   note('mubit: runStrategy "per-conversation" cannot be honoured by the MCP server — it '
-    + 'starts once per session and is never handed a session_id. Falling back to '
-    + '"per-directory" for MCP-tool writes. Hook captures still key on the conversation, so '
-    + 'the two land in different runs; use "per-directory" (the default) to keep them together.');
+    + 'starts once per process, and the conversation it started in can be replaced under it. '
+    + 'Falling back to "per-directory" for MCP-tool writes. Hook captures still key on the '
+    + 'conversation, so the two land in different runs; use "per-directory" (the default) to '
+    + 'keep them together.');
   log(cfg, 'warn', 'mcp: per-conversation is unavailable in the launcher; using per-directory');
 
   return { ...cfg, runStrategy: 'per-directory' };
+}
+
+/**
+ * The one field of a hook payload this process can honestly fill in.
+ *
+ * The host puts `CLAUDE_CODE_SESSION_ID` in every MCP server's environment, and it is the
+ * same id the hook payloads carry as `session_id` — so handing it over lets `deriveRunId`
+ * reach the session map instead of deriving past it. The mapped run is not always the
+ * derived one: `/clear` appends `-c<n>`, and without this the server pins to the unsuffixed
+ * run while every hook in the same session writes to the suffixed one, which splits
+ * `/mubit-memory:remember` from the recall that would surface it.
+ *
+ * No `source`, because there is none to give: the host says nothing here about whether the
+ * conversation started, resumed or was cleared. That is exactly why the derivation is
+ * read-only — with the source absent, `deriveRunId` reuses the mapping when there is one and
+ * derives when there is not, and never writes an answer over a hook's better-informed one.
+ *
+ * A missing id is the startup race, not an error: MCP servers and the SessionStart hook both
+ * start at session start and nothing orders them, so an empty payload — today's behaviour —
+ * is the right answer when the id is absent.
+ *
+ * @param {Record<string, string|undefined>} env
+ * @returns {{session_id?: string}}
+ */
+function hostPayload(env) {
+  const sessionId = String(env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+  return sessionId ? { session_id: sessionId } : {};
 }
 
 /**

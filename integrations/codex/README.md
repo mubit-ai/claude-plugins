@@ -106,6 +106,7 @@ The settings worth knowing, all `MUBIT_CC_*` unless noted:
 | `MUBIT_CC_PINS` | `1` | Render the constraints pinned with the `pin` skill above the recalled block on every prompt of the run — including the prompts recall skips. Capped at five pins, 200 characters each and 240 tokens; costs no extra request on the prompt path. Off restores the injected block exactly. |
 | `MUBIT_CC_DATA_DIR` | — | Overrides where state lives. Highest precedence of any data-dir input. |
 | `MUBIT_CC_STATUSLINE` | `0` here | Defaults **off** under Codex, whose status line is a fixed list of built-in item ids with nothing scriptable in it. |
+| `MUBIT_MCP_TOOLS` (no `_CC`) | — | Which MCP tools to register, comma-separated. Blank means the thirteen below. A list you supply is used **verbatim**, not unioned with that default, so it is also how you reach the other eight. |
 
 ### The three-second SessionEnd
 
@@ -172,6 +173,42 @@ There is no `mubit-recall` subagent here. Codex has no plugin-defined agent type
 `SubagentStart` reports `agent_type: "default"` — so a markdown subagent would be a file
 nothing reads. Point a generic sub-agent at the `recall` skill instead; the isolation is the
 part that mattered.
+
+---
+
+## The thirteen MCP tools
+
+The bundled server carries 21 tools and registers thirteen of them. The other eight cost you
+nothing until you name them in `MUBIT_MCP_TOOLS`.
+
+Codex has no settings UI and no per-skill `tools:` grant, so this table is the only place the
+names appear outside the server's own descriptions.
+
+| Tool | For |
+| --- | --- |
+| `mubit_recall` | Search memory in words. Returns ranked evidence, each with a `reference_id`. |
+| `mubit_diagnose` | A command or test just failed — match the error shape against past failures, before bisecting. |
+| `mubit_dereference` | Read back exact stored content when you already hold a `reference_id`. |
+| `mubit_lessons` | Review what has been learned. A catalogue, not an answer. |
+| `mubit_learned` | Save one durable claim, in a sentence. The common write. |
+| `mubit_outcome` | Credit the `reference_id`s that actually helped, which is what makes them rank higher next time. |
+| `mubit_reflect` | Read this run's activity and extract lessons from it now. |
+| `mubit_archive` | Keep a block byte-exact — failing output, a config, a diff — and get a `reference_id` back. |
+| `mubit_forget` | Delete a lesson, or drop a whole run. Cannot be undone. |
+| `mubit_status` | Can the plugin reach Mubit at all. The connection, not the store. |
+| `mubit_strategies` | The pattern *across* many lessons rather than any single one. |
+| `mubit_checkpoint` | Save a named snapshot of the run, verbatim, before risky work. |
+| `mubit_memory_health` | What is actually stored: counts, staleness, contradictions. The store, not the connection. |
+
+The eight left off are not removed. Two are work a hook already does better
+(`mubit_remember`, `mubit_context`); the rest are the multi-agent orchestration group
+(`mubit_register_agent`, `mubit_list_agents`, `mubit_handoff`, `mubit_feedback`,
+`mubit_step_outcome`) and `mubit_ingest_status`, whose job the `doctor` skill does at its
+step 4 by calling `GET /v2/control/ingest/jobs/<job_id>` directly.
+
+The last three in the table arrived later than the rest, each once it had a skill to reach it:
+`strategies`, `checkpoint` and `memory-health` above. An allowlisted tool with nothing to
+invoke it is schema cost without a surface.
 
 ---
 

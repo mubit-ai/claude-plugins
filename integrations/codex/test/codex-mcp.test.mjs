@@ -43,6 +43,8 @@ const DEFAULT_ALLOWLIST = [
   'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ].sort();
 
+const CODEX_README = join(CODEX_ROOT, 'README.md');
+
 const CODEX_SERVER = join(CODEX_ROOT, 'mcp', 'dist', 'server.js');
 const SHARED_SERVER = join(SHARED_ROOT, 'mcp', 'dist', 'server.js');
 
@@ -122,6 +124,25 @@ test('the allowlist is configurable, and a user list passes through verbatim', a
 // ===========================================================================
 // initialize
 // ===========================================================================
+
+test('the README names every tool the plugin turns on by default', () => {
+  // § Codex has no plugin settings UI and no `tools:` frontmatter grant — the strings
+  //   `PLUGIN_OPTION` and `userConfig` appear nowhere in its binary. So the README is the
+  //   only surface on which a Codex user can learn that a tool exists at all. A tool that is
+  //   registered but undocumented is, in practice, unreachable: the model is told the name
+  //   by the server, but the person deciding whether to keep it, drop it or ask for one of
+  //   the other eight has nowhere to read what it does.
+  //
+  //   This is the half the docstring above calls "the part that does not travel for free".
+  //   A promotion in the shared `mcp/src/launch.mjs` reaches the Codex bundle by rebuilding;
+  //   it reaches the Codex reader only if someone writes it down.
+  const readme = readFileSync(CODEX_README, 'utf8');
+  const missing = DEFAULT_ALLOWLIST.filter((name) => !readme.includes(name));
+  assert.deepEqual(missing, [],
+    `${missing.length} of the ${DEFAULT_ALLOWLIST.length} tools this plugin registers by `
+    + 'default are named nowhere in the Codex README, so a Codex user cannot discover them:\n  '
+    + `${missing.join('\n  ')}`);
+});
 
 test('the initialize frame carries the instructions block', async () => {
   const { init } = await mcpDrive({ steps: [] });

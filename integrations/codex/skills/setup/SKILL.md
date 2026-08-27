@@ -173,9 +173,20 @@ Codex has no plugin settings UI and no `CODEX_PLUGIN_OPTION_*` variables — the
 `PLUGIN_OPTION` and `userConfig` appear nowhere in its binary — so those three rungs are the
 whole ladder. Do not send a Codex user to a `/plugin` configure screen; it does not exist here.
 
-**If either value is missing, run `mubit-memory:auth`.** It opens the console, signs the user
-in, checks the key against the instance and stores it, which is the whole of what this skill
-would otherwise ask them to do by hand.
+**If either value is missing, run `node <root>/scripts/login.mjs`.** It prompts for a key
+without echoing it, checks it against the instance, and writes it to the directory Step 3
+pinned as `MUBIT_CC_DATA_DIR` — which is the point. `mubit-memory:auth` shares its bundle with
+the Claude Code build and resolves the data directory by search, so a hand-run auth can store
+a valid key in a directory these hooks never read: no error anywhere, and memory simply stays
+unauthenticated.
+
+```
+node <root>/scripts/login.mjs            # prompts; add --status to check without dialing
+node <root>/scripts/login.mjs --key=mbt_… --endpoint=https://api.mubit.ai
+```
+
+It prints the directory it wrote to and how it decided, so a wrong answer is visible rather
+than silent. `--json` gives the same as a machine-readable object.
 
 ## Step 5 — confirm with `mcp__mubit__mubit_status`
 

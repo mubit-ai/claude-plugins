@@ -78,19 +78,26 @@ If they accept, write a personal command at `~/.claude/commands/dashboard.md` ho
 ```markdown
 ---
 description: Open the Mubit memory dashboard
+allowed-tools: ["Bash(node <the absolute path to bin/dashboard.mjs>:*)"]
 ---
 
-Run this and give the user the URL it prints, verbatim — the token is in the URL and a retyped
-one will not work.
-
-!`node "<the absolute path to bin/dashboard.mjs>" --json`
+Run `node "<the absolute path to bin/dashboard.mjs>" --json` and give the user the URL it
+prints, verbatim — the token is in the URL and a retyped one will not work.
 ```
 
 Resolve `<the absolute path>` from `${CLAUDE_PLUGIN_ROOT}` at the moment you write the file:
-that variable is set inside the plugin and not in a personal command, so the path has to be
-literal. Say the consequence out loud — **reinstalling the plugin at a different path breaks
-the alias**, and the fix is to delete the file and re-run this skill. `/mubit-memory:dashboard`
-keeps working either way, which is why the shim is a convenience and not the recommended route.
+that variable is set inside the plugin and not in a personal command, so both occurrences have
+to be a literal path. Say the consequence out loud — **reinstalling the plugin at a different
+path breaks the alias**, and the fix is to delete the file and re-run this skill.
+`/mubit-memory:dashboard` keeps working either way, which is why the shim is a convenience and
+not the recommended route.
+
+The alias asks for the command in prose, the way every other script-running skill here does. It
+deliberately does not use the host’s pre-execution form — an exclamation mark followed by a
+backtick-quoted command — because the host scans a **skill body** for that form and runs what
+it finds before the skill is read, and a fenced code block is not an escape. A worked example of
+it on this page would run this page’s own `<the absolute path…>` placeholder as a shell command
+every time somebody typed `/mubit-memory:setup`.
 
 ## Finish
 

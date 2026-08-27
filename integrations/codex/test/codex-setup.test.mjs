@@ -313,6 +313,37 @@ test('the MCP registration carries the data-dir pin', needsCodex, async () => {
     + `run pre-prompt recall never reads.\n${toml}`);
 });
 
+test('the MCP registration carries the plugin-root pin', needsCodex, async () => {
+  // § `mcp/src/launch.mjs` bridges three `MUBIT_CC_*` names onto the host names `lib/`
+  //   reads. Codex registers the server itself, so whatever this script does not pass is
+  //   simply absent — there is no host to supply it.
+  //
+  //   `MUBIT_CC_PLUGIN_ROOT` is the one that has to ride here. `lib/redact.mjs`'s
+  //   `selfRoots()` builds the list of paths that mark an item as being about the plugin
+  //   itself, and the install root is one of them. Unset, the MCP server cannot recognise
+  //   its own install path — which under Codex sits inside `$CODEX_HOME`, and so carries
+  //   the user's home directory into anything it fails to suppress.
+  //
+  //   `MUBIT_CC_PROJECT_DIR` deliberately does NOT ride here: `codex mcp add` writes to
+  //   `$CODEX_HOME/config.toml`, one registration serving every project on the machine, so
+  //   a pinned project directory would be wrong everywhere except the one it was taken in.
+  //   Falling back to the launch cwd is the correct answer there, and the run id is
+  //   unaffected either way because `directoryRunId` resolves through
+  //   `git rev-parse --show-toplevel`.
+  const home = makeHome();
+  const r = await runSetup(home);
+  assert.equal(r.code, 0, `setup exited ${r.code}:\n${r.stdout}\n${r.stderr}`);
+
+  const toml = readToml(home);
+  assert.match(toml, /\[mcp_servers\.mubit\]/, 'the MCP server was not registered');
+  assert.ok(toml.includes('MUBIT_CC_PLUGIN_ROOT'),
+    'the MCP server was registered without MUBIT_CC_PLUGIN_ROOT, so `lib/redact.mjs` cannot '
+    + "put the plugin's own install root in `selfRoots()` and self-referential content goes "
+    + `out unsuppressed:\n${toml}`);
+  assert.ok(toml.includes(CODEX_ROOT),
+    `MUBIT_CC_PLUGIN_ROOT was registered as something other than ${CODEX_ROOT}:\n${toml}`);
+});
+
 test('the MCP registration survives the trust rewrite that follows it', needsCodex, async () => {
   // § Ordering: step 2 runs `codex mcp add`, step 3 rewrites the same file. A rewrite that
   //   dropped what step 2 just wrote would leave the plugin with hooks and no tools.

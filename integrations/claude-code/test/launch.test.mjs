@@ -21,7 +21,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { PLUGIN_ROOT, REPO_ROOT, makeDataDir, makeProjectDir, tempDir, baseEnv, lib, mod } from './helpers/harness.mjs';
@@ -96,7 +96,7 @@ setTimeout(() => process.exit(0), 1500).unref();
 
 /**
  * Run the launcher with a stubbed server.
- * @param {{extra?: Record<string,string>, projectDir?: string}} [o]
+ * @param {{extra?: Record<string,string>, projectDir?: string, dataDir?: string}} [o]
  * @returns {Promise<{code:number|null, stdout:string, stderr:string,
  *                    importedServer:boolean, envAtImport:Record<string,string>,
  *                    guardAtImport:any, instructionsAtImport:any}>}
@@ -112,7 +112,7 @@ async function runLauncher(o = {}) {
   writeFileSync(hooks, LOADER_HOOKS);
   writeFileSync(entry, ENTRY);
 
-  const dataDir = makeDataDir();
+  const dataDir = o.dataDir ?? makeDataDir();
   const projectDir = o.projectDir ?? makeProjectDir();
   const env = baseEnv({
     dataDir,
@@ -146,7 +146,7 @@ async function runLauncher(o = {}) {
   const instructionsAtImport = snap.instructions ?? null;
   return {
     code, stdout: out, stderr: err, importedServer,
-    envAtImport, guardAtImport, instructionsAtImport, env, projectDir,
+    envAtImport, guardAtImport, instructionsAtImport, env, projectDir, dataDir,
   };
 }
 
@@ -184,6 +184,99 @@ test('sets MUBIT_DEFAULT_SESSION_ID to the run id the hooks derive for the same 
   assert.equal(r.envAtImport.MUBIT_DEFAULT_SESSION_ID, expected,
     'the launcher must derive the run id with the same strategy as lib/runid.mjs so MCP-tool ' +
     'writes and hook captures share a run (§8.3)');
+});
+
+// ---------------------------------------------------------------------------
+// §4.3 — the session map belongs to the hooks, and the launcher has to read it
+// ---------------------------------------------------------------------------
+
+/** A synthetic host session id, in the shape the CLI actually hands out. */
+const HOST_SESSION_ID = '8f2c1d40-0000-4000-8000-0000000000a1';
+
+/**
+ * Seed the record a SessionStart hook would have written, so the launcher meets the
+ * mapping it is meant to honour rather than an empty data directory.
+ *
+ * @param {string} dataDir
+ * @param {string} sessionId
+ * @param {Record<string, any>} record
+ */
+function seedSessionMap(dataDir, sessionId, record) {
+  const dir = join(dataDir, 'sessions');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${sessionId}.json`), JSON.stringify(record));
+}
+
+// The host puts `CLAUDE_CODE_SESSION_ID` in every MCP server's environment, and it is the
+// same id the hook payloads carry as `session_id` — so the launcher can read the mapping
+// the hooks wrote instead of deriving past it.
+//
+// It matters because the mapped run is not always the derived one. `/clear` appends
+// `-c<n>` (§4.3), so a launcher that derives fresh pins the server to the unsuffixed run
+// while every hook in the same session writes to the suffixed one: `/mubit-memory:remember`
+// then saves into a run that pre-prompt recall never reads. That divergence is observable
+// on a live session today — `mubit_status` reports the bare run id while the hooks report
+// the `-c1` one.
+test('reuses the run the hooks mapped for this session, /clear suffix and all', async () => {
+  const dataDir = makeDataDir();
+  const projectDir = makeProjectDir();
+  const cleared = 'cc-launch-fixture-c1';
+  seedSessionMap(dataDir, HOST_SESSION_ID, {
+    run_id: cleared,
+    strategy: 'per-directory',
+    project_dir: projectDir,
+    clear_count: 1,
+  });
+
+  const r = await runLauncher({
+    dataDir,
+    projectDir,
+    extra: { CLAUDE_CODE_SESSION_ID: HOST_SESSION_ID },
+  });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+  assert.equal(r.envAtImport.MUBIT_DEFAULT_SESSION_ID, cleared,
+    'the launcher derived past the session map, so MCP-tool writes land in the unsuffixed '
+    + 'run while every hook in the same session writes to the cleared one (§4.3)');
+});
+
+// The startup race: MCP servers and the SessionStart hook both start at session start, and
+// nothing orders them. Meeting no mapping has to mean today's answer, not a refusal.
+test('derives fresh when the session has no mapping yet', async () => {
+  const r = await runLauncher({ extra: { CLAUDE_CODE_SESSION_ID: HOST_SESSION_ID } });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+  const expected = await hookDerivedRunId(r.env);
+  assert.equal(r.envAtImport.MUBIT_DEFAULT_SESSION_ID, expected,
+    'with no record to read, the launcher must still answer with the run id the hooks '
+    + 'derive for this directory (§8.3)');
+});
+
+// The hooks own this file. They are the only thing that ever sees `SessionStart.source`,
+// which is what makes a `/clear` a new run at all — so a launcher that wrote its own answer
+// back would overwrite a mapping derived from strictly more information than it has. The
+// recorded strategy here disagrees with the launcher's, which is the case where the two
+// answers differ and a writer would therefore clobber.
+test('leaves the session map exactly as the hooks wrote it', async () => {
+  const dataDir = makeDataDir();
+  const projectDir = makeProjectDir();
+  const file = join(dataDir, 'sessions', `${HOST_SESSION_ID}.json`);
+  seedSessionMap(dataDir, HOST_SESSION_ID, {
+    run_id: 'cc-launch-fixture-c1',
+    strategy: 'per-conversation',
+    project_dir: projectDir,
+    clear_count: 1,
+  });
+  const before = readFileSync(file, 'utf8');
+
+  const r = await runLauncher({
+    dataDir,
+    projectDir,
+    extra: { CLAUDE_CODE_SESSION_ID: HOST_SESSION_ID },
+  });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+  assert.equal(readFileSync(file, 'utf8'), before,
+    'the launcher rewrote the session map. Only the hooks see the source that decides what a '
+    + 'new run is; the launcher reading and then overwriting turns a `/clear` into a race '
+    + '(§4.3)');
 });
 
 // §8.3 step 3 — the server reads env at MODULE scope. Setting any of these after the

@@ -61,6 +61,7 @@
  * Nothing here logs the API key, and no returned object contains it.
  */
 
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -550,10 +551,23 @@ function messageOf(err) {
 
 // Guarded exactly as `bin/auth.src.mjs` is: the tests import this module and drive `main()`
 // with an injected logger, so it must not run itself on import.
-const selfPath = fileURLToPath(import.meta.url);
-const entryPath = process.argv[1] ? resolve(process.argv[1]) : '';
+/**
+ * `p` with its symlinks resolved, or `p` unchanged when it cannot be resolved.
+ *
+ * The module loader resolves symlinks in `import.meta.url` but `process.argv[1]` keeps them,
+ * so a plugin installed behind a symlinked cache directory (`~/.codex/plugins/cache/...`)
+ * failed the entry-point guard below: `main()` never ran, and the caller saw exit 0 with no
+ * output and no error to explain it.
+ */
+function realPath(p) {
+  try { return p ? realpathSync(p) : p; } catch { return p; }
+}
 
-if (entryPath === selfPath) {
+const selfPath = fileURLToPath(import.meta.url);
+const selfReal = realPath(selfPath);
+const entryPath = process.argv[1] ? realPath(resolve(process.argv[1])) : '';
+
+if (entryPath === selfReal) {
   // A command a person typed is allowed to fail loudly — but a stack trace is never the right
   // output, so the exit code carries the verdict and the message stays a sentence.
   process.exitCode = await main().catch((err) => {

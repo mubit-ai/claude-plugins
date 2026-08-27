@@ -25,6 +25,7 @@
  * Bundled to `bin/statusline.mjs` by §11.2 and registered by `settings.json` (§3.4).
  */
 
+import { realpathSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -490,8 +491,21 @@ export async function main() {
   try { return render(payload); } catch { return ''; }
 }
 
+/**
+ * `p` with its symlinks resolved, or `p` unchanged when it cannot be resolved.
+ *
+ * The module loader resolves symlinks in `import.meta.url` but `process.argv[1]` keeps them,
+ * so a plugin installed behind a symlinked cache directory (`~/.codex/plugins/cache/...`)
+ * failed the entry-point guard below: `main()` never ran, and the caller saw exit 0 with no
+ * output and no error to explain it.
+ */
+function realPath(p) {
+  try { return p ? realpathSync(p) : p; } catch { return p; }
+}
+
 const selfPath = fileURLToPath(import.meta.url);
-const entryPath = process.argv[1] ? resolve(process.argv[1]) : '';
+const selfReal = realPath(selfPath);
+const entryPath = process.argv[1] ? realPath(resolve(process.argv[1])) : '';
 // The built status line sits behind a runtime-floor launcher (esbuild.config.mjs §11.1):
 // `settings.json` names `bin/statusline.mjs`, which checks the Node version and then imports
 // `bin/impl/statusline.mjs`. That handoff is still "run as the entry point" as far as the
@@ -501,7 +515,7 @@ const entryPath = process.argv[1] ? resolve(process.argv[1]) : '';
 const launched = typeof globalThis.__mubitLauncherEntry === 'string'
   && basename(selfPath) === basename(globalThis.__mubitLauncherEntry);
 
-if (entryPath === selfPath || launched) {
+if (entryPath === selfReal || launched) {
   process.exitCode = 0;
   // An unhandled rejection or a stray throw from anything above would print a stack trace
   // onto the user's prompt line and exit non-zero. §16.2 forbids both, so both are pinned

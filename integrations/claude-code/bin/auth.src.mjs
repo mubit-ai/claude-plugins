@@ -31,6 +31,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { hostname } from 'node:os';
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -695,10 +696,23 @@ function resolveDataDirFrom(env = process.env) {
 
 // Guarded the same way as `bin/statusline.src.mjs`: the tests import this module and
 // drive `main()` with injected dependencies, so it must not run itself on import.
-const selfPath = fileURLToPath(import.meta.url);
-const entryPath = process.argv[1] ? resolve(process.argv[1]) : '';
+/**
+ * `p` with its symlinks resolved, or `p` unchanged when it cannot be resolved.
+ *
+ * The module loader resolves symlinks in `import.meta.url` but `process.argv[1]` keeps them,
+ * so a plugin installed behind a symlinked cache directory (`~/.codex/plugins/cache/...`)
+ * failed the entry-point guard below: `main()` never ran, and the caller saw exit 0 with no
+ * output and no error to explain it.
+ */
+function realPath(p) {
+  try { return p ? realpathSync(p) : p; } catch { return p; }
+}
 
-if (entryPath === selfPath) {
+const selfPath = fileURLToPath(import.meta.url);
+const selfReal = realPath(selfPath);
+const entryPath = process.argv[1] ? realPath(resolve(process.argv[1])) : '';
+
+if (entryPath === selfReal) {
   // Unlike a hook, this command is allowed to fail loudly — the user is watching, and a
   // silent exit 0 after a failed login is worse than a message. But a stack trace is
   // still never the right output, so the exit code carries the verdict.

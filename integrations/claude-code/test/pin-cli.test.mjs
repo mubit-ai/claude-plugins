@@ -514,3 +514,44 @@ test('pin slugify: produces a handle a person can type back', () => {
   assert.equal(CLI.slugify('  Stay on 0.10!  '), 'stay-on-10');
   assert.equal(CLI.slugify('!!!'), '');
 });
+
+// ---------------------------------------------------------------------------
+// The entry-point guard — §11.1
+// ---------------------------------------------------------------------------
+
+// The reported defect: `pin.mjs list --json` printed nothing and exited 0. Node's loader
+// resolves symlinks in `import.meta.url` but `process.argv[1]` keeps them, so a plugin behind
+// a symlinked cache path (`~/.codex/plugins/cache/mubit/...`) failed the guard, `main()` never
+// ran, and the caller got a successful exit with no output and no error to explain it.
+test('every bin/ script runs main() when reached through a symlinked path', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { symlinkSync } = await import('node:fs');
+  const { PLUGIN_ROOT, tempDir } = await import('./helpers/harness.mjs');
+
+  const link = join(tempDir('mubit-symlink-'), 'plugin');
+  symlinkSync(PLUGIN_ROOT, link);
+
+  const r = spawnSync(process.execPath, [join(link, 'bin', 'pin.mjs'), 'list', '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, MUBIT_CC_DATA_DIR: makeDataDir(), MUBIT_CC_LOG_LEVEL: 'error' },
+  });
+
+  assert.notEqual(r.stdout.trim(), '', 'exit 0 with no output at all is the defect');
+  assert.doesNotThrow(() => JSON.parse(r.stdout), `not JSON: ${r.stdout}`);
+});
+
+// The other half of the guard, and the reason it exists: the tests above import this module
+// and drive main() with injected dependencies, so importing it must still do nothing.
+test('importing a bin/ script does not run main()', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { PLUGIN_ROOT } = await import('./helpers/harness.mjs');
+  const url = new URL(`file://${join(PLUGIN_ROOT, 'bin', 'pin.mjs')}`).href;
+
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `await import(${JSON.stringify(url)}); console.log('IMPORTED');`], {
+    encoding: 'utf8',
+    env: { ...process.env, MUBIT_CC_LOG_LEVEL: 'error' },
+  });
+
+  assert.equal(r.stdout.trim(), 'IMPORTED', 'an import must produce no command output');
+});

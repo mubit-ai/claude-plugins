@@ -54,8 +54,16 @@ async function setup(t, o = {}) {
   return { dataDir, server, cfg, mod };
 }
 
-/** One `ActivityEntry`, as the server actually serialises it — all sixteen fields. */
+/**
+ * One `ActivityEntry`, as the server actually serialises it — all sixteen fields.
+ *
+ * `meta` is a convenience over `metadata_json`, and it serialises: the proto declares that
+ * field a `string`, so a fixture handing over a bare object would be testing a shape the wire
+ * cannot produce. The cases where the encoding *is* the point — double-encoded, empty,
+ * unparseable — pass `metadata_json` directly, which still wins.
+ */
 function activityEntry(over = {}) {
+  const { meta, ...rest } = over;
   return {
     id: 'a3c1f0de-0000-4000-8000-000000000001',
     run_id: RUN,
@@ -67,14 +75,24 @@ function activityEntry(over = {}) {
     source: 'claude-code',
     importance: 'medium',
     created_at: '2026-08-19T15:03:18Z',
-    metadata_json: '{}',
+    metadata_json: meta === undefined ? '{}' : JSON.stringify(meta),
     reference_id: 'ref_1',
     referenceable: true,
     upsert_key: '',
     retrieval_mode: '',
     origin_entry_type: 'trace',
-    ...over,
+    ...rest,
   };
+}
+
+/**
+ * A lesson as the *activity* feed serialises one: `entry_type` is `lesson` and every field the
+ * lessons route would have returned is inside the metadata instead. `id` and `reference_id` are
+ * the same string because `lessonId()` prefers the second, and a fixture where they disagree
+ * would pin the preference rather than the census.
+ */
+function lessonRow(id, over = {}) {
+  return activityEntry({ id, reference_id: id, entry_type: 'lesson', ...over });
 }
 
 /** A page of the listing route. */
@@ -683,6 +701,35 @@ test('scan: running out of wall clock is reported, not silently trimmed', async 
   assert.ok(r.data.elapsedMs >= 0);
 });
 
+/**
+ * The bounds run the other way too, and getting that backwards is its own false artefact.
+ *
+ * A bound can only truncate something that was still coming. Checked before the page token,
+ * a scan that read the feed to its very last page still reported `truncated` whenever it
+ * happened to cross a bound on the way in — and a complete answer labelled partial is the same
+ * failure as a partial one labelled complete, pointed the other way. Measured against a hosted
+ * instance: 697 lessons, every one of them collected, reported as short.
+ */
+test('scan: reaching the last page is complete, even when a bound would have fired next', async (t) => {
+  const { cfg, mod } = await setup(t, {
+    // Two pages and then the end. Both bounds are already spent by the time the feed runs out.
+    routes: {
+      [LIST_ROUTE]: [
+        { delayMs: 60, json: { entries: [activityEntry({ id: 'a' })], next_page_token: '1', total_visible: 2 } },
+        { delayMs: 60, json: { entries: [activityEntry({ id: 'b' })], next_page_token: '', total_visible: 2 } },
+      ],
+    },
+  });
+
+  const r = await mod.scanActivity(cfg, { run: RUN, limit: 1, budgetMs: 80, maxEntries: 2 });
+  assert.equal(r.ok, true);
+  assert.equal(r.data.entries.length, 2);
+  assert.equal(r.data.truncated, false,
+    `the feed ran out before any bound could cut it short; reason was ${r.data.truncatedReason}`);
+  assert.equal(r.data.truncatedReason, '');
+  assert.equal(r.data.nextPageToken, '');
+});
+
 // A failure mid-scan is a failure. Returning the pages that did arrive, as though the scan
 // completed, is how a partial answer becomes a complete-looking one.
 test('scan: a failed page fails the scan rather than returning a partial as complete', async (t) => {
@@ -719,4 +766,205 @@ test('scan: the client-side corrections apply across every page', async (t) => {
   assert.equal(r.data.excludeDerivedFallbackUsed, true);
   assert.equal(r.data.projectionFallbackUsed, true);
   assert.equal(r.data.droppedDerived, 1);
+});
+
+// ===========================================================================
+// The lesson census
+// ===========================================================================
+
+/**
+ * Why the Memory tab counts lessons from the activity feed and not from the lessons route.
+ *
+ * `/v2/control/lessons` applies `limit` **before** it filters to `entry_type == "lesson"`, so
+ * `limit: 200` means "take two hundred arbitrary facts and keep whichever happen to be
+ * lessons". Measured against a hosted instance, seventeen thousand entries in, the newest three
+ * hundred contained not a single one — a tab that is empty because of the order the server does
+ * two operations in, not because the instance holds nothing.
+ *
+ * `/v2/control/activity` collects, filters by `entry_types`, sorts, and only then pages, and it
+ * reports `total_visible` and `next_page_token`. It is also a strict superset: `list_lessons`
+ * builds every field it returns out of `f.metadata`, which is the same map the activity route
+ * serialises wholesale into `metadata_json`.
+ *
+ * The trap that makes the projection load-bearing is one line away in this very module.
+ * `correct()` maps every row through `compactEntry` unless the projection is `full`, and
+ * `compactEntry` keeps five keys — none of them `metadata_json`. A census at the default
+ * projection would therefore find every lesson and know the scope of none of them.
+ */
+test('census: the feed is asked for lessons at full projection, because compact throws the metadata scope lives in away', async (t) => {
+  const { server, cfg, mod } = await setup(t, { routes: { [LIST_ROUTE]: listPage([]) } });
+
+  const r = await mod.lessonCensus(cfg, { run: RUN });
+  assert.equal(r.ok, true);
+  assert.equal(r.data.source, 'activity');
+
+  const body = server.lastCall('POST', '/v2/control/activity')?.body;
+  assert.deepEqual(body.entry_types, ['lesson'],
+    'without this the census pages through traces and reports that the instance has no lessons');
+  assert.equal(body.projection, 'full',
+    'a compact row has no metadata_json, so every lesson would come back with an unknown scope');
+});
+
+// A census that stops at the first page is the lessons route's defect wearing a different
+// route. The whole point of paying for the feed is that it pages honestly, and an id repeated
+// across a page boundary is one lesson, not two.
+test('census: every page is followed to the end, and a lesson seen twice is counted once', async (t) => {
+  const { cfg, mod } = await setup(t, {
+    routes: {
+      [LIST_ROUTE]: [
+        listPage([lessonRow('a', { created_at: '2026-08-19T15:03:18Z' }),
+          lessonRow('b', { created_at: '2026-08-18T15:03:18Z' })], '2', 4),
+        listPage([lessonRow('b', { created_at: '2026-08-18T15:03:18Z' }),
+          lessonRow('c', { created_at: '2026-08-17T15:03:18Z' })], '', 4),
+      ],
+    },
+  });
+
+  const r = await mod.lessonCensus(cfg, { run: RUN, limit: 2 });
+  assert.equal(r.ok, true);
+  assert.equal(r.data.pages, 2, 'a census that stopped at page one has the defect it was written to fix');
+  assert.deepEqual(r.data.lessons.map((l) => l.id), ['a', 'b', 'c'],
+    'deduped by id, and newest first because that is the order the tab renders');
+  assert.equal(r.data.totalVisible, 4);
+  assert.equal(r.data.truncated, false);
+});
+
+/**
+ * The same liveness failure the scan has, inherited rather than rewritten.
+ *
+ * An instance whose `next_page_token` never advances turns a census into an infinite request
+ * loop against the user's own server — and this one runs behind a page somebody left open. The
+ * timeout is the assertion: without the guard this does not fail, it hangs.
+ */
+test('census: a page token that never advances stops the census instead of hanging it',
+  { timeout: 10000 }, async (t) => {
+    const { server, cfg, mod } = await setup(t, {
+      routes: { [LIST_ROUTE]: listPage([lessonRow('a')], '0', 900) },
+    });
+
+    const r = await mod.lessonCensus(cfg, { run: RUN, limit: 1 });
+    assert.equal(r.ok, true);
+    assert.equal(r.data.truncated, true);
+    assert.equal(r.data.truncatedReason, 'page_token_repeated');
+    assert.ok(server.countOf('POST', '/v2/control/activity') <= 3,
+      `a non-advancing token cost ${server.countOf('POST', '/v2/control/activity')} requests`);
+  });
+
+// A page is not an audit, so the census stops sooner than a scan does — but a short answer that
+// looks complete is the same lie either way. "You have four global lessons" over a census that
+// gave up after two pages is a number a person will act on.
+test('census: hitting the page cap is reported rather than rendered as a total', async (t) => {
+  const { cfg, mod } = await setup(t, {
+    routes: {
+      [LIST_ROUTE]: [
+        listPage([lessonRow('a')], '1', 900),
+        listPage([lessonRow('b')], '2', 900),
+        listPage([lessonRow('c')], '3', 900),
+      ],
+    },
+  });
+
+  const r = await mod.lessonCensus(cfg, { run: RUN, limit: 1, maxPages: 2 });
+  assert.equal(r.ok, true);
+  assert.equal(r.data.pages, 2);
+  assert.equal(r.data.truncated, true);
+  assert.equal(r.data.truncatedReason, 'max_pages');
+  assert.equal(r.data.lessons.length, 2, 'what did arrive is still returned; it is just labelled short');
+
+  const { mod: fresh } = await setup(t);
+  assert.ok(fresh.CENSUS_MAX_PAGES < fresh.SCAN_MAX_PAGES,
+    'an interactive page must give up sooner than a terminal audit does');
+  assert.ok(fresh.CENSUS_BUDGET_MS < fresh.SCAN_BUDGET_MS);
+  assert.ok(fresh.CENSUS_MAX_ENTRIES < fresh.SCAN_MAX_ENTRIES);
+});
+
+/**
+ * The three spellings a scope arrives in, all of which the server itself accepts.
+ *
+ * `list_lessons` reads `scope` and falls back to `lesson_scope`, so an instance that has both
+ * conventions in its history serves both. The double-encoded case is not hypothetical either:
+ * `metadata_json` is a JSON string by declaration, and an instance that round-trips it through
+ * a second encoder hands over a string whose contents are themselves JSON.
+ */
+test('census: a scope stated as scope, as lesson_scope, or through a second encoder all read the same', async (t) => {
+  const { cfg, mod } = await setup(t, {
+    routes: {
+      [LIST_ROUTE]: listPage([
+        lessonRow('plain', { meta: { scope: 'global' } }),
+        lessonRow('aliased', { meta: { lesson_scope: 'session' } }),
+        lessonRow('wrapped', { metadata_json: JSON.stringify(JSON.stringify({ scope: 'org' })) }),
+      ]),
+    },
+  });
+
+  const r = await mod.lessonCensus(cfg, { run: RUN });
+  assert.equal(r.ok, true);
+  const byId = new Map(r.data.lessons.map((l) => [l.id, l]));
+  assert.equal(byId.get('plain').scope, 'global');
+  assert.equal(byId.get('aliased').scope, 'session', 'the server reads lesson_scope too');
+  assert.equal(byId.get('wrapped').scope, 'org', 'a doubly-encoded metadata_json still has a scope in it');
+  for (const id of ['plain', 'aliased', 'wrapped']) {
+    assert.equal(byId.get(id).scopeKnown, true, `${id} named its scope out loud`);
+  }
+  assert.deepEqual(r.data.scopeCounts, { global: 1, session: 1, org: 1 });
+  assert.equal(r.data.unknownScope, 0);
+});
+
+/**
+ * The two facts an absent scope is made of, and why the row carries both.
+ *
+ * Such a lesson reads as `run` everywhere else it is asked for, so a page rendering a blank
+ * would disagree with every other view of the same entry. But "it arrived saying run" and
+ * "we never saw the metadata" are different facts, and only the second one should make somebody
+ * doubt the number next to it.
+ */
+test('census: a row whose metadata did not survive reads as run-scoped and says the scope is unknown', async (t) => {
+  const { cfg, mod } = await setup(t, {
+    routes: {
+      [LIST_ROUTE]: listPage([
+        lessonRow('empty', { metadata_json: '' }),
+        lessonRow('garbled', { metadata_json: 'not json at all' }),
+        lessonRow('stated', { meta: { scope: 'run' } }),
+      ]),
+    },
+  });
+
+  const r = await mod.lessonCensus(cfg, { run: RUN });
+  assert.equal(r.ok, true);
+  const byId = new Map(r.data.lessons.map((l) => [l.id, l]));
+  for (const id of ['empty', 'garbled']) {
+    assert.equal(byId.get(id).scope, 'run', `${id}: the instance would call this a run lesson`);
+    assert.equal(byId.get(id).scopeKnown, false, `${id}: and we are guessing, which the page must be able to show`);
+    assert.equal(byId.get(id).leaksScope, false);
+  }
+  assert.equal(byId.get('stated').scopeKnown, true, 'a scope that was actually stated is not a guess');
+  assert.equal(r.data.unknownScope, 2);
+  assert.deepEqual(r.data.scopeCounts, { run: 3 }, 'a defaulted scope still counts as the scope it defaulted to');
+});
+
+// `repo:` is the project key, and an entry carrying no `repo:` tag is unconfined — it is not
+// this project's. Bucketing the untagged ones under the current repo would invent a
+// confinement the instance never recorded, which is the one answer this column must not give.
+test('census: the repo tag names the project, and an untagged lesson belongs to no project rather than this one', async (t) => {
+  const { cfg, mod } = await setup(t, {
+    routes: {
+      [LIST_ROUTE]: listPage([
+        lessonRow('tagged', { meta: { scope: 'global', env_tags: ['lang:rust', 'repo:acme/ledger'] } }),
+        lessonRow('other', { meta: { scope: 'global', env_tags: ['repo:acme/storefront'] } }),
+        lessonRow('untagged', { meta: { scope: 'global', env_tags: ['lang:rust'] } }),
+        lessonRow('bare', { meta: { scope: 'global' } }),
+      ]),
+    },
+  });
+
+  const r = await mod.lessonCensus(cfg, { run: RUN });
+  assert.equal(r.ok, true);
+  const byId = new Map(r.data.lessons.map((l) => [l.id, l]));
+  assert.equal(byId.get('tagged').project, 'acme/ledger', 'the prefix is stripped; the slug is the key');
+  assert.equal(byId.get('other').project, 'acme/storefront');
+  assert.equal(byId.get('untagged').project, '', 'tags without a repo: one attribute nothing');
+  assert.equal(byId.get('bare').project, '');
+  assert.deepEqual(r.data.projectCounts,
+    { 'acme/ledger': 1, 'acme/storefront': 1, '': 2 },
+    'the empty key is the explicit "no project tag" bucket, not a hole in the table');
 });

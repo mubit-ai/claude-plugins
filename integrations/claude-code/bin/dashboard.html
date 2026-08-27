@@ -159,6 +159,10 @@ nav.tabs button[aria-selected="true"] {
 .btn:hover:not(:disabled) { border-color: var(--accent); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-dim); }
+/* A facet that cannot answer the question is dimmed rather than hidden. Hiding it would leave
+   a person hunting for a control they saw a moment ago; the `title` says why it is off. */
+select:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.link { background: none; border: none; padding: 0 2px; color: var(--accent); text-decoration: underline; }
 
 .split { display: grid; grid-template-columns: minmax(240px, 380px) 1fr; gap: 12px; align-items: start; }
 /* The turns table carries seven columns plus a prompt that has to stay readable, so it takes
@@ -186,6 +190,8 @@ nav.tabs button[aria-selected="true"] {
 .tag.leak { color: var(--accent); border-color: var(--accent); }
 .tag.ok { color: var(--success); border-color: var(--success); }
 .tag.bad { color: var(--danger); border-color: var(--danger); }
+/* Dashed, because the badge is reporting the absence of a fact rather than a fact. */
+.tag.unknown { border-style: dashed; }
 
 .detail { padding: 14px; }
 .detail h2 { font-size: 14px; margin: 0 0 8px; }
@@ -260,12 +266,31 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
             <button id="mode-lessons" aria-pressed="true">Lessons</button>
             <button id="mode-activity" aria-pressed="false">Activity</button>
           </span>
+          <span class="seg">
+            <button id="runs-this" aria-pressed="false">This run</button>
+            <button id="runs-all" aria-pressed="true">All runs</button>
+          </span>
           <input class="grow" type="search" id="filter" placeholder="Filter what is loaded (instant)" aria-label="Filter loaded entries">
+          <!-- One control, not a value plus a "leaks?" toggle. Reach and exact scope are the same
+               axis asked at two grains, and two controls would let a person select "global" and
+               "only its own run" at once — a state with no rows in it by construction. -->
           <select id="scope-filter" style="width:auto" aria-label="Scope filter">
             <option value="">Every scope</option>
-            <option value="run">Only run scope</option>
-            <option value="leak">Visible outside its own run</option>
+            <optgroup label="Reach">
+              <option value="leak">Visible outside its own run</option>
+              <option value="run">Only its own run</option>
+            </optgroup>
+            <optgroup label="Exact">
+              <option value="session">session</option>
+              <option value="global">global</option>
+              <!-- `org` is written by promotion and by nothing on the client, so offering it on an
+                   instance that has never promoted anything is offering a guaranteed empty result.
+                   It is unhidden by `syncScopeVocabulary()` the moment a loaded row carries it. -->
+              <option value="org" hidden disabled>org</option>
+              <option value="unknown">scope not recorded</option>
+            </optgroup>
           </select>
+          <select id="project-filter" style="width:auto" aria-label="Project filter"></select>
           <button class="btn" id="do-search" title="Ask the instance, rather than filtering what is already loaded">Search instance</button>
         </div>
 
@@ -273,6 +298,8 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
           <div class="card list" id="memory-list"></div>
           <div class="card detail" id="memory-detail"><p class="empty">Select an entry.</p></div>
         </div>
+        <p class="note" id="memory-footer"></p>
+        <p class="note" id="memory-scope-note"></p>
       </section>
 
       <!-- ---------------- Turns ---------------- -->
@@ -333,15 +360,40 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     meta: null,
     dir: '',
     run: '',
+    // Memory-only, and it does not touch `state.run`. An empty `run=` upstream means *every*
+    // run, which is the only way the scope question can be asked at all — but /api/search,
+    // /api/outcome, /api/archive and /api/health/remote all refuse an empty run, and the Turns
+    // and Analytics tabs read a run's files off local disk. So the rail keeps naming one
+    // concrete run and this flag re-points one fetch. It defaults on because the tab's whole
+    // claim is "what does this instance remember", not "what did this session write".
+    allRuns: true,
     mode: 'lessons',
     tab: 'memory',
     lessons: [],
     activity: [],
     turns: [],
+    scope: '',
+    project: '',
     selectedEntry: null,
     selectedTurn: null,
     searchResults: null,
+    searchQuery: '',
     lastRemoteAt: 0,
+    // How many remote refreshes are in the air. The poll declines to add to it; only a forced
+    // refresh cuts in, so a census slower than the cadence cannot be lapped by its own timer.
+    remoteBusy: 0,
+    // "" is not the same as "not asked yet", and neither is the same as "the call failed".
+    // Collapsing the three is what made an unreachable instance render as an empty one.
+    loaded: false,
+    lessonsError: '',
+    activityError: '',
+    joinError: '',
+    // The census the server counted before paging, which is the only number that can tell a
+    // person their filter matched nothing rather than their instance holding nothing.
+    census: null,
+    // A slow all-runs fetch started before a fast this-run one must not land after it and
+    // repaint the older answer. Every render path checks the sequence it was issued under.
+    reqSeq: 0,
   };
 
   async function api(path, init) {
@@ -515,6 +567,107 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
   }
 
   // -------------------------------------------------------------------------
+  // Row semantics
+  // -------------------------------------------------------------------------
+
+  // #region scope-predicate
+  /*
+   * Everything between the region markers is sliced out of this file verbatim by
+   * test/dashboard-page.test.mjs and run in a bare `node:vm` context, which is why it may not
+   * touch `state`, `$`, `document` or anything else in the page: the slice has to evaluate on
+   * its own or the truth table below is untested. Add nothing impure here.
+   *
+   * Three sources now feed the same list — the activity census, the lessons fallback and
+   * `/api/search` — and they carry rows of different fidelity. So `leaksScope` and
+   * `fromOtherRun` are *derived here* rather than read off the wire, even though the server
+   * sends both: a row that came back from search has no scope of its own to speak of, and one
+   * page that computes a fact one way is easier to trust than three that receive it.
+   */
+
+  /** Every scope a lesson can come back with. `org` arrives only by promotion, never from a client. */
+  const SCOPE_VALUES = ['run', 'session', 'global', 'org'];
+
+  /**
+   * The scope this row has *as far as the instance is concerned*.
+   *
+   * An absent scope becomes `run`, because that is what such a lesson reads as everywhere else
+   * it is asked for — a page that invented a fifth bucket for it would disagree with every other
+   * view of the same entry. That it arrived unrecorded is a separate fact, and
+   * `scopeKnown` is where it lives.
+   */
+  function scopeOf(row) {
+    const raw = row && row.scope != null ? String(row.scope) : '';
+    return raw === '' ? 'run' : raw;
+  }
+
+  /** Did anything actually record a scope, or did the default supply one? */
+  function scopeKnown(row) {
+    if (row && typeof row.scopeKnown === 'boolean') return row.scopeKnown;
+    return !!(row && row.scope != null && String(row.scope) !== '');
+  }
+
+  /** Visible to runs other than the one that wrote it — the promise the Memory tab sells. */
+  function leaksScope(row) {
+    return scopeOf(row) !== 'run';
+  }
+
+  /**
+   * Written by some run other than the one the rail is pointing at. A rendering fact only: it
+   * says where the reader is standing, and nothing about the entry's reach.
+   */
+  function fromOtherRun(row, currentRun) {
+    const src = String((row && (row.sourceRunId || row.run_id)) || '');
+    return !!(currentRun && src && src !== String(currentRun));
+  }
+
+  /**
+   * `unknown` overlaps `run` on purpose. "Nothing recorded a scope" and "this is run-scoped"
+   * are different facts about the same rows, and a person auditing what leaks needs to be able
+   * to ask which of the two they are looking at. Excluding an unrecorded row from `run` would
+   * be the page disagreeing with the instance about where that lesson is visible.
+   */
+  function matchesScope(row, filter) {
+    if (!filter) return true;
+    if (filter === 'leak') return leaksScope(row);
+    if (filter === 'unknown') return !scopeKnown(row);
+    return scopeOf(row) === filter;
+  }
+
+  /**
+   * A `repo:` slug is derived from a git remote URL, so it never contains whitespace — which
+   * makes a key with a leading space one that no real project can collide with. It has to be a
+   * distinct value rather than the empty string, because the empty string already means
+   * "every project" on the select.
+   */
+  const NO_PROJECT = ' no-project-tag';
+
+  function projectOf(row) {
+    const p = String((row && row.project) || '');
+    return p === '' ? NO_PROJECT : p;
+  }
+
+  function matchesProject(row, filter) {
+    return !filter || projectOf(row) === filter;
+  }
+
+  /**
+   * Scope is deliberately *not* in the haystack. It used to be, and the words it contributes
+   * are "run", "session" and "global" — so typing `run` matched every row on the page, which
+   * is the one query a person looking at a scope filter is most likely to type.
+   */
+  function matchesText(row, needle) {
+    if (!needle) return true;
+    const hay = [
+      (row && row.content) || '',
+      (row && (row.lessonType || row.entry_type)) || '',
+      (row && (row.sourceRunId || row.run_id)) || '',
+      (row && row.project) || '',
+    ].join(' ').toLowerCase();
+    return hay.indexOf(needle) >= 0;
+  }
+  // #endregion scope-predicate
+
+  // -------------------------------------------------------------------------
   // Memory tab
   // -------------------------------------------------------------------------
 
@@ -523,27 +676,85 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     return state.mode === 'lessons' ? state.lessons : state.activity;
   }
 
+  /**
+   * Whether the scope and project facets can say anything true about what is loaded.
+   *
+   * The activity feed is fetched with the compact projection, and compact is not a subset —
+   * the server *overwrites* `metadata_json` with `{entry_type, created_at}`, so scope is not
+   * merely missing from those rows, it has been discarded upstream. Asking for a full
+   * projection over a feed that is overwhelmingly traces would pull megabytes to answer a
+   * question about lessons. So in activity mode the facets are switched off and say why,
+   * which is the honest version of the silent empty list they used to produce.
+   */
+  function facetsApply() {
+    return state.mode === 'lessons' || !!state.searchResults;
+  }
+
+  const activeScope = () => (facetsApply() ? state.scope : '');
+  const activeProject = () => (facetsApply() ? state.project : '');
+
+  /**
+   * Once a search has run, the text box holds the *query*, not a filter.
+   *
+   * The instance answers semantically: "how do we publish the mirror" can return a lesson that
+   * contains none of those words, which is the entire reason for asking it rather than grepping
+   * what is loaded. Re-applying the same string as a literal substring filter over the answer
+   * threw those rows away again — a search that worked, rendering as a search that found
+   * nothing. Escape clears the results and hands the box back to the instant filter.
+   */
+  const activeText = () => (state.searchResults ? '' : $('filter').value.trim().toLowerCase());
+
   function filteredEntries() {
-    const q = $('filter').value.trim().toLowerCase();
-    const scope = $('scope-filter').value;
-    return currentEntries().filter((e) => {
-      if (scope === 'run' && e.scope !== 'run') return false;
-      if (scope === 'leak' && !e.leaksScope) return false;
-      if (!q) return true;
-      return (e.content + ' ' + (e.scope || '') + ' ' + (e.lessonType || e.entry_type || '')
-        + ' ' + (e.sourceRunId || e.run_id || '')).toLowerCase().indexOf(q) >= 0;
-    });
+    const q = activeText();
+    const scope = activeScope();
+    const project = activeProject();
+    return currentEntries().filter((e) => matchesScope(e, scope)
+      && matchesProject(e, project) && matchesText(e, q));
+  }
+
+  /** What the scope filter alone costs, so the footer can offer to give it back. */
+  function hiddenByScope() {
+    const scope = activeScope();
+    if (!scope) return 0;
+    const q = activeText();
+    const project = activeProject();
+    return currentEntries().filter((e) => matchesProject(e, project) && matchesText(e, q)
+      && !matchesScope(e, scope)).length;
   }
 
   function renderMemoryList() {
     const box = $('memory-list');
     clear(box);
-    const rows = filteredEntries();
-    if (!rows.length) {
-      box.appendChild(el('p', 'empty', state.mode === 'lessons'
-        ? 'No lessons match.' : 'No activity matches.'));
+
+    // A failed fetch and an instance holding nothing used to render the same sentence, which
+    // is the single most expensive thing this page could get wrong: it tells somebody their
+    // memory is empty when their memory is fine and their network is not.
+    const err = state.mode === 'lessons' ? state.lessonsError : state.activityError;
+    if (err) {
+      const p = el('p', 'empty', state.mode === 'lessons'
+        ? 'Could not load lessons from the instance.'
+        : 'Could not load activity from the instance.');
+      box.appendChild(p);
+      box.appendChild(el('p', 'note', err));
       return;
     }
+
+    const rows = filteredEntries();
+    if (!rows.length) {
+      if (!state.loaded) {
+        box.appendChild(el('p', 'empty', 'Loading…'));
+        return;
+      }
+      const total = currentEntries().length;
+      box.appendChild(el('p', 'empty', total
+        ? 'No entry in the ' + total + ' loaded matches these filters.'
+        : (state.mode === 'lessons'
+          ? 'This instance returned no lessons for ' + (state.allRuns ? 'any run.' : 'this run.')
+          : 'This instance returned no activity for '
+            + (state.allRuns ? 'any run.' : 'this run.'))));
+      return;
+    }
+
     rows.forEach((e) => {
       const b = el('button', 'item');
       b.setAttribute('aria-current', String(state.selectedEntry && state.selectedEntry.id === e.id));
@@ -551,7 +762,13 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
 
       const meta = el('div', 'line2');
       if (e.lessonType || e.entry_type) meta.appendChild(tag(e.lessonType || e.entry_type));
-      if (e.scope) meta.appendChild(tag(e.scope, e.leaksScope ? 'leak' : null));
+      meta.appendChild(scopeBadge(e));
+      if (fromOtherRun(e, state.run)) {
+        const t = tag('other run');
+        t.title = 'Written by ' + (e.sourceRunId || e.run_id) + ', not by the run selected in the '
+          + 'rail. Where it is visible is the scope badge; this only says who wrote it.';
+        meta.appendChild(t);
+      }
       if (e.importance) meta.appendChild(tag(e.importance));
       meta.appendChild(document.createTextNode(day(e.createdAt || e.created_at)));
       b.appendChild(meta);
@@ -559,6 +776,36 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
       b.addEventListener('click', () => { state.selectedEntry = e; renderMemory(); });
       box.appendChild(b);
     });
+  }
+
+  /**
+   * Always rendered, never gated on the row carrying a scope. Gating it was how a search
+   * result and an untagged lesson both came back with no badge at all, which reads as "no
+   * scope" — a thing the vocabulary does not contain.
+   */
+  function scopeBadge(e) {
+    const known = scopeKnown(e);
+    const t = tag(known ? scopeOf(e) : 'scope ?', leaksScope(e) ? 'leak' : (known ? null : 'unknown'));
+    if (!known) {
+      t.title = 'Nothing recorded a scope for this entry. The instance defaults an untagged '
+        + 'lesson to run scope, so that is how it behaves — but "defaulted" and "recorded" are '
+        + 'different facts, and only this badge can tell you which one you are looking at.';
+    }
+    return t;
+  }
+
+  /** What the scope means for this entry, in words rather than in a bucket name. */
+  const REACH = {
+    run: 'Only the run that wrote it. It goes away with that session.',
+    session: 'Every run in the same session — so it survives a compaction, but not a new session.',
+    global: 'Every run on this instance, in every project. This is the one that follows you.',
+    org: 'Everyone on this instance’s organisation. Only promotion writes this scope.',
+  };
+
+  function reachOf(e) {
+    const s = scopeOf(e);
+    const base = REACH[s] || ('Scope "' + s + '" is not one this page knows about.');
+    return scopeKnown(e) ? base : base + ' — but that is the default, not a recorded scope.';
   }
 
   function renderMemoryDetail() {
@@ -585,14 +832,26 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     const dl = el('dl');
     const pair = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, v)); };
     pair('id', e.id || '—');
-    pair('scope', e.scope || '—');
+    pair('scope', scopeKnown(e) ? scopeOf(e) : scopeOf(e) + ' (not recorded)');
+    // The bucket name is jargon and the question a person came here with is "who else sees
+    // this". Spelling the answer out is the whole reason the row exists.
+    pair('reach', reachOf(e));
+    pair('project', e.project || 'no project tag');
     pair('importance', e.importance || '—');
-    pair('written by', e.sourceRunId || e.run_id || '—');
+    pair('written by', (e.sourceRunId || e.run_id || '—')
+      + (fromOtherRun(e, state.run) ? ' (not the selected run)' : ''));
     pair('source', e.source || '—');
     pair('created', e.createdAt || e.created_at || 'not recorded');
     box.appendChild(dl);
 
-    if (e.leaksScope) {
+    if (!e.project) {
+      box.appendChild(el('p', 'note',
+        'Only the hook capture paths write a project tag. A lesson saved through the '
+        + 'mubit_learned tool, or written by reflection, carries none — so "no project tag" '
+        + 'means unattributed, and never that this entry belongs to the project you are in.'));
+    }
+
+    if (leaksScope(e)) {
       const p = el('p', 'note',
         'This entry is above run scope, so it is visible to runs other than the one that wrote '
         + 'it. That is by design for a rule meant to follow you; it is a surprise for anything '
@@ -686,9 +945,123 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     });
   }
 
+  /**
+   * `org` is offered only once something carries it, so the select cannot advertise a filter
+   * that is guaranteed to match nothing on an instance that has never promoted a lesson.
+   */
+  function syncScopeVocabulary() {
+    const opt = $('scope-filter').querySelector('option[value="org"]');
+    if (!opt) return;
+    const present = currentEntries().some((e) => scopeOf(e) === 'org');
+    if (present) { opt.removeAttribute('hidden'); opt.removeAttribute('disabled'); return; }
+    opt.setAttribute('hidden', '');
+    opt.setAttribute('disabled', '');
+    if (state.scope === 'org') state.scope = '';
+  }
+
+  function renderProjectFacet() {
+    const sel = $('project-filter');
+    const counts = new Map();
+    currentEntries().forEach((e) => {
+      const p = projectOf(e);
+      counts.set(p, (counts.get(p) || 0) + 1);
+    });
+    const slugs = Array.from(counts.keys()).filter((p) => p !== NO_PROJECT).sort();
+    if (counts.has(NO_PROJECT)) slugs.push(NO_PROJECT);
+
+    clear(sel);
+    const every = el('option', null, 'Every project');
+    every.value = '';
+    sel.appendChild(every);
+    slugs.forEach((p) => {
+      const o = el('option', null, (p === NO_PROJECT ? 'No project tag (unattributed)' : p)
+        + '  (' + counts.get(p) + ')');
+      o.value = p;
+      sel.appendChild(o);
+    });
+    // A facet value that has fallen out of the loaded window would otherwise leave the select
+    // showing "Every project" while still filtering by the vanished one.
+    if (state.project && !counts.has(state.project)) state.project = '';
+    sel.value = state.project;
+  }
+
+  function syncFacetAvailability() {
+    const on = facetsApply();
+    const why = 'The activity feed is fetched with the compact projection, which the instance '
+      + 'returns with the scope metadata stripped out — so no scope or project filter can say '
+      + 'anything true about these rows. Switch to Lessons to filter by scope.';
+    ['scope-filter', 'project-filter'].forEach((id) => {
+      const sel = $(id);
+      sel.disabled = !on;
+      sel.title = on ? '' : why;
+    });
+  }
+
+  /**
+   * The line that makes a filter matching nothing legible.
+   *
+   * Everything above this is a view over the loaded window; the census numbers are the
+   * server's count over the whole instance before paging. Without them, "0 results" and "your
+   * instance is empty" are the same pixels.
+   */
+  function renderMemoryFooter() {
+    const foot = $('memory-footer');
+    clear(foot);
+
+    const shown = filteredEntries().length;
+    const hidden = hiddenByScope();
+    const parts = [shown + (shown === 1 ? ' result' : ' results')];
+    if (hidden) parts.push(hidden + ' hidden by the scope filter');
+
+    const c = state.census;
+    if (state.mode === 'lessons' && !state.searchResults && c) {
+      parts.push(c.totalVisible + ' visible to this instance');
+      if (c.source) parts.push('answered by ' + c.source);
+      if (c.truncated) {
+        parts.push('the census stopped after ' + c.pages + (c.pages === 1 ? ' page' : ' pages')
+          + (c.truncatedReason ? ' (' + c.truncatedReason + ')' : ''));
+      }
+      if (c.unknownScope) parts.push(c.unknownScope + ' with no recorded scope');
+    }
+    if (state.searchResults) {
+      parts.push('search results for “' + state.searchQuery + '”');
+    }
+    foot.appendChild(document.createTextNode(parts.join(' · ')));
+
+    if (hidden) {
+      const b = el('button', 'btn link', 'Show every scope');
+      b.setAttribute('aria-label', 'Clear the scope filter and show every scope');
+      b.addEventListener('click', () => {
+        state.scope = '';
+        $('scope-filter').value = '';
+        renderMemory();
+      });
+      foot.appendChild(document.createTextNode(' · '));
+      foot.appendChild(b);
+    }
+
+    const note = $('memory-scope-note');
+    const bits = [];
+    const what = state.mode === 'lessons' ? 'lessons' : 'entries';
+    bits.push(state.allRuns
+      ? 'Showing ' + what + ' from every run this instance holds. Worked / Did not work / '
+        + 'Archive / delete still attribute to the run selected in the rail, because those '
+        + 'routes need a concrete run.'
+      : 'Showing only ' + what + ' the run selected in the rail wrote, so anything a previous '
+        + 'session saved at global scope is out of view.');
+    if (state.joinError) {
+      bits.push('Creation dates are missing: the activity join failed — ' + state.joinError);
+    }
+    note.textContent = bits.join(' ');
+  }
+
   function renderMemory() {
+    syncScopeVocabulary();
+    syncFacetAvailability();
+    renderProjectFacet();
     renderMemoryList();
     renderMemoryDetail();
+    renderMemoryFooter();
   }
 
   // -------------------------------------------------------------------------
@@ -720,6 +1093,8 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
       const prompt = el('td', 'prompt', t.promptPreview || '(empty prompt)');
       prompt.title = t.promptPreview || '';
       tr.appendChild(prompt);
+      // `0` is not a rung. The ladder is 1–2, and an absent rung is coerced to zero on the way
+      // in, so the falsy branch here is what renders "we have no reading" — not "rung zero".
       tr.appendChild(el('td', 'num', t.rung || '—'));
       tr.appendChild(el('td', 'num', t.sources));
       tr.appendChild(el('td', 'num', t.tok));
@@ -772,7 +1147,7 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     pair('started', clock(t.startedAt));
     pair('recall', t.sources + ' memories · ' + t.tok + ' tok · ' + t.chars + ' chars');
     pair('repeats', t.ptr + ' rendered as a pointer');
-    pair('rung', t.rung || '—');
+    pair('rung', t.rung || '—'); // Same as the table: zero means unrecorded, not a rung.
     if (t.emptyReason) pair('empty because', t.emptyReason);
     pair('outcome', t.outcomeState || '—');
     pair('session', short(t.sessionId, 8));
@@ -914,16 +1289,67 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
       showBanner('upstream_unreachable', 'No endpoint is configured for this install.');
       state.lessons = [];
       state.activity = [];
+      state.loaded = true;
       renderMemory();
       return;
     }
-    const now = Date.now();
-    if (!force && now - state.lastRemoteAt < (state.meta.pollMs || {}).remote) return;
-    state.lastRemoteAt = now;
+    // The poll waits for the census, rather than counting from when the last one was *issued*.
+    //
+    // An all-runs census is a scan of the whole feed. Measured against a hosted instance with
+    // seven hundred lessons it takes about nineteen seconds — longer than the fifteen-second
+    // remote cadence. Counting the gap from the request going out meant the next poll fired
+    // while the first was still in the air, superseded it, and left the page reading "Loading…"
+    // forever: every answer arrived stale, so none of them was ever rendered. A forced refresh
+    // still cuts in, because that is somebody toggling the run selector and waiting.
+    if (!force) {
+      if (state.remoteBusy) return;
+      if (Date.now() - state.lastRemoteAt < (state.meta.pollMs || {}).remote) return;
+    }
+
+    // An all-runs census is a scan and a single-run one is not, so the two race whenever
+    // somebody toggles the segment. Whoever was issued last wins; anything older lands into a
+    // stale sequence and is dropped rather than repainting the answer to the previous question.
+    const seq = ++state.reqSeq;
+    const stale = () => seq !== state.reqSeq;
+    state.remoteBusy += 1;
+    try {
+      await remoteFetch(stale);
+    } finally {
+      state.remoteBusy -= 1;
+      // From completion, not from dispatch — see above.
+      state.lastRemoteAt = Date.now();
+    }
+  }
+
+  /** The two instance calls the Memory tab is built from. @param {() => boolean} stale */
+  async function remoteFetch(stale) {
+    // The empty `run` *is* the fix: upstream reads it as "every run". `currentRun` never
+    // filters anything — it is the run `fromOtherRun` is rendered against.
+    // `limit` is the census's *page* size, not a cap on the answer, and 500 is the largest the
+    // route serves. On this route the cheapest way to finish a scan inside its budget is to ask
+    // for fewer, bigger pages: at 200 a seven-hundred-lesson instance ran out of wall clock on
+    // page three and reported itself truncated, where two pages of 500 complete.
+    const q = 'run=' + encodeURIComponent(state.allRuns ? '' : state.run)
+      + '&currentRun=' + encodeURIComponent(state.run)
+      + '&limit=500';
 
     try {
-      const body = await api('/api/lessons?run=' + encodeURIComponent(state.run) + '&limit=200');
+      const body = await api('/api/lessons?' + q);
+      if (stale()) return;
       state.lessons = body.lessons || [];
+      state.lessonsError = '';
+      state.joinError = String(body.joinError || '');
+      // `scopeCounts` and `projectCounts` are on the wire and deliberately not kept: the page
+      // counts the rows it is actually showing, and a facet labelled with a number that does
+      // not match the list under it is worse than one with no number at all.
+      state.census = {
+        totalVisible: num(body.totalVisible) || state.lessons.length,
+        truncated: !!body.truncated,
+        truncatedReason: String(body.truncatedReason || ''),
+        pages: num(body.pages),
+        source: String(body.source || ''),
+        unknownScope: num(body.unknownScope),
+      };
       // `joined` says the activity call worked; `dated` says it produced timestamps. They come
       // apart on an instance that stores lessons without a creation time, and a green light
       // over a column of dashes is the version of that a user reads as a bug in this page.
@@ -931,19 +1357,28 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
       setConn(true, dated ? 'connected' : 'connected · this instance records no lesson dates');
       hideBanner();
     } catch (err) {
+      if (stale()) return;
       setConn(false, err.code === 'auth_failed' ? 'key rejected' : 'unreachable');
       showBanner(err.code, err.message);
       state.lessons = [];
+      state.census = null;
+      state.lessonsError = err.message || 'the request failed';
+      state.loaded = true;
       renderMemory();
       return;
     }
 
     try {
-      const body = await api('/api/activity?run=' + encodeURIComponent(state.run) + '&limit=200');
+      const body = await api('/api/activity?' + q);
+      if (stale()) return;
       state.activity = body.entries || [];
+      state.activityError = '';
     } catch (err) {
+      if (stale()) return;
       state.activity = [];
+      state.activityError = err.message || 'the request failed';
     }
+    state.loaded = true;
     renderMemory();
   }
 
@@ -954,18 +1389,35 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     btn.disabled = true;
     btn.textContent = 'searching…';
     try {
+      // `/api/search` refuses an empty run, which is why this one call keeps naming the local
+      // run even when the tab is showing every run's lessons.
       const body = await post('/api/search', { run: state.run, query: q, limit: 30 });
-      state.searchResults = (body.evidence || []).map((e) => ({
-        id: e.reference_id || e.id || '',
-        content: e.content || '',
-        entry_type: e.entry_type || '',
-        scope: '',
-        importance: '',
-        source: e.source || '',
-        run_id: e.run_id || '',
-        leaksScope: false,
-        createdAt: '',
-      }));
+      // Search evidence carries no scope of its own. Stamping a literal onto it was the bug:
+      // every result read as run-scoped, so any active scope filter emptied the list and the
+      // badge said something the instance had never claimed. Joining by id against what is
+      // already loaded recovers the real scope where it can, and everything else is left
+      // genuinely unknown — which the badge and the `unknown` filter can both express.
+      const byId = new Map();
+      state.lessons.forEach((l) => { if (l.id) byId.set(String(l.id), l); });
+      state.searchResults = (body.evidence || []).map((e) => {
+        const id = String(e.reference_id || e.id || '');
+        const hit = byId.get(id) || null;
+        return {
+          id: id,
+          content: e.content || '',
+          entry_type: e.entry_type || '',
+          lessonType: hit ? hit.lessonType : '',
+          scope: hit ? hit.scope : undefined,
+          scopeKnown: hit ? hit.scopeKnown : false,
+          importance: hit ? hit.importance : '',
+          project: hit ? hit.project : '',
+          source: e.source || '',
+          run_id: e.run_id || '',
+          sourceRunId: hit ? hit.sourceRunId : (e.run_id || ''),
+          createdAt: hit ? hit.createdAt : '',
+        };
+      });
+      state.searchQuery = q;
       state.selectedEntry = null;
       renderMemory();
       hideBanner();
@@ -992,31 +1444,59 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     $('tab-' + n).addEventListener('click', () => selectTab(n));
   });
 
-  $('mode-lessons').addEventListener('click', () => {
-    state.mode = 'lessons';
+  function setMode(mode) {
+    state.mode = mode;
+    state.searchResults = null;
+    state.searchQuery = '';
+    state.selectedEntry = null;
+    $('mode-lessons').setAttribute('aria-pressed', String(mode === 'lessons'));
+    $('mode-activity').setAttribute('aria-pressed', String(mode === 'activity'));
+    renderMemory();
+  }
+  $('mode-lessons').addEventListener('click', () => setMode('lessons'));
+  $('mode-activity').addEventListener('click', () => setMode('activity'));
+
+  // The run segment re-points the Memory fetch only; `state.run` is left alone so the rail,
+  // the Turns tab and every write route keep naming one concrete run.
+  function setAllRuns(all) {
+    if (state.allRuns === all) return;
+    state.allRuns = all;
     state.searchResults = null;
     state.selectedEntry = null;
-    $('mode-lessons').setAttribute('aria-pressed', 'true');
-    $('mode-activity').setAttribute('aria-pressed', 'false');
+    $('runs-all').setAttribute('aria-pressed', String(all));
+    $('runs-this').setAttribute('aria-pressed', String(!all));
     renderMemory();
-  });
-  $('mode-activity').addEventListener('click', () => {
-    state.mode = 'activity';
-    state.searchResults = null;
-    state.selectedEntry = null;
-    $('mode-lessons').setAttribute('aria-pressed', 'false');
-    $('mode-activity').setAttribute('aria-pressed', 'true');
-    renderMemory();
-  });
+    refreshRemote(true);
+  }
+  $('runs-all').addEventListener('click', () => setAllRuns(true));
+  $('runs-this').addEventListener('click', () => setAllRuns(false));
 
   // Instant, over what is already loaded. The instance is only asked when the button is
   // pressed, because a semantic search on every keystroke is a bill.
-  $('filter').addEventListener('input', renderMemory);
-  $('scope-filter').addEventListener('change', renderMemory);
+  // Editing the box hands it back to the instant filter. Leaving the results up while the text
+  // that produced them changes underneath would make the box a control that does nothing —
+  // it cannot filter them (they are a semantic answer) and it no longer describes them.
+  $('filter').addEventListener('input', () => {
+    if (state.searchResults) { state.searchResults = null; state.searchQuery = ''; }
+    renderMemory();
+  });
+  $('scope-filter').addEventListener('change', (e) => {
+    state.scope = e.target.value;
+    renderMemory();
+  });
+  $('project-filter').addEventListener('change', (e) => {
+    state.project = e.target.value;
+    renderMemory();
+  });
   $('do-search').addEventListener('click', searchInstance);
   $('filter').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') searchInstance();
-    if (e.key === 'Escape') { state.searchResults = null; $('filter').value = ''; renderMemory(); }
+    if (e.key === 'Escape') {
+      state.searchResults = null;
+      state.searchQuery = '';
+      $('filter').value = '';
+      renderMemory();
+    }
   });
   $('turn-filter').addEventListener('input', renderTurns);
 
@@ -1055,6 +1535,9 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
   // Disk is cheap and changes with every prompt; the instance is neither. The two cadences are
   // set by the server so the page and the server cannot drift into disagreeing about them.
   setConn(null, 'connecting');
+  // Firefox restores a `<select>`'s value across a reload, which would leave the control
+  // showing one filter while `state` held another. The state object is the authority.
+  $('scope-filter').value = state.scope;
   renderMemory();
   refreshLocal().then(() => {
     refreshAnalytics();

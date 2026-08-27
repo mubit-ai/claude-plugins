@@ -91,23 +91,34 @@ function activityEntry(over = {}) {
  * passed but dropped by a future refactor looks identical from the call site and identical in
  * a mock, and the symptom in production is recall going quiet on a machine whose only fault
  * was an open dashboard.
+ *
+ * The census is driven through it too, because it is the worst case for this invariant: it is
+ * the only dashboard read that makes several upstream calls per render, so one failing instance
+ * costs the breaker a handful of strikes per poll rather than one.
  */
 test('proxy: an upstream failure records nothing in the breaker, so a dashboard poll cannot open it for the hooks', async (t) => {
   const { dataDir, cfg, mod } = await setup(t, {
     routes: {
       'POST /v2/control/lessons': { status: 500, json: { error: 'boom' } },
-      'POST /v2/control/activity': { status: 500, json: { error: 'boom' } },
+      // One page through and then the instance falls over, which is the shape that costs most:
+      // a census that has already committed to paging keeps going until a page refuses.
+      'POST /v2/control/activity': [
+        { json: { entries: [activityEntry()], next_page_token: '1', total_visible: 900 } },
+        { status: 500, json: { error: 'boom' } },
+      ],
       'POST /v2/control/memory_health': { status: 500, json: { error: 'boom' } },
     },
   });
+  const activity = await lib('activity.mjs');
 
   for (let i = 0; i < 8; i++) {
+    await activity.lessonCensus(cfg, { run: 'cc-here-00000001', limit: 1 });
     await mod.fetchLessons(cfg, { run: 'cc-here-00000001' });
     await mod.fetchMemoryHealth(cfg, { run: 'cc-here-00000001' });
   }
 
   assert.deepEqual(readdirSync(join(dataDir, 'breaker')), [],
-    'sixteen failed dashboard calls must leave the breaker exactly as they found it');
+    'failed dashboard calls must leave the breaker exactly as they found it');
 });
 
 test('proxy: READ_ONLY is frozen and says record false', async (t) => {
@@ -301,6 +312,127 @@ test('lessons: scope above run is flagged as visible outside its own run', async
   const foreign = mod.normalizeLesson(lessonEntry({ source_run_id: 'cc-elsewhere-0001' }),
     { currentRun: 'cc-here-00000001' });
   assert.equal(foreign.fromOtherRun, true, 'a lesson written by another run is what followed an agent out');
+});
+
+/**
+ * The scope that is absent, which is neither of the two the filter offers.
+ *
+ * A lesson whose metadata names no scope reads as `run` everywhere else it is asked for. A
+ * normaliser that defaults it to `''` instead puts the row in neither filter position: it is
+ * not a `run` lesson and it is not a leak, so it disappears from a tab whose whole job is
+ * showing every lesson exactly once. Defaulting to `run` also keeps the page agreeing with
+ * every other view of the same entry.
+ *
+ * `scopeKnown` is the second half, and it is why this is not just a changed default. "The
+ * server defaulted it" and "we never saw the metadata" are different facts, and only the
+ * second should make somebody doubt the number beside it.
+ */
+test('lessons: a lesson naming no scope is a run lesson, which is what the server itself would have said', async (t) => {
+  const { mod } = await setup(t);
+
+  const fromRoute = mod.normalizeLesson(lessonEntry({ scope: '' }), { currentRun: 'cc-here-00000001' });
+  assert.equal(fromRoute.scope, 'run');
+  assert.equal(fromRoute.scopeKnown, false, 'the page has to be able to say this one was guessed');
+  assert.equal(fromRoute.leaksScope, false);
+
+  const fromFeed = mod.normalizeActivityLesson(activityEntry({ metadata_json: '{}' }),
+    { currentRun: 'cc-here-00000001' });
+  assert.equal(fromFeed.scope, 'run', 'both normalisers or the two paths disagree about the same lesson');
+  assert.equal(fromFeed.scopeKnown, false);
+  assert.equal(fromFeed.leaksScope, false);
+
+  // And a scope that was actually stated is not a guess, on either path.
+  assert.equal(mod.normalizeLesson(lessonEntry({ scope: 'run' })).scopeKnown, true);
+  assert.equal(mod.normalizeActivityLesson(
+    activityEntry({ metadata_json: JSON.stringify({ scope: 'run' }) })).scopeKnown, true);
+});
+
+/**
+ * `fromOtherRun` is wrong today on any hosted instance, and this is the field that fixes it.
+ *
+ * `list_lessons` falls back to `&f.run_id` — the *scoped* run id, as stored. The activity route
+ * serialises `unscoped_run_id_for_owner(&fact.run_id, owner)`. So the id the lessons route hands
+ * back and the id the page holds as "the current run" are not the same string even when they
+ * name the same run, and every lesson reads as foreign. Off the feed both sides are unscoped.
+ */
+test('lessons: the source run is the unscoped id the page can actually compare against', async (t) => {
+  const { mod } = await setup(t);
+
+  const stated = mod.normalizeActivityLesson(
+    activityEntry({ run_id: 'cc-here-00000001', metadata_json: JSON.stringify({ source_run_id: 'cc-elsewhere-0001' }) }),
+    { currentRun: 'cc-here-00000001' });
+  assert.equal(stated.sourceRunId, 'cc-elsewhere-0001', 'a stated source_run_id is the answer');
+  assert.equal(stated.fromOtherRun, true);
+
+  const silent = mod.normalizeActivityLesson(activityEntry({ run_id: 'cc-here-00000001', metadata_json: '{}' }),
+    { currentRun: 'cc-here-00000001' });
+  assert.equal(silent.sourceRunId, 'cc-here-00000001',
+    'with no source_run_id the entry was written by the run it sits in — the same fallback the server makes');
+  assert.equal(silent.fromOtherRun, false,
+    'a lesson this run wrote is not one that followed an agent in from somewhere else');
+  assert.equal(silent.runId, 'cc-here-00000001', 'and the run the entry sits in stays visible in its own right');
+});
+
+// ---------------------------------------------------------------------------
+// The census asks the feed, and filters here
+// ---------------------------------------------------------------------------
+
+/**
+ * `/v2/control/lessons` applies `limit` before it filters to `entry_type == "lesson"`, so its
+ * `scope` and `importance` filters run over a page that was already chosen arbitrarily —
+ * `{scope: "global", limit: 5}` is structurally close to zero. `ListActivityRequest` has no
+ * scope field at all. Both roads end in the same place: scope is filtered over the rows, after
+ * the census, and a scope field on the wire would be a filter that quietly does nothing.
+ */
+test('lessons: the census filters scope over the rows it collected, never on the wire', async (t) => {
+  const { server, cfg } = await setup(t, {
+    routes: {
+      'POST /v2/control/activity': [
+        { json: { entries: [activityEntry()], next_page_token: '1', total_visible: 2 } },
+        { json: { entries: [activityEntry({ id: 'b', reference_id: 'b' })], next_page_token: '', total_visible: 2 } },
+      ],
+    },
+  });
+  const activity = await lib('activity.mjs');
+
+  const r = await activity.lessonCensus(cfg, { run: 'cc-here-00000001', limit: 1 });
+  assert.equal(r.ok, true);
+  const calls = server.calls('POST', '/v2/control/activity');
+  assert.ok(calls.length >= 2, 'a single-page census would not prove the loop sends a clean body either');
+  for (const call of calls) {
+    for (const key of ['scope', 'lesson_scope', 'importance']) {
+      assert.ok(!(key in call.body),
+        `\`${key}\` reached /v2/control/activity, where the route has no such field to honour. `
+        + `Body: ${JSON.stringify(call.body)}`);
+    }
+  }
+});
+
+/**
+ * D1, which is the whole reason a `global` lesson written by another run can never appear.
+ *
+ * `list_lessons` branches on the request: a `run_id` takes `nexus.list(run_id, limit)` and an
+ * absent one takes `list_global(limit)`. The Memory tab always sent the current run, so the one
+ * question it exists to answer — what is visible outside the run that wrote it — was the one
+ * question the request made unanswerable. The current run is what a row is *rendered against*;
+ * it is not a filter, and it must not become one on the way out.
+ */
+test('lessons: the current run is what a row is compared against, not what the request asks for', async (t) => {
+  const { server, cfg } = await setup(t, {
+    routes: { 'POST /v2/control/activity': { json: { entries: [], next_page_token: '', total_visible: 0 } } },
+  });
+  const activity = await lib('activity.mjs');
+
+  await activity.lessonCensus(cfg, { currentRun: 'cc-here-00000001' });
+  const wide = server.lastCall('POST', '/v2/control/activity')?.body;
+  assert.ok(!('run_id' in wide),
+    `currentRun became a run_id and confined the census to one run; body was ${JSON.stringify(wide)}`);
+
+  // And the other direction, so this is a distinction rather than a dropped field: a census
+  // that was asked for one run still says so.
+  server.reset();
+  await activity.lessonCensus(cfg, { run: 'cc-here-00000001', currentRun: 'cc-here-00000001' });
+  assert.equal(server.lastCall('POST', '/v2/control/activity')?.body.run_id, 'cc-here-00000001');
 });
 
 // ---------------------------------------------------------------------------

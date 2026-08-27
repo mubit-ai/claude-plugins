@@ -49,10 +49,11 @@ import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { lessonCensus } from '../lib/activity.mjs';
 import { isConfigured, loadConfig } from '../lib/config.mjs';
 import {
   deleteLesson, fetchActivity, fetchLessons, fetchMemoryHealth, fetchRemoteRuns,
-  runSearch, sendArchive, sendOutcome,
+  normalizeActivityLesson, ok, runSearch, sendArchive, sendOutcome,
 } from '../lib/dashboard-api.mjs';
 import {
   analytics, appendRollup, listDataDirs, listRuns, localHealth, newestRun,
@@ -403,6 +404,178 @@ function scope(ctx, url) {
 }
 
 // ---------------------------------------------------------------------------
+// The lesson census
+// ---------------------------------------------------------------------------
+
+/**
+ * Why `/api/lessons` scans the activity feed rather than calling the lessons route.
+ *
+ * The instance's lessons route fetches `limit` facts of *any* entry type and only then filters to
+ * `entry_type == "lesson"`. `limit=200` therefore means "take two hundred arbitrary facts and
+ * keep whichever happen to be lessons" — measured against a hosted instance, the newest three
+ * hundred entries out of seventeen thousand contained not a single one. The tab was near-empty
+ * and it looked like an instance with nothing in it. The activity route has the opposite
+ * order: it collects everything, filters by `entry_types`, sorts, and only then pages.
+ *
+ * The lessons route stays as the fallback, because it is what an instance with an unreadable
+ * activity feed can still answer. Which of the two replied is *reported* rather than inferred:
+ * they have different fidelity — the lessons route carries no `created_at` and reports the
+ * scoped `source_run_id` where activity reports the unscoped one — and a page that cannot say
+ * where a row came from cannot say what a missing row means.
+ *
+ * Scope is never sent upstream. `ListActivityRequest` has no scope field at all, and on the
+ * lessons route the scope filter runs *after* `limit`, so asking for `scope=global` there
+ * filters an already-truncated set and reliably answers with nothing. It is applied here,
+ * after the census, which is what makes "show me the leaks" stop returning an empty list.
+ */
+
+/**
+ * The one value of `?project=` that is not a repo slug: the rows carrying no `repo:` tag.
+ *
+ * The bucket needs a spelling of its own because an empty query parameter is indistinguishable
+ * from an absent one — and it is the honest half of the facet. `repo:` is written only by the
+ * hook capture paths, so a lesson written through `mubit_learned`, and every lesson reflection
+ * produces, has no project at all. Those must never be shown as belonging to the current one.
+ */
+export const UNTAGGED_PROJECT = '__untagged__';
+
+/**
+ * Does one normalised row satisfy the selected scope?
+ *
+ * `run` and `unknown` overlap deliberately. A lesson whose metadata names no scope comes back
+ * reading `run`, so that is where the page has to file it or the two disagree about the same
+ * entry — but "it arrived saying run" and "it arrived saying nothing" are different facts, and
+ * `unknown` is where somebody goes to see the difference.
+ *
+ * @param {Record<string, any>} row
+ * @param {string} want
+ */
+function scopeMatches(row, want) {
+  if (!want) return true;
+  if (want === 'leak') return row.leaksScope === true;
+  if (want === 'unknown') return row.scopeKnown === false;
+  return row.scope === want;
+}
+
+/**
+ * Counted into a `Map` rather than an object literal: these keys come out of an instance's
+ * metadata, and `obj['__proto__'] = n` on a plain object silently sets nothing at all.
+ *
+ * @param {any[]} rows @param {(r: any) => string} key
+ */
+function countBy(rows, key) {
+  /** @type {Map<string, number>} */
+  const out = new Map();
+  for (const r of rows) {
+    const k = key(r);
+    out.set(k, (out.get(k) ?? 0) + 1);
+  }
+  return Object.fromEntries(out);
+}
+
+/**
+ * The census, the fallback, and the local filter — as one envelope.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {{run: string, currentRun: string, scope: string, importance: string,
+ *          project: string, limit: number, source: string}} p
+ * @returns {Promise<Record<string, any>>}
+ */
+async function lessonsPayload(cfg, p) {
+  const keep = (rows) => rows.filter((r) => scopeMatches(r, p.scope)
+    && (!p.importance || r.importance === p.importance)
+    && (!p.project || (p.project === UNTAGGED_PROJECT ? !r.project : r.project === p.project)));
+
+  /** @type {Record<string, any>|null} */
+  let census = null;
+  if (p.source !== 'lessons') {
+    census = await lessonCensus(cfg, { run: p.run, currentRun: p.currentRun, limit: p.limit });
+    if (!census.ok) {
+      if (p.source === 'activity') return census;
+    } else if (census.data.lessons.length || census.data.truncated || p.source === 'activity') {
+      // A truncated census that found nothing found nothing *so far*. Falling back there would
+      // swap a partial answer for a differently-shaped one; only a complete, empty scan is
+      // evidence that the feed has no lessons to give.
+      const loaded = census.data.lessons;
+      const rows = keep(loaded);
+      return ok({
+        lessons: rows,
+        joined: true,
+        dated: loaded.filter((l) => l.createdAt).length,
+        joinError: '',
+        source: 'activity',
+        censusError: '',
+        loaded: loaded.length,
+        matched: rows.length,
+        hidden: loaded.length - rows.length,
+        totalVisible: census.data.totalVisible,
+        truncated: census.data.truncated,
+        truncatedReason: census.data.truncatedReason,
+        pages: census.data.pages,
+        unknownScope: census.data.unknownScope,
+        scopeCounts: census.data.scopeCounts,
+        projectCounts: census.data.projectCounts,
+      });
+    }
+  }
+
+  // `scope` and `importance` are deliberately not forwarded: on this route they are applied
+  // after `limit`, so sending them narrows an already-arbitrary sample twice.
+  const fb = await fetchLessons(cfg, { run: p.run, limit: p.limit });
+  if (!fb.ok) return fb;
+
+  const loaded = fb.data.lessons;
+  const rows = keep(loaded);
+  return ok({
+    lessons: rows,
+    joined: fb.data.joined,
+    dated: fb.data.dated,
+    joinError: fb.data.joinError,
+    source: 'lessons',
+    // Why the page is not looking at a census. Empty when the census simply came back empty.
+    censusError: census && !census.ok ? String(census.message ?? '') : '',
+    loaded: loaded.length,
+    matched: rows.length,
+    hidden: loaded.length - rows.length,
+    // This route reports no server-side total, so the only honest number is what arrived —
+    // which `source: 'lessons'` is what tells the page.
+    totalVisible: loaded.length,
+    truncated: false,
+    truncatedReason: '',
+    pages: 1,
+    unknownScope: loaded.filter((l) => l.scopeKnown === false).length,
+    scopeCounts: countBy(loaded, (l) => String(l.scope ?? '')),
+    projectCounts: countBy(loaded, (l) => String(l.project ?? '')),
+  });
+}
+
+/**
+ * Add the scope fields to a lesson-typed activity row, keeping everything else it carries.
+ *
+ * Lesson rows only: scope is a lesson property, and stamping a trace with one would put a
+ * fiction on the page that reads exactly like a fact. Under the compact projection the server
+ * has already overwritten `metadata_json` with `{entry_type, created_at}`, so a compact lesson
+ * row arrives with `scopeKnown: false` — the honest answer, and the reason the page can say the
+ * feed does not carry scope instead of filtering silently to nothing.
+ *
+ * @param {any} entry
+ * @param {string} currentRun
+ */
+function decorateScope(entry, currentRun) {
+  if (!entry || typeof entry !== 'object' || entry.entry_type !== 'lesson') return entry;
+  const n = normalizeActivityLesson(entry, { currentRun });
+  return {
+    ...entry,
+    scope: n.scope,
+    scopeKnown: n.scopeKnown,
+    leaksScope: n.leaksScope,
+    project: n.project,
+    sourceRunId: n.sourceRunId,
+    fromOtherRun: n.fromOtherRun,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // GET routes
 // ---------------------------------------------------------------------------
 
@@ -479,19 +652,37 @@ async function getRoute(ctx, res, path, url) {
   // --- proxied. These need the instance, and degrade with a banner. --------
 
   if (path === '/api/lessons') {
-    return upstream(res, cfg, await fetchLessons(cfg, {
+    return upstream(res, cfg, await lessonsPayload(cfg, {
+      // An empty `run` means every run, and that is the only spelling it gets. A second
+      // `allRuns` parameter would just be a second way to pin this tab back to one run, which
+      // is the bug that made a global lesson from another run structurally invisible.
       run: String(url.searchParams.get('run') ?? ''),
+      // A rendering context, never a filter: it is what `fromOtherRun` is measured against.
+      currentRun: String(url.searchParams.get('currentRun') ?? ''),
       scope: String(url.searchParams.get('scope') ?? ''),
       importance: String(url.searchParams.get('importance') ?? ''),
+      project: String(url.searchParams.get('project') ?? ''),
       limit: Number(url.searchParams.get('limit') ?? 100),
+      source: String(url.searchParams.get('source') ?? 'auto'),
     }));
   }
 
   if (path === '/api/activity') {
-    return upstream(res, cfg, await fetchActivity(cfg, {
+    const entryTypes = String(url.searchParams.get('entryTypes') ?? '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    const r = await fetchActivity(cfg, {
       run: String(url.searchParams.get('run') ?? ''),
       limit: Number(url.searchParams.get('limit') ?? 100),
       pageToken: String(url.searchParams.get('pageToken') ?? ''),
+      projection: String(url.searchParams.get('projection') ?? ''),
+      sort: String(url.searchParams.get('sort') ?? ''),
+      entryTypes: entryTypes.length ? entryTypes : undefined,
+    });
+    if (!r.ok) return upstream(res, cfg, r);
+    const currentRun = String(url.searchParams.get('currentRun') ?? '');
+    return upstream(res, cfg, ok({
+      ...r.data,
+      entries: r.data.entries.map((e) => decorateScope(e, currentRun)),
     }));
   }
 

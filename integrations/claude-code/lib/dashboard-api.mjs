@@ -56,6 +56,19 @@ export const EXTRA_ROUTES = Object.freeze({
 });
 
 /**
+ * What a lesson's scope is when its metadata does not say.
+ *
+ * `run` is what such a lesson reads as everywhere else it is asked for, so rendering an empty
+ * string here would make the page disagree with every other view of the same entry — and worse,
+ * an empty scope belongs to neither side of the leak filter, so the row vanishes from a tab
+ * whose job is showing every lesson exactly once.
+ */
+const DEFAULT_SCOPE = 'run';
+
+/** The `env_tags` prefix that names a project. Untagged means unconfined, not local. */
+const REPO_TAG = 'repo:';
+
+/**
  * The error vocabulary the page renders from. `unauthorized` and `not_found` belong to the
  * dashboard's own server; the rest describe the instance behind it.
  */
@@ -166,13 +179,15 @@ export function lessonId(raw) {
  */
 export function normalizeLesson(raw, ctx = {}) {
   const l = (raw && typeof raw === 'object') ? raw : {};
-  const scope = String(l.scope || '');
+  const stated = String(l.scope || '');
+  const scope = stated || DEFAULT_SCOPE;
   const sourceRun = String(l.source_run_id || '');
   return {
     id: lessonId(l),
     content: String(l.content || ''),
     lessonType: String(l.lesson_type || ''),
     scope,
+    scopeKnown: stated !== '',
     importance: String(l.importance || ''),
     conditions: Array.isArray(l.conditions) ? l.conditions.map(String) : [],
     rationale: String(l.rationale || ''),
@@ -182,9 +197,103 @@ export function normalizeLesson(raw, ctx = {}) {
     // "Visible outside the run that wrote it" — the filter the scope-leak view is built on.
     // Anything above `run` scope reaches other runs by design; whether that was intended is
     // the question the column exists to let a human answer.
-    leaksScope: scope !== '' && scope !== 'run',
+    leaksScope: scope !== DEFAULT_SCOPE,
     fromOtherRun: !!(ctx.currentRun && sourceRun && sourceRun !== ctx.currentRun),
   };
+}
+
+/**
+ * The same lesson as it arrives on the **activity** feed, normalised to the same keys.
+ *
+ * The Memory tab reads lessons from `/v2/control/activity` rather than `/v2/control/lessons`,
+ * because that route applies `limit` before it filters to `entry_type == "lesson"` — `limit:
+ * 200` means "take two hundred arbitrary facts and keep whichever happen to be lessons", and
+ * on a busy instance that is reliably none of them. The feed collects, filters, sorts, and only
+ * then pages.
+ *
+ * Nothing is lost in the swap. `list_lessons` builds every field it returns out of
+ * `f.metadata`, and `metadata_json` is that same map serialised whole — so the fields are all
+ * still here, one indirection further in, plus `created_at`, which `LessonEntry` has no room
+ * for and `createdAtIndex` below exists to go and fetch, plus `env_tags`.
+ *
+ * Two fields differ in ways that matter. `list_lessons` falls back to `&f.run_id`, the
+ * *scoped* run id as stored, where the feed serialises `unscoped_run_id_for_owner` — so off the
+ * lessons route `sourceRunId` and the page's current run are different strings even when they
+ * name the same run, and every lesson reads as foreign. And an absent scope becomes `run` here,
+ * matching the server's own default, rather than an empty string belonging to neither side of
+ * the leak filter.
+ *
+ * @param {Record<string, any>} entry an `ActivityEntry`
+ * @param {{currentRun?: string}} [ctx]
+ * @returns {Record<string, any>}
+ */
+export function normalizeActivityLesson(entry, ctx = {}) {
+  const e = (entry && typeof entry === 'object') ? entry : {};
+  const meta = parseMetadata(e.metadata_json) || {};
+  // The same `or_else` pair, in the same order, that `list_lessons` reads: an instance with
+  // both conventions in its history serves both, and the server accepts both.
+  const stated = str(meta.scope) || str(meta.lesson_scope);
+  const scope = stated || DEFAULT_SCOPE;
+  const sourceRun = String(meta.source_run_id || e.run_id || '');
+  const conditions = meta.conditions || meta.lesson_conditions;
+  return {
+    id: lessonId(e),
+    content: String(e.content || ''),
+    lessonType: String(meta.lesson_type || ''),
+    scope,
+    // "The server would have called this a run lesson" and "we never saw the metadata" are the
+    // same rendered word and different facts, and only the second should make a reader doubt
+    // the count beside it.
+    scopeKnown: stated !== '',
+    importance: String(meta.importance || meta.lesson_importance || ''),
+    conditions: Array.isArray(conditions) ? conditions.map(String) : [],
+    rationale: String(meta.rationale || ''),
+    sourceRunId: sourceRun,
+    source: String(e.source || ''),
+    createdAt: String(e.created_at || ''),
+    runId: String(e.run_id || ''),
+    project: projectTag(meta.env_tags),
+    leaksScope: scope !== DEFAULT_SCOPE,
+    fromOtherRun: !!(ctx.currentRun && sourceRun && sourceRun !== ctx.currentRun),
+  };
+}
+
+/**
+ * The project a lesson belongs to, or nothing at all.
+ *
+ * `repo:` is the project key, and an entry carrying no `repo:` tag is unconfined rather than
+ * local. Attributing it to whatever project happens to be open would invent a confinement the
+ * instance never recorded — which is the one claim this column exists to let a human check.
+ *
+ * @param {any} tags `env_tags` — a JSON array of strings, merged into the fact's metadata at
+ *   ingest so tag-aware scoring can reach it
+ * @returns {string}
+ */
+function projectTag(tags) {
+  if (!Array.isArray(tags)) return '';
+  const hit = tags.map(str).find((t) => t.startsWith(REPO_TAG));
+  return hit ? hit.slice(REPO_TAG.length) : '';
+}
+
+/**
+ * `metadata_json`, whatever shape it arrived in.
+ *
+ * The proto declares it a `string`, so on the wire it is JSON in a string. Callers that have
+ * already parsed it hand over an object, and instances that round-trip it through a second
+ * encoder hand over a JSON string whose contents are themselves JSON. Two unwraps cover all
+ * three; the bound is fixed rather than a loop so a pathological value cannot spin.
+ *
+ * @param {any} raw
+ * @returns {Record<string, any>|null}
+ */
+export function parseMetadata(raw) {
+  let v = raw;
+  for (let i = 0; i < 2; i += 1) {
+    if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+    if (typeof v !== 'string' || !v.trim()) return null;
+    try { v = JSON.parse(v); } catch { return null; }
+  }
+  return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
 }
 
 /**

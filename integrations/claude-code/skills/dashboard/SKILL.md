@@ -33,10 +33,12 @@ when the result is going to be parsed rather than read.
 
 Three tabs, joining two sources that have never been joined before:
 
-- **Memory** — every lesson the instance holds, filterable instantly and searchable properly.
-  Each entry shows its scope, and there is a filter for the ones **visible outside the run that
-  wrote them**, which is the question nothing else in the plugin answers. One-click `Worked` /
-  `Did not work` sends an outcome; deletion requires typing the lesson id.
+- **Memory** — every lesson the instance holds, across **every run** by default, filterable
+  instantly and searchable properly. Each lesson shows its scope, and there is a filter for the
+  ones **visible outside the run that wrote them**, which is the question nothing else in the
+  plugin answers. One-click `Worked` / `Did not work` sends an outcome; deletion requires typing
+  the lesson id. Activity mode shows the raw feed, which is fetched compactly and carries no
+  scope — the scope and project filters switch off there and say so.
 - **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
   they cost in tokens, and how many were repeats rendered as a pointer. This is the local half,
   read from `runs/<run_id>/turns/`.

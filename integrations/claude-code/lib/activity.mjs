@@ -70,7 +70,8 @@
  */
 
 import {
-  EXTRA_ROUTES, READ_ONLY, fail, fetchActivity, mapError, ok, scrubKey,
+  EXTRA_ROUTES, READ_ONLY, fail, fetchActivity, mapError, normalizeActivityLesson, ok,
+  parseMetadata, scrubKey,
 } from './dashboard-api.mjs';
 import { request } from './http.mjs';
 
@@ -128,6 +129,19 @@ export const PAGE_DEFAULT = 100;
 export const SCAN_MAX_ENTRIES = 5000;
 export const SCAN_MAX_PAGES = 200;
 export const SCAN_BUDGET_MS = 60000;
+
+/**
+ * The same three bounds for a census, and a page size, all of them tighter.
+ *
+ * A scan is a terminal command somebody typed and is waiting on deliberately. A census runs
+ * behind the dashboard's Memory tab, on a render, possibly on a poll — so it gives up sooner,
+ * and it asks for the largest page the route will serve, because on this route the cheapest
+ * way to make a scan short is to make each request bigger.
+ */
+export const CENSUS_MAX_PAGES = 6;
+export const CENSUS_PAGE_LIMIT = 500;
+export const CENSUS_MAX_ENTRIES = 3000;
+export const CENSUS_BUDGET_MS = 15000;
 
 /**
  * The metadata keys that mean "the instance derived this, a client did not write it".
@@ -339,12 +353,17 @@ export async function scanActivity(cfg, params = {}) {
     excludeDerivedFallbackUsed = excludeDerivedFallbackUsed || page.data.excludeDerivedFallbackUsed;
     projectionFallbackUsed = projectionFallbackUsed || page.data.projectionFallbackUsed;
 
+    // Whether there is more comes first, because a bound can only truncate something. Tested
+    // the other way round, a scan that read the feed to its last page still reported
+    // `truncated` if it happened to cross a bound on the way — and a complete answer labelled
+    // partial is the same failure as a partial one labelled complete, pointed the other way.
+    // Measured on a hosted instance: 697 lessons, every one of them collected, reported short.
+    token = page.data.nextPageToken;
+    if (!token) break;
+
     if (entries.length >= maxEntries) { truncated = true; truncatedReason = 'max_entries'; break; }
     if (Date.now() - started >= budgetMs) { truncated = true; truncatedReason = 'budget'; break; }
     if (pages >= maxPages) { truncated = true; truncatedReason = 'max_pages'; break; }
-
-    token = page.data.nextPageToken;
-    if (!token) break;
   }
 
   return ok({
@@ -358,6 +377,112 @@ export async function scanActivity(cfg, params = {}) {
     truncatedReason,
     elapsedMs: Date.now() - started,
     nextPageToken: truncated ? token : '',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The lesson census
+// ---------------------------------------------------------------------------
+
+/**
+ * Every lesson the calling key can see, normalised, newest first, with the scope counted.
+ *
+ * This is the dashboard's Memory tab, and it goes through the activity feed rather than
+ * `/v2/control/lessons` because that route applies `limit` **before** it filters to
+ * `entry_type == "lesson"`. `limit: 200` there means "take two hundred arbitrary facts, keep
+ * whichever happen to be lessons" — measured against a hosted instance, seventeen thousand
+ * entries in, the newest three hundred contained not one. A tab that is empty because of the
+ * order the server does two operations in reads exactly like an instance that holds nothing.
+ * The feed collects, filters by `entry_types`, sorts, and only then pages.
+ *
+ * **`projection: 'full'` is not optional.** `correct()` maps every row through `compactEntry`
+ * unless the projection is `full`, and those five keys do not include `metadata_json` — which
+ * is where a lesson's scope, importance, conditions and source run all live. A census at the
+ * default projection finds every lesson and knows the scope of none of them.
+ *
+ * Scope is never a request field. `ListActivityRequest` has none, and on the lessons route the
+ * scope filter runs after `limit` — so asking for one upstream is asking for a filter that
+ * quietly does nothing. The caller filters the rows this returns, once the count is complete.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {{run?: string, currentRun?: string, maxPages?: number, maxEntries?: number,
+ *          budgetMs?: number, limit?: number}} [params]
+ * @returns {Promise<Record<string, any>>}
+ */
+export async function lessonCensus(cfg, params = {}) {
+  const p = obj(params);
+  const run = str(p.run);
+  const currentRun = str(p.currentRun);
+
+  // An absent `run` is the point of the whole exercise: the tab always sent the current one,
+  // which took `list_lessons`'s per-run branch, and a `global` lesson written by a different
+  // run could then structurally never appear.
+  const scan = await scanActivity(cfg, {
+    run,
+    allRuns: !run,
+    entryTypes: ['lesson'],
+    projection: 'full',
+    limit: clamp(p.limit, PAGE_MIN, PAGE_MAX, CENSUS_PAGE_LIMIT),
+    maxPages: clamp(p.maxPages, 1, 10_000, CENSUS_MAX_PAGES),
+    maxEntries: clamp(p.maxEntries, 1, 1_000_000, CENSUS_MAX_ENTRIES),
+    budgetMs: clamp(p.budgetMs, 1, 3_600_000, CENSUS_BUDGET_MS),
+  });
+  if (!scan.ok) return scan;
+
+  /** @type {Set<string>} */
+  const seen = new Set();
+  /** @type {Record<string, any>[]} */
+  const rows = [];
+  for (const entry of scan.data.entries) {
+    const row = normalizeActivityLesson(entry, { currentRun });
+    // Offset paging can hand the same row back twice across a boundary. A row with no id at
+    // all is kept: it cannot be deduped against anything, and collapsing them all into one
+    // would hide lessons rather than duplicates.
+    if (row.id) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+    }
+    rows.push(row);
+  }
+
+  // `scanActivity` forces `sort: 'asc'`, because under `desc` a write landing mid-scan shifts
+  // every later offset. The tab renders newest first, so the order is put back here — and a row
+  // whose `created_at` the instance never filled in goes last rather than to the top.
+  const lessons = rows
+    .map((row) => ({ row, at: Date.parse(row.createdAt) }))
+    .sort((a, b) => {
+      if (Number.isNaN(a.at)) return Number.isNaN(b.at) ? 0 : 1;
+      if (Number.isNaN(b.at)) return -1;
+      return b.at - a.at;
+    })
+    .map((held) => held.row);
+
+  // Counted into Maps rather than object literals: these keys come from an instance's metadata,
+  // and `obj['__proto__'] = n` on a plain object silently sets nothing at all.
+  /** @type {Map<string, number>} */
+  const scopeCounts = new Map();
+  /** @type {Map<string, number>} */
+  const projectCounts = new Map();
+  let unknownScope = 0;
+  for (const row of lessons) {
+    if (!row.scopeKnown) unknownScope += 1;
+    scopeCounts.set(row.scope, (scopeCounts.get(row.scope) ?? 0) + 1);
+    projectCounts.set(row.project, (projectCounts.get(row.project) ?? 0) + 1);
+  }
+
+  return ok({
+    lessons,
+    source: 'activity',
+    pages: scan.data.pages,
+    totalVisible: scan.data.totalVisible,
+    // A census that gave up is still worth rendering; a census that gave up and says it didn't
+    // turns "you have four global lessons" into a number somebody will act on.
+    truncated: scan.data.truncated,
+    truncatedReason: scan.data.truncatedReason,
+    unknownScope,
+    scopeCounts: Object.fromEntries(scopeCounts),
+    projectCounts: Object.fromEntries(projectCounts),
+    elapsedMs: scan.data.elapsedMs,
   });
 }
 
@@ -456,27 +581,6 @@ function correct(raw, o) {
 // ---------------------------------------------------------------------------
 
 /**
- * `metadata_json`, whatever shape it arrived in.
- *
- * The proto declares it a `string`, so on the wire it is JSON in a string. Callers that have
- * already parsed it hand over an object, and instances that round-trip it through a second
- * encoder hand over a JSON string whose contents are themselves JSON. Two unwraps cover all
- * three; the bound is fixed rather than a loop so a pathological value cannot spin.
- *
- * @param {any} raw
- * @returns {Record<string, any>|null}
- */
-function parseMetadata(raw) {
-  let v = raw;
-  for (let i = 0; i < 2; i += 1) {
-    if (v && typeof v === 'object' && !Array.isArray(v)) return v;
-    if (typeof v !== 'string' || !v.trim()) return null;
-    try { v = JSON.parse(v); } catch { return null; }
-  }
-  return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
-}
-
-/**
  * The truth values a flag arrives as. A JSON boolean is what the server writes; the string
  * spellings are what a metadata writer that stringified its booleans produces, and the server
  * misses those because `as_bool()` rejects them.
@@ -522,8 +626,12 @@ function describe(v) {
 }
 
 /**
- * Re-exported so a caller that only needs to scrub one string does not have to know that the
- * dashboard owns the implementation. Nothing here returns `cfg`, and every message crossing
- * the boundary has already been through it.
+ * Re-exported so a caller that only needs to scrub one string, or to unwrap one
+ * `metadata_json`, does not have to know that the dashboard owns both implementations. Nothing
+ * here returns `cfg`, and every message crossing the boundary has already been through
+ * `scrubKey`.
+ *
+ * `parseMetadata` sits over there rather than here because `normalizeActivityLesson` needs it
+ * and the dependency between these two files only runs one way.
  */
-export { scrubKey, READ_ONLY };
+export { scrubKey, READ_ONLY, parseMetadata };

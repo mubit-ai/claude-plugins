@@ -2642,12 +2642,13 @@ var MAX_BRANCH = 32;
 var MAX_SESSION_FILE = 128;
 var GIT_TIMEOUT_MS = 2e3;
 var TOUCH_INTERVAL_MS = 60 * 1e3;
-function deriveRunId(cfg, payload = {}) {
+function deriveRunId(cfg, payload = {}, options = {}) {
   const c = isObject8(cfg) ? cfg : {};
   const p = isObject8(payload) ? payload : {};
-  return assertUsableRunId(resolveRunId(c, p));
+  const persist = !(isObject8(options) && options.persist === false);
+  return assertUsableRunId(resolveRunId(c, p, persist));
 }
-function resolveRunId(cfg, payload) {
+function resolveRunId(cfg, payload, persist) {
   const strategy = normaliseStrategy(cfg.runStrategy);
   const source = normaliseSource(payload.source);
   const sessionId = hostSessionId(payload);
@@ -2667,12 +2668,14 @@ function resolveRunId(cfg, payload) {
   } else {
     runId = reusableRun(cfg, payload, prev, strategy) || deriveFresh(cfg, payload, strategy);
   }
-  rememberRun(cfg, payload, sessionId, prev, {
-    run_id: runId,
-    clear_count: clear,
-    strategy,
-    source
-  });
+  if (persist) {
+    rememberRun(cfg, payload, sessionId, prev, {
+      run_id: runId,
+      clear_count: clear,
+      strategy,
+      source
+    });
+  }
   return runId;
 }
 function deriveFresh(cfg, payload, strategy) {

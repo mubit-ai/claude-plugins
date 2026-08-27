@@ -1488,6 +1488,7 @@ function str2(v) {
 // bin/pin.src.mjs
 var POISONED_RUN_ID3 = "default";
 var MARKER_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
+var MARKER_AMBIGUOUS_MS = 5 * 60 * 1e3;
 function parseArgs(argv = []) {
   const args = Array.isArray(argv) ? argv.map((a) => String(a ?? "")) : [];
   const flag = (f) => args.includes(f);
@@ -1653,8 +1654,15 @@ function pickRun(cfg, explicit = "") {
     }
     return { ok: true, runId: named };
   }
-  const newest = newestMarker(cfg);
-  if (newest) return { ok: true, runId: newest };
+  const { runId, rivals } = newestMarker(cfg);
+  if (runId && rivals.length) {
+    return {
+      ok: false,
+      state: "ambiguous_run",
+      detail: `More than one Mubit run is live in this data directory \u2014 ${[runId, ...rivals].join(", ")} \u2014 so the most recently touched marker is not reliably the session that typed this. Name the run this session is using: pin --run <run_id> "\u2026". The SessionStart block at the top of the conversation prints it, and so does /mubit-memory:doctor.`
+    };
+  }
+  if (runId) return { ok: true, runId };
   return {
     ok: false,
     state: "no_run",
@@ -1662,16 +1670,21 @@ function pickRun(cfg, explicit = "") {
   };
 }
 function newestMarker(cfg) {
-  let best = "";
-  let bestAt = 0;
-  for (const m of scanRunMarkers(str3(cfg?.dataDir))) {
-    if (m.runId === POISONED_RUN_ID3) continue;
-    if (m.at > bestAt) {
-      bestAt = m.at;
-      best = m.runId;
-    }
+  const now = Date.now();
+  const fresh2 = scanRunMarkers(str3(cfg?.dataDir)).filter((m) => m.runId !== POISONED_RUN_ID3 && m.at > 0 && now - m.at < MARKER_MAX_AGE_MS).sort((a, b) => b.at - a.at);
+  const [best, ...rest] = fresh2;
+  if (!best) return { runId: "", rivals: [] };
+  const bestBase = markerBase(best.runId);
+  const rivals = [];
+  for (const m of rest) {
+    if (best.at - m.at >= MARKER_AMBIGUOUS_MS) break;
+    if (markerBase(m.runId) === bestBase) continue;
+    if (!rivals.includes(m.runId)) rivals.push(m.runId);
   }
-  return bestAt > 0 && Date.now() - bestAt < MARKER_MAX_AGE_MS ? best : "";
+  return { runId: best.runId, rivals };
+}
+function markerBase(runId) {
+  return str3(runId).replace(/-sub-[^-]+$/, "").replace(/-c\d+$/, "");
 }
 function toPins(variables) {
   return (Array.isArray(variables) ? variables : []).map((v) => ({ slug: safeSlug2(v.slug), text: oneLine2(v.value), at: Date.now() })).filter((p) => p.slug && p.text);

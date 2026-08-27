@@ -692,12 +692,13 @@ var MAX_BRANCH = 32;
 var MAX_SESSION_FILE = 128;
 var GIT_TIMEOUT_MS = 2e3;
 var TOUCH_INTERVAL_MS = 60 * 1e3;
-function deriveRunId(cfg, payload = {}) {
+function deriveRunId(cfg, payload = {}, options = {}) {
   const c = isObject(cfg) ? cfg : {};
   const p = isObject(payload) ? payload : {};
-  return assertUsableRunId(resolveRunId(c, p));
+  const persist = !(isObject(options) && options.persist === false);
+  return assertUsableRunId(resolveRunId(c, p, persist));
 }
-function resolveRunId(cfg, payload) {
+function resolveRunId(cfg, payload, persist) {
   const strategy = normaliseStrategy(cfg.runStrategy);
   const source = normaliseSource(payload.source);
   const sessionId = hostSessionId(payload);
@@ -717,12 +718,14 @@ function resolveRunId(cfg, payload) {
   } else {
     runId = reusableRun(cfg, payload, prev, strategy) || deriveFresh(cfg, payload, strategy);
   }
-  rememberRun(cfg, payload, sessionId, prev, {
-    run_id: runId,
-    clear_count: clear,
-    strategy,
-    source
-  });
+  if (persist) {
+    rememberRun(cfg, payload, sessionId, prev, {
+      run_id: runId,
+      clear_count: clear,
+      strategy,
+      source
+    });
+  }
   return runId;
 }
 function deriveFresh(cfg, payload, strategy) {
@@ -1126,7 +1129,7 @@ var INSTRUCTIONS = [
   "",
   "When to search. In the main conversation Mubit injects the memory relevant to each turn before you see it, so opening a turn by searching for that is wasted work. Search when the injected memory falls short \u2014 and always search as a subagent, which receives no injection at all and otherwise begins with no memory of this project.",
   "",
-  "Which tool. mubit_recall for a topic or question in words. mubit_diagnose when a command or test has just failed, which matches the error shape against past failures. mubit_dereference when you already hold a reference_id. mubit_lessons to review what has been learned rather than to ask a question.",
+  "Which tool. mubit_recall for a topic or question in words. mubit_diagnose when a command or test has just failed, which matches the error shape against past failures. mubit_dereference when you already hold a reference_id. mubit_lessons to review what has been learned rather than to ask a question. mubit_strategies for the pattern across many lessons rather than any single one.",
   "",
   'What to write back. mubit_learned records one durable claim \u2014 a constraint, a fix that worked, a standing preference \u2014 stated so it is still true in a later session. It is not a session log: narrating what happened ("the user asked for X", "I refactored Y") is the common way this tool is misused, and every future recall pays for it. mubit_outcome credits the reference_ids that actually helped, which is what makes the memory that helps rank higher next time.'
 ].join("\n");
@@ -1238,7 +1241,7 @@ function prepare(env) {
   }
   let runId;
   try {
-    runId = deriveRunId(runConfig(cfg), {});
+    runId = deriveRunId(runConfig(cfg), hostPayload(env), { persist: false });
   } catch (err) {
     refuse(`could not derive a run id: ${describe(err)}`);
     return false;
@@ -1266,9 +1269,13 @@ function prepare(env) {
 }
 function runConfig(cfg) {
   if (String(cfg.runStrategy ?? "").trim() !== "per-conversation") return cfg;
-  note('mubit: runStrategy "per-conversation" cannot be honoured by the MCP server \u2014 it starts once per session and is never handed a session_id. Falling back to "per-directory" for MCP-tool writes. Hook captures still key on the conversation, so the two land in different runs; use "per-directory" (the default) to keep them together.');
+  note('mubit: runStrategy "per-conversation" cannot be honoured by the MCP server \u2014 it starts once per process, and the conversation it started in can be replaced under it. Falling back to "per-directory" for MCP-tool writes. Hook captures still key on the conversation, so the two land in different runs; use "per-directory" (the default) to keep them together.');
   log(cfg, "warn", "mcp: per-conversation is unavailable in the launcher; using per-directory");
   return { ...cfg, runStrategy: "per-directory" };
+}
+function hostPayload(env) {
+  const sessionId = String(env.CLAUDE_CODE_SESSION_ID ?? "").trim();
+  return sessionId ? { session_id: sessionId } : {};
 }
 function allowlist(cfg) {
   const list2 = Array.isArray(cfg.mcpTools) ? cfg.mcpTools.map((t) => String(t).trim()).filter(Boolean) : [];

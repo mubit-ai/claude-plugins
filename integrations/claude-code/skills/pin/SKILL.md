@@ -37,7 +37,7 @@ wrong to say next week, it is a pin.
 ## Pin something
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" add "don't touch the vendored server" --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" add "don't touch the vendored server" --run <run_id> --json
 ```
 
 It renders on the very next prompt — the command writes through to the local cache the recall
@@ -45,12 +45,27 @@ hook reads, so there is nothing to wait for.
 
 Use the user's own words. A pin is an instruction, and paraphrasing an instruction changes it.
 
+### Always pass `--run`
+
+`<run_id>` is the run named in the **Mubit memory is active** block at the top of this
+conversation — the line reading `Run: cc-<slug>-<hash>`. Copy it verbatim.
+
+Without `--run` the command has to guess, and it guesses by reading whichever run's hooks fired
+most recently. Every Claude session on the machine shares one plugin data directory, so a
+second session answering a prompt in the seconds before you type wins that race, and the pin
+is written to *its* run. The command reports success either way. The user then watches for a
+pin that renders in a session they are not looking at.
+
+The command now refuses rather than guessing when two runs are live (`ambiguous_run` below),
+but do not rely on that: it can only see the sessions whose hooks happen to have fired inside
+its window, and passing `--run` is what makes the question not arise.
+
 ## See what is pinned, and clear one
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" list --json
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear <slug> --json
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear --all --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" list --run <run_id> --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear <slug> --run <run_id> --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear --all --run <run_id> --json
 ```
 
 `list` prints a slug beside each pin; `clear` takes that slug. `--all` clears only this
@@ -87,6 +102,10 @@ Two failures worth recognising by name:
 - **`no_run`** — no hook has written a run marker yet, so the command cannot tell which run
   this session is. It resolves itself after one prompt; `--run <run_id>` names one explicitly,
   and `/mubit-memory:doctor` prints the current run id.
+- **`ambiguous_run`** — two or more runs are live in the shared data directory and no `--run`
+  was given, so the command refused rather than pin to the wrong session. `detail` lists the
+  candidates. Re-run with the run id from the SessionStart block; do not pick one from the
+  list by guessing which looks right.
 
 ## What a pin is not
 

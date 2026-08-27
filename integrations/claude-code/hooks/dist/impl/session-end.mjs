@@ -133,8 +133,11 @@ function pruneStale(cfg = {}) {
       expire(join(rd, "checkpoints.json"), 30 * DAY);
       expire(join(rd, "jobs.json"), 24 * HOUR);
       for (const e of dirEntries(rd)) {
-        if (e.isFile() && e.name.startsWith("flushed-") && e.name.endsWith(".marker")) {
+        if (!e.isFile()) continue;
+        if (e.name.startsWith("flushed-") && e.name.endsWith(".marker")) {
           expire(join(rd, e.name), 7 * DAY);
+        } else if (e.name.startsWith("flush-") && e.name.endsWith(".lock")) {
+          expire(join(rd, e.name), 90 * SEC);
         }
       }
     }
@@ -1895,12 +1898,13 @@ var MAX_BRANCH = 32;
 var MAX_SESSION_FILE = 128;
 var GIT_TIMEOUT_MS = 2e3;
 var TOUCH_INTERVAL_MS = 60 * 1e3;
-function deriveRunId(cfg, payload = {}) {
+function deriveRunId(cfg, payload = {}, options = {}) {
   const c = isObject3(cfg) ? cfg : {};
   const p = isObject3(payload) ? payload : {};
-  return assertUsableRunId(resolveRunId(c, p));
+  const persist = !(isObject3(options) && options.persist === false);
+  return assertUsableRunId(resolveRunId(c, p, persist));
 }
-function resolveRunId(cfg, payload) {
+function resolveRunId(cfg, payload, persist) {
   const strategy = normaliseStrategy(cfg.runStrategy);
   const source = normaliseSource(payload.source);
   const sessionId = hostSessionId(payload);
@@ -1920,12 +1924,14 @@ function resolveRunId(cfg, payload) {
   } else {
     runId = reusableRun(cfg, payload, prev, strategy) || deriveFresh(cfg, payload, strategy);
   }
-  rememberRun(cfg, payload, sessionId, prev, {
-    run_id: runId,
-    clear_count: clear,
-    strategy,
-    source
-  });
+  if (persist) {
+    rememberRun(cfg, payload, sessionId, prev, {
+      run_id: runId,
+      clear_count: clear,
+      strategy,
+      source
+    });
+  }
   return runId;
 }
 function deriveFresh(cfg, payload, strategy) {
@@ -2196,6 +2202,7 @@ import {
 import { createHash as createHash4, randomBytes } from "node:crypto";
 import { join as join9 } from "node:path";
 var DRAIN_LOCK_TTL_MS = 6e4;
+var FLUSH_LEASE_TTL_MS = 9e4;
 var DEFAULT_MAX = 32;
 function batchIdempotencyKey(runId, items) {
   const ids = (Array.isArray(items) ? items : []).map((it) => it && typeof it === "object" ? String(it.item_id ?? "") : "").join("|");
@@ -2376,6 +2383,38 @@ function releaseDrainLock(lock) {
   } catch {
   }
 }
+function acquireFlushLease(cfg, runId, name) {
+  const open = { path: "", runId: String(runId ?? ""), pid: process.pid, ts: 0 };
+  try {
+    const safe = safeSegment(name);
+    const dir = runDir(cfg, runId);
+    if (!safe || !ensureDir(dir)) return open;
+    const lockPath = join9(dir, `flush-${safe}.lock`);
+    const held = create(lockPath);
+    if (held) return { path: lockPath, runId: String(runId ?? ""), pid: process.pid, ts: held };
+    if (!existsSync6(lockPath)) return open;
+    const owner = readLock(lockPath);
+    const now = Date.now();
+    const expired = !owner || now - owner.ts >= FLUSH_LEASE_TTL_MS;
+    const orphaned = !owner || !pidAlive(owner.pid);
+    if (!expired && !orphaned) return null;
+    try {
+      unlinkSync4(lockPath);
+    } catch {
+    }
+    const stolen = create(lockPath);
+    if (stolen) return { path: lockPath, runId: String(runId ?? ""), pid: process.pid, ts: stolen };
+    return existsSync6(lockPath) ? null : open;
+  } catch {
+    return open;
+  }
+}
+function releaseFlushLease(lease) {
+  try {
+    if (lease?.path) unlinkSync4(lease.path);
+  } catch {
+  }
+}
 function claimHeld(cfg, runId, name) {
   try {
     const safe = safeSegment(name);
@@ -2485,61 +2524,75 @@ await runHook("session-end", {
       );
       return SUPPRESS;
     }
-    const drained = await drainInline(cfg, {
-      runId,
-      agentId,
-      sessionId,
-      deadline: Math.min(deadline2 - REFLECT_MS / 2, Date.now() + DRAIN_MS)
-    });
-    const flushed = await flushOutcomes(cfg, {
-      runId,
-      agentId,
-      budget: () => budgetFor(OUTCOME_MS, REFLECT_MS / 2)
-    });
-    const priorIngested = numOr2(readMarker(cfg, runId).captured?.ingested, 0);
-    const pending = spoolStats(cfg, runId).count;
-    const reflect = await maybeReflect(cfg, {
-      runId,
-      budget: budgetFor(REFLECT_MS, HEARTBEAT_MS),
-      // Evidence *in flight* counts. When another drainer holds the lock this hook defers to
-      // it and reaches here before that drainer commits, so the marker's ingest count is stale
-      // by design. The spool is the only term that sees the work that is about to land.
-      anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0 || drained.deferred && pending > 0,
-      // ...but a non-empty spool means the opposite when *our* drain is the one that stopped:
-      // budget spent, breaker open, or an ingest that failed. Then nobody is about to land
-      // it, and reflecting would draw conclusions from a session the server only half has.
-      undelivered: drained.failed && pending > 0,
-      pending
-    });
-    const beatBudget = budgetFor(HEARTBEAT_MS);
-    if (beatBudget > 0) {
-      const res = await heartbeat(
+    const lease = acquireFlushLease(cfg, runId, sessionId);
+    if (!lease) {
+      log(
         cfg,
-        { run_id: runId, agent_id: agentId, status: "idle" },
-        { timeoutMs: beatBudget }
+        "debug",
+        "session-end: another flush holds this session; standing down",
+        { run_id: runId, session_id: sessionId }
       );
-      if (!res.ok) log(cfg, "info", `session-end: idle heartbeat failed (${res.state})`, { run_id: runId });
+      return SUPPRESS;
     }
-    updateMarker(cfg, runId, {
-      mode: cfg.mode,
-      captured: { pending: spoolStats(cfg, runId).count },
-      // Written unconditionally: a conditional block makes `status: ""` ambiguous between
-      // "reflect was skipped" and "this hook never reached the marker write". After this, a
-      // blank status means exactly the second — the hook was killed with its own work.
-      reflect: {
-        at: reflect.at,
-        lessons_stored: reflect.lessons,
-        status: reflect.status,
-        attempts: reflect.attempts
-      },
-      ...reflect.error ? { last_error: reflect.error.slice(0, 200) } : {}
-    });
-    claimOnce(cfg, runId, claim);
     try {
-      pruneStale(cfg);
-    } catch {
+      const drained = await drainInline(cfg, {
+        runId,
+        agentId,
+        sessionId,
+        deadline: Math.min(deadline2 - REFLECT_MS / 2, Date.now() + DRAIN_MS)
+      });
+      const flushed = await flushOutcomes(cfg, {
+        runId,
+        agentId,
+        budget: () => budgetFor(OUTCOME_MS, REFLECT_MS / 2)
+      });
+      const priorIngested = numOr2(readMarker(cfg, runId).captured?.ingested, 0);
+      const pending = spoolStats(cfg, runId).count;
+      const reflect = await maybeReflect(cfg, {
+        runId,
+        budget: budgetFor(REFLECT_MS, HEARTBEAT_MS),
+        // Evidence *in flight* counts. When another drainer holds the lock this hook defers to
+        // it and reaches here before that drainer commits, so the marker's ingest count is stale
+        // by design. The spool is the only term that sees the work that is about to land.
+        anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0 || drained.deferred && pending > 0,
+        // ...but a non-empty spool means the opposite when *our* drain is the one that stopped:
+        // budget spent, breaker open, or an ingest that failed. Then nobody is about to land
+        // it, and reflecting would draw conclusions from a session the server only half has.
+        undelivered: drained.failed && pending > 0,
+        pending
+      });
+      const beatBudget = budgetFor(HEARTBEAT_MS);
+      if (beatBudget > 0) {
+        const res = await heartbeat(
+          cfg,
+          { run_id: runId, agent_id: agentId, status: "idle" },
+          { timeoutMs: beatBudget }
+        );
+        if (!res.ok) log(cfg, "info", `session-end: idle heartbeat failed (${res.state})`, { run_id: runId });
+      }
+      updateMarker(cfg, runId, {
+        mode: cfg.mode,
+        captured: { pending: spoolStats(cfg, runId).count },
+        // Written unconditionally: a conditional block makes `status: ""` ambiguous between
+        // "reflect was skipped" and "this hook never reached the marker write". After this, a
+        // blank status means exactly the second — the hook was killed with its own work.
+        reflect: {
+          at: reflect.at,
+          lessons_stored: reflect.lessons,
+          status: reflect.status,
+          attempts: reflect.attempts
+        },
+        ...reflect.error ? { last_error: reflect.error.slice(0, 200) } : {}
+      });
+      claimOnce(cfg, runId, claim);
+      try {
+        pruneStale(cfg);
+      } catch {
+      }
+      return SUPPRESS;
+    } finally {
+      releaseFlushLease(lease);
     }
-    return SUPPRESS;
   }
 });
 function handOff(cfg, payload, runId) {

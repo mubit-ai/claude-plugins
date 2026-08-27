@@ -1,0 +1,138 @@
+{
+  "description": "Mubit Memory 0.12.0 for Codex. THIS FILE IS A TEMPLATE, not a live registration. Codex ignores a hooks.json bundled in a plugin and exports no plugin-root variable to a hook process, so /mubit-memory:setup substitutes {{PLUGIN_ROOT}} for this plugin's install path and merges the result into $CODEX_HOME/hooks.json, then records the trust hash of each registration in config.toml. Two consequences worth knowing: an untrusted hook is skipped silently under `codex exec` (no prompt, no warning, exit 0), and editing a registration changes its content hash and returns it to untrusted -- so re-run setup after any change. Codex clamps the SessionEnd timeout to 3s whatever this says, which is why sessionEndDetach is the default. Every handler that emits additionalContext declares additionalContextLimit explicitly: Codex defaults it to 2500 tokens and, over the limit, SPILLS rather than truncates -- it writes the full text to <temp>/hook_outputs/ and hands the model a head-and-tail stub. The plugin's own recall budget is 1500 tokens, so 2500 is the margin, stated rather than inherited. Declaring it on an event that cannot emit context is warned about and discarded, which is why the four that can are the only ones carrying it. Each of those is recorded behaviour, not a guess.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|shell|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 3,
+            "additionalContextLimit": 2500,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/pre-tool.mjs\""
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 3,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/capture.mjs\" --permission"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 3,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/capture.mjs\""
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/checkpoint.mjs\" --pre"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/checkpoint.mjs\" --post"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "additionalContextLimit": 2500,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/session-start.mjs\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 3,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/session-end.mjs\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 3,
+            "additionalContextLimit": 2500,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/prompt-recall.mjs\""
+          },
+          {
+            "type": "command",
+            "timeout": 3,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/stage-prompt.mjs\""
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 3,
+            "additionalContextLimit": 2500,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/subagent-start.mjs\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 3,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/capture.mjs\" --subagent"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "node \"{{PLUGIN_ROOT}}/hooks/dist/capture.mjs\" --stop"
+          }
+        ]
+      }
+    ]
+  }
+}

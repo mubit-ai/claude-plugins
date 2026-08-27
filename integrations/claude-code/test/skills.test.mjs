@@ -827,3 +827,81 @@ test('pin/SKILL.md says it never installs anything, and is not a permission boun
     'a pin is text in front of the model, not a boundary — a user who reads it as one will '
     + 'stop using the permission system for something that actually has to hold');
 });
+
+// ---------------------------------------------------------------------------
+// Host shell pre-execution
+// ---------------------------------------------------------------------------
+
+/**
+ * The host expands shell patterns inside a skill body *before the model reads it*, and runs
+ * whatever it finds from the user's cwd. Two forms are scanned, mirrored here from the host's
+ * own matcher:
+ *
+ *   ```!            a fenced block whose info string is a bare `!`
+ *   !`cmd`          at a line start or after whitespace
+ *
+ * Inline `code` spans are blanked before the second regex runs, which is why an ordinary
+ * backticked command is safe. A **fenced** block is not blanked and is therefore not an
+ * escape — a worked example of the form inside ```markdown fences still fires.
+ *
+ * `setup` shipped exactly that: a template for a personal `/dashboard` alias containing
+ * !-backtick plus the placeholder `<the absolute path to bin/dashboard.mjs>`. Every
+ * `/mubit-memory:setup` ran the placeholder as a command and the skill died on
+ * MODULE_NOT_FOUND before it could check anybody's credentials.
+ */
+const HOST_SHELL_PATTERNS = [
+  { name: 'a ```! fenced block', re: /```!\s*\n?([\s\S]*?)\n?```/g },
+  { name: 'the !-backtick form', re: /(?<=^|\s)!`([^`]+)`/gm },
+];
+
+/** The host blanks inline `code` spans before scanning for the !-backtick form. */
+function blankInlineCode(text) {
+  return text.replace(/`[^`\n]+`/g, (span, at) => {
+    const before = text[at - 1];
+    return before === '!' || before === '`' ? span : `\`${' '.repeat(span.length - 2)}\``;
+  });
+}
+
+function hostShellCommands(text) {
+  const found = [];
+  for (const { name, re } of HOST_SHELL_PATTERNS) {
+    const scanned = re.source.startsWith('```') ? text : blankInlineCode(text);
+    for (const m of scanned.matchAll(re)) {
+      const command = m[1]?.trim();
+      if (command) found.push(`${name}: ${command}`);
+    }
+  }
+  return found;
+}
+
+test('no skill or agent body carries a shell command the host pre-executes', () => {
+  const files = [
+    ...SKILLS.map((name) => [`skills/${name}/SKILL.md`, join(SKILLS_DIR, name, 'SKILL.md')]),
+    ...readdirSync(AGENTS_DIR)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => [`agents/${f}`, join(AGENTS_DIR, f)]),
+  ];
+
+  for (const [label, path] of files) {
+    const found = hostShellCommands(readFileSync(path, 'utf8'));
+    assert.deepEqual(found, [],
+      `${label} contains a pattern the host runs before the skill is read:\n`
+      + found.map((f) => `    ${f}`).join('\n')
+      + '\n  Document a command as an inline `code` span or a ```bash block instead. Those are '
+      + 'never executed. A ```markdown fence is not an escape.');
+  }
+});
+
+// The alias this skill offers to write is the one place the plugin hands somebody a file
+// containing a command line, so it is the one place the pattern could come back.
+test('setup/SKILL.md offers the /dashboard alias without a pre-executed command', () => {
+  const { body } = loadSkill('setup');
+
+  assert.match(body, /~\/\.claude\/commands\/dashboard\.md/,
+    'the alias path is the whole offer; without it the step cannot be followed');
+  assert.match(body, /allowed-tools/,
+    'the alias must grant Bash for the dashboard script, or it prompts on every use — which is '
+    + 'the friction the shim exists to remove');
+  assert.match(body, /exclamation mark/i,
+    'the body must say why the pre-execution form is absent, or the next edit puts it back');
+});

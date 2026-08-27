@@ -40,6 +40,12 @@ import { ensureDir, resolveDataDir, runDir, safeSegment } from './state.mjs';
 /** §7: `runs/<run_id>/drain.lock` is assumed orphaned past this age and stolen. */
 const DRAIN_LOCK_TTL_MS = 60_000;
 
+/**
+ * §7: `runs/<run_id>/flush-<session_id>.lock`. Past the detached body's own 58 s ceiling by
+ * enough that a lease is never stolen from a child that is still working.
+ */
+const FLUSH_LEASE_TTL_MS = 90_000;
+
 /** §6.1 `MUBIT_CC_BATCH_MAX_ITEMS` default, used when a caller passes no usable `max`. */
 const DEFAULT_MAX = 32;
 
@@ -426,6 +432,82 @@ export function releaseDrainLock(lock) {
     const p = typeof lock === 'string' ? lock : lock.path;
     if (!p) return;
     unlinkSync(p);
+  } catch {
+    // Already released, or stolen out from under us past the TTL. Either way, done.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The flush lease
+// ---------------------------------------------------------------------------
+
+/**
+ * §5.7 step 1: one SessionEnd flush per session *at a time*.
+ *
+ * `claimHeld`/`claimOnce` answer "has this session already been flushed", and they answer it
+ * that way on purpose — a claim recorded up front marks a session flushed with the drain and
+ * the reflect still undone, and under a host that kills the hook that is how a session ends
+ * up permanently stood down in front of work that never happened.
+ *
+ * The cost of that split is that between two flushes running *concurrently* the claim says
+ * nothing: both read it before either records it. `acquireDrainLock` covers the drain, and
+ * the outcome flush and the heartbeat are both repeatable — but **reflect is not idempotent**,
+ * and a repeat has been observed storing a lesson restating one already held. So "is one in
+ * flight right now" has to be answered too, and it has to be answered without reintroducing
+ * the permanent stand-down: this is a lease, not a marker.
+ *
+ * A lease is taken from a dead holder immediately (`pidAlive`) and from a live one past
+ * `FLUSH_LEASE_TTL_MS`, on the same reasoning as the drain lock: a stuck lease that silences
+ * every later flush is worse than the double it exists to prevent.
+ *
+ * **Returns a lease, not null, when one cannot be recorded at all** — an unwritable or
+ * read-only `${CLAUDE_PLUGIN_DATA}` must not be able to stop the flush entirely (§4.6). That
+ * lease carries an empty `path` and releasing it is a no-op.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {string} name  e.g. `<session_id>`
+ * @returns {DrainLock|null} null when another live flush owns this session
+ */
+export function acquireFlushLease(cfg, runId, name) {
+  const open = { path: '', runId: String(runId ?? ''), pid: process.pid, ts: 0 };
+  try {
+    const safe = safeSegment(name);
+    const dir = runDir(cfg, runId);
+    if (!safe || !ensureDir(dir)) return open;
+    const lockPath = join(dir, `flush-${safe}.lock`);
+
+    const held = create(lockPath);
+    if (held) return { path: lockPath, runId: String(runId ?? ''), pid: process.pid, ts: held };
+
+    // `create` reports 0 both for "someone holds it" and for "this directory took nothing".
+    // The file itself is what tells them apart, and only the first is a reason to stand down.
+    if (!existsSync(lockPath)) return open;
+
+    const owner = readLock(lockPath);
+    const now = Date.now();
+    const expired = !owner || (now - owner.ts) >= FLUSH_LEASE_TTL_MS;
+    const orphaned = !owner || !pidAlive(owner.pid);
+    if (!expired && !orphaned) return null;
+
+    try { unlinkSync(lockPath); } catch { /* another stealer got there first */ }
+    const stolen = create(lockPath);
+    if (stolen) return { path: lockPath, runId: String(runId ?? ''), pid: process.pid, ts: stolen };
+    return existsSync(lockPath) ? null : open;
+  } catch {
+    return open;
+  }
+}
+
+/**
+ * Released in a `finally`, where the lease is legitimately the empty-path one on every path
+ * that could not record a lease at all.
+ * @param {DrainLock|null|undefined} lease
+ * @returns {void}
+ */
+export function releaseFlushLease(lease) {
+  try {
+    if (lease?.path) unlinkSync(lease.path);
   } catch {
     // Already released, or stolen out from under us past the TTL. Either way, done.
   }

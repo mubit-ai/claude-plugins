@@ -281,6 +281,50 @@ test('two SessionEnds for one session produce exactly one reflect', async (t) =>
   assert.equal(spoolFiles(dataDir, RUN_ID).length, 0);
 });
 
+// The test above resolves whichever way the machine is feeling: the second child usually
+// arrives after the first has finished and reads the claim, and on a loaded machine it
+// arrives while the first is still working and reads nothing — the claim is recorded only
+// after the work it claims. This one pins the second case, by holding the first child inside
+// its drain for as long as the second child needs to start and decide.
+//
+// It fails without `acquireFlushLease`, with two reflects and two heartbeats. That is not a
+// slow assertion: it is a second pair of LLM calls the user is billed for, and a lesson
+// restating one already stored. `reason=exit` on the heels of `reason=clear` is the ordinary
+// way a session ends this way, not an exotic one.
+test('a second SessionEnd arriving mid-flush stands down instead of reflecting again', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/ingest': { delayMs: INGEST_DELAY_MS, json: INGEST_OK },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const payload = fx.sessionEnd({ cwd: PROJECT_DIR, reason: 'clear' });
+  const first = await runHook('session-end', payload, { env: env(dataDir, server.url) });
+  const second = await runHook('session-end', { ...payload, reason: 'exit' },
+    { env: env(dataDir, server.url) });
+
+  assertHookContract(first);
+  assertHookContract(second);
+
+  // The overlap this test is built on, asserted rather than assumed: the first child is still
+  // inside its 2.5 s stalled drain, so the second child read the claim while the first had yet
+  // to record it. Two hook spawns cost ~300 ms even on a machine at load 40, so the margin
+  // here is large — a failure on this line means the stall stopped working, not that the
+  // property below regressed.
+  assert.equal(server.countOf('POST', '/v2/control/reflect'), 0,
+    `the drain is still stalled; nothing may have reflected yet: ${seq(server)}`);
+
+  await waitForStatus(dataDir, 'ok');
+  await settle(1000);
+
+  assert.equal(server.countOf('POST', '/v2/control/reflect'), 1,
+    `reflect is not idempotent — exactly one may go out; saw: ${seq(server)}`);
+  assert.equal(server.countOf('POST', '/v2/control/ingest'), 1,
+    `and the stood-down child drained nothing either; saw: ${seq(server)}`);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0);
+});
+
 // ---------------------------------------------------------------------------
 // 5. The opt-out, which is also what keeps the inline suite honest
 // ---------------------------------------------------------------------------

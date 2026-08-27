@@ -271,9 +271,19 @@ test('session-start returns inside its budget while the resume call never answer
 // 2 — the call comes from a second process
 // ===========================================================================
 
-// The claim above, stated as a mechanism rather than as a stopwatch: at the instant `runHook`
-// resolved, `/v2/control/context` had not been called; a moment later it had. A wall-clock
-// assertion alone would also pass for a hook that dialled a very fast server.
+// The claim above, stated as a mechanism rather than as a stopwatch: a wall-clock assertion
+// alone would also pass for a hook that dialled a very fast server.
+//
+// It is stated by *counting*, not by timing. The obvious phrasing — "at the instant `runHook`
+// resolved, `/v2/control/context` had not been called yet" — is a claim about what a detached
+// child has not got round to doing, and no margin can pin one: the child is a sibling process
+// racing the parent's own exit, and on a loaded machine it wins. That assertion failed in CI
+// on a plugin behaving exactly as designed.
+//
+// The counting argument says the same thing and does not care who got there first. Exactly one
+// `session-resume.mjs` was spawned; that child's briefing demonstrably landed, so it made a
+// request of its own; and the server saw exactly one request in total. A hook that dialled
+// `/context` itself would make that two.
 test('the resume request is made by a second process, after session-start has returned', async (t) => {
   const server = await fakeMubit({ 'POST /v2/control/context': { json: BRIEFING } });
   t.after(() => server.close());
@@ -283,13 +293,11 @@ test('the resume request is made by a second process, after session-start has re
   const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: e });
   assertHookContract(r);
 
-  assert.equal(server.countOf('POST', '/v2/control/context'), 0,
-    'the hook had already returned and the briefing had not been requested — anything else '
-    + 'means the user paid for it');
-
-  await waitFor(() => server.countOf('POST', '/v2/control/context') >= 1);
-  assert.equal(server.countOf('POST', '/v2/control/context'), 1,
-    'exactly one briefing per session; a second is a second pair of LLM calls');
+  // The child's own request completed: `resume.json` is written from the response body. The
+  // spy file is appended to by the child's own preload, so it is only readable from here too.
+  // A generous ceiling on purpose: this waits for success, so a long one costs nothing when
+  // the child is healthy and only buys margin on a runner that is not.
+  await waitFor(() => existsSync(resumePath(dataDir)), 10_000);
 
   const spawns = resumeSpawns(file);
   assert.equal(spawns.length, 1, 'exactly one child');
@@ -298,7 +306,9 @@ test('the resume request is made by a second process, after session-start has re
   assert.ok(spawns[0].argv.includes('--run'),
     'the child takes its identity off argv; see the run-id test below for why');
 
-  await waitFor(() => existsSync(resumePath(dataDir)));
+  assert.equal(server.countOf('POST', '/v2/control/context'), 1,
+    'one child, one briefing, one request — so `session-start` dialled nothing itself, and '
+    + 'the user paid for none of it. A second would be a second pair of LLM calls');
 });
 
 // ===========================================================================

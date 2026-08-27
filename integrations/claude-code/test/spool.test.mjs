@@ -354,6 +354,94 @@ test('acquireDrainLock: a fresh lock held by a live pid is not stolen', async ()
 });
 
 // ---------------------------------------------------------------------------
+// acquireFlushLease — the question `claimOnce` deliberately cannot answer
+// ---------------------------------------------------------------------------
+
+// `claimHeld`/`claimOnce` are split across the work they claim, so between two flushes
+// running *concurrently* both read "not claimed" and both proceed. That is fine for the
+// drain, which has its own lock, and fine for the outcome flush and the heartbeat, which
+// repeat harmlessly. It is not fine for reflect, which is not idempotent.
+test('acquireFlushLease: a live holder is respected, and the lease is reusable after release',
+  async () => {
+    const { cfg, dataDir, S } = await setup();
+    const held = S.acquireFlushLease(cfg, RUN, SESSION);
+    assert.ok(held?.path, 'the first flush takes the lease');
+    assert.ok(existsSync(join(runDir(dataDir), `flush-${SESSION}.lock`)),
+      'it lands at runs/<run_id>/flush-<session_id>.lock (§7)');
+
+    assert.equal(S.acquireFlushLease(cfg, RUN, SESSION), null,
+      'a second flush of the same session must stand down while the first is live');
+
+    S.releaseFlushLease(held);
+    assert.equal(existsSync(held.path), false, 'released in a finally, and gone');
+    assert.ok(S.acquireFlushLease(cfg, RUN, SESSION)?.path,
+      'and a later flush is not blocked by a lease that was properly given up');
+  });
+
+// One session flushing must not silence another's, exactly as with the claim marker.
+test('acquireFlushLease: leases are namespaced by session', async () => {
+  const { cfg, S } = await setup();
+  assert.ok(S.acquireFlushLease(cfg, RUN, 'session-a')?.path);
+  assert.ok(S.acquireFlushLease(cfg, RUN, 'session-b')?.path);
+});
+
+// The property that keeps this a lease and not a second `claimOnce`. A flush killed
+// mid-body — which is the whole reason the claim was split off the front of the work — must
+// not leave a lease that stands every later attempt down forever.
+test('acquireFlushLease: a lease whose owner is gone is stolen before the TTL', async () => {
+  const { cfg, dataDir, S } = await setup();
+  mkdirSync(runDir(dataDir), { recursive: true });
+  const deadPid = 2 ** 30;                    // above every pid_max in use; never alive
+  writeFileSync(join(runDir(dataDir), `flush-${SESSION}.lock`),
+    JSON.stringify({ pid: deadPid, ts: Date.now() }));
+
+  assert.ok(S.acquireFlushLease(cfg, RUN, SESSION)?.path,
+    'a killed flush must not take the session with it');
+});
+
+// ...and the backstop for the case the pid check cannot see: a recycled pid, or a holder
+// wedged inside a socket that never closes. 90 s is past the detached body's own 58 s
+// ceiling, so this never fires on a child that is merely slow.
+test('acquireFlushLease: a lease past the TTL is stolen even from a live pid', async () => {
+  const { cfg, dataDir, S } = await setup();
+  mkdirSync(runDir(dataDir), { recursive: true });
+  writeFileSync(join(runDir(dataDir), `flush-${SESSION}.lock`),
+    JSON.stringify({ pid: process.pid, ts: Date.now() - 120_000 }));
+
+  assert.ok(S.acquireFlushLease(cfg, RUN, SESSION)?.path);
+});
+
+// §4.6's direction of failure, restated for the lease: an unwritable data dir may not veto
+// the flush. `create` reports the same 0 for "someone holds it" and for "this directory took
+// nothing", so the lock file's own absence is what tells them apart.
+test('acquireFlushLease: an unwritable run dir proceeds rather than standing down', async (t) => {
+  if (process.getuid?.() === 0) {
+    return t.skip('running as root: filesystem permissions are unenforceable');
+  }
+  const { cfg, dataDir, S } = await setup();
+  S.appendItem(cfg, RUN, item({ item_id: 'x' }));      // materialise runs/<run_id>/
+
+  const dir = runDir(dataDir);
+  chmodSync(dir, 0o500);
+  t.after(() => { try { chmodSync(dir, 0o700); } catch { /* best effort */ } });
+
+  const lease = S.acquireFlushLease(cfg, RUN, SESSION);
+  assert.ok(lease, 'losing a session\'s flush is worse than reflecting twice');
+  assert.equal(lease.path, '', 'and it carries no path, so releasing it is a no-op');
+  S.releaseFlushLease(lease);
+});
+
+// A lease that cannot be attributed to a living flush is not a live flush. Same rule the
+// drain lock uses, and for the same reason.
+test('acquireFlushLease: a malformed lease is treated as orphaned', async () => {
+  const { cfg, dataDir, S } = await setup();
+  mkdirSync(runDir(dataDir), { recursive: true });
+  writeFileSync(join(runDir(dataDir), `flush-${SESSION}.lock`), 'not json');
+
+  assert.ok(S.acquireFlushLease(cfg, RUN, SESSION)?.path);
+});
+
+// ---------------------------------------------------------------------------
 // claimOnce — §4.6 "proceed on marker failure"
 // ---------------------------------------------------------------------------
 

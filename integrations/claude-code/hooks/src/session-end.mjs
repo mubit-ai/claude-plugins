@@ -22,8 +22,8 @@
  * Order is the whole design
  * ---------------------------------------------------------------------------
  * ```
- * claimOnce → drain inline → flush outcome-pending turns → reflect → heartbeat idle
- *   → marker → pruneStale
+ * claimHeld + lease → drain inline → flush outcome-pending turns → reflect → heartbeat idle
+ *   → marker → claimOnce → release → pruneStale
  * ```
  *
  * **The drain commits before reflect is even attempted.** §1.4 says a session that ends
@@ -68,12 +68,21 @@
  * `MUBIT_CC_SESSION_END_DETACH=0` runs the body here instead, for an environment that forbids
  * background processes; so does a hand-off that cannot be written. Neither drops the flush.
  *
- * `claimOnce` guards the whole thing: SessionEnd can fire more than once (a `reason=exit`
- * after a `reason=clear`, a wrapper re-running the hook), and a double flush is a double
- * reflect. It returns **true when it fails to write** — proceeding on marker failure is
- * deliberate (§4.6): losing a session's captures is worse than sending them twice, and the
- * batch carries the same `idempotency_key` whichever drainer sends it, so the double send is
- * one the server can collapse.
+ * SessionEnd can fire more than once (a `reason=exit` after a `reason=clear`, a wrapper
+ * re-running the hook), and a double flush is a double reflect. Two things stop it, because
+ * "already" and "right now" are different questions:
+ *
+ *   - `claimHeld`/`claimOnce` — has this session already been flushed. Read at the top,
+ *     recorded at the bottom, so a flush killed in between leaves nothing behind and the
+ *     next attempt picks the session up instead of standing down in front of undone work.
+ *     `claimOnce` returns **true when it fails to write** — proceeding on marker failure is
+ *     deliberate (§4.6): losing a session's captures is worse than sending them twice, and
+ *     the batch carries the same `idempotency_key` whichever drainer sends it.
+ *   - `acquireFlushLease` — is one flushing *right now*. That is exactly the question the
+ *     split above cannot answer, and it has to be answered separately because reflect is not
+ *     idempotent while everything else here repeats harmlessly. A lease rather than a second
+ *     marker, so a killed holder blocks nobody: it is taken from a dead pid at once, and from
+ *     a live one past its TTL.
  *
  * Best-effort throughout, and exit 0 always (§4.9). Anything still spooled is picked up by
  * the next session's first drain — the spool is keyed by `run_id`, not by session, so a
@@ -92,8 +101,8 @@ import { readMarker, updateMarker } from '../../lib/markers.mjs';
 import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
 import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
 import {
-  acquireDrainLock, batchIdempotencyKey, claimHeld, claimOnce, commitBatch, readBatch,
-  releaseDrainLock, spoolStats,
+  acquireDrainLock, acquireFlushLease, batchIdempotencyKey, claimHeld, claimOnce, commitBatch,
+  readBatch, releaseDrainLock, releaseFlushLease, spoolStats,
 } from '../../lib/spool.mjs';
 import {
   pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
@@ -228,73 +237,90 @@ await runHook('session-end', {
       return SUPPRESS;
     }
 
-    // §5.7 step 2 — inline, ignoring the batch-size trigger. Commits BEFORE anything below
-    // can fail: a lost reflect costs scope promotion, never the captures themselves.
-    const drained = await drainInline(cfg, {
-      runId,
-      agentId,
-      sessionId,
-      deadline: Math.min(deadline - (REFLECT_MS / 2), Date.now() + DRAIN_MS),
-    });
-
-    // §5.7 step 3 — a turn `capture --stop` left pending, attributed before reflect so the
-    // reflection sees the outcome signals it folds in.
-    const flushed = await flushOutcomes(cfg, {
-      runId, agentId, budget: () => budgetFor(OUTCOME_MS, REFLECT_MS / 2),
-    });
-
-    // §5.7 step 4 — REQUIRED (§1.4), and skipped only on the documented conditions.
-    const priorIngested = numOr(readMarker(cfg, runId).captured?.ingested, 0);
-    const pending = spoolStats(cfg, runId).count;
-    const reflect = await maybeReflect(cfg, {
-      runId,
-      budget: budgetFor(REFLECT_MS, HEARTBEAT_MS),
-      // Evidence *in flight* counts. When another drainer holds the lock this hook defers to
-      // it and reaches here before that drainer commits, so the marker's ingest count is stale
-      // by design. The spool is the only term that sees the work that is about to land.
-      anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0
-        || (drained.deferred && pending > 0),
-      // ...but a non-empty spool means the opposite when *our* drain is the one that stopped:
-      // budget spent, breaker open, or an ingest that failed. Then nobody is about to land
-      // it, and reflecting would draw conclusions from a session the server only half has.
-      undelivered: drained.failed && pending > 0,
-      pending,
-    });
-
-    // §5.7 step 5 — the agent is not gone, it is idle; re-registering it next session is
-    // noise the control plane reconciles.
-    const beatBudget = budgetFor(HEARTBEAT_MS);
-    if (beatBudget > 0) {
-      const res = await heartbeat(cfg, { run_id: runId, agent_id: agentId, status: 'idle' },
-        { timeoutMs: beatBudget });
-      if (!res.ok) log(cfg, 'info', `session-end: idle heartbeat failed (${res.state})`, { run_id: runId });
+    // ...and the other half of the same question: is a flush in flight *right now*? The claim
+    // above is recorded only after the work it claims, so between two concurrent flushes it
+    // reads false for both — and `reason=exit` arriving on the heels of `reason=clear` hands
+    // the detached children of both to the machine at once. The drain lock keeps that from
+    // being a double drain; nothing kept it from being a double reflect, which is a second
+    // pair of LLM calls and a lesson restating one already stored.
+    const lease = acquireFlushLease(cfg, runId, sessionId);
+    if (!lease) {
+      log(cfg, 'debug', 'session-end: another flush holds this session; standing down',
+        { run_id: runId, session_id: sessionId });
+      return SUPPRESS;
     }
 
-    // §5.7 step 6 — the marker is what the status line and the next session read.
-    updateMarker(cfg, runId, {
-      mode: cfg.mode,
-      captured: { pending: spoolStats(cfg, runId).count },
-      // Written unconditionally: a conditional block makes `status: ""` ambiguous between
-      // "reflect was skipped" and "this hook never reached the marker write". After this, a
-      // blank status means exactly the second — the hook was killed with its own work.
-      reflect: {
-        at: reflect.at, lessons_stored: reflect.lessons, status: reflect.status,
-        attempts: reflect.attempts,
-      },
-      ...(reflect.error ? { last_error: reflect.error.slice(0, 200) } : {}),
-    });
+    try {
+      // §5.7 step 2 — inline, ignoring the batch-size trigger. Commits BEFORE anything below
+      // can fail: a lost reflect costs scope promotion, never the captures themselves.
+      const drained = await drainInline(cfg, {
+        runId,
+        agentId,
+        sessionId,
+        deadline: Math.min(deadline - (REFLECT_MS / 2), Date.now() + DRAIN_MS),
+      });
 
-    // §5.7 step 1, second half. The work above is done, so record the claim that says so —
-    // and only now. A hook killed anywhere above this line leaves no marker, which is what
-    // lets the next SessionEnd, or a later drain, pick the session up instead of standing
-    // down in front of work that never happened.
-    claimOnce(cfg, runId, claim);
+      // §5.7 step 3 — a turn `capture --stop` left pending, attributed before reflect so the
+      // reflection sees the outcome signals it folds in.
+      const flushed = await flushOutcomes(cfg, {
+        runId, agentId, budget: () => budgetFor(OUTCOME_MS, REFLECT_MS / 2),
+      });
 
-    // §7's TTL sweep runs only from here and from `drain.mjs` — never on a blocking hook's
-    // critical path — and is itself gated to at most once an hour.
-    try { pruneStale(cfg); } catch { /* a sweep is never worth a failure */ }
+      // §5.7 step 4 — REQUIRED (§1.4), and skipped only on the documented conditions.
+      const priorIngested = numOr(readMarker(cfg, runId).captured?.ingested, 0);
+      const pending = spoolStats(cfg, runId).count;
+      const reflect = await maybeReflect(cfg, {
+        runId,
+        budget: budgetFor(REFLECT_MS, HEARTBEAT_MS),
+        // Evidence *in flight* counts. When another drainer holds the lock this hook defers to
+        // it and reaches here before that drainer commits, so the marker's ingest count is stale
+        // by design. The spool is the only term that sees the work that is about to land.
+        anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0
+          || (drained.deferred && pending > 0),
+        // ...but a non-empty spool means the opposite when *our* drain is the one that stopped:
+        // budget spent, breaker open, or an ingest that failed. Then nobody is about to land
+        // it, and reflecting would draw conclusions from a session the server only half has.
+        undelivered: drained.failed && pending > 0,
+        pending,
+      });
 
-    return SUPPRESS;
+      // §5.7 step 5 — the agent is not gone, it is idle; re-registering it next session is
+      // noise the control plane reconciles.
+      const beatBudget = budgetFor(HEARTBEAT_MS);
+      if (beatBudget > 0) {
+        const res = await heartbeat(cfg, { run_id: runId, agent_id: agentId, status: 'idle' },
+          { timeoutMs: beatBudget });
+        if (!res.ok) log(cfg, 'info', `session-end: idle heartbeat failed (${res.state})`, { run_id: runId });
+      }
+
+      // §5.7 step 6 — the marker is what the status line and the next session read.
+      updateMarker(cfg, runId, {
+        mode: cfg.mode,
+        captured: { pending: spoolStats(cfg, runId).count },
+        // Written unconditionally: a conditional block makes `status: ""` ambiguous between
+        // "reflect was skipped" and "this hook never reached the marker write". After this, a
+        // blank status means exactly the second — the hook was killed with its own work.
+        reflect: {
+          at: reflect.at, lessons_stored: reflect.lessons, status: reflect.status,
+          attempts: reflect.attempts,
+        },
+        ...(reflect.error ? { last_error: reflect.error.slice(0, 200) } : {}),
+      });
+
+      // §5.7 step 1, second half. The work above is done, so record the claim that says so —
+      // and only now. A hook killed anywhere above this line leaves no marker, which is what
+      // lets the next SessionEnd, or a later drain, pick the session up instead of standing
+      // down in front of work that never happened.
+      claimOnce(cfg, runId, claim);
+
+      // §7's TTL sweep runs only from here and from `drain.mjs` — never on a blocking hook's
+      // critical path — and is itself gated to at most once an hour.
+      try { pruneStale(cfg); } catch { /* a sweep is never worth a failure */ }
+
+      return SUPPRESS;
+    } finally {
+      releaseFlushLease(lease);
+    }
   },
 });
 

@@ -39,7 +39,40 @@ function dataDir(cfg = {}, env = process.env) {
   if (typeof host2 === "string" && host2) return host2;
   if (cfg && typeof cfg.dataDir === "string" && cfg.dataDir) return cfg.dataDir;
   const home = typeof e.HOME === "string" && e.HOME ? e.HOME : safeHome();
-  return join(home, ".claude", "plugins", "data", "mubit-memory");
+  return liveDataDir(home, e);
+}
+function liveDataDir(home, env = {}) {
+  const root = join(home, ".claude", "plugins", "data");
+  try {
+    const codexHome = typeof env.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join(home, ".codex");
+    const pinned = JSON.stringify(JSON.parse(readFileSync(join(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    if (pinned && pinned[1]) return pinned[1];
+  } catch {
+  }
+  try {
+    let best = "";
+    let bestAt = -1;
+    for (const name of readdirSync(root)) {
+      if (!name.startsWith("mubit-memory")) continue;
+      const dir = join(root, name);
+      let at = 0;
+      try {
+        for (const f of readdirSync(join(dir, "status"))) {
+          if (!f.endsWith(".json") || f === "health.json") continue;
+          at = Math.max(at, statSync(join(dir, "status", f)).mtimeMs);
+        }
+      } catch {
+      }
+      if (existsSync(join(dir, "credentials.json"))) at += 1e15;
+      if (at > bestAt) {
+        bestAt = at;
+        best = dir;
+      }
+    }
+    if (best && bestAt > 0) return best;
+  } catch {
+  }
+  return join(root, "mubit-memory");
 }
 function safeHome() {
   try {
@@ -1544,10 +1577,41 @@ function pathOf(route) {
 function withMs(res, started) {
   return { ...res, ms: Date.now() - started };
 }
+function NETWORK_HINT(err) {
+  const HINTS = {
+    ENOTFOUND: "no such host \u2014 the endpoint name does not resolve; check it for a typo",
+    EAI_AGAIN: "the DNS lookup failed \u2014 check the network, or the endpoint for a typo",
+    ECONNREFUSED: "nothing is listening there \u2014 check the port, and that the instance is running",
+    EHOSTUNREACH: "the host is unreachable from this network",
+    ENETUNREACH: "the network is unreachable",
+    ENETDOWN: "the network is down",
+    ECONNRESET: "the connection was reset in flight",
+    ETIMEDOUT: "the connection timed out",
+    UND_ERR_CONNECT_TIMEOUT: "the connection timed out",
+    UND_ERR_HEADERS_TIMEOUT: "the instance accepted the connection but sent no headers in time",
+    CERT_HAS_EXPIRED: "the instance's TLS certificate has expired",
+    DEPTH_ZERO_SELF_SIGNED_CERT: "the instance's TLS certificate is self-signed and not trusted",
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: "the instance's TLS certificate could not be verified"
+  };
+  let cur = err;
+  for (let i = 0; i < 8 && cur && typeof cur === "object"; i++) {
+    const code = typeof cur.code === "string" ? cur.code.toUpperCase() : "";
+    if (HINTS[code]) return SANDBOX_BLOCKED() || `${HINTS[code]} (${code})`;
+    cur = cur.cause;
+  }
+  return "";
+}
+function SANDBOX_BLOCKED() {
+  const env = typeof process === "object" && process ? process.env || {} : {};
+  if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
+  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+}
 function messageOf(err) {
   try {
     if (!err) return "unknown error";
     if (typeof err === "string") return err;
+    const hint = NETWORK_HINT(err);
+    if (hint) return hint;
     const parts = [];
     if (err.name) parts.push(String(err.name));
     if (err.message) parts.push(String(err.message));

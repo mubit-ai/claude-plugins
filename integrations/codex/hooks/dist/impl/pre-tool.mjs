@@ -35,7 +35,40 @@ function dataDir(cfg = {}, env = process.env) {
   if (typeof host2 === "string" && host2) return host2;
   if (cfg && typeof cfg.dataDir === "string" && cfg.dataDir) return cfg.dataDir;
   const home = typeof e.HOME === "string" && e.HOME ? e.HOME : safeHome2();
-  return join2(home, ".claude", "plugins", "data", "mubit-memory");
+  return liveDataDir(home, e);
+}
+function liveDataDir(home, env = {}) {
+  const root = join2(home, ".claude", "plugins", "data");
+  try {
+    const codexHome = typeof env.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join2(home, ".codex");
+    const pinned = JSON.stringify(JSON.parse(readFileSync(join2(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    if (pinned && pinned[1]) return pinned[1];
+  } catch {
+  }
+  try {
+    let best = "";
+    let bestAt = -1;
+    for (const name of readdirSync2(root)) {
+      if (!name.startsWith("mubit-memory")) continue;
+      const dir = join2(root, name);
+      let at = 0;
+      try {
+        for (const f of readdirSync2(join2(dir, "status"))) {
+          if (!f.endsWith(".json") || f === "health.json") continue;
+          at = Math.max(at, statSync2(join2(dir, "status", f)).mtimeMs);
+        }
+      } catch {
+      }
+      if (existsSync2(join2(dir, "credentials.json"))) at += 1e15;
+      if (at > bestAt) {
+        bestAt = at;
+        best = dir;
+      }
+    }
+    if (best && bestAt > 0) return best;
+  } catch {
+  }
+  return join2(root, "mubit-memory");
 }
 function safeHome2() {
   try {

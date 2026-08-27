@@ -3,18 +3,13 @@
 // ../claude-code/bin/dashboard.src.mjs
 import { spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync as readFileSync6, unlinkSync as unlinkSync4 } from "node:fs";
+import { readFileSync as readFileSync6, realpathSync, unlinkSync as unlinkSync4 } from "node:fs";
 import { createServer } from "node:http";
 import { join as join9, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// ../claude-code/lib/config.mjs
+// ../claude-code/lib/breaker.mjs
 import { createHash } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
-import { basename, dirname as dirname2, join as join3, resolve } from "node:path";
-
-// ../claude-code/lib/credentials.mjs
-import { existsSync as existsSync2, readFileSync as readFileSync2, unlinkSync as unlinkSync2 } from "node:fs";
 import { join as join2 } from "node:path";
 
 // ../claude-code/lib/state.mjs
@@ -46,7 +41,40 @@ function dataDir(cfg = {}, env = process.env) {
   if (typeof host2 === "string" && host2) return host2;
   if (cfg && typeof cfg.dataDir === "string" && cfg.dataDir) return cfg.dataDir;
   const home = typeof e.HOME === "string" && e.HOME ? e.HOME : safeHome();
-  return join(home, ".claude", "plugins", "data", "mubit-memory");
+  return liveDataDir(home, e);
+}
+function liveDataDir(home, env = {}) {
+  const root = join(home, ".claude", "plugins", "data");
+  try {
+    const codexHome = typeof env.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join(home, ".codex");
+    const pinned = JSON.stringify(JSON.parse(readFileSync(join(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    if (pinned && pinned[1]) return pinned[1];
+  } catch {
+  }
+  try {
+    let best = "";
+    let bestAt = -1;
+    for (const name of readdirSync(root)) {
+      if (!name.startsWith("mubit-memory")) continue;
+      const dir = join(root, name);
+      let at = 0;
+      try {
+        for (const f of readdirSync(join(dir, "status"))) {
+          if (!f.endsWith(".json") || f === "health.json") continue;
+          at = Math.max(at, statSync(join(dir, "status", f)).mtimeMs);
+        }
+      } catch {
+      }
+      if (existsSync(join(dir, "credentials.json"))) at += 1e15;
+      if (at > bestAt) {
+        bestAt = at;
+        best = dir;
+      }
+    }
+    if (best && bestAt > 0) return best;
+  } catch {
+  }
+  return join(root, "mubit-memory");
 }
 function safeHome() {
   try {
@@ -118,10 +146,261 @@ function runDir(cfg, runId) {
   return join(resolveDataDir(cfg), "runs", safeSegment(runId));
 }
 
+// ../claude-code/lib/breaker.mjs
+var CONN_STATES = (
+  /** @type {const} */
+  [
+    "ready",
+    "unreachable",
+    "server_error",
+    "auth_failed",
+    "not_responding",
+    "unconfigured"
+  ]
+);
+var TIMEOUT_ESCALATION = 3;
+var NEVER_WARMING = /* @__PURE__ */ new Set(["ready", "auth_failed", "unconfigured"]);
+var DEFAULT_THRESHOLD = 5;
+var DEFAULT_WINDOW_MS = 3e5;
+var DEFAULT_COOLDOWN_MS = 12e4;
+var UNREACHABLE_CODES = /* @__PURE__ */ new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ECONNRESET",
+  "ENETUNREACH",
+  "ENETDOWN",
+  "EHOSTDOWN",
+  "EADDRNOTAVAIL",
+  "ECONNABORTED",
+  "EAI_AGAIN",
+  "EPIPE"
+]);
+var TIMEOUT_CODES = /* @__PURE__ */ new Set([
+  "ETIMEDOUT",
+  "ESOCKETTIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT"
+]);
+var TIMEOUT_NAMES = /* @__PURE__ */ new Set(["AbortError", "TimeoutError", "HeadersTimeoutError", "BodyTimeoutError"]);
+function classifyError(err, status) {
+  try {
+    const chain = causeChain(err);
+    for (const e of chain) {
+      if (TIMEOUT_NAMES.has(nameOf(e)) || TIMEOUT_CODES.has(codeOf(e))) return "not_responding";
+    }
+    for (const e of chain) {
+      if (UNREACHABLE_CODES.has(codeOf(e))) return "unreachable";
+    }
+    const s = toStatus(status);
+    if (s !== null) {
+      if (s === 401 || s === 403) return "auth_failed";
+      if (s >= 200 && s < 300) return err ? "server_error" : "ready";
+      return "server_error";
+    }
+    if (chain.length && isFetchFailed(chain[0])) return "unreachable";
+    return "server_error";
+  } catch {
+    return "server_error";
+  }
+}
+function causeChain(e) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  let cur = e;
+  for (let i = 0; i < 8 && cur && typeof cur === "object"; i++) {
+    if (seen.has(cur)) break;
+    seen.add(cur);
+    out.push(cur);
+    cur = cur.cause;
+  }
+  return out;
+}
+function codeOf(e) {
+  const c = e && e.code;
+  return typeof c === "string" ? c.toUpperCase() : "";
+}
+function nameOf(e) {
+  const n = e && e.name;
+  return typeof n === "string" ? n : "";
+}
+function isFetchFailed(e) {
+  return typeof (e && e.message) === "string" && /fetch failed/i.test(e.message);
+}
+function toStatus(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
+  if (typeof v === "string" && /^\d+$/.test(v.trim())) return Number(v.trim());
+  return null;
+}
+function breakerPath(cfg = {}) {
+  return join2(resolveDataDir(cfg), "breaker", `${endpointHash(cfg)}.json`);
+}
+function endpointHash(cfg = {}) {
+  const endpoint = typeof cfg?.endpoint === "string" ? cfg.endpoint : "";
+  return createHash("sha256").update(endpoint).digest("hex").slice(0, 12);
+}
+function fresh() {
+  return {
+    state: "ready",
+    failures: [],
+    openedAt: 0,
+    timeoutStreak: 0,
+    lastOkAt: 0,
+    lastState: "",
+    probeAt: 0
+  };
+}
+function params(cfg) {
+  const b = cfg && typeof cfg.breaker === "object" && cfg.breaker ? cfg.breaker : {};
+  return {
+    threshold: posInt(b.threshold, DEFAULT_THRESHOLD),
+    windowMs: posInt(b.windowMs, DEFAULT_WINDOW_MS),
+    cooldownMs: posInt(b.cooldownMs, DEFAULT_COOLDOWN_MS)
+  };
+}
+function load(cfg, now, windowMs) {
+  const s = fresh();
+  try {
+    const raw = readJson(breakerPath(cfg), null);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return s;
+    if (isConnState(raw.state)) s.state = raw.state;
+    if (isConnState(raw.lastState)) s.lastState = raw.lastState;
+    if (Array.isArray(raw.failures)) {
+      s.failures = raw.failures.filter(
+        (t) => typeof t === "number" && Number.isFinite(t) && Math.abs(now - t) < windowMs
+      );
+    }
+    s.openedAt = num(raw.openedAt);
+    s.lastOkAt = num(raw.lastOkAt);
+    s.probeAt = num(raw.probeAt);
+    s.timeoutStreak = Math.max(0, Math.trunc(num(raw.timeoutStreak)));
+  } catch {
+    return fresh();
+  }
+  return s;
+}
+function save(cfg, s) {
+  writeJsonAtomic(breakerPath(cfg), {
+    state: s.state,
+    failures: s.failures,
+    openedAt: s.openedAt,
+    timeoutStreak: s.timeoutStreak,
+    lastOkAt: s.lastOkAt,
+    lastState: s.lastState,
+    probeAt: s.probeAt,
+    endpoint: typeof cfg?.endpoint === "string" ? cfg.endpoint : ""
+  });
+}
+function readBreaker(cfg, opts = {}) {
+  try {
+    const { windowMs } = params(cfg);
+    const now = Date.now();
+    const s = load(cfg ?? {}, now, windowMs);
+    const until = num(opts?.coldStartUntil);
+    const warming = until > 0 && now < until && !NEVER_WARMING.has(s.state);
+    return {
+      state: s.state,
+      failures: s.failures,
+      openedAt: s.openedAt,
+      timeoutStreak: s.timeoutStreak,
+      lastOkAt: s.lastOkAt,
+      lastState: s.lastState,
+      probeAt: s.probeAt,
+      display: warming ? "warming" : s.state,
+      suppressMessage: warming
+    };
+  } catch {
+    return { ...fresh(), display: "ready", suppressMessage: false };
+  }
+}
+function recordFailure(cfg, state) {
+  try {
+    if (state === "unconfigured") return;
+    const { threshold, windowMs } = params(cfg);
+    const now = Date.now();
+    const s = load(cfg ?? {}, now, windowMs);
+    const kind = isConnState(state) && state !== "ready" ? state : "server_error";
+    const prev = s.state;
+    s.timeoutStreak = kind === "not_responding" ? s.timeoutStreak + 1 : 0;
+    if (kind === "auth_failed") {
+      s.state = "auth_failed";
+    } else {
+      s.failures.push(now);
+      const cap = Math.max(threshold * 4, 64);
+      if (s.failures.length > cap) s.failures = s.failures.slice(-cap);
+      if (kind === "not_responding") {
+        if (s.timeoutStreak >= TIMEOUT_ESCALATION && s.state !== "auth_failed") {
+          s.state = "not_responding";
+        }
+      } else if (s.state !== "auth_failed") {
+        s.state = kind;
+      }
+    }
+    if (s.failures.length >= threshold) {
+      s.openedAt = now;
+      s.probeAt = 0;
+    }
+    s.lastState = prev;
+    save(cfg ?? {}, s);
+  } catch {
+  }
+}
+function recordSuccess(cfg) {
+  try {
+    const { windowMs } = params(cfg);
+    const now = Date.now();
+    const prev = load(cfg ?? {}, now, windowMs).state;
+    save(cfg ?? {}, {
+      state: "ready",
+      failures: [],
+      openedAt: 0,
+      timeoutStreak: 0,
+      lastOkAt: now,
+      lastState: prev,
+      probeAt: 0
+    });
+  } catch {
+  }
+}
+function allowRequest(cfg) {
+  try {
+    const { windowMs, cooldownMs } = params(cfg);
+    const now = Date.now();
+    const s = load(cfg ?? {}, now, windowMs);
+    if (!(s.openedAt > 0)) return true;
+    const since = Math.max(s.openedAt, s.probeAt);
+    if (now - since < cooldownMs) return false;
+    s.probeAt = now;
+    save(cfg ?? {}, s);
+    return true;
+  } catch {
+    return true;
+  }
+}
+function isConnState(v) {
+  return typeof v === "string" && /** @type {readonly string[]} */
+  CONN_STATES.includes(v);
+}
+function num(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+function posInt(v, d) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : d;
+}
+
+// ../claude-code/lib/config.mjs
+import { createHash as createHash2 } from "node:crypto";
+import { existsSync as existsSync3, readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
+import { basename, dirname as dirname2, join as join4, resolve } from "node:path";
+
 // ../claude-code/lib/credentials.mjs
+import { existsSync as existsSync2, readFileSync as readFileSync2, unlinkSync as unlinkSync2 } from "node:fs";
+import { join as join3 } from "node:path";
 var FILE = "credentials.json";
 function credentialsPath(dataDir2) {
-  return join2(String(dataDir2 ?? ""), FILE);
+  return join3(String(dataDir2 ?? ""), FILE);
 }
 function readCredentials(dataDir2) {
   try {
@@ -198,7 +477,7 @@ function loadConfig(env = process.env) {
   const userFileRaw = readUserFileRaw(projectDir);
   const userFile = parseUserFile(userFileRaw);
   const creds = readCredentials(dataDir2);
-  const cachePath = join3(dataDir2, CACHE_FILE);
+  const cachePath = join4(dataDir2, CACHE_FILE);
   const key = inputHash(e, userFileRaw, creds, projectDir, dataDir2);
   const cached = readCache(cachePath, key);
   if (cached) return freezeConfig({ ...cached, apiKey: resolveApiKey(e, creds, userFile) });
@@ -393,7 +672,7 @@ function inputHash(e, userFileRaw, creds, projectDir, dataDir2) {
   for (const k of names) parts.push(`${k}=${e[k]}`);
   parts.push(`file=${userFileRaw}`);
   for (const k of Object.keys(creds ?? {}).sort()) parts.push(`cred:${k}=${creds[k]}`);
-  return createHash("sha256").update(parts.join("\0")).digest("hex");
+  return createHash2("sha256").update(parts.join("\0")).digest("hex");
 }
 function readCache(p, key) {
   try {
@@ -419,7 +698,7 @@ function freezeConfig(cfg) {
 function readUserFileRaw(projectDir) {
   try {
     if (!projectDir) return "";
-    return readFileSync3(join3(projectDir, ".mubit-cc.json"), "utf8");
+    return readFileSync3(join4(projectDir, ".mubit-cc.json"), "utf8");
   } catch {
     return "";
   }
@@ -479,252 +758,6 @@ function safeCwd() {
   } catch {
     return ".";
   }
-}
-
-// ../claude-code/lib/breaker.mjs
-import { createHash as createHash2 } from "node:crypto";
-import { join as join4 } from "node:path";
-var CONN_STATES = (
-  /** @type {const} */
-  [
-    "ready",
-    "unreachable",
-    "server_error",
-    "auth_failed",
-    "not_responding",
-    "unconfigured"
-  ]
-);
-var TIMEOUT_ESCALATION = 3;
-var NEVER_WARMING = /* @__PURE__ */ new Set(["ready", "auth_failed", "unconfigured"]);
-var DEFAULT_THRESHOLD = 5;
-var DEFAULT_WINDOW_MS = 3e5;
-var DEFAULT_COOLDOWN_MS = 12e4;
-var UNREACHABLE_CODES = /* @__PURE__ */ new Set([
-  "ECONNREFUSED",
-  "ENOTFOUND",
-  "EHOSTUNREACH",
-  "ECONNRESET",
-  "ENETUNREACH",
-  "ENETDOWN",
-  "EHOSTDOWN",
-  "EADDRNOTAVAIL",
-  "ECONNABORTED",
-  "EAI_AGAIN",
-  "EPIPE"
-]);
-var TIMEOUT_CODES = /* @__PURE__ */ new Set([
-  "ETIMEDOUT",
-  "ESOCKETTIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_BODY_TIMEOUT"
-]);
-var TIMEOUT_NAMES = /* @__PURE__ */ new Set(["AbortError", "TimeoutError", "HeadersTimeoutError", "BodyTimeoutError"]);
-function classifyError(err, status) {
-  try {
-    const chain = causeChain(err);
-    for (const e of chain) {
-      if (TIMEOUT_NAMES.has(nameOf(e)) || TIMEOUT_CODES.has(codeOf(e))) return "not_responding";
-    }
-    for (const e of chain) {
-      if (UNREACHABLE_CODES.has(codeOf(e))) return "unreachable";
-    }
-    const s = toStatus(status);
-    if (s !== null) {
-      if (s === 401 || s === 403) return "auth_failed";
-      if (s >= 200 && s < 300) return err ? "server_error" : "ready";
-      return "server_error";
-    }
-    if (chain.length && isFetchFailed(chain[0])) return "unreachable";
-    return "server_error";
-  } catch {
-    return "server_error";
-  }
-}
-function causeChain(e) {
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  let cur = e;
-  for (let i = 0; i < 8 && cur && typeof cur === "object"; i++) {
-    if (seen.has(cur)) break;
-    seen.add(cur);
-    out.push(cur);
-    cur = cur.cause;
-  }
-  return out;
-}
-function codeOf(e) {
-  const c = e && e.code;
-  return typeof c === "string" ? c.toUpperCase() : "";
-}
-function nameOf(e) {
-  const n = e && e.name;
-  return typeof n === "string" ? n : "";
-}
-function isFetchFailed(e) {
-  return typeof (e && e.message) === "string" && /fetch failed/i.test(e.message);
-}
-function toStatus(v) {
-  if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
-  if (typeof v === "string" && /^\d+$/.test(v.trim())) return Number(v.trim());
-  return null;
-}
-function breakerPath(cfg = {}) {
-  return join4(resolveDataDir(cfg), "breaker", `${endpointHash(cfg)}.json`);
-}
-function endpointHash(cfg = {}) {
-  const endpoint = typeof cfg?.endpoint === "string" ? cfg.endpoint : "";
-  return createHash2("sha256").update(endpoint).digest("hex").slice(0, 12);
-}
-function fresh() {
-  return {
-    state: "ready",
-    failures: [],
-    openedAt: 0,
-    timeoutStreak: 0,
-    lastOkAt: 0,
-    lastState: "",
-    probeAt: 0
-  };
-}
-function params(cfg) {
-  const b = cfg && typeof cfg.breaker === "object" && cfg.breaker ? cfg.breaker : {};
-  return {
-    threshold: posInt(b.threshold, DEFAULT_THRESHOLD),
-    windowMs: posInt(b.windowMs, DEFAULT_WINDOW_MS),
-    cooldownMs: posInt(b.cooldownMs, DEFAULT_COOLDOWN_MS)
-  };
-}
-function load(cfg, now, windowMs) {
-  const s = fresh();
-  try {
-    const raw = readJson(breakerPath(cfg), null);
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return s;
-    if (isConnState(raw.state)) s.state = raw.state;
-    if (isConnState(raw.lastState)) s.lastState = raw.lastState;
-    if (Array.isArray(raw.failures)) {
-      s.failures = raw.failures.filter(
-        (t) => typeof t === "number" && Number.isFinite(t) && Math.abs(now - t) < windowMs
-      );
-    }
-    s.openedAt = num(raw.openedAt);
-    s.lastOkAt = num(raw.lastOkAt);
-    s.probeAt = num(raw.probeAt);
-    s.timeoutStreak = Math.max(0, Math.trunc(num(raw.timeoutStreak)));
-  } catch {
-    return fresh();
-  }
-  return s;
-}
-function save(cfg, s) {
-  writeJsonAtomic(breakerPath(cfg), {
-    state: s.state,
-    failures: s.failures,
-    openedAt: s.openedAt,
-    timeoutStreak: s.timeoutStreak,
-    lastOkAt: s.lastOkAt,
-    lastState: s.lastState,
-    probeAt: s.probeAt,
-    endpoint: typeof cfg?.endpoint === "string" ? cfg.endpoint : ""
-  });
-}
-function readBreaker(cfg, opts = {}) {
-  try {
-    const { windowMs } = params(cfg);
-    const now = Date.now();
-    const s = load(cfg ?? {}, now, windowMs);
-    const until = num(opts?.coldStartUntil);
-    const warming = until > 0 && now < until && !NEVER_WARMING.has(s.state);
-    return {
-      state: s.state,
-      failures: s.failures,
-      openedAt: s.openedAt,
-      timeoutStreak: s.timeoutStreak,
-      lastOkAt: s.lastOkAt,
-      lastState: s.lastState,
-      probeAt: s.probeAt,
-      display: warming ? "warming" : s.state,
-      suppressMessage: warming
-    };
-  } catch {
-    return { ...fresh(), display: "ready", suppressMessage: false };
-  }
-}
-function recordFailure(cfg, state) {
-  try {
-    if (state === "unconfigured") return;
-    const { threshold, windowMs } = params(cfg);
-    const now = Date.now();
-    const s = load(cfg ?? {}, now, windowMs);
-    const kind = isConnState(state) && state !== "ready" ? state : "server_error";
-    const prev = s.state;
-    s.timeoutStreak = kind === "not_responding" ? s.timeoutStreak + 1 : 0;
-    if (kind === "auth_failed") {
-      s.state = "auth_failed";
-    } else {
-      s.failures.push(now);
-      const cap = Math.max(threshold * 4, 64);
-      if (s.failures.length > cap) s.failures = s.failures.slice(-cap);
-      if (kind === "not_responding") {
-        if (s.timeoutStreak >= TIMEOUT_ESCALATION && s.state !== "auth_failed") {
-          s.state = "not_responding";
-        }
-      } else if (s.state !== "auth_failed") {
-        s.state = kind;
-      }
-    }
-    if (s.failures.length >= threshold) {
-      s.openedAt = now;
-      s.probeAt = 0;
-    }
-    s.lastState = prev;
-    save(cfg ?? {}, s);
-  } catch {
-  }
-}
-function recordSuccess(cfg) {
-  try {
-    const { windowMs } = params(cfg);
-    const now = Date.now();
-    const prev = load(cfg ?? {}, now, windowMs).state;
-    save(cfg ?? {}, {
-      state: "ready",
-      failures: [],
-      openedAt: 0,
-      timeoutStreak: 0,
-      lastOkAt: now,
-      lastState: prev,
-      probeAt: 0
-    });
-  } catch {
-  }
-}
-function allowRequest(cfg) {
-  try {
-    const { windowMs, cooldownMs } = params(cfg);
-    const now = Date.now();
-    const s = load(cfg ?? {}, now, windowMs);
-    if (!(s.openedAt > 0)) return true;
-    const since = Math.max(s.openedAt, s.probeAt);
-    if (now - since < cooldownMs) return false;
-    s.probeAt = now;
-    save(cfg ?? {}, s);
-    return true;
-  } catch {
-    return true;
-  }
-}
-function isConnState(v) {
-  return typeof v === "string" && /** @type {readonly string[]} */
-  CONN_STATES.includes(v);
-}
-function num(v) {
-  return typeof v === "number" && Number.isFinite(v) ? v : 0;
-}
-function posInt(v, d) {
-  const n = typeof v === "number" ? v : Number(v);
-  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : d;
 }
 
 // ../claude-code/lib/log.mjs
@@ -822,9 +855,9 @@ function scrub(text, count) {
 }
 function entropy(s) {
   if (s === null || s === void 0) return 0;
-  const str3 = typeof s === "string" ? s : String(s);
-  if (str3.length === 0) return 0;
-  const buf = Buffer.from(str3, "utf8");
+  const str4 = typeof s === "string" ? s : String(s);
+  if (str4.length === 0) return 0;
+  const buf = Buffer.from(str4, "utf8");
   const n = buf.length;
   if (n === 0) return 0;
   const counts = new Uint32Array(256);
@@ -1230,10 +1263,41 @@ function firstOf(...vals) {
 function withMs(res, started) {
   return { ...res, ms: Date.now() - started };
 }
+function NETWORK_HINT(err) {
+  const HINTS = {
+    ENOTFOUND: "no such host \u2014 the endpoint name does not resolve; check it for a typo",
+    EAI_AGAIN: "the DNS lookup failed \u2014 check the network, or the endpoint for a typo",
+    ECONNREFUSED: "nothing is listening there \u2014 check the port, and that the instance is running",
+    EHOSTUNREACH: "the host is unreachable from this network",
+    ENETUNREACH: "the network is unreachable",
+    ENETDOWN: "the network is down",
+    ECONNRESET: "the connection was reset in flight",
+    ETIMEDOUT: "the connection timed out",
+    UND_ERR_CONNECT_TIMEOUT: "the connection timed out",
+    UND_ERR_HEADERS_TIMEOUT: "the instance accepted the connection but sent no headers in time",
+    CERT_HAS_EXPIRED: "the instance's TLS certificate has expired",
+    DEPTH_ZERO_SELF_SIGNED_CERT: "the instance's TLS certificate is self-signed and not trusted",
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: "the instance's TLS certificate could not be verified"
+  };
+  let cur = err;
+  for (let i = 0; i < 8 && cur && typeof cur === "object"; i++) {
+    const code = typeof cur.code === "string" ? cur.code.toUpperCase() : "";
+    if (HINTS[code]) return SANDBOX_BLOCKED() || `${HINTS[code]} (${code})`;
+    cur = cur.cause;
+  }
+  return "";
+}
+function SANDBOX_BLOCKED() {
+  const env = typeof process === "object" && process ? process.env || {} : {};
+  if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
+  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+}
 function messageOf(err) {
   try {
     if (!err) return "unknown error";
     if (typeof err === "string") return err;
+    const hint = NETWORK_HINT(err);
+    if (hint) return hint;
     const parts = [];
     if (err.name) parts.push(String(err.name));
     if (err.message) parts.push(String(err.message));
@@ -1259,6 +1323,8 @@ var EXTRA_ROUTES = Object.freeze({
   deleteLesson: "/v2/control/lessons/delete",
   runs: "/v2/control/runs"
 });
+var DEFAULT_SCOPE = "run";
+var REPO_TAG = "repo:";
 var ERROR_CODES = Object.freeze([
   "unauthorized",
   "not_found",
@@ -1300,13 +1366,15 @@ function lessonId(raw) {
 }
 function normalizeLesson(raw, ctx = {}) {
   const l = raw && typeof raw === "object" ? raw : {};
-  const scope2 = String(l.scope || "");
+  const stated = String(l.scope || "");
+  const scope2 = stated || DEFAULT_SCOPE;
   const sourceRun = String(l.source_run_id || "");
   return {
     id: lessonId(l),
     content: String(l.content || ""),
     lessonType: String(l.lesson_type || ""),
     scope: scope2,
+    scopeKnown: stated !== "",
     importance: String(l.importance || ""),
     conditions: Array.isArray(l.conditions) ? l.conditions.map(String) : [],
     rationale: String(l.rationale || ""),
@@ -1316,9 +1384,55 @@ function normalizeLesson(raw, ctx = {}) {
     // "Visible outside the run that wrote it" — the filter the scope-leak view is built on.
     // Anything above `run` scope reaches other runs by design; whether that was intended is
     // the question the column exists to let a human answer.
-    leaksScope: scope2 !== "" && scope2 !== "run",
+    leaksScope: scope2 !== DEFAULT_SCOPE,
     fromOtherRun: !!(ctx.currentRun && sourceRun && sourceRun !== ctx.currentRun)
   };
+}
+function normalizeActivityLesson(entry, ctx = {}) {
+  const e = entry && typeof entry === "object" ? entry : {};
+  const meta = parseMetadata(e.metadata_json) || {};
+  const stated = str2(meta.scope) || str2(meta.lesson_scope);
+  const scope2 = stated || DEFAULT_SCOPE;
+  const sourceRun = String(meta.source_run_id || e.run_id || "");
+  const conditions = meta.conditions || meta.lesson_conditions;
+  return {
+    id: lessonId(e),
+    content: String(e.content || ""),
+    lessonType: String(meta.lesson_type || ""),
+    scope: scope2,
+    // "The server would have called this a run lesson" and "we never saw the metadata" are the
+    // same rendered word and different facts, and only the second should make a reader doubt
+    // the count beside it.
+    scopeKnown: stated !== "",
+    importance: String(meta.importance || meta.lesson_importance || ""),
+    conditions: Array.isArray(conditions) ? conditions.map(String) : [],
+    rationale: String(meta.rationale || ""),
+    sourceRunId: sourceRun,
+    source: String(e.source || ""),
+    createdAt: String(e.created_at || ""),
+    runId: String(e.run_id || ""),
+    project: projectTag(meta.env_tags),
+    leaksScope: scope2 !== DEFAULT_SCOPE,
+    fromOtherRun: !!(ctx.currentRun && sourceRun && sourceRun !== ctx.currentRun)
+  };
+}
+function projectTag(tags) {
+  if (!Array.isArray(tags)) return "";
+  const hit = tags.map(str2).find((t) => t.startsWith(REPO_TAG));
+  return hit ? hit.slice(REPO_TAG.length) : "";
+}
+function parseMetadata(raw) {
+  let v = raw;
+  for (let i = 0; i < 2; i += 1) {
+    if (v && typeof v === "object" && !Array.isArray(v)) return v;
+    if (typeof v !== "string" || !v.trim()) return null;
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  return v && typeof v === "object" && !Array.isArray(v) ? v : null;
 }
 async function fetchLessons(cfg, params2 = {}) {
   const run = str2(params2.run);
@@ -1490,6 +1604,253 @@ function str2(v) {
   return typeof v === "string" ? v.trim() : "";
 }
 function clamp(v, lo, hi, dflt) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(hi, Math.max(lo, Math.trunc(n)));
+}
+
+// ../claude-code/lib/activity.mjs
+var ACTIVITY_ROUTES = Object.freeze({
+  activity: EXTRA_ROUTES.activity,
+  export: "/v2/control/activity/export"
+});
+var EXPORT_TIMEOUT_MS = 45e3;
+var EXPORT_OPTS = Object.freeze({ record: false, timeoutMs: EXPORT_TIMEOUT_MS });
+var COMPACT_KEYS = Object.freeze(["id", "created_at", "entry_type", "run_id", "content"]);
+var COMPACT_CONTENT_CHARS = 200;
+var PAGE_MIN = 1;
+var PAGE_MAX = 500;
+var PAGE_DEFAULT = 100;
+var SCAN_MAX_ENTRIES = 5e3;
+var SCAN_MAX_PAGES = 200;
+var SCAN_BUDGET_MS = 6e4;
+var CENSUS_MAX_PAGES = 6;
+var CENSUS_PAGE_LIMIT = 500;
+var CENSUS_MAX_ENTRIES = 3e3;
+var CENSUS_BUDGET_MS = 15e3;
+var DERIVED_KEYS = Object.freeze(["derived", "promotion", "promoted", "auto_promoted"]);
+async function listActivity(cfg, params2 = {}) {
+  const p = obj(params2);
+  const run = str3(p.run);
+  if (!run && p.allRuns !== true) {
+    return fail(
+      400,
+      "bad_request",
+      "activity requires a run id; pass allRuns to list across every run this key can see"
+    );
+  }
+  const res = await fetchActivity(cfg, {
+    run,
+    limit: clamp2(p.limit, PAGE_MIN, PAGE_MAX, PAGE_DEFAULT),
+    pageToken: str3(p.pageToken),
+    sort: str3(p.sort) === "asc" ? "asc" : "desc",
+    projection: str3(p.projection) === "full" ? "full" : "compact",
+    entryTypes: Array.isArray(p.entryTypes) ? p.entryTypes : void 0,
+    excludeDerived: p.excludeDerived === true,
+    createdAfter: str3(p.createdAfter),
+    createdBefore: str3(p.createdBefore),
+    userId: str3(p.userId),
+    agentId: str3(p.agentId)
+  });
+  if (!res.ok) return res;
+  const corrected = correct(res.data.entries, {
+    excludeDerived: p.excludeDerived === true,
+    compact: str3(p.projection) !== "full"
+  });
+  return ok({
+    ...corrected,
+    nextPageToken: res.data.nextPageToken,
+    // The server's count, over the server's filtering, before paging. It over-counts by
+    // `droppedDerived` whenever the re-filter had to do work.
+    totalVisible: res.data.totalVisible
+  });
+}
+async function scanActivity(cfg, params2 = {}) {
+  const p = obj(params2);
+  const maxEntries = clamp2(p.maxEntries, 1, 1e6, SCAN_MAX_ENTRIES);
+  const maxPages = clamp2(p.maxPages, 1, 1e4, SCAN_MAX_PAGES);
+  const budgetMs = clamp2(p.budgetMs, 1, 36e5, SCAN_BUDGET_MS);
+  const started = Date.now();
+  const entries = [];
+  const seen = /* @__PURE__ */ new Set();
+  let token = str3(p.pageToken);
+  let pages = 0;
+  let totalVisible = 0;
+  let droppedDerived = 0;
+  let excludeDerivedFallbackUsed = false;
+  let projectionFallbackUsed = false;
+  let truncated = false;
+  let truncatedReason = "";
+  for (; ; ) {
+    if (seen.has(token)) {
+      truncated = true;
+      truncatedReason = "page_token_repeated";
+      break;
+    }
+    seen.add(token);
+    const page = await listActivity(cfg, { ...p, pageToken: token, sort: "asc" });
+    if (!page.ok) return page;
+    pages += 1;
+    entries.push(...page.data.entries);
+    totalVisible = page.data.totalVisible;
+    droppedDerived += page.data.droppedDerived;
+    excludeDerivedFallbackUsed = excludeDerivedFallbackUsed || page.data.excludeDerivedFallbackUsed;
+    projectionFallbackUsed = projectionFallbackUsed || page.data.projectionFallbackUsed;
+    token = page.data.nextPageToken;
+    if (!token) break;
+    if (entries.length >= maxEntries) {
+      truncated = true;
+      truncatedReason = "max_entries";
+      break;
+    }
+    if (Date.now() - started >= budgetMs) {
+      truncated = true;
+      truncatedReason = "budget";
+      break;
+    }
+    if (pages >= maxPages) {
+      truncated = true;
+      truncatedReason = "max_pages";
+      break;
+    }
+  }
+  return ok({
+    entries,
+    pages,
+    totalVisible,
+    droppedDerived,
+    excludeDerivedFallbackUsed,
+    projectionFallbackUsed,
+    truncated,
+    truncatedReason,
+    elapsedMs: Date.now() - started,
+    nextPageToken: truncated ? token : ""
+  });
+}
+async function lessonCensus(cfg, params2 = {}) {
+  const p = obj(params2);
+  const run = str3(p.run);
+  const currentRun = str3(p.currentRun);
+  const scan = await scanActivity(cfg, {
+    run,
+    allRuns: !run,
+    entryTypes: ["lesson"],
+    projection: "full",
+    limit: clamp2(p.limit, PAGE_MIN, PAGE_MAX, CENSUS_PAGE_LIMIT),
+    maxPages: clamp2(p.maxPages, 1, 1e4, CENSUS_MAX_PAGES),
+    maxEntries: clamp2(p.maxEntries, 1, 1e6, CENSUS_MAX_ENTRIES),
+    budgetMs: clamp2(p.budgetMs, 1, 36e5, CENSUS_BUDGET_MS)
+  });
+  if (!scan.ok) return scan;
+  const seen = /* @__PURE__ */ new Set();
+  const rows = [];
+  for (const entry of scan.data.entries) {
+    const row = normalizeActivityLesson(entry, { currentRun });
+    if (row.id) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+    }
+    rows.push(row);
+  }
+  const lessons = rows.map((row) => ({ row, at: Date.parse(row.createdAt) })).sort((a, b) => {
+    if (Number.isNaN(a.at)) return Number.isNaN(b.at) ? 0 : 1;
+    if (Number.isNaN(b.at)) return -1;
+    return b.at - a.at;
+  }).map((held) => held.row);
+  const scopeCounts = /* @__PURE__ */ new Map();
+  const projectCounts = /* @__PURE__ */ new Map();
+  let unknownScope = 0;
+  for (const row of lessons) {
+    if (!row.scopeKnown) unknownScope += 1;
+    scopeCounts.set(row.scope, (scopeCounts.get(row.scope) ?? 0) + 1);
+    projectCounts.set(row.project, (projectCounts.get(row.project) ?? 0) + 1);
+  }
+  return ok({
+    lessons,
+    source: "activity",
+    pages: scan.data.pages,
+    totalVisible: scan.data.totalVisible,
+    // A census that gave up is still worth rendering; a census that gave up and says it didn't
+    // turns "you have four global lessons" into a number somebody will act on.
+    truncated: scan.data.truncated,
+    truncatedReason: scan.data.truncatedReason,
+    unknownScope,
+    scopeCounts: Object.fromEntries(scopeCounts),
+    projectCounts: Object.fromEntries(projectCounts),
+    elapsedMs: scan.data.elapsedMs
+  });
+}
+function isDerived(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  for (const key of DERIVED_KEYS) {
+    if (truthy(
+      /** @type {any} */
+      entry[key]
+    )) return true;
+  }
+  const meta = parseMetadata(
+    /** @type {any} */
+    entry.metadata_json ?? /** @type {any} */
+    entry.metadata
+  );
+  if (!meta) return false;
+  for (const key of DERIVED_KEYS) {
+    if (truthy(meta[key])) return true;
+  }
+  return false;
+}
+function compactEntry(entry) {
+  const e = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
+  const content = e.content === void 0 || e.content === null ? "" : String(e.content);
+  return {
+    id: plain(e.id),
+    created_at: plain(e.created_at),
+    entry_type: plain(e.entry_type),
+    run_id: plain(e.run_id),
+    content: content.length > COMPACT_CONTENT_CHARS ? `${content.slice(0, COMPACT_CONTENT_CHARS)}...` : content
+  };
+}
+function correct(raw, o) {
+  let entries = Array.isArray(raw) ? raw : [];
+  let droppedDerived = 0;
+  if (o.excludeDerived) {
+    const kept = entries.filter((e) => !isDerived(e));
+    droppedDerived = entries.length - kept.length;
+    entries = kept;
+  }
+  let projectionFallbackUsed = false;
+  if (o.compact) {
+    projectionFallbackUsed = entries.some((e) => {
+      const c = e && typeof e === "object" ? e.content : "";
+      return typeof c === "string" && c.length > COMPACT_CONTENT_CHARS + 3;
+    });
+    entries = entries.map(compactEntry);
+  }
+  return {
+    entries,
+    droppedDerived,
+    excludeDerivedFallbackUsed: droppedDerived > 0,
+    projectionFallbackUsed
+  };
+}
+function truthy(v) {
+  if (v === true) return true;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    return s === "true" || s === "1" || s === "yes";
+  }
+  return false;
+}
+function str3(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+function plain(v) {
+  return v === void 0 || v === null ? "" : String(v);
+}
+function obj(v) {
+  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+}
+function clamp2(v, lo, hi, dflt) {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n)) return dflt;
   return Math.min(hi, Math.max(lo, Math.trunc(n)));
@@ -2245,6 +2606,90 @@ function scope(ctx, url) {
   const run = asked || (dir ? newestRun(dir) : "");
   return { dir, run, dirs };
 }
+var UNTAGGED_PROJECT = "__untagged__";
+function scopeMatches(row, want) {
+  if (!want) return true;
+  if (want === "leak") return row.leaksScope === true;
+  if (want === "unknown") return row.scopeKnown === false;
+  return row.scope === want;
+}
+function countBy(rows, key) {
+  const out = /* @__PURE__ */ new Map();
+  for (const r of rows) {
+    const k = key(r);
+    out.set(k, (out.get(k) ?? 0) + 1);
+  }
+  return Object.fromEntries(out);
+}
+async function lessonsPayload(cfg, p) {
+  const keep = (rows2) => rows2.filter((r) => scopeMatches(r, p.scope) && (!p.importance || r.importance === p.importance) && (!p.project || (p.project === UNTAGGED_PROJECT ? !r.project : r.project === p.project)));
+  let census = null;
+  if (p.source !== "lessons") {
+    census = await lessonCensus(cfg, { run: p.run, currentRun: p.currentRun, limit: p.limit });
+    if (!census.ok) {
+      if (p.source === "activity") return census;
+    } else if (census.data.lessons.length || census.data.truncated || p.source === "activity") {
+      const loaded2 = census.data.lessons;
+      const rows2 = keep(loaded2);
+      return ok({
+        lessons: rows2,
+        joined: true,
+        dated: loaded2.filter((l) => l.createdAt).length,
+        joinError: "",
+        source: "activity",
+        censusError: "",
+        loaded: loaded2.length,
+        matched: rows2.length,
+        hidden: loaded2.length - rows2.length,
+        totalVisible: census.data.totalVisible,
+        truncated: census.data.truncated,
+        truncatedReason: census.data.truncatedReason,
+        pages: census.data.pages,
+        unknownScope: census.data.unknownScope,
+        scopeCounts: census.data.scopeCounts,
+        projectCounts: census.data.projectCounts
+      });
+    }
+  }
+  const fb = await fetchLessons(cfg, { run: p.run, limit: p.limit });
+  if (!fb.ok) return fb;
+  const loaded = fb.data.lessons;
+  const rows = keep(loaded);
+  return ok({
+    lessons: rows,
+    joined: fb.data.joined,
+    dated: fb.data.dated,
+    joinError: fb.data.joinError,
+    source: "lessons",
+    // Why the page is not looking at a census. Empty when the census simply came back empty.
+    censusError: census && !census.ok ? String(census.message ?? "") : "",
+    loaded: loaded.length,
+    matched: rows.length,
+    hidden: loaded.length - rows.length,
+    // This route reports no server-side total, so the only honest number is what arrived —
+    // which `source: 'lessons'` is what tells the page.
+    totalVisible: loaded.length,
+    truncated: false,
+    truncatedReason: "",
+    pages: 1,
+    unknownScope: loaded.filter((l) => l.scopeKnown === false).length,
+    scopeCounts: countBy(loaded, (l) => String(l.scope ?? "")),
+    projectCounts: countBy(loaded, (l) => String(l.project ?? ""))
+  });
+}
+function decorateScope(entry, currentRun) {
+  if (!entry || typeof entry !== "object" || entry.entry_type !== "lesson") return entry;
+  const n = normalizeActivityLesson(entry, { currentRun });
+  return {
+    ...entry,
+    scope: n.scope,
+    scopeKnown: n.scopeKnown,
+    leaksScope: n.leaksScope,
+    project: n.project,
+    sourceRunId: n.sourceRunId,
+    fromOtherRun: n.fromOtherRun
+  };
+}
 async function getRoute(ctx, res, path, url) {
   const cfg = ctx.cfg;
   if (path === "/api/meta") {
@@ -2298,18 +2743,35 @@ async function getRoute(ctx, res, path, url) {
     return sendJson(res, 200, dir && run ? analytics(dir, run, { since }) : { dir, runId: run, series: [], points: 0 }, cfg);
   }
   if (path === "/api/lessons") {
-    return upstream(res, cfg, await fetchLessons(cfg, {
+    return upstream(res, cfg, await lessonsPayload(cfg, {
+      // An empty `run` means every run, and that is the only spelling it gets. A second
+      // `allRuns` parameter would just be a second way to pin this tab back to one run, which
+      // is the bug that made a global lesson from another run structurally invisible.
       run: String(url.searchParams.get("run") ?? ""),
+      // A rendering context, never a filter: it is what `fromOtherRun` is measured against.
+      currentRun: String(url.searchParams.get("currentRun") ?? ""),
       scope: String(url.searchParams.get("scope") ?? ""),
       importance: String(url.searchParams.get("importance") ?? ""),
-      limit: Number(url.searchParams.get("limit") ?? 100)
+      project: String(url.searchParams.get("project") ?? ""),
+      limit: Number(url.searchParams.get("limit") ?? 100),
+      source: String(url.searchParams.get("source") ?? "auto")
     }));
   }
   if (path === "/api/activity") {
-    return upstream(res, cfg, await fetchActivity(cfg, {
+    const entryTypes = String(url.searchParams.get("entryTypes") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    const r = await fetchActivity(cfg, {
       run: String(url.searchParams.get("run") ?? ""),
       limit: Number(url.searchParams.get("limit") ?? 100),
-      pageToken: String(url.searchParams.get("pageToken") ?? "")
+      pageToken: String(url.searchParams.get("pageToken") ?? ""),
+      projection: String(url.searchParams.get("projection") ?? ""),
+      sort: String(url.searchParams.get("sort") ?? ""),
+      entryTypes: entryTypes.length ? entryTypes : void 0
+    });
+    if (!r.ok) return upstream(res, cfg, r);
+    const currentRun = String(url.searchParams.get("currentRun") ?? "");
+    return upstream(res, cfg, ok({
+      ...r.data,
+      entries: r.data.entries.map((e) => decorateScope(e, currentRun))
     }));
   }
   if (path === "/api/health/remote") {
@@ -2414,6 +2876,14 @@ function defaultOpen(url) {
   child.unref();
 }
 var selfPath = fileURLToPath(import.meta.url);
+function realPath(p) {
+  try {
+    return p ? realpathSync(p) : p;
+  } catch {
+    return p;
+  }
+}
+var selfReal = realPath(selfPath);
 async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const log2 = deps.log ?? console.log;
   const cfg = deps.cfg ?? loadConfig(env);
@@ -2578,8 +3048,8 @@ function describe(url, cfg, reused) {
   lines.push("", 'Stop it with:  node "$CLAUDE_PLUGIN_ROOT/bin/dashboard.mjs" --stop');
   return lines.join("\n");
 }
-var entryPath = process.argv[1] ? resolve2(process.argv[1]) : "";
-if (entryPath === selfPath) {
+var entryPath = process.argv[1] ? realPath(resolve2(process.argv[1])) : "";
+if (entryPath === selfReal) {
   process.exitCode = await main().catch((err) => {
     console.log(`The dashboard could not start: ${err?.message ?? err}`);
     return 1;
@@ -2589,6 +3059,7 @@ export {
   IDLE_MS,
   POLL_MS,
   STATE_FILE,
+  UNTAGGED_PROJECT,
   clearState,
   main,
   mintToken,

@@ -38,7 +38,40 @@ function dataDir(cfg = {}, env = process.env) {
   if (typeof host2 === "string" && host2) return host2;
   if (cfg && typeof cfg.dataDir === "string" && cfg.dataDir) return cfg.dataDir;
   const home = typeof e.HOME === "string" && e.HOME ? e.HOME : safeHome();
-  return join(home, ".claude", "plugins", "data", "mubit-memory");
+  return liveDataDir(home, e);
+}
+function liveDataDir(home, env = {}) {
+  const root = join(home, ".claude", "plugins", "data");
+  try {
+    const codexHome = typeof env.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join(home, ".codex");
+    const pinned = JSON.stringify(JSON.parse(readFileSync(join(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    if (pinned && pinned[1]) return pinned[1];
+  } catch {
+  }
+  try {
+    let best = "";
+    let bestAt = -1;
+    for (const name of readdirSync(root)) {
+      if (!name.startsWith("mubit-memory")) continue;
+      const dir = join(root, name);
+      let at = 0;
+      try {
+        for (const f of readdirSync(join(dir, "status"))) {
+          if (!f.endsWith(".json") || f === "health.json") continue;
+          at = Math.max(at, statSync(join(dir, "status", f)).mtimeMs);
+        }
+      } catch {
+      }
+      if (existsSync(join(dir, "credentials.json"))) at += 1e15;
+      if (at > bestAt) {
+        bestAt = at;
+        best = dir;
+      }
+    }
+    if (best && bestAt > 0) return best;
+  } catch {
+  }
+  return join(root, "mubit-memory");
 }
 function safeHome() {
   try {
@@ -1225,7 +1258,7 @@ var BRIDGED = [
   ["MUBIT_CC_DATA_DIR", "CLAUDE_PLUGIN_DATA"]
 ];
 var UNEXPANDED = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
-var SERVER_VERSION = true ? "0.12.0" : "";
+var SERVER_VERSION = true ? "0.12.4" : "";
 if (prepare(process.env)) {
   await import("./server.js");
 }

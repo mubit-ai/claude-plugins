@@ -147,6 +147,32 @@ Which harness wrote an entry is recorded as its agent role — `codex` or `claud
 two are distinguishable where it matters, and count as two actors where something upstream is
 asking how well attested a lesson is.
 
+### Sharing one run, and when it stops sharing
+
+The sharing is a property of the id, not of a lookup: `per-directory` derives
+`cc-<slug>-<sha256(git root)[:8]>` from the project, so both harnesses on one checkout compute
+the same answer independently. The `cc-` prefix reads as "Claude Code" for historical reasons
+only; it means "the run for this directory", and renaming it would strand every run already
+stored under it.
+
+Two things break it, and only two. The **data directory** — covered above, and the quiet one.
+And the **path**: a second clone, or the same repo on another machine where the home directory
+has a different name, derives a different hash and therefore a different run. To pin one run
+across paths, harnesses and machines:
+
+```bash
+export MUBIT_CC_RUN_STRATEGY=static
+export MUBIT_CC_RUN_ID=team-<project>
+```
+
+Set both for both tools and re-run `setup`, which writes them into the `--env` flags on each
+registration so the hooks inherit them. `static` does not fall back: with `MUBIT_CC_RUN_ID`
+unset it raises a config error rather than quietly deriving a different run, because a run that
+is silently un-shared is indistinguishable from memory that does not work.
+
+Check which run either side is on with `mubit-memory:doctor`, or `node <root>/bin/pin.mjs list
+--json`.
+
 ---
 
 ## Skills

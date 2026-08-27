@@ -65,7 +65,7 @@ set two values in the plugin's settings (`/plugin` → Mubit Memory → configur
 
 | Setting | Value |
 | --- | --- |
-| `endpoint` | your instance URL, e.g. `https://eu.mubit.ai` |
+| `endpoint` | your instance URL, e.g. `https://api.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
 There the key is marked sensitive, so it goes to your OS keychain rather than to a file. That is
@@ -466,6 +466,31 @@ record lands in one run while everything the MCP tools write — `/mubit-memory:
 the default, has no such split: both writers derive the same id from the same directory, and
 one query returns evidence from both. Use `per-conversation` only if you actually want each
 conversation isolated and can live with that split.
+
+### Sharing one run between Codex and Claude Code
+
+The run id is already harness-independent. `per-directory` derives
+`cc-<slug>-<sha256(git root)[:8]>` from the project, not from the host, so a Codex session and
+a Claude Code session opened on the same checkout land on the same run and see each other's
+pins and lessons. The `cc-` prefix reads as "Claude Code" for historical reasons only — it
+means "the run for this directory", and renaming it would strand every run already stored under
+it. What distinguishes the two harnesses is the *agent role* recorded on each entry, `codex` or
+`claude-code`.
+
+They diverge only when the **path** diverges: a second clone, or the same repo on another
+machine where the home directory has a different name. To pin one run across paths, harnesses
+and machines:
+
+```bash
+export MUBIT_CC_RUN_STRATEGY=static
+export MUBIT_CC_RUN_ID=team-<project>
+```
+
+Set both in the same place for both tools — a shell profile, or the `--env` flags the codex
+integration's `setup` writes into its registrations — and re-run setup so the hooks inherit
+them. `static` does not fall back: with `MUBIT_CC_RUN_ID` unset it raises a config error rather
+than quietly writing into a derived run, because a run that is silently un-shared is
+indistinguishable from memory that does not work.
 
 ---
 

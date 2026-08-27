@@ -22,7 +22,7 @@
  */
 
 import test from 'node:test';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { assert, CODEX_ROOT, SHARED_ROOT, REPO_ROOT } from './helpers/codex-fixtures.mjs';
@@ -104,5 +104,40 @@ test('a source edit is actually caught by this gate', () => {
     assert.equal(differing[0].file, 'capture.mjs');
   } finally {
     build.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The publish build — what a released bundle may not carry
+// ---------------------------------------------------------------------------
+
+/**
+ * `sourcemap: 'inline'` embeds `sourcesContent`: the complete text of every module esbuild
+ * pulled in, base64'd into the bundle. For Codex that is the whole of the *sibling's* `lib/`
+ * and `hooks/src/`, because `esbuild.config.mjs` inlines them — and `package.json`'s `files`
+ * publishes neither. So a release built with the default settings ships the shared source
+ * anyway, invisible to grep and to review, inside files that are on the published list.
+ *
+ * Claude Code grew `MUBIT_CC_BUILD_NO_SOURCEMAP` at `c768465` for exactly this. The Codex
+ * config never did, which made the flag a claim that silently did nothing here — the worse
+ * failure of the two, because the release step looks like it worked.
+ */
+test('the publish build leaves no inline sourcemap in any bundle Codex ships', () => {
+  const built = rebuildInto(CODEX_ROOT, { MUBIT_CC_BUILD_NO_SOURCEMAP: '1' });
+  try {
+    assert.ok(built.ok, `the Codex build failed:\n${built.stderr}`);
+
+    const carrying = readdirSync(built.outDir, { recursive: true })
+      .map(String)
+      .filter((rel) => rel.endsWith('.mjs') || rel.endsWith('.js'))
+      .filter((rel) => !isVendoredServer(rel))
+      .filter((rel) => readFileSync(join(built.outDir, rel), 'utf8').includes('sourceMappingURL'))
+      .sort();
+
+    assert.deepEqual(carrying, [], 'MUBIT_CC_BUILD_NO_SOURCEMAP=1 was set and these bundles still '
+      + `carry an inline sourcemap:\n    ${carrying.join('\n    ')}\n`
+      + '  Each one embeds the shared lib/ and hooks/src/ that this package does not publish.');
+  } finally {
+    built.cleanup();
   }
 });

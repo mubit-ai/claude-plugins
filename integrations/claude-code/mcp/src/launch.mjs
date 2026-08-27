@@ -223,7 +223,7 @@ function runConfig(cfg) {
 }
 
 /**
- * §8.2 — `cfg.mcpTools`, or the curated ten. A user-supplied list passes through verbatim
+ * §8.2 — `cfg.mcpTools`, or the curated thirteen. A user-supplied list passes through verbatim
  * rather than being unioned with the default: "restore `mubit_handoff`" and "give me only
  * `mubit_recall`" are both legitimate, and only a verbatim list expresses the second.
  *

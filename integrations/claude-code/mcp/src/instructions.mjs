@@ -49,8 +49,9 @@
  *      preemptively", a negative with no positive beside it, and the trained behaviour was
  *      to never call a memory tool at all (`session-start.mjs`). The subagent clause is the
  *      half the steer block cannot state, because it never reaches one.
- *   2. **Which retrieval tool for which shape of question.** Four of the curated ten read
- *      from memory and the choice between them is deferred with their descriptions.
+ *   2. **Which retrieval tool for which shape of question.** Five of the curated thirteen
+ *      answer a question the model is already holding, and the choice between them is
+ *      deferred with their descriptions.
  *   3. **What `mubit_learned` is for.** Its own description says what belongs in a lesson and
  *      never what does not, and this is the mistake a model makes unprompted: narrating the
  *      session into permanent memory, whose cost is paid by every future recall.
@@ -71,7 +72,8 @@ export const INSTRUCTIONS = [
   'Which tool. mubit_recall for a topic or question in words. mubit_diagnose when a command '
     + 'or test has just failed, which matches the error shape against past failures. '
     + 'mubit_dereference when you already hold a reference_id. mubit_lessons to review what '
-    + 'has been learned rather than to ask a question.',
+    + 'has been learned rather than to ask a question. mubit_strategies for the pattern '
+    + 'across many lessons rather than any single one.',
   '',
   'What to write back. mubit_learned records one durable claim — a constraint, a fix that '
     + 'worked, a standing preference — stated so it is still true in a later session. It is '

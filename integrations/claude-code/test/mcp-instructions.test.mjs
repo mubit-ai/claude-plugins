@@ -7,7 +7,7 @@
  * go looking. So `instructions` carries the whole "when is Mubit worth reaching for" argument
  * for two populations at once:
  *
- *   - every session with tool search on, where the ten descriptions are deferred;
+ *   - every session with tool search on, where the thirteen descriptions are deferred;
  *   - every **subagent**. `hooks.json` registers `SessionStart` and `UserPromptSubmit` in the
  *     parent conversation only, so a subagent is handed no steer block and no per-turn
  *     injection. A subagent that does not search has no memory of this project at all.
@@ -52,14 +52,14 @@ const handshake = () => (_init ??= mcpDrive());
 // The shipped frame
 // ---------------------------------------------------------------------------
 
-// The headline. Without this field a model under tool search is offered ten bare tool names
+// The headline. Without this field a model under tool search is offered thirteen bare tool names
 // and no statement of when any of them is worth reaching for.
 test('initialize carries a non-empty instructions string', async () => {
   const { init, stderr } = await handshake();
 
   assert.equal(typeof init?.instructions, 'string',
     'the initialize result carried no `instructions` field, so under tool search the model '
-    + 'meets ten bare tool names with nothing saying when to use one — and a subagent, which '
+    + 'meets thirteen bare tool names with nothing saying when to use one — and a subagent, which '
     + `sees no SessionStart preamble, meets nothing at all.${REMEDY}\n  server stderr:\n${stderr || '(silent)'}`);
   assert.ok(String(init.instructions).trim().length > 0,
     `\`instructions\` was present but blank, which the host renders as no guidance.${REMEDY}`);
@@ -231,4 +231,99 @@ test('a frame the guard cannot read is never rewritten', async () => {
       `${label} did not come back by identity — a shape this guard does not understand is not `
       + 'a reason to reshape somebody else\'s frame');
   }
+});
+
+// ---------------------------------------------------------------------------
+// §8.2 — keeping the string in step with the set it describes
+// ---------------------------------------------------------------------------
+//
+// `f3534e5` promoted `mubit_strategies`, `mubit_checkpoint` and `mubit_memory_health` out of
+// the excluded eight and into the curated default. It touched twenty-three files doing it —
+// both READMEs, six skills, five test files — and not this one. So the string that is the
+// entire tool surface for a subagent went on describing the set it had replaced.
+//
+// The two tests below are the two halves of that miss: the counts it states, and the verbs it
+// names.
+
+/** The curated set, read from the module a real session resolves. */
+const CURATED = [...(await import('../lib/config.mjs')).loadConfig({}).mcpTools];
+
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
+  'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen',
+  'eighteen', 'nineteen', 'twenty'];
+
+// A prose count is a claim like any other. These two files argue for the curated set by
+// size — "thirteen of the server's twenty-one", "four of the curated ten read from memory" —
+// and a stale number there is not a typo: it is the sentence still describing the old set,
+// which is exactly the state this commit found them in.
+test('every stated size of the curated set is the size it actually is', async () => {
+  const want = NUMBER_WORDS[CURATED.length];
+  const wrong = [];
+
+  for (const rel of ['mcp/src/instructions.mjs', 'mcp/src/launch.mjs']) {
+    const src = readFileSync(join(PLUGIN_ROOT, rel), 'utf8');
+    for (const line of src.split('\n')) {
+      const m = /curated ([a-z]+)/.exec(line);
+      if (!m || !NUMBER_WORDS.includes(m[1])) continue;
+      if (m[1] !== want) wrong.push(`${rel}: "curated ${m[1]}" — ${line.trim()}`);
+    }
+  }
+
+  assert.deepEqual(wrong, [], `the curated set holds ${CURATED.length} tools (${want}), but these `
+    + `sentences still count the set they replaced:\n    ${wrong.join('\n    ')}\n`
+    + '  A promotion that leaves the prose behind is how the instructions came to describe a tool '
+    + 'set the launcher no longer ships.');
+});
+
+/**
+ * Which allowlisted verbs the "Which tool" paragraph has to name, and which it may leave to
+ * their descriptions.
+ *
+ * The split is not importance, it is whether the tool answers *a question the model is already
+ * holding*. That paragraph exists to route a question to a verb, and it is the only routing a
+ * subagent ever gets: a subagent is handed no steer block, no per-turn injection and no skills,
+ * so a retrieval verb this string never names is one it will not reach for. Under tool search
+ * the same is true of every session, because descriptions arrive only after the model has
+ * decided to go looking.
+ *
+ * Everything else is excluded here with its reason, and the reason is the point — a fourteenth
+ * tool cannot be added to the curated set without someone deciding which side of this line it
+ * falls on.
+ */
+const ANSWERS_A_QUESTION = {
+  mubit_recall: 'a topic or question stated in words',
+  mubit_diagnose: 'an error from a command that just failed',
+  mubit_dereference: 'a reference_id the model already holds',
+  mubit_lessons: 'what has been learned, rather than an answer',
+  mubit_strategies: 'the pattern across many lessons rather than any one of them',
+};
+
+const ANSWERS_NO_QUESTION = {
+  mubit_learned: 'a write — the paragraph after it is entirely about this one',
+  mubit_outcome: 'a write; named beside mubit_learned as what credits the entries that helped',
+  mubit_reflect: 'a write, and one the SessionEnd hook already performs on the model\'s behalf',
+  mubit_archive: 'a write; reached with a reference_id in hand, not with a question',
+  mubit_forget: 'a write, and a destructive one — not something to steer a model toward',
+  mubit_checkpoint: 'not a question but a moment, and the moment is the user\'s to name',
+  mubit_status: 'diagnostics — reached when memory is failing, not when it is being used',
+  mubit_memory_health: 'diagnostics, for the same reason',
+};
+
+test('the instructions name every curated verb that answers a question', async () => {
+  const { init } = await handshake();
+  const text = String(init.instructions);
+
+  assert.deepEqual(
+    [...Object.keys(ANSWERS_A_QUESTION), ...Object.keys(ANSWERS_NO_QUESTION)].sort(),
+    [...CURATED].sort(),
+    'the curated set and the two lists above have diverged. Every allowlisted tool has to sit on '
+    + 'one side of this line with a stated reason, or the next promotion repeats f3534e5.');
+
+  const missing = Object.entries(ANSWERS_A_QUESTION).filter(([t]) => !text.includes(t));
+
+  assert.deepEqual(missing.map(([t]) => t), [], 'the instructions never name '
+    + `${missing.map(([t, why]) => `${t} (${why})`).join(', ')}.\n`
+    + '  This string is the whole tool surface for a subagent and for any session under tool '
+    + 'search, so a retrieval verb it does not name is one they will not reach for.'
+    + REMEDY);
 });

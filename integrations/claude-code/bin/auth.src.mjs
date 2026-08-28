@@ -133,28 +133,41 @@ export function consoleUrlFrom(env = process.env) {
  * open, and that is not an error — printing the URL is the whole fallback, and the user
  * carries on by hand. Failing here would strand somebody who was one paste away.
  *
- * @param {{url: string, openImpl?: (url: string) => any, log?: (m: string) => void}} opts
- * @returns {boolean} whether a browser was actually launched
+ * The result is a **live object**, not a boolean, because the answer is not available when
+ * this returns. `spawn` reports ENOENT on the next tick, so reading a synchronous return
+ * value said "launched" on exactly the machines that had no browser: the URL was never
+ * printed, and the caller went on to report a timeout as "still provisioning" rather than
+ * offering the paste route. The deadline reads `.launched` minutes later, by which time the
+ * answer has settled.
+ *
+ * @param {{url: string, openImpl?: (url: string, onFailure: () => void) => any,
+ *          log?: (m: string) => void}} opts
+ * @returns {{launched: boolean}}
  */
 export function openConsole({ url, openImpl = defaultOpen, log = console.error }) {
-  let launched = false;
+  const state = { launched: false };
+  // Unconditionally. A tab that opened makes this line redundant; a tab that did not opens
+  // nothing and says nothing, and one redundant line is a much smaller cost than that.
+  log(`Open this in your browser:\n  ${url}`);
   try {
-    openImpl(url);
-    launched = true;
+    openImpl(url, () => { state.launched = false; });
+    state.launched = true;
   } catch {
-    launched = false;
+    state.launched = false;
   }
-  if (!launched) log(`Open this in your browser:\n  ${url}`);
-  return launched;
+  return state;
 }
 
-/** @param {string} url */
-function defaultOpen(url) {
+/**
+ * @param {string} url
+ * @param {() => void} onFailure called when the launch fails *after* this returns
+ */
+function defaultOpen(url, onFailure) {
   const cmd = process.platform === 'darwin' ? 'open'
     : process.platform === 'win32' ? 'start'
       : 'xdg-open';
   const child = spawn(cmd, [url], { detached: true, stdio: 'ignore', shell: process.platform === 'win32' });
-  child.on('error', () => { /* no browser here; the caller already printed the URL */ });
+  child.on('error', () => onFailure?.());
   child.unref();
 }
 
@@ -487,12 +500,13 @@ export async function runBrowserAuth(opts = {}) {
   }
   const port = addr.port;
 
-  let launched = false;
-  const timer = setTimeout(() => fail(new BrowserTimeout(launched)), timeoutMs);
+  /** @type {{launched: boolean}} */
+  let opened = { launched: false };
+  const timer = setTimeout(() => fail(new BrowserTimeout(opened.launched)), timeoutMs);
 
   try {
     const authUrl = buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region });
-    launched = openConsole({ url: authUrl, openImpl, log });
+    opened = openConsole({ url: authUrl, openImpl, log });
 
     const hit = await awaited;
     if (hit.provisioning) throw new ProvisioningPending();
@@ -626,11 +640,16 @@ export function parseArgs(argv = []) {
 /**
  * @param {string[]} argv
  * @param {Record<string, string|undefined>} env
- * @param {{fetchImpl?: typeof fetch, log?: (m: string) => void, dataDir?: string}} [deps]
+ * @param {{fetchImpl?: typeof fetch, log?: (m: string) => void,
+ *          logProgress?: (m: string) => void, dataDir?: string}} [deps]
  * @returns {Promise<number>} process exit code
  */
 export async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const log = deps.log ?? console.log;
+  // Progress goes to stderr, the verdict to stdout, so `--json` output stays parseable. The
+  // authorize URL is now printed on every run rather than only when the launch failed, and
+  // mixing it into the JSON stream would break every caller that parses it.
+  const logProgress = deps.logProgress ?? ((m) => console.error(m));
   const args = parseArgs(argv);
   const dataDir = deps.dataDir ?? resolveDataDirFrom(env, args);
   const emit = (payload) => log(args.json ? JSON.stringify(payload) : payload.detail);
@@ -669,7 +688,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
         // window per test and then sit out the full deadline.
         openImpl: deps.openImpl,
         timeoutMs: authTimeoutFrom(env, deps),
-        log: (m) => log(m),
+        log: logProgress,
       });
       const res = await authenticateWithKey({
         dataDir,

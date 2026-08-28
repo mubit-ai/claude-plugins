@@ -361,9 +361,43 @@ test('a browser that will not open is not a failure — the URL is still surface
     log: (m) => printed.push(m),
   });
 
-  assert.equal(res, false, 'it reports that it could not open one');
+  assert.equal(res.launched, false, 'it reports that it could not open one');
   assert.ok(printed.join('\n').includes('https://console.mubit.ai'),
     'over SSH there is no browser, and printing the URL is the whole fallback');
+});
+
+/**
+ * The launcher `spawn`s and reports ENOENT on the *next tick*, long after `openConsole` has
+ * returned — so a machine with no `open`/`xdg-open` looked like a successful launch. Nothing
+ * printed the URL, and the user was left with a command that sat there and then told them
+ * their workspace was still provisioning. Both halves are wrong, and both come from reading
+ * a synchronous return value for an asynchronous failure.
+ */
+test('a launch that fails asynchronously still surfaces the URL, and still reads as failed', async () => {
+  const { openConsole } = await mod('bin/auth.src.mjs');
+  const printed = [];
+
+  const res = openConsole({
+    url: 'https://console.mubit.ai',
+    // What `defaultOpen` does: returns cleanly, then reports the failure on a later tick.
+    openImpl: (_url, onFailure) => { setTimeout(onFailure, 0); },
+    log: (m) => printed.push(m),
+  });
+
+  assert.equal(res.launched, true, 'nothing has failed yet at the moment this returns');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(res.launched, false, 'and the deadline, much later, reads the settled answer');
+  assert.ok(printed.join('\n').includes('https://console.mubit.ai'));
+});
+
+test('a real launch prints the URL too, so it is always copyable', async () => {
+  const { openConsole } = await mod('bin/auth.src.mjs');
+  const printed = [];
+
+  openConsole({ url: 'https://console.mubit.ai', openImpl: () => {}, log: (m) => printed.push(m) });
+
+  assert.ok(printed.join('\n').includes('https://console.mubit.ai'),
+    'a tab that opened makes this redundant; a tab that silently did not makes it the only way out');
 });
 
 test('openConsole passes the console URL through untouched', async () => {
@@ -1065,10 +1099,35 @@ test('a machine with no browser at all still gets the paste route', async () => 
   );
 
   assert.equal(code, 1, 'over SSH there is nothing to wait for — waiting again would not help');
-  const out = JSON.parse(lines.filter((l) => l.startsWith('{')).join(''));
+  const out = JSON.parse(lines.join(''));
   assert.equal(out.state, 'browser_failed');
   assert.match(out.detail, new RegExp(KEY_ENV_VAR));
   await console_.close();
+});
+
+/**
+ * The authorize URL is printed on every run now, and `--json` callers parse the verdict. They
+ * are two streams for a reason: progress on stderr, exactly one JSON object on stdout.
+ */
+test('--json puts nothing but the verdict on the log channel', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const instance = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const console_ = await fakeConsole({ key: 'mbt_k', mubitEndpoint: instance.url });
+  const lines = [];
+  const progress = [];
+
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir: makeDataDir(), fetchImpl: fetch, timeoutMs: 5000,
+    log: (m) => lines.push(m), logProgress: (m) => progress.push(m),
+    openImpl: (url) => { console_.browse(url); },
+  });
+
+  assert.equal(code, 0, [...progress, ...lines].join('\n'));
+  assert.equal(lines.length, 1);
+  assert.doesNotThrow(() => JSON.parse(lines[0]));
+  assert.match(progress.join('\n'), /\/app\/cli-auth\?/, 'the URL is still surfaced, just not there');
+  await console_.close();
+  await instance.close();
 });
 
 

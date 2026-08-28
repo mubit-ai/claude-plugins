@@ -576,8 +576,41 @@ function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }
  */
 export function endpointFor(payload = {}) {
   const explicit = typeof payload.mubitEndpoint === 'string' ? payload.mubitEndpoint.trim() : '';
-  if (explicit) return normalizeEndpoint(explicit);
+  if (explicit && carriesCredentialsSafely(explicit)) return normalizeEndpoint(explicit);
   return DEFAULT_ENDPOINT;
+}
+
+/**
+ * Is this an endpoint an API key may be sent to?
+ *
+ * Only over TLS, or to loopback. Measured against production on 2026-08-28: the platform
+ * API's `/location` reports `MUBIT_REGIONAL_HTTP_ENDPOINT`, and the prod overlays set it to
+ * `http://api.eu.mubit.ai` and `http://api.us.mubit.ai` — plain HTTP. Storing that would put
+ * `Authorization: Bearer mbt_…` in clear text on every hook of every session. Upgrading the
+ * scheme instead would store something that cannot connect: probed directly, both hosts
+ * answer over HTTP and fail the TLS handshake outright, so there is no HTTPS listener there
+ * yet. Declining leaves the shared gateway, which serves TLS and resolves the instance from
+ * the bearer key — which is what this plugin used before the endpoint was carried at all.
+ *
+ * Nothing here needs to change when those hosts get TLS, or when the manifests are corrected
+ * to `https://`: the endpoint simply starts being accepted.
+ *
+ * Loopback is the one exception, because plaintext to 127.0.0.1 crosses no network. Local
+ * development depends on it.
+ *
+ * @param {string} raw
+ * @returns {boolean}
+ */
+function carriesCredentialsSafely(raw) {
+  let url;
+  try {
+    url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'https:') return true;
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
 }
 
 /**

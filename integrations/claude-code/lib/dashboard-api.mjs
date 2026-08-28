@@ -401,14 +401,19 @@ async function createdAtIndex(cfg, run, lessonCount) {
  * unrecallable. `exclude_derived: false` is likewise absent rather than false, so a request
  * body says only what the caller actually asked for.
  *
+ * `opts` is additive and merges over the read-only defaults. A caller on a hook's budget has
+ * to be able to name its own deadline: 20 s is right for a person typing a command and wrong
+ * for a section of a blocking hook, which would rather render nothing than wait.
+ *
  * @param {Record<string, any>} cfg
  * @param {{run?: string, limit?: number, pageToken?: string, projection?: string,
  *          entryTypes?: string[], sort?: string, excludeDerived?: boolean,
  *          createdAfter?: string, createdBefore?: string, userId?: string,
  *          agentId?: string}} [params]
+ * @param {{timeoutMs?: number, record?: boolean}} [opts]
  * @returns {Promise<Record<string, any>>}
  */
-export async function fetchActivity(cfg, params = {}) {
+export async function fetchActivity(cfg, params = {}, opts = {}) {
   const req = {
     limit: clamp(params.limit, 1, 500, 100),
     sort: params.sort === 'asc' ? 'asc' : 'desc',
@@ -427,7 +432,7 @@ export async function fetchActivity(cfg, params = {}) {
   if (str(params.userId)) req.user_id = str(params.userId);
   if (str(params.agentId)) req.agent_id = str(params.agentId);
 
-  const res = await request(cfg, 'POST', EXTRA_ROUTES.activity, req, READ_ONLY);
+  const res = await request(cfg, 'POST', EXTRA_ROUTES.activity, req, { ...READ_ONLY, ...opts });
   if (!res.ok) return mapError(cfg, res);
 
   const body = (res.body && typeof res.body === 'object') ? res.body : {};

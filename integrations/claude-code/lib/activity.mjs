@@ -256,9 +256,11 @@ export async function exportActivity(cfg, params = {}) {
  *          entryTypes?: string[], createdAfter?: string, createdBefore?: string,
  *          userId?: string, agentId?: string, excludeDerived?: boolean,
  *          projection?: string, sort?: string}} [params]
+ * @param {{timeoutMs?: number, record?: boolean}} [opts] merged over the read-only defaults,
+ *   so a caller on a hook's budget can name its own deadline
  * @returns {Promise<Record<string, any>>}
  */
-export async function listActivity(cfg, params = {}) {
+export async function listActivity(cfg, params = {}, opts = {}) {
   const p = obj(params);
   const run = str(p.run);
   if (!run && p.allRuns !== true) {
@@ -278,7 +280,7 @@ export async function listActivity(cfg, params = {}) {
     createdBefore: str(p.createdBefore),
     userId: str(p.userId),
     agentId: str(p.agentId),
-  });
+  }, opts);
   if (!res.ok) return res;
 
   const corrected = correct(res.data.entries, {

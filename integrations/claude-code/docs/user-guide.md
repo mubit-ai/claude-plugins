@@ -238,7 +238,7 @@ What happens on its own:
 
 | When | What the plugin does |
 | --- | --- |
-| Session starts | Derives a run id from your directory, registers the agent, pulls up to 5 global lessons, and tells the model memory is active |
+| Session starts | Derives a run id from your directory, registers the agent, pulls up to 5 standing (`global`) lessons, and tells the model memory is active |
 | You `cd` into another repo | Moves the session to that repo's run, and flushes what the run you left had spooled. A `cd` inside one repo changes nothing |
 | Every prompt you send | Queries memory and injects what is relevant, within a 1500 ms budget and a 1500-token cap. **Zero LLM calls** — assembly is local |
 | Every tool call | Redacts and spools it. Zero network on the hot path |
@@ -493,6 +493,37 @@ want the context back.
 
 `reflectOnEnd`, default `true`. It is the only path that promotes a lesson beyond its own run.
 Turning it off to save a few seconds at exit trades away cross-session memory entirely.
+
+### How lessons from other sessions reach you
+
+A lesson stored at `global` scope is one that has escaped the run that wrote it. There are
+three ways it can arrive, and **only the first is on at default settings** — which is worth
+knowing before you conclude that cross-session memory is not working.
+
+| Path | Default | What it costs |
+| --- | --- | --- |
+| The **session-start** standing set — up to 5, in the opening context | **on** | one request, inside the 900 ms slice of session start |
+| The **per-prompt** cross-run lane — lessons from other runs alongside this turn's recall | declines | it is the most expensive part of a recall, and at the shipped budget there is no room for it |
+| The **detached refresh** that would pay for that lane out of band | off | a second process on every prompt |
+
+The second one is `recallCrossRun`, default `auto`. `auto` reads the budget the caller already
+passed and spends the lane only where there is room; at the shipped `recallBudgetMs` of
+`1500` there is not, so it declines every time. Two ways to change that, and they are a pair:
+
+```bash
+# Fund it on the prompt path — both, or neither.
+MUBIT_CC_RECALL_BUDGET_MS=3500
+MUBIT_CC_TIMEOUT_MS=6000
+```
+
+```bash
+# Or pay for it out of band: the refresh runs after your turn and the NEXT prompt renders it.
+MUBIT_CC_RECALL_ASYNC=1
+```
+
+`recallAsync` costs one extra process per prompt and one turn of staleness. Both defaults are
+deliberate latency choices, not oversights — the session-start set is the path that carries
+standing lessons without asking you to pay for either.
 
 ### A reminder before a dangerous command — off by default
 

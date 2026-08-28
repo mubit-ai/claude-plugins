@@ -333,6 +333,37 @@ test('optionValue(): both spellings resolve into Config.apiKey', async () => {
   }
 });
 
+/**
+ * Characterization, not a wish: a *set-but-blank* key at a higher rung shadows a perfectly
+ * good `credentials.json` below it, and the plugin then reports `auth_failed` on a machine
+ * where `/mubit-memory:auth` has just succeeded.
+ *
+ * This is deliberate and stays. Both rungs test presence rather than truthiness because a
+ * blank value is an answer: `endpoint: ""` means "explicitly local, send nothing", and a CI
+ * job exporting `MUBIT_API_KEY=` is switching a developer's stored key off on purpose. Making
+ * either rung skip blanks would take that away to fix a case a user can see and clear.
+ *
+ * The cost is a support path, so it is written down rather than designed away: `skills/setup`
+ * step 1 tells the reader to check `/plugin` -> configure for an emptied field before
+ * believing anything else, and this test is why that paragraph exists.
+ */
+test('a set-but-blank key at a higher rung deliberately shadows a stored one', async () => {
+  const config = await lib('config.mjs');
+  const projectDir = makeProjectDir();
+  const key = 'mbt_stored_by_auth_0123456789abcdef';
+
+  for (const shadow of [{ CLAUDE_PLUGIN_OPTION_APIKEY: '' }, { MUBIT_API_KEY: '' }]) {
+    const dataDir = makeDataDir();
+    writeFileSync(join(dataDir, 'credentials.json'),
+      JSON.stringify({ endpoint: 'https://api.mubit.ai', apiKey: key }));
+
+    assert.equal(load(config, envOf(dataDir, projectDir, {})).apiKey, key,
+      'the control: with nothing above it, the stored key is used');
+    assert.equal(load(config, envOf(dataDir, projectDir, shadow)).apiKey, '',
+      `${Object.keys(shadow)[0]}='' is a value, not an absence — it wins`);
+  }
+});
+
 // ===========================================================================
 // §4.1 connection mode
 // ===========================================================================

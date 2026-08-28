@@ -38,7 +38,7 @@ import { fileURLToPath } from 'node:url';
 import {
   clearCredentials, credentialsPath, readCredentials, writeCredentials,
 } from '../lib/credentials.mjs';
-import { liveDataDir } from '../lib/state.mjs';
+import { liveDataDir, safeHome } from '../lib/state.mjs';
 
 /** Where keys are issued. `MUBIT_CONSOLE_URL` overrides it for staging. */
 export const CONSOLE_URL = 'https://console.mubit.ai';
@@ -48,6 +48,9 @@ export const DEFAULT_ENDPOINT = 'https://api.mubit.ai';
 
 /** Mubit API keys are `mbt_`-prefixed. */
 export const KEY_PREFIX = 'mbt_';
+
+/** What this plugin calls itself to the console. See `buildAuthUrl`. */
+export const CLIENT_ID = 'claude-code';
 
 /** The authenticated probe: a read, no side effects, and no LLM call. */
 export const PROBE_ROUTE = '/v2/control/lessons';
@@ -480,9 +483,18 @@ export async function runBrowserAuth(opts = {}) {
   }
 }
 
-/** @returns {string} */
+/**
+ * `/app/cli-auth` serves more than one CLI, and until this parameter existed it could not
+ * tell which one it was talking to — so its copy had to stay neutral about the command the
+ * user should run and the product it belongs to. `client` is additive on purpose: every
+ * already-installed copy of this plugin will keep omitting it, so the console's neutral
+ * wording is the fallback and not a legacy branch.
+ *
+ * @returns {string}
+ */
 function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }) {
   const url = new URL(`${consoleUrl}/app/cli-auth`);
+  url.searchParams.set('client', CLIENT_ID);
   url.searchParams.set('port', String(port));
   url.searchParams.set('state', state);
   url.searchParams.set('challenge', challenge);
@@ -561,6 +573,7 @@ export function parseArgs(argv = []) {
   return {
     mode: has('--status') ? 'status' : has('--logout') ? 'logout' : has('--paste') ? 'paste' : 'browser',
     endpoint: valueOf('--endpoint'),
+    dataDir: valueOf('--data-dir'),
     json: has('--json'),
   };
 }
@@ -573,8 +586,8 @@ export function parseArgs(argv = []) {
  */
 export async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const log = deps.log ?? console.log;
-  const dataDir = deps.dataDir ?? resolveDataDirFrom(env);
   const args = parseArgs(argv);
+  const dataDir = deps.dataDir ?? resolveDataDirFrom(env, args);
   const emit = (payload) => log(args.json ? JSON.stringify(payload) : payload.detail);
 
   if (args.mode === 'status') {
@@ -638,7 +651,8 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
         state: 'browser_failed',
         detail: `${err?.message ?? err}\n`
           + `You can finish by hand instead: issue a key at ${consoleUrlFrom(env)}, then run\n`
-          + `  ${KEY_ENV_VAR}=mbt_… node "${'${CLAUDE_PLUGIN_ROOT}'}/bin/auth.mjs" --paste`,
+          + `  ${KEY_ENV_VAR}=mbt_… node "${'${CLAUDE_PLUGIN_ROOT}'}/bin/auth.mjs"`
+          + ` --data-dir "${dataDir}" --paste`,
       });
       return 1;
     }
@@ -676,18 +690,33 @@ function authTimeoutFrom(env = {}, deps = {}) {
 }
 
 /**
- * Mirrors `lib/state.mjs` `dataDir()`, minus its `cfg` rung — this command has no resolved
- * config, and asking for one before the user is signed in is the wrong way round.
+ * Where the credentials go, and the only decision in this file that can make a *successful*
+ * sign-in look like nothing happened.
  *
- * The final fallback is `liveDataDir()` itself rather than a fourth hand-copy of it: nothing
- * pins `MUBIT_CC_DATA_DIR` into a command the user typed, and looking in the bare directory
- * left `--status` reporting no credentials on a machine that had them.
+ * Mirrors `lib/state.mjs` `dataDir()`, minus its `cfg` rung — this command has no resolved
+ * config, and asking for one before the user is signed in is the wrong way round — plus one
+ * rung above it:
+ *
+ *   1. **`--data-dir`.** `${CLAUDE_PLUGIN_DATA}` is interpolated by the host into a skill's
+ *      body text, so `skills/auth/SKILL.md` can pass the exact answer down. This rung exists
+ *      because the two environment rungs below it are *empty* on the path that matters: the
+ *      skill runs this command through Bash, and a Bash tool call gets
+ *      `CLAUDE_PLUGIN_DATA=""` and `CLAUDE_PLUGIN_ROOT=""`. Measured, not assumed.
+ *   2. `MUBIT_CC_DATA_DIR`, then `CLAUDE_PLUGIN_DATA`, for a process the host launched.
+ *   3. `liveDataDir()` itself rather than a fourth hand-copy of it. Looking in the bare
+ *      directory left `--status` reporting no credentials on a machine that had them.
+ *
+ * A blank `--data-dir`, or one the host never substituted, is dropped rather than used: a
+ * literal `${CLAUDE_PLUGIN_DATA}` taken as a path would create a directory of that name under
+ * whatever the session's cwd happened to be, write the key into it, and report success.
  */
-function resolveDataDirFrom(env = process.env) {
+function resolveDataDirFrom(env = process.env, args = {}) {
   const e = env ?? {};
+  const flag = typeof args?.dataDir === 'string' ? args.dataDir.trim() : '';
+  if (flag && !/^\$\{/.test(flag)) return flag;
   if (e.MUBIT_CC_DATA_DIR) return e.MUBIT_CC_DATA_DIR;
   if (e.CLAUDE_PLUGIN_DATA) return e.CLAUDE_PLUGIN_DATA;
-  return liveDataDir(e.HOME || '.', e);
+  return liveDataDir(e.HOME || safeHome(), e);
 }
 
 // ---------------------------------------------------------------------------

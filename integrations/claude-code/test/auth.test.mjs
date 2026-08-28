@@ -24,9 +24,10 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { statSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
-import { fakeMubit, lib, makeDataDir, mod } from './helpers/harness.mjs';
+import { fakeMubit, lib, makeDataDir, mod, tempDir } from './helpers/harness.mjs';
 
 const IS_ROOT = process.getuid?.() === 0;
 const KEY = 'mbt_a_realistic_looking_test_key';
@@ -751,6 +752,29 @@ test('the auth URL carries the context the console needs to provision', async ()
   await console_.close();
 });
 
+/**
+ * `/app/cli-auth` is shared: the Minima harness drives the same page with the same
+ * parameters, and neither client sent a name until this. So the console cannot brand its
+ * copy for Claude Code unless it is told, and `client` is how it is told.
+ *
+ * Purely additive. The console's neutral wording has to stay for every already-installed
+ * copy of this plugin, which will keep omitting the parameter forever.
+ */
+test('the auth URL names this client, so the console can address it by name', async () => {
+  const { runBrowserAuth } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole();
+  let authUrl = '';
+
+  await runBrowserAuth({
+    consoleUrl: console_.url,
+    openImpl: (url) => { authUrl = url; console_.browse(url); },
+    timeoutMs: 5000,
+  });
+
+  assert.equal(new URL(authUrl).searchParams.get('client'), 'claude-code');
+  await console_.close();
+});
+
 test('the loopback port is released once the flow ends', async () => {
   const { runBrowserAuth } = await mod('bin/auth.src.mjs');
   const { createServer } = await import('node:http');
@@ -864,4 +888,152 @@ test('main() falls back to the paste route when the browser flow cannot finish',
   assert.match(out.detail, new RegExp(KEY_ENV_VAR),
     'a dead end is not an answer — the manual route must be in the same message');
   await console_.close();
+});
+
+// ===========================================================================
+// Which directory the credentials land in
+// ===========================================================================
+
+/**
+ * This is the rung nothing used to cover.
+ *
+ * Every other test in this file injects `deps.dataDir`, so `resolveDataDirFrom()` — the code
+ * that runs on the only path a user ever takes — had zero coverage. It matters more than the
+ * rest put together: a sign-in that stores a good key in a directory no hook reads is
+ * indistinguishable, from the user's side, from a sign-in that failed.
+ *
+ * The skill invokes this command through Bash, and a Bash tool call gets
+ * `CLAUDE_PLUGIN_DATA=""` — measured, not assumed. So the environment rung is not available
+ * where it is needed and the answer has to be passed in as `--data-dir`, interpolated by the
+ * host into the skill body.
+ */
+
+/** A `$HOME` with the named `mubit-memory*` directories, and credentials in some of them. */
+function homeWithDataDirs(dirs = {}) {
+  const home = tempDir('mubit-auth-home-');
+  const root = join(home, '.claude', 'plugins', 'data');
+  for (const [name, spec] of Object.entries(dirs)) {
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    if (spec.endpoint) {
+      writeFileSync(join(dir, 'credentials.json'),
+        JSON.stringify({ endpoint: spec.endpoint, apiKey: KEY }));
+    }
+  }
+  return { home, root };
+}
+
+/**
+ * `--status` reads the resolved directory and reports its endpoint, so it is a
+ * network-free probe for "which directory did the resolver choose?".
+ * @returns {Promise<string>}
+ */
+async function resolvedEndpoint(argv, env) {
+  const { main } = await mod('bin/auth.src.mjs');
+  const lines = [];
+  await main([...argv, '--status', '--json'], env, { log: (m) => lines.push(m) });
+  return JSON.parse(lines.join('')).endpoint;
+}
+
+test('the data directory resolver walks every rung, in order', async () => {
+  const { home, root } = homeWithDataDirs({
+    'mubit-memory': {},
+    'mubit-memory-mubit': { endpoint: 'https://found-by-search.example' },
+  });
+  const pinned = makeDataDir();
+  writeFileSync(join(pinned, 'credentials.json'),
+    JSON.stringify({ endpoint: 'https://pinned.example', apiKey: KEY }));
+  const fromHost = makeDataDir();
+  writeFileSync(join(fromHost, 'credentials.json'),
+    JSON.stringify({ endpoint: 'https://from-host.example', apiKey: KEY }));
+  const fromFlag = makeDataDir();
+  writeFileSync(join(fromFlag, 'credentials.json'),
+    JSON.stringify({ endpoint: 'https://from-flag.example', apiKey: KEY }));
+
+  /** @type {Array<{name: string, argv: string[], env: Record<string,string>, want: string}>} */
+  const table = [
+    {
+      name: '--data-dir outranks everything: it is what the host interpolated into the skill',
+      argv: ['--data-dir', fromFlag],
+      env: { HOME: home, MUBIT_CC_DATA_DIR: pinned, CLAUDE_PLUGIN_DATA: fromHost },
+      want: 'https://from-flag.example',
+    },
+    {
+      name: 'MUBIT_CC_DATA_DIR next — setup recorded it, so it is not a guess',
+      argv: [],
+      env: { HOME: home, MUBIT_CC_DATA_DIR: pinned, CLAUDE_PLUGIN_DATA: fromHost },
+      want: 'https://pinned.example',
+    },
+    {
+      name: 'CLAUDE_PLUGIN_DATA next, for the processes the host does launch itself',
+      argv: [],
+      env: { HOME: home, CLAUDE_PLUGIN_DATA: fromHost },
+      want: 'https://from-host.example',
+    },
+    {
+      name: 'the search last, and it finds the suffixed directory the hooks use',
+      argv: [],
+      env: { HOME: home },
+      want: 'https://found-by-search.example',
+    },
+  ];
+
+  for (const row of table) {
+    assert.equal(await resolvedEndpoint(row.argv, row.env), row.want, row.name);
+  }
+  assert.ok(root);
+});
+
+test('an empty or uninterpolated --data-dir is ignored, not used as a path', async () => {
+  const { home } = homeWithDataDirs({
+    'mubit-memory-mubit': { endpoint: 'https://found-by-search.example' },
+  });
+
+  // A host that does not know the variable leaves the placeholder in the argument verbatim.
+  // Taking it literally would create `./${CLAUDE_PLUGIN_DATA}/credentials.json` under
+  // whatever directory the session happened to be in, and report success.
+  for (const bad of ['', '${CLAUDE_PLUGIN_DATA}', '${MUBIT_CC_DATA_DIR}']) {
+    assert.equal(
+      await resolvedEndpoint(['--data-dir', bad], { HOME: home }),
+      'https://found-by-search.example',
+      `--data-dir ${JSON.stringify(bad)} must fall through to the next rung`,
+    );
+  }
+});
+
+test('parseArgs exposes --data-dir', async () => {
+  const { parseArgs } = await mod('bin/auth.src.mjs');
+  assert.equal(parseArgs(['--data-dir', '/somewhere']).dataDir, '/somewhere');
+  assert.equal(parseArgs([]).dataDir, undefined);
+});
+
+/**
+ * The acceptance criterion for the whole fix, stated where a reader will find it: a
+ * first-ever sign-in, in the environment a Bash tool call actually has, writes exactly one
+ * `credentials.json`, and it is in the directory the host points its hooks at.
+ */
+test('a first-ever sign-in writes to the suffixed directory and never creates the bare one', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const server = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const console_ = await fakeConsole({ key: 'mbt_first_ever_signin' });
+  const { home, root } = homeWithDataDirs({ 'mubit-memory': {}, 'mubit-memory-mubit': {} });
+  const lines = [];
+
+  const code = await main(
+    ['--endpoint', server.url, '--json'],
+    // Exactly what a Bash tool call gets: no CLAUDE_PLUGIN_DATA, no MUBIT_CC_DATA_DIR.
+    { HOME: home, MUBIT_CONSOLE_URL: console_.url },
+    {
+      fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 5000,
+      openImpl: (url) => { console_.browse(url); },
+    },
+  );
+
+  assert.equal(code, 0, lines.join('\n'));
+  assert.ok(existsSync(join(root, 'mubit-memory-mubit', 'credentials.json')),
+    'the key must land where the hooks read');
+  assert.equal(existsSync(join(root, 'mubit-memory', 'credentials.json')), false,
+    'the bare name is not a directory any host hands a hook');
+  await console_.close();
+  await server.close();
 });

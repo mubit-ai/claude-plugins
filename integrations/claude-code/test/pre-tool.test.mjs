@@ -588,13 +588,26 @@ test('rules.mjs never throws on an unwritable data dir', async () => {
 // round trip. If neither producer writes, the hook is correct and permanently silent — which
 // is the failure mode that looks exactly like "it works, nothing matched".
 test('session-start writes the rules it already fetched into rules.json', async (t) => {
+  // The feed's shape, not the lessons route's: `lesson_type` lives inside `metadata_json`
+  // here, and mapping it back out is exactly what keeps this store fed.
+  const feedLesson = (id, content, type) => ({
+    id,
+    created_at: '2026-02-02T00:00:00Z',
+    entry_type: 'lesson',
+    run_id: 'cc-some-other-run',
+    content,
+    source: 'reflection:cc-some-other-run',
+    metadata_json: JSON.stringify({ scope: 'global', lesson_type: type, importance: 'high' }),
+  });
   const server = await fakeMubit({
-    'POST /v2/control/lessons': {
+    'POST /v2/control/activity': {
       json: {
-        lessons: [
-          { lesson_id: 'les_rule', content: FORCE_PUSH_RULE, lesson_type: 'rule', scope: 'global', importance: 'high' },
-          { lesson_id: 'les_lesson', content: MIGRATION_RULE, lesson_type: 'failure', scope: 'global', importance: 'high' },
+        entries: [
+          feedLesson('les_rule', FORCE_PUSH_RULE, 'rule'),
+          feedLesson('les_lesson', MIGRATION_RULE, 'failure'),
         ],
+        next_page_token: '',
+        total_visible: 2,
       },
     },
   });
@@ -607,7 +620,7 @@ test('session-start writes the rules it already fetched into rules.json', async 
   assertHookContract(r);
 
   assert.ok(existsSync(rulesPath(dataDir)),
-    'session-start fetched global lessons and did not record the rules among them. The '
+    'session-start fetched the standing lessons and did not record the rules among them. The '
     + 'PreToolUse hook has no other way to learn about them: it may not dial.');
   const stored = readJsonFile(rulesPath(dataDir));
   assert.deepEqual((stored.rules ?? []).map((x) => x.ref), ['les_rule'],

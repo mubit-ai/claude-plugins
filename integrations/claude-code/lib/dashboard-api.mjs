@@ -223,6 +223,18 @@ export function normalizeLesson(raw, ctx = {}) {
  * matching the server's own default, rather than an empty string belonging to neither side of
  * the leak filter.
  *
+ * ## The promotion keys
+ *
+ * Three fields are carried through untouched rather than coerced: whatever an instance stamps
+ * about whether a lesson is travelling is the answer, and rewriting it into this module's own
+ * vocabulary would put an interpretation between a reader and the only evidence there is.
+ *
+ * `promotionStamped` is separate from the values because an absent key and a key set to
+ * `false` are different answers. "Nothing was stamped" is a question about the instance;
+ * "stamped, and the answer is no" is a question about the lesson. Collapsing them into one
+ * `false` is how a measurement turns into a wrong conclusion — so the values are `null` when
+ * absent, never `false`.
+ *
  * @param {Record<string, any>} entry an `ActivityEntry`
  * @param {{currentRun?: string}} [ctx]
  * @returns {Record<string, any>}
@@ -255,8 +267,17 @@ export function normalizeActivityLesson(entry, ctx = {}) {
     project: projectTag(meta.env_tags),
     leaksScope: scope !== DEFAULT_SCOPE,
     fromOtherRun: !!(ctx.currentRun && sourceRun && sourceRun !== ctx.currentRun),
+    promotionStamped: PROMOTION_KEYS.some((k) => meta[k] !== undefined),
+    promotionCandidate: meta.promotion_candidate ?? null,
+    promotionQuarantined: meta.promotion_quarantined ?? null,
+    promotionShadowStats: meta.promotion_shadow_stats ?? null,
   };
 }
+
+/** The three keys `promotionStamped` looks for. Named once, so the check cannot drift. */
+const PROMOTION_KEYS = Object.freeze([
+  'promotion_candidate', 'promotion_quarantined', 'promotion_shadow_stats',
+]);
 
 /**
  * The project a lesson belongs to, or nothing at all.

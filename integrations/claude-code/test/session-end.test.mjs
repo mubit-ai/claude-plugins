@@ -607,6 +607,36 @@ test('skips reflect when nothing was ingested this session', async (t) => {
   server.assertCalled('POST', '/v2/control/agents/heartbeat', 1);
 });
 
+/**
+ * The hook spool is not the only way work reaches the server. An MCP write goes out of the
+ * MCP server's own process and never touches the spool or the capture path — so a session
+ * whose whole memory contribution was `mubit_learned` used to reach here looking empty,
+ * skip reflect, and take the one call authorised to widen a lesson with it.
+ *
+ * The guard on that write path records what it sent into the same run marker this hook
+ * already reads, which is what puts an MCP write on the same road to reflect that a hook
+ * capture has always been on.
+ */
+test('reflects a session whose only ingest went through the MCP server', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir(); // empty spool, no pending turns
+
+  // What the MCP egress guard leaves behind after an accepted write.
+  mkdirSync(join(dataDir, 'status'), { recursive: true });
+  writeFileSync(join(dataDir, 'status', `${RUN_ID}.json`), JSON.stringify({
+    run_id: RUN_ID, mcp: { ingested: 1, at: Date.now() },
+  }));
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  assertHookContract(r);
+  server.assertNotCalled('POST', '/v2/control/ingest');
+  server.assertCalled('POST', '/v2/control/reflect', 1);
+  assert.equal(readMarker(dataDir).reflect.status, 'ok');
+});
+
 // ---------------------------------------------------------------------------
 // Idempotence and durability
 // ---------------------------------------------------------------------------

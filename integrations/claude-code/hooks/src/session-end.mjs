@@ -267,7 +267,13 @@ await runHook('session-end', {
       });
 
       // §5.7 step 4 — REQUIRED (§1.4), and skipped only on the documented conditions.
-      const priorIngested = numOr(readMarker(cfg, runId).captured?.ingested, 0);
+      const marker = readMarker(cfg, runId);
+      const priorIngested = numOr(marker.captured?.ingested, 0);
+      // The MCP server's writes, which no term above can see: they leave a different process
+      // and touch neither the spool nor the capture path. Without this, a session whose whole
+      // memory contribution was `mubit_learned` reached here looking empty and skipped the
+      // one call that can widen a lesson past the run it was written in.
+      const mcpIngested = numOr(marker.mcp?.ingested, 0);
       const pending = spoolStats(cfg, runId).count;
       const reflect = await maybeReflect(cfg, {
         runId,
@@ -276,7 +282,7 @@ await runHook('session-end', {
         // it and reaches here before that drainer commits, so the marker's ingest count is stale
         // by design. The spool is the only term that sees the work that is about to land.
         anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0
-          || (drained.deferred && pending > 0),
+          || mcpIngested > 0 || (drained.deferred && pending > 0),
         // ...but a non-empty spool means the opposite when *our* drain is the one that stopped:
         // budget spent, breaker open, or an ingest that failed. Then nobody is about to land
         // it, and reflecting would draw conclusions from a session the server only half has.

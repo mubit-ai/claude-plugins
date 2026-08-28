@@ -582,8 +582,8 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
       res.end(JSON.stringify({
         mubitApiKey: key,
         mubitEndpoint,
-        minimaUrl: 'https://api.minima.sh',
-        instanceId: 'mnm-abcdef123456',
+        minimaUrl: 'https://harness.example.invalid',
+        instanceId: 'instance-under-test',
         projectId: 'proj_1',
         namespace: 'proj_1',
         region: 'eu',
@@ -802,7 +802,7 @@ test('the auth URL carries the context the console needs to provision', async ()
 });
 
 /**
- * `/app/cli-auth` is shared: the Minima harness drives the same page with the same
+ * `/app/cli-auth` is shared: a second CLI client drives the same page with the same
  * parameters, and neither client sent a name until this. So the console cannot brand its
  * copy for Claude Code unless it is told, and `client` is how it is told.
  *

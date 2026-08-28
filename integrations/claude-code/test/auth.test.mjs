@@ -850,20 +850,19 @@ test('the loopback port is released once the flow ends', async () => {
 // Mapping the console's answer onto the plugin's two settings
 // ---------------------------------------------------------------------------
 
-test('endpointFor trusts an explicit endpoint, and never invents a host from a region', async () => {
-  const { endpointFor, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+test('the candidates never invent a host from a region', async () => {
+  const { endpointCandidatesFor, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
 
   // eu.mubit.ai and us.mubit.ai are NXDOMAIN. Mapping a region onto one of them stored an
   // endpoint that could never answer, and the failure surfaced far from the sign-in.
   for (const region of ['eu', 'us', 'EU', 'moon']) {
-    assert.equal(endpointFor({ region }), DEFAULT_ENDPOINT,
+    assert.deepEqual(endpointCandidatesFor({ region }), [DEFAULT_ENDPOINT],
       `region ${region} is a console routing hint, not a hostname this side may invent`);
   }
-  assert.equal(endpointFor({}), DEFAULT_ENDPOINT, 'no region means the default, not an error');
-  assert.equal(DEFAULT_ENDPOINT, 'https://api.mubit.ai', 'the only host that resolves');
-  assert.equal(endpointFor({ mubitEndpoint: 'https://custom.example.com' }),
-    'https://custom.example.com', 'an explicit endpoint from the console always wins');
-  assert.equal(endpointFor({ mubitEndpoint: 'https://custom.example.com', region: 'eu' }),
+  assert.equal(DEFAULT_ENDPOINT, 'https://api.mubit.ai', 'the only prod host that serves TLS');
+  assert.equal(endpointCandidatesFor({ mubitEndpoint: 'https://custom.example.com' })[0],
+    'https://custom.example.com', 'an explicit endpoint from the console is tried first');
+  assert.equal(endpointCandidatesFor({ mubitEndpoint: 'https://custom.example.com', region: 'eu' })[0],
     'https://custom.example.com', 'an explicit endpoint outranks a region');
 });
 
@@ -929,53 +928,154 @@ test('an older console that sends no endpoint still gets a working default', asy
 });
 
 /**
- * The console may name an endpoint this side must not store.
+ * The console may name an endpoint this side must not send a key to — and the answer is
+ * not to throw the whole answer away.
  *
- * Measured against production on 2026-08-28: the platform API's `/location` route reports
- * `MUBIT_REGIONAL_HTTP_ENDPOINT`, and the prod overlays set that to **`http://api.eu.mubit.ai`
- * / `http://api.us.mubit.ai`** — plain HTTP. Probed directly, those two hosts answer 401 over
- * HTTP and fail the TLS handshake outright over HTTPS, so there is no TLS listener there at
- * all. `api.mubit.ai` answers 401 over HTTPS.
+ * Measured on 2026-08-28, in two clusters, and they disagree in a way that decides this:
  *
- * Storing what the console said would put `Authorization: Bearer mbt_…` on the wire in clear
- * text on every hook of every session. Upgrading the scheme instead would store an endpoint
- * that cannot connect. So a plaintext endpoint is *declined*, and the fallback — the shared
- * gateway, which serves TLS and routes by bearer key — is what the plugin already used before
- * any of this. The regional endpoints start being used the moment they serve HTTPS; nothing
- * here needs to change for that.
+ *   api.eu.dev.mubit.ai   https -> 401   http -> 308 to https
+ *   api.eu.mubit.ai       https -> TLS handshake fails   http -> 401
+ *   api.mubit.ai          https -> 401
  *
- * `normalizeEndpoint` has said the same thing about user input since it was written:
- * "silently downgrading the transport a credential travels over is worse than refusing to
- * guess". The console is not a more trusted source than the user for this.
+ * Both clusters *report* `http://`, because that is what their platform-api has in
+ * `MUBIT_REGIONAL_HTTP_ENDPOINT`. So a plaintext answer says nothing about whether the host
+ * serves TLS: dev's does, prod's does not.
+ *
+ * Declining outright and falling back was wrong for dev in a way a real run showed: the key
+ * went to `api.mubit.ai` — a *different cluster* — which rejected it, and the user was told
+ * "the instance rejected that key. Issue a new one in the console." There is nothing wrong
+ * with the key, and no new one will help.
+ *
+ * So the scheme is upgraded and the host is kept, and the compiled-in gateway follows it as
+ * a fallback. The key is verified against each in turn and stored against the first that
+ * accepts it, which is machinery this already had. Dev works today; prod's TLS failure falls
+ * through to the gateway that has always served it. Neither ever sees plaintext.
  */
-test('a plaintext endpoint from the console is declined, not stored', async () => {
-  const { endpointFor, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+test('a plaintext endpoint is upgraded and tried first, with the gateway behind it', async () => {
+  const { endpointCandidatesFor, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+
+  assert.deepEqual(
+    endpointCandidatesFor({ mubitEndpoint: 'http://api.eu.dev.mubit.ai' }),
+    ['https://api.eu.dev.mubit.ai', DEFAULT_ENDPOINT],
+    'dev serves TLS on that exact host, so the upgrade is what makes dev work at all');
+
+  assert.deepEqual(
+    endpointCandidatesFor({ mubitEndpoint: 'http://api.eu.mubit.ai' }),
+    ['https://api.eu.mubit.ai', DEFAULT_ENDPOINT],
+    'prod has no TLS listener there yet, so this one falls through to the gateway');
+
+  assert.deepEqual(
+    endpointCandidatesFor({ mubitEndpoint: 'https://custom.example.com' }),
+    ['https://custom.example.com', DEFAULT_ENDPOINT]);
+
+  assert.deepEqual(endpointCandidatesFor({}), [DEFAULT_ENDPOINT],
+    'an older console that sends nothing still gets the working default');
+
+  assert.deepEqual(endpointCandidatesFor({ mubitEndpoint: DEFAULT_ENDPOINT }), [DEFAULT_ENDPOINT],
+    'no point verifying the same endpoint twice');
+});
+
+/** The point of the upgrade is that nothing is ever *tried* in clear text. */
+test('no candidate ever carries the key over plaintext to a real network', async () => {
+  const { endpointCandidatesFor } = await mod('bin/auth.src.mjs');
 
   for (const named of [
-    'http://api.eu.mubit.ai',        // what production reports today
-    'http://api.us.mubit.ai',
-    'http://internal.cluster.local:8080',
+    'http://api.eu.mubit.ai', 'http://api.us.mubit.ai', 'http://internal.cluster.local:8080',
+    'api.eu.mubit.ai', 'HTTP://Api.EU.Mubit.AI',
   ]) {
-    assert.equal(endpointFor({ mubitEndpoint: named }), DEFAULT_ENDPOINT,
-      `${named} would carry the key in clear text`);
+    for (const candidate of endpointCandidatesFor({ mubitEndpoint: named })) {
+      assert.ok(candidate.startsWith('https://'),
+        `${named} produced ${candidate}, which would put the key on the wire in clear text`);
+    }
   }
-
-  assert.equal(endpointFor({ mubitEndpoint: 'https://api.eu.mubit.ai' }), 'https://api.eu.mubit.ai',
-    'the same host over TLS is exactly what this is waiting for');
 });
 
 /**
  * Loopback is the exception, and the only one: plaintext to 127.0.0.1 does not cross a
- * network. Local development and `tests/e2e/cli-auth.spec.ts` both depend on it.
+ * network, and there is rarely a TLS listener there to upgrade to. Local development and
+ * `tests/e2e/cli-auth.spec.ts` both depend on it.
  */
-test('a loopback endpoint is kept, because plaintext there crosses nothing', async () => {
-  const { endpointFor } = await mod('bin/auth.src.mjs');
+test('a loopback endpoint is kept as-is, because plaintext there crosses nothing', async () => {
+  const { endpointCandidatesFor } = await mod('bin/auth.src.mjs');
 
   for (const named of [
     'http://127.0.0.1:8788', 'http://localhost:3000', 'http://[::1]:8080',
   ]) {
-    assert.equal(endpointFor({ mubitEndpoint: named }), named.replace(/\/+$/, ''));
+    assert.equal(endpointCandidatesFor({ mubitEndpoint: named })[0], named.replace(/\/+$/, ''),
+      'upgrading this one would break every local run');
   }
+});
+
+/**
+ * The candidates are *verified*, not guessed between. This is the behaviour a real dev-cluster
+ * run needed: the first candidate is unreachable, and the user still ends up signed in rather
+ * than being told their key is bad.
+ */
+test('the first endpoint that accepts the key is the one stored', async () => {
+  const { authenticateAcrossEndpoints, currentCredentials } = await mod('bin/auth.src.mjs');
+  const dir = tempDir('mubit-endpoint-fallback-');
+  const tried = [];
+
+  const res = await authenticateAcrossEndpoints({
+    dataDir: dir,
+    endpoints: ['https://no-tls.example', 'https://gateway.example'],
+    apiKey: 'mbt_a_b_c',
+    // Verification makes more than one request per endpoint; what this asserts is which
+    // endpoints were reached, and in what order, not how many calls each one costs.
+    fetchImpl: async (url) => {
+      const origin = new URL(url).origin;
+      if (tried.at(-1) !== origin) tried.push(origin);
+      if (url.startsWith('https://no-tls.example')) throw new Error('tlsv1 alert protocol version');
+      return new Response('{}', { status: 200 });
+    },
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.endpoint, 'https://gateway.example');
+  assert.deepEqual(tried, ['https://no-tls.example', 'https://gateway.example'],
+    'in order, and the second is only reached because the first failed');
+  assert.equal(currentCredentials(dir).endpoint, 'https://gateway.example',
+    'stored against the endpoint that actually answered, not the one the console named');
+});
+
+test('a later endpoint is never tried once one has accepted the key', async () => {
+  const { authenticateAcrossEndpoints, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+  const tried = [];
+
+  const res = await authenticateAcrossEndpoints({
+    dataDir: tempDir('mubit-endpoint-first-'),
+    endpoints: ['https://mine.example', DEFAULT_ENDPOINT],
+    apiKey: 'mbt_a_b_c',
+    fetchImpl: async (url) => {
+      const origin = new URL(url).origin;
+      if (tried.at(-1) !== origin) tried.push(origin);
+      return new Response('{}', { status: 200 });
+    },
+  });
+
+  assert.equal(res.endpoint, 'https://mine.example');
+  assert.deepEqual(tried, ['https://mine.example'],
+    'the fallback is a fallback, not a second request every user pays for');
+});
+
+/**
+ * When every candidate refuses the key, the failure reported is the *console's own* answer.
+ * The fallback failing too is the less interesting half: it is the endpoint the operator
+ * configured that the user or an operator has to go look at.
+ */
+test('when nothing accepts the key, the console\'s own endpoint is the one reported', async () => {
+  const { authenticateAcrossEndpoints } = await mod('bin/auth.src.mjs');
+
+  const res = await authenticateAcrossEndpoints({
+    dataDir: tempDir('mubit-endpoint-allfail-'),
+    endpoints: ['https://named.example', 'https://gateway.example'],
+    apiKey: 'mbt_a_b_c',
+    fetchImpl: async () => new Response('{}', { status: 401 }),
+  });
+
+  assert.equal(res.ok, false);
+  assert.equal(res.endpoint, 'https://named.example');
+  assert.equal(res.stored, false);
 });
 
 // ---------------------------------------------------------------------------

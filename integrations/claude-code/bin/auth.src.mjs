@@ -553,17 +553,24 @@ function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }
 }
 
 /**
- * Turn the console's answer into the `endpoint` the plugin stores.
+ * The endpoints to try for the key the console just issued, most authoritative first.
  *
  * `mubitEndpoint` is the console's own answer — `httpEndpoint` from the platform API's
  * `/location` route, which is the only thing that knows what a given cluster overrode
- * `MUBIT_REGIONAL_HTTP_ENDPOINT` to. Trust it whenever it is there.
+ * `MUBIT_REGIONAL_HTTP_ENDPOINT` to. It is tried first, and the compiled-in gateway follows
+ * it, because the console's answer can be right, stale, or unreachable and only the server
+ * can say which.
  *
- * When it is not, the default is a decision and not an oversight. A console old enough to
- * omit the field still has to work, and `api.mubit.ai` is a key-routed shared gateway:
- * `/v2/core/health` answers for keys belonging to different instances, so the bearer token
- * selects the instance and the hostname does not. Making an absent endpoint fatal would
- * break those users to fix nothing.
+ * **A plaintext answer is upgraded, not discarded.** Measured 2026-08-28 in two clusters:
+ * both report `http://`, and only one of them means it. `api.eu.dev.mubit.ai` answers 401
+ * over TLS and 308s plain HTTP to it; `api.eu.mubit.ai` answers over plain HTTP and fails
+ * the TLS handshake. So the scheme says nothing about the host, and dropping the host over
+ * it sent a dev key to the production gateway, which rejected it and told the user their key
+ * was bad. Keeping the host and fixing the scheme is right in both clusters: dev connects,
+ * prod's TLS failure falls through to the gateway that has always served it.
+ *
+ * Loopback keeps its scheme. Plaintext to 127.0.0.1 crosses no network, and there is rarely
+ * a TLS listener there to upgrade to.
  *
  * No region map, either way. eu.mubit.ai and us.mubit.ai are NXDOMAIN, so turning
  * `payload.region` into one of them stored an endpoint that could never answer, and every
@@ -572,45 +579,56 @@ function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }
  * invent.
  *
  * @param {Record<string, any>} payload
- * @returns {string}
+ * @returns {string[]} at least one endpoint, never empty
  */
-export function endpointFor(payload = {}) {
+export function endpointCandidatesFor(payload = {}) {
   const explicit = typeof payload.mubitEndpoint === 'string' ? payload.mubitEndpoint.trim() : '';
-  if (explicit && carriesCredentialsSafely(explicit)) return normalizeEndpoint(explicit);
-  return DEFAULT_ENDPOINT;
+  const named = explicit ? overTls(explicit) : '';
+  return named && named !== DEFAULT_ENDPOINT ? [named, DEFAULT_ENDPOINT] : [DEFAULT_ENDPOINT];
 }
 
 /**
- * Is this an endpoint an API key may be sent to?
- *
- * Only over TLS, or to loopback. Measured against production on 2026-08-28: the platform
- * API's `/location` reports `MUBIT_REGIONAL_HTTP_ENDPOINT`, and the prod overlays set it to
- * `http://api.eu.mubit.ai` and `http://api.us.mubit.ai` — plain HTTP. Storing that would put
- * `Authorization: Bearer mbt_…` in clear text on every hook of every session. Upgrading the
- * scheme instead would store something that cannot connect: probed directly, both hosts
- * answer over HTTP and fail the TLS handshake outright, so there is no HTTPS listener there
- * yet. Declining leaves the shared gateway, which serves TLS and resolves the instance from
- * the bearer key — which is what this plugin used before the endpoint was carried at all.
- *
- * Nothing here needs to change when those hosts get TLS, or when the manifests are corrected
- * to `https://`: the endpoint simply starts being accepted.
- *
- * Loopback is the one exception, because plaintext to 127.0.0.1 crosses no network. Local
- * development depends on it.
+ * The same endpoint, over a transport an API key may travel on: TLS, or loopback.
  *
  * @param {string} raw
- * @returns {boolean}
+ * @returns {string} '' when it is not a URL at all
  */
-function carriesCredentialsSafely(raw) {
+function overTls(raw) {
   let url;
   try {
     url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
   } catch {
-    return false;
+    return '';
   }
-  if (url.protocol === 'https:') return true;
   const host = url.hostname.replace(/^\[|\]$/g, '');
-  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  if (url.protocol === 'http:' && !loopback) url.protocol = 'https:';
+  return url.toString().replace(/\/+$/, '');
+}
+
+/**
+ * Verify the key against each endpoint in turn and store it against the first that accepts.
+ *
+ * Trying more than one is not a guess: a cluster can name an endpoint it does not serve, and
+ * the gateway behind it resolves the instance from the bearer key rather than the hostname.
+ * The alternative — pick one, fail — reports "the instance rejected that key" for a key that
+ * is perfectly good, which is what a real dev-cluster run did before this existed.
+ *
+ * When none accept it, the first is reported: that is the console's own answer, and the one
+ * whose configuration someone has to go and look at.
+ *
+ * @param {{dataDir: string, endpoints: string[], apiKey: string,
+ *          fetchImpl?: typeof fetch, timeoutMs?: number}} opts
+ * @returns {Promise<{ok: boolean, state: AuthState, detail: string, endpoint: string, stored: boolean}>}
+ */
+export async function authenticateAcrossEndpoints({ endpoints, ...opts }) {
+  let first;
+  for (const endpoint of endpoints) {
+    const res = await authenticateWithKey({ ...opts, endpoint });
+    if (res.ok) return res;
+    first ??= res;
+  }
+  return first;
 }
 
 /**
@@ -723,9 +741,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
         timeoutMs: authTimeoutFrom(env, deps),
         log: logProgress,
       });
-      const res = await authenticateWithKey({
+      const res = await authenticateAcrossEndpoints({
         dataDir,
-        endpoint: args.endpoint ?? endpointFor(payload),
+        endpoints: args.endpoint ? [args.endpoint] : endpointCandidatesFor(payload),
         apiKey: payload.mubitApiKey,
         fetchImpl,
       });

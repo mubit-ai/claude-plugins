@@ -73,7 +73,7 @@ const CACHE_TTL_MS = 300 * 1000;
  * spend the 300 s TTL after an upgrade with the feature silently off, and the one report that
  * reached anybody would be "it works on a fresh machine".
  */
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 /** §4.1: env_tags ride on every ingested item, so the cap is a payload-size guarantee. */
 const MAX_ENV_TAGS = 8;
@@ -518,11 +518,27 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   const mcpToolsRaw = pick('mcpTools', 'MUBIT_MCP_TOOLS');
   const mcpTools = list(mcpToolsRaw, DEFAULT_MCP_TOOLS);
   // §8.2 — the ceiling on what an MCP write may claim for itself. The bundled SDK stamps a
-  // fixed `lesson_scope` on `mubit_learned` regardless of the caller, and that default is
-  // wider than a run-local write, so `mcp/src/egress.mjs` holds it down to this. The widest
-  // scope is deliberately absent from the list: it is not a value a client sets for itself.
+  // fixed `lesson_scope` on `mubit_learned` regardless of the caller, and `mcp/src/egress.mjs`
+  // resolves it to this. The widest scope is deliberately absent from the list: it is not a
+  // value a client sets for itself.
+  //
+  // **`session`, and it used to be `run`.** The argument for `run` was that reflect is the
+  // authority that widens a lesson, which makes a narrow initial stamp free — the lesson
+  // travels later, through the sanctioned path. Measured against a real instance, it does
+  // not: a reflect over a run containing an agent-written lesson stored its output at `run`
+  // as well, and nothing on that instance sat above `run` at all. So `run` was not a narrow
+  // *first* stamp, it was the only stamp, and an agent-written lesson had no path out of the
+  // run that wrote it.
+  //
+  // `session` is also what the tool itself tells the model it does: `mubit_learned`'s
+  // description — frozen inside a bundle this repo cannot rebuild — says it "writes one
+  // lesson scoped to this session". A default that contradicts the only documentation the
+  // model can see is a promise broken in the one place nobody can read the code.
+  //
+  // Set `run` to keep every agent-written lesson inside the run that wrote it. The ceiling
+  // still only ever narrows a caller that asked for less.
   const mcpLessonScope = enumOf(pick('mcpLessonScope', 'MUBIT_MCP_LESSON_SCOPE'),
-    ['run', 'session', 'global'], 'run');
+    ['run', 'session', 'global'], 'session');
   // Pinned context. On (the default), a constraint the user pins for this run with
   // `/mubit-memory:pin` is rendered above the recalled block on every prompt, including the
   // prompts recall itself skips: an open breaker, `recall: false`, a two-word answer.

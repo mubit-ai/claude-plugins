@@ -46,6 +46,7 @@
  */
 
 import { lessonCensus } from '../../lib/activity.mjs';
+import { readMarker, updateMarker } from '../../lib/markers.mjs';
 
 /**
  * The scope lattice, widest last. Every step up this list is a step out of the run that wrote
@@ -491,6 +492,42 @@ function censusOnce(cfg) {
 }
 
 // ---------------------------------------------------------------------------
+// Telling the hooks what the MCP server sent
+// ---------------------------------------------------------------------------
+
+/**
+ * Record an accepted MCP write against the run, in the file the hooks already read.
+ *
+ * The two write paths do not meet anywhere else. A hook capture goes through the spool and
+ * the drain, which stamp the run marker on the way; an MCP write leaves this process and
+ * touches neither. So `session-end` — deciding whether there is anything to reflect over —
+ * could see a session whose whole memory contribution was `mubit_learned` and correctly
+ * conclude, from the only evidence it had, that nothing had been ingested. It then skipped
+ * reflect, which is the one call authorised to widen a lesson past the run that wrote it.
+ *
+ * Local, synchronous and best-effort, exactly like every other marker write: a failure here
+ * costs a reflect, never the write that just succeeded.
+ *
+ * @param {Record<string, any>|undefined} cfg
+ * @param {string} runId
+ * @param {number} items
+ */
+function recordMcpIngest(cfg, runId, items) {
+  try {
+    if (!cfg || !runId || items <= 0) return;
+    const prior = Number(readMarker(cfg, runId)?.mcp?.ingested);
+    updateMarker(cfg, runId, {
+      mcp: { ingested: (Number.isFinite(prior) ? prior : 0) + items, at: Date.now() },
+    });
+  } catch { /* a lost marker write is not a reason to fail a write that landed */ }
+}
+
+/** How many items a body carries, for the count above. @param {any} body */
+function countItems(body) {
+  return Array.isArray(body?.items) ? body.items.length : 0;
+}
+
+// ---------------------------------------------------------------------------
 // The fetch wrapper
 // ---------------------------------------------------------------------------
 
@@ -568,6 +605,10 @@ export function installFetchGuard(opts) {
     let noteKey = INGEST_NOTE_KEY;
     /** @type {any} */
     let sendInit = init;
+    // Set on an ingest, and read after the response: what to credit the run with if the
+    // write is accepted. Computed here because this is the only place the body is parsed.
+    let ingestedItems = 0;
+    let ingestedRun = '';
 
     try {
       if (isIngest(input, init)) {
@@ -580,6 +621,10 @@ export function installFetchGuard(opts) {
             sendInit = { ...init, body: JSON.stringify(out.body) };
             note = out.note;
           }
+          ingestedItems = countItems(out.body);
+          // The run the write actually goes to, which is the pinned one under `pinRun` and
+          // the caller's otherwise — the marker has to name the run the hooks will look in.
+          ingestedRun = typeof out.body?.run_id === 'string' ? out.body.run_id : '';
         }
       } else if (isLessonsRead(input, init)) {
         const plan = await planLessons(init);
@@ -596,6 +641,7 @@ export function installFetchGuard(opts) {
     }
 
     const res = await base(input, sendInit);
+    if (res?.ok && ingestedItems > 0) recordMcpIngest(opts?.cfg, ingestedRun, ingestedItems);
     if (!note) return res;
     return annotate(res, note, noteKey);
   };

@@ -580,12 +580,36 @@ test('remember/SKILL.md states the scope mubit_learned actually writes', () => {
   assert.ok(para,
     'remember/SKILL.md no longer has a paragraph saying what scope mubit_learned writes at — '
     + 'that sentence is the model\'s only account of where its lesson went (§9.2)');
-  assert.match(para, /\brun\b/,
-    `remember/SKILL.md must say mubit_learned writes at run scope. Paragraph:\n${para}`);
-  assert.doesNotMatch(para, /\bsession\b/,
-    'remember/SKILL.md still says mubit_learned writes at session scope. It does not: the '
-    + 'egress guard clamps it to run, and session is read across runs anyway, which is the '
-    + `leak that clamp exists to close. Paragraph:\n${para}`);
+
+  // The scope is a setting, not a constant, and the paragraph has to say so: naming one value
+  // as if it were fixed is how this sentence went stale the last time. It must name the
+  // setting, state the default, and say what the other values do.
+  assert.match(para, /mcpLessonScope|MUBIT_MCP_LESSON_SCOPE/,
+    `the scope is whatever the ceiling is set to, and the paragraph must say which setting '
+    + 'that is. Paragraph:\n${para}`);
+  assert.match(para, /`session`/,
+    `remember/SKILL.md must state the default the model's write will actually get. `
+    + `Paragraph:\n${para}`);
+  assert.match(para, /`run`/,
+    `remember/SKILL.md must say what a ceiling of run does — it is the setting a user who `
+    + `wants per-run isolation reaches for. Paragraph:\n${para}`);
+});
+
+/**
+ * "Lessons never reach another session" is a scope question wearing a connectivity costume:
+ * every step of the doctor's ladder comes back clean while a `run` ceiling is the whole
+ * cause. At the shipped default the tool result no longer carries a clamp note either — the
+ * write is not clamped — so this skill is the surface that has to name the setting.
+ */
+test('doctor/SKILL.md routes a cross-session lesson complaint at the scope ceiling', () => {
+  const { body } = loadSkill('doctor');
+
+  assert.match(body, /mcpLessonScope|MUBIT_MCP_LESSON_SCOPE/,
+    'doctor/SKILL.md does not name the setting that decides whether a written lesson can '
+    + 'ever leave the run that wrote it');
+  assert.match(body, /scope-audit/,
+    'doctor/SKILL.md does not point at the audit that answers "what is actually stored, by '
+    + 'scope" — without it the step is advice with no measurement behind it');
 });
 
 // A ceiling with no documented way to raise it reads as a limitation rather than a setting,

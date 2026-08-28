@@ -69,15 +69,25 @@ const wrote = (server) => {
 // What the guard pins
 // ---------------------------------------------------------------------------
 
-// The headline regression. `session` is not "narrower than global" — only `run` keeps a
-// lesson inside the run that wrote it, so this is the assertion per-task isolation rests on.
-test('mubit_learned writes lesson_scope "run", not "session"', async (t) => {
+// The default, and the one thing on this wire a user can change. `run` was the default until
+// it was measured: on a live instance a reflect over a run holding an agent-written lesson
+// stored its own output at `run` too, so a lesson stamped `run` had no path out of its run at
+// all. `session` is also what the tool's own frozen description tells the model it does.
+test('mubit_learned writes lesson_scope "session" at the default ceiling', async (t) => {
   const { server } = await call(t, 'mubit_learned', { text: LESSON });
   const { item } = wrote(server);
 
-  assert.equal(item.lesson_scope, 'run',
-    'the bundled SDK hard-codes "session" here, and "session" is not the per-run scope its '
-    + `name suggests — only "run" is. Got ${JSON.stringify(item.lesson_scope)}.`);
+  assert.equal(item.lesson_scope, 'session',
+    `the default ceiling decides this, and it is "session". Got ${JSON.stringify(item.lesson_scope)}.`);
+});
+
+// The narrowing direction still works, and it is one setting away. This is the assertion a
+// user who wants per-run isolation is relying on.
+test('a ceiling of "run" keeps an agent-written lesson inside its own run', async (t) => {
+  const { server } = await call(t, 'mubit_learned', { text: LESSON },
+    { extra: { MUBIT_MCP_LESSON_SCOPE: 'run' } });
+
+  assert.equal(wrote(server).item.lesson_scope, 'run');
 });
 
 // The tool still has to work. A guard that silently dropped the lesson would pass the test
@@ -118,23 +128,23 @@ test('MUBIT_MCP_LESSON_SCOPE raises the ceiling', async (t) => {
   assert.equal(wrote(server).item.lesson_scope, 'global');
 });
 
-// A ceiling of "session" is the pre-fix behaviour, available on purpose and reachable only
-// by asking for it.
-test('a ceiling of "session" leaves the SDK default alone', async (t) => {
+// Asking for the default explicitly is the same wire as leaving it alone.
+test('a ceiling of "session" is the same as the default', async (t) => {
   const { server } = await call(t, 'mubit_learned', { text: LESSON },
     { extra: { MUBIT_MCP_LESSON_SCOPE: 'session' } });
 
   assert.equal(wrote(server).item.lesson_scope, 'session');
 });
 
-// A typo in a setting must not silently reinstate the defect. `run` is the safe answer and
-// the only acceptable fallback — falling back to "whatever the SDK sent" would mean a
-// misspelt value re-opened the leak.
-test('an unrecognised ceiling falls back to run, never to the SDK default', async (t) => {
+// A typo takes the documented default, exactly as every other enum setting does — never the
+// widest scope, and never "whatever the SDK sent". The guard has a second, narrower net of
+// its own for a value the config layer cannot produce; `resolveCeiling` below owns that one,
+// and the two are deliberately different answers to two different questions.
+test('an unrecognised ceiling takes the default, never the widest scope', async (t) => {
   const { server } = await call(t, 'mubit_learned', { text: LESSON },
     { extra: { MUBIT_MCP_LESSON_SCOPE: 'banana' } });
 
-  assert.equal(wrote(server).item.lesson_scope, 'run');
+  assert.equal(wrote(server).item.lesson_scope, 'session');
 });
 
 // The original report's exact path: `mubit_remember` is off by default, but `mcpTools`
@@ -143,11 +153,21 @@ test('an unrecognised ceiling falls back to run, never to the SDK default', asyn
 test('a restored mubit_remember cannot write above the ceiling', async (t) => {
   const { server } = await call(t, 'mubit_remember',
     { text: LESSON, intent: 'lesson', lesson_scope: 'global' },
-    { extra: { MUBIT_MCP_TOOLS: 'mubit_remember' } });
+    { extra: { MUBIT_MCP_TOOLS: 'mubit_remember', MUBIT_MCP_LESSON_SCOPE: 'run' } });
 
   assert.equal(wrote(server).item.lesson_scope, 'run',
-    'the agent asked for global and the ceiling is run — this is the write the benchmark '
-    + 'harness caught crossing five unrelated tasks');
+    'the agent asked for global and the ceiling is run — restoring a tool must not restore '
+    + 'the ability to write past the setting');
+});
+
+// And the same at the shipped default: a caller asking for more than the ceiling is narrowed
+// to it, whatever the ceiling happens to be.
+test('a restored mubit_remember is clamped to the default ceiling too', async (t) => {
+  const { server } = await call(t, 'mubit_remember',
+    { text: LESSON, intent: 'lesson', lesson_scope: 'global' },
+    { extra: { MUBIT_MCP_TOOLS: 'mubit_remember' } });
+
+  assert.equal(wrote(server).item.lesson_scope, 'session');
 });
 
 // Clamping is one-directional. A caller that deliberately narrows its own write keeps the
@@ -168,7 +188,8 @@ test('the ceiling never widens a write that asked for less', async (t) => {
 // bundled tool description still promises "scoped to this session", which cannot be edited
 // from this repo. The tool result is the only channel that can correct it.
 test('a clamped write says so, and names the setting that would allow it', async (t) => {
-  const { out } = await call(t, 'mubit_learned', { text: LESSON });
+  const { out } = await call(t, 'mubit_learned', { text: LESSON },
+    { extra: { MUBIT_MCP_LESSON_SCOPE: 'run' } });
 
   assert.match(out.text, /run/,
     `the tool result never mentions the scope it actually wrote:\n${out.text}`);
@@ -178,10 +199,11 @@ test('a clamped write says so, and names the setting that would allow it', async
 });
 
 // Noise has a cost too: the note is a correction, so a write that needed no correcting must
-// not carry one.
+// not carry one — which at the shipped default is every ordinary write. That is what makes
+// the setting's other surfaces (the doctor skill, the README row) load-bearing rather than
+// decorative: nothing in the tool result names it any more.
 test('a write that needed no clamping is not annotated', async (t) => {
-  const { out } = await call(t, 'mubit_learned', { text: LESSON },
-    { extra: { MUBIT_MCP_LESSON_SCOPE: 'session' } });
+  const { out } = await call(t, 'mubit_learned', { text: LESSON });
 
   assert.doesNotMatch(out.text, /mcpLessonScope|MUBIT_MCP_LESSON_SCOPE/,
     `nothing was clamped, so nothing should be reported:\n${out.text}`);
@@ -190,7 +212,8 @@ test('a write that needed no clamping is not annotated', async (t) => {
 // The write still has to be usable. Whatever the guard adds must not displace the job id
 // the caller needs to follow the ingest.
 test('the annotation rides alongside the real response, not instead of it', async (t) => {
-  const { out } = await call(t, 'mubit_learned', { text: LESSON });
+  const { out } = await call(t, 'mubit_learned', { text: LESSON },
+    { extra: { MUBIT_MCP_LESSON_SCOPE: 'run' } });
 
   assert.ok(out.json, `the tool result is not JSON:\n${out.text}`);
   assert.equal(out.json.job_id, 'job_test_1');
@@ -240,6 +263,10 @@ test('a 5xx from the endpoint is still reported as the tool failing, not the gua
 // The guard as a unit
 // ---------------------------------------------------------------------------
 
+// The guard's own fallback, and it is deliberately NOT the config default. `loadConfig`
+// resolves an unrecognised setting to `session` like every other enum, and this layer never
+// sees such a value — it exists as a second net for a string that reached the guard some
+// other way, and for that case the safe answer is the narrowest scope, not the widest.
 test('resolveCeiling defaults to run and refuses anything it does not know', async () => {
   const { resolveCeiling } = await E();
 

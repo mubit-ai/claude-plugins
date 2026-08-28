@@ -31,6 +31,15 @@ will stop for a permission prompt.
 
 ## Step 1 — run it
 
+**Say what is about to happen before you run it.** This command opens a browser and then
+blocks with no output until it finishes — a Bash tool call does not stream, so there is
+nothing to print in the meantime. Tell the user: a browser tab is opening; sign in or create
+an account there; a first-ever workspace takes a minute or two to provision and the page
+waits for it; then come back here.
+
+**Run it with a Bash `timeout` of `600000`.** The default is 120000, and the harness kills the
+command at that point — in the middle of a sign-up that was going fine.
+
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --data-dir "${CLAUDE_PLUGIN_DATA}" --json
 ```
@@ -47,14 +56,14 @@ browser flow the key never passes through the conversation at all.
 | Exit | Meaning | What to tell the user |
 | --- | --- | --- |
 | `0` | Signed in, and the key was checked against the instance. | Report the endpoint, then go to step 3. |
-| `2` | The workspace is still provisioning. **Not a failure.** | "Your workspace is still being created — usually a minute or two. Run `/mubit-memory:auth` again shortly; it picks up where it left off." Do not change anything. |
+| `2` | Still in flight — the workspace is provisioning, or the sign-up did not finish inside the deadline. **Not a failure.** | "Your workspace is still being created — usually a minute or two. Run `/mubit-memory:auth` again shortly; it picks up where it left off." Do not change anything, and do not offer the paste route: nothing is broken. |
 | `1` | Something went wrong. The `state` field says which. | See the table below. |
 
 On exit `1`, `state` is one of:
 
 | `state` | What it means | What to tell the user |
 | --- | --- | --- |
-| `browser_failed` | No browser opened, or the flow timed out. | Fall through to step 2b. This is the common case over SSH and in containers. |
+| `browser_failed` | **No browser could be opened at all.** Not a timeout — a timeout after a browser opened is exit `2`. | Fall through to step 2b. This is the common case over SSH and in containers. |
 | `auth_failed` | The instance rejected the key. | The key is wrong, revoked, or issued for a different instance. Issue a new one in the console. |
 | `unreachable` | Nothing answered at the endpoint. | The endpoint is wrong, or the instance is not running. This is not a key problem — do not have them reissue one. |
 | `server_error` | The instance is up and failing. | Retry once, then check the instance in the console. The client cannot fix it. |

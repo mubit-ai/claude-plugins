@@ -509,7 +509,8 @@ test('parseArgs defaults to the browser flow', async () => {
  * exchange when they disagree. That is the entire security property of PKCE, so the
  * fake enforces it rather than rubber-stamping whatever arrives.
  */
-async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false } = {}) {
+async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false,
+  mubitEndpoint = '' } = {}) {
   const { createServer } = await import('node:http');
   const { createHash } = await import('node:crypto');
 
@@ -538,12 +539,20 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
         return res.end(JSON.stringify({ error: 'pkce_mismatch' }));
       }
       res.writeHead(200, { 'content-type': 'application/json' });
+      // Exactly the field set `server/api/cli/token.post.ts` returns, and nothing else.
+      // The old fake was *generous* — it invented a richer payload than the real server —
+      // and that is precisely what hid the missing `mubitEndpoint` from 1487 tests: the
+      // console shipped no endpoint, the plugin fell back to its compiled-in default, and
+      // every test passed. The console asserts the same list from its side, so a change to
+      // either reddens one of them.
       res.end(JSON.stringify({
-        // The console returns fields the plugin does not read alongside the ones it does;
-        // `extraField` stands in for those, so the parse is still exercised against a
-        // response wider than the contract.
-        mubitApiKey: key, extraField: 'ignored',
-        projectId: 'proj_1', namespace: 'ns_1', region: 'eu',
+        mubitApiKey: key,
+        mubitEndpoint,
+        minimaUrl: 'https://api.minima.sh',
+        instanceId: 'mnm-abcdef123456',
+        projectId: 'proj_1',
+        namespace: 'proj_1',
+        region: 'eu',
       }));
     });
   });
@@ -558,7 +567,13 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
      * Play the part of the browser: read the URL the CLI wanted to open, register the
      * challenge against a fresh code, and call the loopback back.
      */
-    async browse(authUrl, { code = 'code_ok', tamperState, sendProvisioning = provisioning } = {}) {
+    async browse(authUrl, {
+      code = 'code_ok', tamperState, sendProvisioning = provisioning, delayMs = 0,
+    } = {}) {
+      // `delayMs` stands in for a user who has to create an account, an org and wait out a
+      // workspace coming up. It is the only way to exercise a ten-minute deadline in a suite
+      // that must finish in seconds — the wait is faked, the deadline arithmetic is not.
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs).unref?.());
       const u = new URL(authUrl);
       issued.set(code, u.searchParams.get('challenge'));
       const cbPort = u.searchParams.get('port');
@@ -604,7 +619,7 @@ test('the browser flow returns the key the console issued', async () => {
   });
 
   assert.equal(res.mubitApiKey, 'mbt_issued_by_console');
-  assert.equal(res.namespace, 'ns_1');
+  assert.equal(res.namespace, 'proj_1');
   await console_.close();
 });
 
@@ -818,6 +833,67 @@ test('endpointFor trusts an explicit endpoint, and never invents a host from a r
     'https://custom.example.com', 'an explicit endpoint outranks a region');
 });
 
+/**
+ * The contract, from this side. `server/api/cli/token.post.ts` asserts the same list from
+ * its own side, so the two cannot drift silently: whichever one moves, the other goes red.
+ *
+ * This test is here because the generous fake it replaces is the entire reason the missing
+ * `mubitEndpoint` survived a 1487-test suite. A double that returns more than the real thing
+ * proves the parser works and nothing about the contract.
+ */
+test('the console double returns exactly the field set the real console returns', async () => {
+  const { runBrowserAuth } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole({ mubitEndpoint: 'https://eu.api.mubit.ai' });
+
+  const payload = await runBrowserAuth({
+    consoleUrl: console_.url,
+    openImpl: (url) => { console_.browse(url); },
+    timeoutMs: 5000,
+  });
+
+  assert.deepEqual(Object.keys(payload).sort(), [
+    'instanceId', 'minimaUrl', 'mubitApiKey', 'mubitEndpoint', 'namespace', 'projectId', 'region',
+  ]);
+  await console_.close();
+});
+
+/**
+ * Pinning the fallback as a decision rather than an oversight.
+ *
+ * A console old enough not to send `mubitEndpoint` still has to work, and the default is not
+ * a guess: probing production showed `api.mubit.ai` is a key-routed shared gateway —
+ * `/v2/core/health` answers 200 for keys belonging to different instances — so the bearer
+ * token, not the hostname, selects the instance. Making an absent endpoint fatal would break
+ * users on an older console to fix nothing.
+ */
+test('an older console that sends no endpoint still gets a working default', async () => {
+  const { main, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+  const console_ = await fakeConsole({ key: 'mbt_from_old_console' });   // mubitEndpoint: ''
+  const dataDir = makeDataDir();
+  const lines = [];
+
+  // `fetchImpl` answers the default endpoint, which the test cannot dial for real.
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push(String(url));
+    if (String(url).startsWith(DEFAULT_ENDPOINT)) {
+      return new Response(String(url).endsWith('/health') ? 'OK' : '{}', { status: 200 });
+    }
+    return fetch(url, init);
+  };
+
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir, fetchImpl, log: (m) => lines.push(m), timeoutMs: 5000,
+    openImpl: (url) => { console_.browse(url); },
+  });
+
+  assert.equal(code, 0, lines.join('\n'));
+  assert.equal(readCredentials(dataDir).endpoint, DEFAULT_ENDPOINT);
+  assert.ok(seen.some((u) => u.startsWith(DEFAULT_ENDPOINT)), 'and it was checked, not assumed');
+  await console_.close();
+});
+
 // ---------------------------------------------------------------------------
 // main() through the browser path
 // ---------------------------------------------------------------------------
@@ -849,6 +925,31 @@ test('main() browser flow: signs in, verifies, and stores — with no key in the
   await server.close();
 });
 
+/**
+ * The half that was broken end to end: the console names an endpoint and the plugin stores
+ * it. Every other browser-flow test pins `--endpoint`, so none of them could have caught the
+ * console not sending one.
+ */
+test('main() stores the endpoint the console named, not its own default', async () => {
+  const { main, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+  const instance = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const console_ = await fakeConsole({ key: 'mbt_regional', mubitEndpoint: instance.url });
+  const dataDir = makeDataDir();
+  const lines = [];
+
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir, fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 5000,
+    openImpl: (url) => { console_.browse(url); },
+  });
+
+  assert.equal(code, 0, lines.join('\n'));
+  assert.equal(readCredentials(dataDir).endpoint, instance.url);
+  assert.notEqual(instance.url, DEFAULT_ENDPOINT, 'the test would be vacuous otherwise');
+  await console_.close();
+  await instance.close();
+});
+
 test('main() reports a still-provisioning workspace as retryable, with its own exit code', async () => {
   const { main } = await mod('bin/auth.src.mjs');
   const console_ = await fakeConsole({ provisioning: true });
@@ -869,26 +970,107 @@ test('main() reports a still-provisioning workspace as retryable, with its own e
   await console_.close();
 });
 
-test('main() falls back to the paste route when the browser flow cannot finish', async () => {
-  const { main, KEY_ENV_VAR } = await mod('bin/auth.src.mjs');
-  const console_ = await fakeConsole();
+/**
+ * How long a human actually needs.
+ *
+ * The default was two minutes, chosen for "sign in and pick an instance". The user this
+ * command exists for is doing more than that: creating an account, creating an org, and then
+ * waiting out a workspace that takes a minute or two on its own — and the console now waits
+ * for that workspace rather than bouncing. Two minutes fails a flow that is working.
+ *
+ * Ten is the ceiling, not a guess: a Bash tool call is killed at 600 s at the outside, so a
+ * client deadline above that could never be reached. `skills/auth/SKILL.md` sets the tool's
+ * own timeout to match — without that the harness kills this at 120 s and the change is inert.
+ */
+test('the browser deadline is ten minutes, matching the longest a tool call can run', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+  const instance = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const console_ = await fakeConsole({ key: 'mbt_slow_signup', mubitEndpoint: instance.url });
   const dataDir = makeDataDir();
   const lines = [];
 
-  // Nothing ever opens, so the flow times out.
-  const code = await main(
-    ['--json'],
-    { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_TIMEOUT_MS: '120' },
-    { dataDir, fetchImpl: fetch, log: (m) => lines.push(m), openImpl: () => {} },
-  );
+  const started = Date.now();
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir, fetchImpl: fetch, log: (m) => lines.push(m),
+    // The deadline is shrunk for the test; the point is that the flow survives a callback
+    // arriving long after the old 120 s default would have given up.
+    timeoutMs: 5000,
+    openImpl: (url) => { console_.browse(url, { delayMs: 300 }); },
+  });
 
-  assert.equal(code, 1);
-  const out = JSON.parse(lines.join(''));
-  assert.equal(out.state, 'browser_failed');
-  assert.match(out.detail, new RegExp(KEY_ENV_VAR),
-    'a dead end is not an answer — the manual route must be in the same message');
+  assert.equal(code, 0, lines.join('\n'));
+  assert.equal(readCredentials(dataDir).apiKey, 'mbt_slow_signup');
+  assert.ok(Date.now() - started < 4000, 'no real sleeping in this suite');
+  await console_.close();
+  await instance.close();
+});
+
+test('the shipped default deadline is 600000 ms, and the environment still overrides it', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole();
+  const lines = [];
+
+  // Nothing opens, so the flow runs to its deadline. `MUBIT_CC_AUTH_TIMEOUT_MS` has to still
+  // work, or every test in this file that relies on it would sit out ten minutes.
+  const started = Date.now();
+  await main(['--json'], { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_TIMEOUT_MS: '120' },
+    { dataDir: makeDataDir(), fetchImpl: fetch, log: (m) => lines.push(m), openImpl: () => {} });
+  assert.ok(Date.now() - started < 3000);
+
+  const src = await import('node:fs').then((fs) =>
+    fs.readFileSync(new URL('../bin/auth.src.mjs', import.meta.url), 'utf8'));
+  assert.match(src, /raw > 0 \? raw : 600000/,
+    'a Bash tool call is killed at 600 s at the outside, so nothing above it is reachable');
   await console_.close();
 });
+
+/**
+ * A browser that opened and a browser that never existed are different problems.
+ *
+ * Timing out after the console page was reached means the sign-up is still in flight, or the
+ * workspace is still coming up — the same command, run again, finishes it. Reporting that as
+ * `browser_failed` sent the user off to issue a key by hand to fix a flow that was working.
+ * The SSH case, where nothing could be opened at all, keeps exit 1 and the paste route.
+ */
+test('a timeout after the browser opened is retryable, not a browser failure', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole();
+  const lines = [];
+
+  const code = await main(
+    ['--json'],
+    { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_TIMEOUT_MS: '150' },
+    // A browser opened — it just never came back in time.
+    { dataDir: makeDataDir(), fetchImpl: fetch, log: (m) => lines.push(m), openImpl: () => true },
+  );
+
+  assert.equal(code, 2, 'the retryable exit code, not the fix-something one');
+  assert.equal(JSON.parse(lines.join('')).state, 'provisioning');
+  await console_.close();
+});
+
+test('a machine with no browser at all still gets the paste route', async () => {
+  const { main, KEY_ENV_VAR } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole();
+  const lines = [];
+
+  const code = await main(
+    ['--json'],
+    { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_TIMEOUT_MS: '150' },
+    {
+      dataDir: makeDataDir(), fetchImpl: fetch, log: (m) => lines.push(m),
+      openImpl: () => { throw new Error('no xdg-open here'); },
+    },
+  );
+
+  assert.equal(code, 1, 'over SSH there is nothing to wait for — waiting again would not help');
+  const out = JSON.parse(lines.filter((l) => l.startsWith('{')).join(''));
+  assert.equal(out.state, 'browser_failed');
+  assert.match(out.detail, new RegExp(KEY_ENV_VAR));
+  await console_.close();
+});
+
 
 // ===========================================================================
 // Which directory the credentials land in

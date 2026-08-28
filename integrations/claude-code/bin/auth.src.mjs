@@ -58,6 +58,23 @@ export const HEALTH_ROUTE = '/v2/core/health';
 
 const DEFAULT_TIMEOUT_MS = 8000;
 
+/**
+ * How long to wait for the browser round trip.
+ *
+ * Two minutes was chosen for "sign in and pick an instance". The user this command exists
+ * for is creating an account, creating an organization, and then waiting out a workspace
+ * that takes a minute or two by itself — and the console now waits for that workspace rather
+ * than bouncing back. Two minutes failed flows that were working.
+ *
+ * Ten is a ceiling rather than a preference: a Bash tool call is killed at 600 s at the
+ * outside, so a longer deadline could never be reached. `skills/auth/SKILL.md` sets the
+ * tool's own timeout to match — without that the harness kills this at its 120 s default and
+ * this constant does nothing.
+ *
+ * `MUBIT_CC_AUTH_TIMEOUT_MS` shrinks it, the way the other `MUBIT_CC_*` windows are shrunk.
+ */
+const DEFAULT_AUTH_TIMEOUT_MS = 600000;
+
 // ---------------------------------------------------------------------------
 // Shape
 // ---------------------------------------------------------------------------
@@ -355,6 +372,25 @@ export class ProvisioningPending extends Error {
   }
 }
 
+/**
+ * The browser round trip ran out of time.
+ *
+ * `launched` is the whole reason this is a class and not a bare `Error`. A deadline reached
+ * *after* a browser opened means the sign-up, the org creation or the workspace is still in
+ * flight, and running the same command again finishes it. A deadline reached with nothing
+ * opened — over SSH, in a container — means there was never anything to wait for, and the
+ * only way forward is the paste route. They used to print the same message, which sent the
+ * first user off to issue a key by hand to fix a flow that was working.
+ */
+export class BrowserTimeout extends Error {
+  /** @param {boolean} launched */
+  constructor(launched) {
+    super('timed out waiting for browser authorization');
+    this.name = 'BrowserTimeout';
+    this.launched = launched;
+  }
+}
+
 /** base64url: the URL-safe alphabet, no padding. These travel in a query string. */
 function base64url(buf) {
   return Buffer.from(buf).toString('base64')
@@ -399,7 +435,7 @@ export function makePkce() {
 export async function runBrowserAuth(opts = {}) {
   const {
     consoleUrl = CONSOLE_URL, repo = '', host = '', region = '',
-    openImpl, fetchImpl = fetch, timeoutMs = 120000, log = console.error,
+    openImpl, fetchImpl = fetch, timeoutMs = DEFAULT_AUTH_TIMEOUT_MS, log = console.error,
   } = opts;
 
   const { verifier, challenge } = makePkce();
@@ -451,14 +487,12 @@ export async function runBrowserAuth(opts = {}) {
   }
   const port = addr.port;
 
-  const timer = setTimeout(
-    () => fail(new Error('timed out waiting for browser authorization')),
-    timeoutMs,
-  );
+  let launched = false;
+  const timer = setTimeout(() => fail(new BrowserTimeout(launched)), timeoutMs);
 
   try {
     const authUrl = buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region });
-    openConsole({ url: authUrl, openImpl, log });
+    launched = openConsole({ url: authUrl, openImpl, log });
 
     const hit = await awaited;
     if (hit.provisioning) throw new ProvisioningPending();
@@ -507,17 +541,28 @@ function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }
 /**
  * Turn the console's answer into the `endpoint` the plugin stores.
  *
+ * `mubitEndpoint` is the console's own answer — `httpEndpoint` from the platform API's
+ * `/location` route, which is the only thing that knows what a given cluster overrode
+ * `MUBIT_REGIONAL_HTTP_ENDPOINT` to. Trust it whenever it is there.
+ *
+ * When it is not, the default is a decision and not an oversight. A console old enough to
+ * omit the field still has to work, and `api.mubit.ai` is a key-routed shared gateway:
+ * `/v2/core/health` answers for keys belonging to different instances, so the bearer token
+ * selects the instance and the hostname does not. Making an absent endpoint fatal would
+ * break those users to fix nothing.
+ *
+ * No region map, either way. eu.mubit.ai and us.mubit.ai are NXDOMAIN, so turning
+ * `payload.region` into one of them stored an endpoint that could never answer, and every
+ * later command then failed with `TypeError: fetch failed (ENOTFOUND)` far from the sign-in
+ * that caused it. A region is a routing hint for the console, not a hostname this side may
+ * invent.
+ *
  * @param {Record<string, any>} payload
  * @returns {string}
  */
 export function endpointFor(payload = {}) {
   const explicit = typeof payload.mubitEndpoint === 'string' ? payload.mubitEndpoint.trim() : '';
   if (explicit) return normalizeEndpoint(explicit);
-  // No region map. eu.mubit.ai and us.mubit.ai are NXDOMAIN, so turning `payload.region` into
-  // one of them stored an endpoint that could never answer, and every later command then
-  // failed with `TypeError: fetch failed (ENOTFOUND)` far from the sign-in that caused it.
-  // A region is a routing hint for the console, not a hostname this side may invent: trust an
-  // endpoint only when the console names one outright.
   return DEFAULT_ENDPOINT;
 }
 
@@ -635,7 +680,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
       emit({ ok: res.ok, state: res.state, endpoint: res.endpoint, detail: res.detail });
       return res.ok ? 0 : 1;
     } catch (err) {
-      if (err instanceof ProvisioningPending) {
+      // A browser opened and the deadline passed: the sign-up, the organization or the
+      // workspace is still in flight, and the same command run again picks it up. That is
+      // the same situation as the console's explicit `provisioning=1`, which older console
+      // versions still send and which therefore stays.
+      if (err instanceof ProvisioningPending || (err instanceof BrowserTimeout && err.launched)) {
         emit({
           ok: false,
           state: 'provisioning',
@@ -644,8 +693,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
         });
         return 2; // distinct from a real failure, so the skill can say "wait", not "fix"
       }
-      // No browser, no console, or the user closed the tab. The paste route still works,
-      // so the flow degrades to it rather than dead-ending.
+      // Nothing could be opened — over SSH, in a container, on a machine with no default
+      // browser. Waiting longer cannot help, and the paste route can, so the flow degrades
+      // to it rather than dead-ending.
       emit({
         ok: false,
         state: 'browser_failed',
@@ -677,16 +727,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   return res.ok ? 0 : 1;
 }
 
-/**
- * How long to wait for the browser round trip. Two minutes is right for a human who has
- * to sign in, possibly create an account, and pick an instance — but no test suite can
- * afford it, so `MUBIT_CC_AUTH_TIMEOUT_MS` shrinks it the way the other `MUBIT_CC_*`
- * windows are shrunk.
- */
+/** See `DEFAULT_AUTH_TIMEOUT_MS`. */
 function authTimeoutFrom(env = {}, deps = {}) {
   if (typeof deps.timeoutMs === 'number') return deps.timeoutMs;
   const raw = Number(env?.MUBIT_CC_AUTH_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : 120000;
+  return Number.isFinite(raw) && raw > 0 ? raw : 600000;
 }
 
 /**

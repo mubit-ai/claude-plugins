@@ -544,7 +544,7 @@ test('parseArgs defaults to the browser flow', async () => {
  * fake enforces it rather than rubber-stamping whatever arrives.
  */
 async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false,
-  mubitEndpoint = '' } = {}) {
+  mubitEndpoint = '', tokenStatus = 200, rawBody = undefined, omitKey = false } = {}) {
   const { createServer } = await import('node:http');
   const { createHash } = await import('node:crypto');
 
@@ -564,6 +564,18 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
       exchanges.push(body);
 
+      // The forced-failure modes, for the exchange-failure matrix. They short-circuit
+      // before PKCE on purpose: a console answering 500 or an HTML error page never got
+      // as far as checking anything.
+      if (rawBody !== undefined) {
+        res.writeHead(tokenStatus, { 'content-type': 'text/html' });
+        return res.end(rawBody);
+      }
+      if (tokenStatus !== 200) {
+        res.writeHead(tokenStatus, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ error: `forced_${tokenStatus}` }));
+      }
+
       const expected = issued.get(body.code);
       const actual = createHash('sha256').update(String(body.verifier ?? '')).digest('base64')
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -579,7 +591,7 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
       // console shipped no endpoint, the plugin fell back to its compiled-in default, and
       // every test passed. The console asserts the same list from its side, so a change to
       // either reddens one of them.
-      res.end(JSON.stringify({
+      const payload = {
         mubitApiKey: key,
         mubitEndpoint,
         minimaUrl: 'https://harness.example.invalid',
@@ -587,7 +599,10 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
         projectId: 'proj_1',
         namespace: 'proj_1',
         region: 'eu',
-      }));
+      };
+      // A console broken enough to answer without the one field that matters.
+      if (omitKey) delete payload.mubitApiKey;
+      res.end(JSON.stringify(payload));
     });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -603,6 +618,7 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
      */
     async browse(authUrl, {
       code = 'code_ok', tamperState, sendProvisioning = provisioning, delayMs = 0,
+      omitCode = false,
     } = {}) {
       // `delayMs` stands in for a user who has to create an account, an org and wait out a
       // workspace coming up. It is the only way to exercise a ten-minute deadline in a suite
@@ -614,7 +630,9 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
       const state = tamperState ?? u.searchParams.get('state');
       const q = sendProvisioning
         ? `provisioning=1&state=${encodeURIComponent(state)}`
-        : `code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
+        : omitCode
+          ? `state=${encodeURIComponent(state)}`
+          : `code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
       return fetch(`http://127.0.0.1:${cbPort}/callback?${q}`, { redirect: 'manual' });
     },
     /** Register a code whose challenge does not match any verifier we will send. */
@@ -1427,4 +1445,325 @@ test('a first-ever sign-in writes to the suffixed directory and never creates th
     'the bare name is not a directory any host hands a hook');
   await console_.close();
   await server.close();
+});
+
+// ===========================================================================
+// The matrix nothing covered: bad env values, failed exchanges, and the edges
+// ===========================================================================
+
+/**
+ * `MUBIT_CC_AUTH_TIMEOUT_MS` is read straight from the environment, and the environment
+ * can say anything. `Number('abc')` is NaN, and `setTimeout(fn, NaN)` fires *now* — so a
+ * mis-set variable would silently re-introduce the instant-timeout bug the 600 s default
+ * exists to fix, and it would look exactly like "the browser flow never works on this
+ * machine". Every unusable value must land on the shipped default, never on zero.
+ */
+test('an unusable auth timeout falls back to ten minutes, never to an instant one', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+
+  for (const raw of ['abc', '', '0', '-5', 'NaN']) {
+    const instance = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+    const console_ = await fakeConsole({ key: 'mbt_survives_bad_timeout', mubitEndpoint: instance.url });
+    const dataDir = makeDataDir();
+    const lines = [];
+
+    // No deps.timeoutMs: the env rung is the one under test. The browse lands ~50 ms in,
+    // which a 600 s deadline survives and an instant one does not.
+    const code = await main(['--json'],
+      { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_TIMEOUT_MS: raw },
+      {
+        dataDir, fetchImpl: fetch, log: (m) => lines.push(m),
+        openImpl: (url) => { console_.browse(url, { delayMs: 50 }); },
+      });
+
+    assert.equal(code, 0,
+      `MUBIT_CC_AUTH_TIMEOUT_MS=${JSON.stringify(raw)} must fall back, not fire instantly: ${lines.join('\n')}`);
+    assert.equal(readCredentials(dataDir).apiKey, 'mbt_survives_bad_timeout');
+    await console_.close();
+    await instance.close();
+  }
+});
+
+/**
+ * The console's side of the exchange can fail in every way an HTTP service can, and the
+ * flow's job is the same in all of them: exit 1, offer the paste route, store nothing.
+ * The malformed-JSON row is the sharp one — `res.json()` throwing must not put a parser's
+ * `Unexpected token` line in front of a user as if it were an explanation.
+ */
+test('a failed token exchange offers the paste route and stores nothing', async () => {
+  const { main, KEY_ENV_VAR } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+
+  /** @type {Array<[string, Record<string, any>]>} */
+  const rows = [
+    ['HTTP 400', { tokenStatus: 400 }],
+    ['HTTP 500', { tokenStatus: 500 }],
+    ['malformed JSON', { rawBody: '<!DOCTYPE html><p>service temporarily unavailable</p>' }],
+    ['missing key field', { omitKey: true }],
+    ['empty key', { key: '' }],
+  ];
+
+  for (const [name, consoleOpts] of rows) {
+    const console_ = await fakeConsole(consoleOpts);
+    const dataDir = makeDataDir();
+    const lines = [];
+
+    const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+      dataDir, fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 5000,
+      openImpl: (url) => { console_.browse(url); },
+    });
+
+    assert.equal(code, 1, `${name}: a failed exchange is a failure, not a retry`);
+    const out = JSON.parse(lines.join(''));
+    assert.equal(out.state, 'browser_failed', name);
+    assert.match(out.detail, new RegExp(KEY_ENV_VAR), `${name}: the paste route is the way out`);
+    assert.ok(!out.detail.includes('Unexpected token'),
+      `${name}: a JSON parser's complaint is not a user message — got: ${out.detail}`);
+    assert.deepEqual(readCredentials(dataDir), {}, `${name}: nothing may be stored`);
+    await console_.close();
+  }
+});
+
+test('a console that refuses the exchange connection fails to the paste route', async () => {
+  const { main, KEY_ENV_VAR } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+  const { createServer } = await import('node:http');
+
+  // A port that was just listening and now refuses: bind, note, close.
+  const probe = createServer();
+  await new Promise((r) => probe.listen(0, '127.0.0.1', () => r(undefined)));
+  const deadPort = /** @type {any} */ (probe.address()).port;
+  await new Promise((r) => probe.close(() => r(undefined)));
+
+  const dataDir = makeDataDir();
+  const lines = [];
+  const code = await main(['--json'],
+    { MUBIT_CONSOLE_URL: `http://127.0.0.1:${deadPort}` },
+    {
+      dataDir, fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 5000,
+      // The "browser" can still reach the loopback; only the console is gone.
+      openImpl: (url) => {
+        const u = new URL(url);
+        fetch(`http://127.0.0.1:${u.searchParams.get('port')}/callback`
+          + `?code=c&state=${u.searchParams.get('state')}`, { redirect: 'manual' });
+      },
+    });
+
+  assert.equal(code, 1);
+  const out = JSON.parse(lines.join(''));
+  assert.equal(out.state, 'browser_failed');
+  assert.match(out.detail, new RegExp(KEY_ENV_VAR));
+  assert.deepEqual(readCredentials(dataDir), {});
+});
+
+/**
+ * A callback that carries our `state` but no `code` and no `provisioning=1` is a console
+ * mid-flow, not a success — the old consoles' explicit `provisioning=1` and this are the
+ * same situation, and both must come back retryable with nothing on disk.
+ */
+test('a callback with state but no code is still-provisioning, and stores nothing', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+  const console_ = await fakeConsole();
+  const dataDir = makeDataDir();
+  const lines = [];
+
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir, fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 5000,
+    openImpl: (url) => { console_.browse(url, { omitCode: true }); },
+  });
+
+  assert.equal(code, 2, 'the retryable exit code, not the fix-something one');
+  assert.equal(JSON.parse(lines.join('')).state, 'provisioning');
+  assert.deepEqual(readCredentials(dataDir), {}, 'no code, no key, nothing to store');
+  await console_.close();
+});
+
+// ---------------------------------------------------------------------------
+// repoIdentity — who the console is provisioning for
+// ---------------------------------------------------------------------------
+
+test('repoIdentity normalises both remote shapes and is blank outside a repo', async () => {
+  const { repoIdentity } = await mod('bin/auth.src.mjs');
+  const { spawnSync } = await import('node:child_process');
+
+  assert.equal(repoIdentity(tempDir('mubit-auth-norepo-')), '',
+    'outside a repo the console gets a blank and decides for itself');
+
+  const withRemote = (remote) => {
+    const dir = tempDir('mubit-auth-repo-');
+    spawnSync('git', ['init', '-q'], { cwd: dir });
+    spawnSync('git', ['remote', 'add', 'origin', remote], { cwd: dir });
+    return dir;
+  };
+  // leakcheck-allow: personal-data — a git SSH remote, not an address; the shape is the fixture.
+  assert.equal(repoIdentity(withRemote('git@github.com:mubit-ai/claude-plugins.git')),
+    'github.com/mubit-ai/claude-plugins', 'the SSH shape');
+  assert.equal(repoIdentity(withRemote('https://github.com/mubit-ai/claude-plugins.git')),
+    'github.com/mubit-ai/claude-plugins', 'the HTTPS shape');
+});
+
+test('the auth URL still carries repo= when there is no repo to name', async () => {
+  const { runBrowserAuth } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole();
+  let authUrl = '';
+
+  await runBrowserAuth({
+    consoleUrl: console_.url, repo: '',
+    openImpl: (url) => { authUrl = url; console_.browse(url); }, timeoutMs: 5000,
+  });
+
+  const u = new URL(authUrl);
+  assert.ok(u.searchParams.has('repo'), 'the parameter is part of the contract, present even when empty');
+  assert.equal(u.searchParams.get('repo'), '');
+  await console_.close();
+});
+
+// ---------------------------------------------------------------------------
+// The store, on the second run and after damage
+// ---------------------------------------------------------------------------
+
+test('re-authenticating replaces both the key and the endpoint, still owner-only', { skip: IS_ROOT }, async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const { credentialsPath, readCredentials, writeCredentials } = await lib('credentials.mjs');
+  const instance = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const console_ = await fakeConsole({ key: 'mbt_rotated', mubitEndpoint: instance.url });
+  const dataDir = makeDataDir();
+  writeCredentials(dataDir, { endpoint: 'https://stale.example', apiKey: 'mbt_stale' });
+  const lines = [];
+
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir, fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 5000,
+    openImpl: (url) => { console_.browse(url); },
+  });
+
+  assert.equal(code, 0, lines.join('\n'));
+  assert.deepEqual(readCredentials(dataDir), { endpoint: instance.url, apiKey: 'mbt_rotated' },
+    'a half-replaced store — new key, stale endpoint — is a working key pointed at the wrong door');
+  assert.equal((statSync(credentialsPath(dataDir)).mode & 0o777).toString(8), '600');
+  await console_.close();
+  await instance.close();
+});
+
+test('a corrupt credentials store reads as unconfigured, not as a crash', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const dataDir = makeDataDir();
+  writeFileSync(join(dataDir, 'credentials.json'), '{"endpoint": "https://half.example", "apiK');
+  const lines = [];
+
+  const code = await main(['--status', '--json'], {}, { dataDir, log: (m) => lines.push(m) });
+
+  assert.equal(code, 1, 'a store a SIGKILL truncated is the unconfigured state, not an error');
+  assert.equal(JSON.parse(lines.join('')).state, 'unconfigured');
+});
+
+test('logging out with nothing stored is a success', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const lines = [];
+
+  const code = await main(['--logout', '--json'], {}, { dataDir: makeDataDir(), log: (m) => lines.push(m) });
+
+  assert.equal(code, 0, '"already logged out" is the state the user asked for');
+  assert.equal(JSON.parse(lines.join('')).state, 'unconfigured');
+});
+
+// ---------------------------------------------------------------------------
+// Endpoint hygiene — the console's answer, and the paste route's precedence
+// ---------------------------------------------------------------------------
+
+test('a non-URL endpoint from the console never displaces the default', async () => {
+  const { endpointCandidatesFor, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+
+  for (const bad of ['', '   ', '::::', null, 123]) {
+    assert.deepEqual(endpointCandidatesFor({ mubitEndpoint: bad }), [DEFAULT_ENDPOINT],
+      `mubitEndpoint ${JSON.stringify(bad)} is not an endpoint and must not become one`);
+  }
+
+  // A decision, pinned as one: `new URL('https://nonsense')` parses, so a bare word IS a
+  // hostname as far as this side can tell. It goes first, gets *verified*, fails, and the
+  // gateway behind it is what actually answers — the candidates machinery absorbs it.
+  assert.deepEqual(endpointCandidatesFor({ mubitEndpoint: 'nonsense' }),
+    ['https://nonsense', DEFAULT_ENDPOINT]);
+});
+
+test('--data-dir pointing at a directory that does not exist yet is created, owner-only', { skip: IS_ROOT }, async () => {
+  const { main, KEY_ENV_VAR } = await mod('bin/auth.src.mjs');
+  const { credentialsPath, readCredentials } = await lib('credentials.mjs');
+  const server = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const nested = join(tempDir('mubit-auth-deep-'), 'a', 'b', 'plugin-data');
+  const lines = [];
+
+  const code = await main(
+    ['--paste', '--endpoint', server.url, '--data-dir', nested, '--json'],
+    { [KEY_ENV_VAR]: KEY },
+    { fetchImpl: fetch, log: (m) => lines.push(m) },
+  );
+
+  assert.equal(code, 0, lines.join('\n'));
+  assert.deepEqual(readCredentials(nested), { endpoint: server.url, apiKey: KEY },
+    'a data dir the host has not created yet must not turn a good sign-in into a silent no-op');
+  assert.equal((statSync(credentialsPath(nested)).mode & 0o777).toString(8), '600');
+  await server.close();
+});
+
+test('paste mode resolves the endpoint flag over the environment over the default', async () => {
+  const { main, KEY_ENV_VAR, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+  const seen = [];
+  const fetchImpl = async (url) => {
+    seen.push(new URL(String(url)).origin);
+    return new Response('{}', { status: 200 });
+  };
+  const run = (argv, env) => {
+    seen.length = 0;
+    return main(['--paste', '--json', ...argv], { [KEY_ENV_VAR]: KEY, ...env },
+      { dataDir: makeDataDir(), fetchImpl, log: () => {} });
+  };
+
+  await run(['--endpoint', 'https://flag.example'], { MUBIT_ENDPOINT: 'https://env.example' });
+  assert.ok(seen.length > 0 && seen.every((o) => o === 'https://flag.example'),
+    `--endpoint outranks the environment: ${seen.join(', ')}`);
+
+  await run([], { MUBIT_ENDPOINT: 'https://env.example' });
+  assert.ok(seen.length > 0 && seen.every((o) => o === 'https://env.example'),
+    `the environment outranks the default: ${seen.join(', ')}`);
+
+  await run([], {});
+  assert.ok(seen.length > 0 && seen.every((o) => o === DEFAULT_ENDPOINT),
+    `nothing set means the compiled-in gateway: ${seen.join(', ')}`);
+});
+
+/**
+ * Codex runs an unapproved command inside seatbelt with the network off. The verify path
+ * already translates its ENOTFOUND into "approve the command"; the *browser* path did not,
+ * so the same user was told the token exchange failed as if the console were down. The
+ * sandbox note must reach the browser path's failure message too.
+ */
+test('inside the codex sandbox a refused console blames the network, not the browser', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const { createServer } = await import('node:http');
+  const probe = createServer();
+  await new Promise((r) => probe.listen(0, '127.0.0.1', () => r(undefined)));
+  const deadPort = /** @type {any} */ (probe.address()).port;
+  await new Promise((r) => probe.close(() => r(undefined)));
+  const lines = [];
+
+  const code = await main(['--json'],
+    { MUBIT_CONSOLE_URL: `http://127.0.0.1:${deadPort}`, CODEX_SANDBOX: '1' },
+    {
+      dataDir: makeDataDir(), fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 5000,
+      openImpl: (url) => {
+        const u = new URL(url);
+        fetch(`http://127.0.0.1:${u.searchParams.get('port')}/callback`
+          + `?code=c&state=${u.searchParams.get('state')}`, { redirect: 'manual' });
+      },
+    });
+
+  assert.equal(code, 1);
+  const out = JSON.parse(lines.join(''));
+  assert.equal(out.state, 'browser_failed');
+  assert.match(out.detail, /sandbox|network access/i,
+    'the fix is approving the command, and the message must say so');
+  assert.doesNotMatch(out.detail, /fetch failed/i,
+    'the raw transport wrapper is not an explanation');
 });

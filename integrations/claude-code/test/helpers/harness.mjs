@@ -801,9 +801,24 @@ export async function lib(file) {
   return import(`${new URL(`file://${p}`).href}?fresh=${_bust++}`);
 }
 
-/** Same, for anything outside `lib/` (e.g. 'bin/statusline.src.mjs'). */
+/**
+ * Same, for anything outside `lib/` (e.g. 'bin/statusline.src.mjs').
+ *
+ * Under `MUBIT_CC_TEST_TARGET=dist` a `bin/<x>.src.mjs` import is rewritten to the
+ * committed `bin/<x>.mjs` bundle when one exists — same exports, same entry guard,
+ * different file. `runHook()` has made that swap for hooks since the rejected-field
+ * incident; nothing made it for the bin commands, so `npm run test:dist` was running
+ * the auth suite against a file no user ever executes.
+ */
 export async function mod(relPath) {
-  const p = join(PLUGIN_ROOT, relPath);
+  let p = join(PLUGIN_ROOT, relPath);
+  if (process.env.MUBIT_CC_TEST_TARGET === 'dist') {
+    const m = /^bin\/(.+)\.src\.mjs$/.exec(relPath);
+    if (m) {
+      const bundled = join(PLUGIN_ROOT, 'bin', `${m[1]}.mjs`);
+      if (existsSync(bundled)) p = bundled;
+    }
+  }
   if (!existsSync(p)) throw new Error(`${relPath} does not exist yet — write it, then re-run.`);
   return import(`${new URL(`file://${p}`).href}?fresh=${_bust++}`);
 }

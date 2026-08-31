@@ -1,8 +1,11 @@
+# This file is generated, like README.md. Edit it in the source repository — a change made
+# here is overwritten on the next release.
+
 # Local session-recording state. Codaph writes full Claude Code transcripts here — tool
 # calls, file contents, command output — which on a developer machine means verbatim
 # material from private repositories. It is never part of the published plugin, and this
-# repository is public, so it must never be committed. Twenty megabytes of it are sitting
-# in this working tree right now; that is fine, and staying untracked is what keeps it fine.
+# repository is public, so it must never be committed. Tens of megabytes of it can be sitting
+# in a working tree at any time; that is fine, and staying untracked is what keeps it fine.
 .codaph/
 
 # Dependencies. The plugin ships its bundles committed (see integrations/claude-code/.gitignore,
@@ -12,3 +15,6 @@ node_modules/
 # Editor / OS noise
 .DS_Store
 *.log
+
+# Local-only leak rules: names that must not be published in the repository they guard.
+.github/leakcheck/rules.local.mjs

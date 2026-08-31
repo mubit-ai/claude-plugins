@@ -2,7 +2,7 @@
 /**
  * `lib/state.mjs` — the durable surface under `${CLAUDE_PLUGIN_DATA}`.
  *
- * Build-guide §4.8 (module API) and §7 (state layout + TTL table).
+ * The module API, the on-disk state layout and its TTL table.
  *
  * Every hook is a short-lived process, so anything that must survive a process
  * boundary goes through here. Three rules hold everywhere in this file:
@@ -31,13 +31,16 @@ const DAY = 24 * HOUR;
 /** §7: pruning runs at most hourly, gated by an O_EXCL marker at `prune.lock`. */
 const PRUNE_INTERVAL_MS = HOUR;
 
+/** This plugin's data directory, and the prefix every suffixed variant of it shares. */
+const DATA_DIR_PREFIX = 'mubit-memory';
+
 // ---------------------------------------------------------------------------
 // dataDir
 // ---------------------------------------------------------------------------
 
 /**
  * §4.8 resolution order:
- *   `MUBIT_CC_DATA_DIR` -> `CLAUDE_PLUGIN_DATA` -> `~/.claude/plugins/data/mubit-memory`.
+ *   `MUBIT_CC_DATA_DIR` -> `CLAUDE_PLUGIN_DATA` -> `cfg.dataDir` -> `liveDataDir()`.
  *
  * `${CLAUDE_PLUGIN_DATA}` survives plugin updates; `${CLAUDE_PLUGIN_ROOT}` does
  * not (it is replaced wholesale), so nothing writable ever goes in ROOT.
@@ -54,10 +57,112 @@ export function dataDir(cfg = {}, env = process.env) {
   if (typeof host === 'string' && host) return host;
   if (cfg && typeof cfg.dataDir === 'string' && cfg.dataDir) return cfg.dataDir;
   const home = (typeof e.HOME === 'string' && e.HOME) ? e.HOME : safeHome();
-  return join(home, '.claude', 'plugins', 'data', 'mubit-memory');
+  return liveDataDir(home, e);
 }
 
-function safeHome() {
+/**
+ * Where this machine's Mubit state actually lives, for a process nobody told.
+ *
+ * Hooks and the MCP server are launched with `MUBIT_CC_DATA_DIR` pinned into them by setup, but
+ * a command a model runs straight from the shell inherits none of that — and **the name the
+ * host picks carries a suffix**: a marketplace install writes `mubit-memory-<marketplace>`, a
+ * `--plugin-dir` session writes `mubit-memory-inline`, and the bare name is only one of
+ * several. Returning the bare name on that path sent these commands to scan a directory
+ * nothing writes to, and report "no hook has written a run marker yet" at a session whose
+ * hooks had been writing markers for every prompt.
+ *
+ * The preference order, and why each rung:
+ *
+ *   1. **What setup pinned into `$CODEX_HOME/hooks.json`.** That is the answer setup
+ *      *recorded*, not a guess, so it outranks any search: it is the directory the hooks
+ *      themselves are using.
+ *   2. **A directory holding `credentials.json`.** `/mubit-memory:auth` writes exactly one of
+ *      these, into the install the user actually authenticated. It is the strongest available
+ *      evidence of which install is live, and the liveliness of the rest is noise.
+ *   3. **The liveliest by `status/` mtime.** Every hook touches its data directory, so recency
+ *      is a good proxy for "in use" when nobody has authenticated yet.
+ *   4. **The bare name.** A machine with no Claude Code install at all wants a directory
+ *      rather than an error.
+ *
+ * Rungs 2–4 are the same algorithm as `claudeCodeDataDir()` in
+ * `integrations/codex/lib/boot.mjs`, deliberately copied rather than shared: that module is
+ * loaded unbundled at runtime by the codex integration's `scripts/setup.mjs`, and the codex
+ * package ships only its own `lib/`, so importing across integrations there would be a dead
+ * path in the published plugin. Keep the two in step by hand.
+ *
+ * @param {string} home
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {string}
+ */
+export function liveDataDir(home, env = {}) {
+  const root = join(home, '.claude', 'plugins', 'data');
+
+  try {
+    const codexHome = (typeof env.CODEX_HOME === 'string' && env.CODEX_HOME)
+      ? env.CODEX_HOME
+      : join(home, '.codex');
+    const pinned = JSON.stringify(JSON.parse(readFileSync(join(codexHome, 'hooks.json'), 'utf8')))
+      .match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    if (pinned && pinned[1]) return pinned[1];
+  } catch { /* no Codex registrations, or unreadable: fall through to the search */ }
+
+  const bare = join(root, DATA_DIR_PREFIX);
+
+  /** @type {Array<{path: string, creds: boolean, at: number, bare: boolean}>} */
+  let candidates = [];
+  try {
+    candidates = readdirSync(root)
+      .filter((n) => n === DATA_DIR_PREFIX || n.startsWith(`${DATA_DIR_PREFIX}-`))
+      .map((n) => join(root, n))
+      .filter((p) => { try { return statSync(p).isDirectory(); } catch { return false; } })
+      .map((p) => ({
+        path: p,
+        creds: existsSync(join(p, 'credentials.json')),
+        at: dirActivity(p),
+        bare: p === bare,
+      }));
+  } catch {
+    return bare;                       // no ~/.claude/plugins/data at all
+  }
+  if (!candidates.length) return bare;
+
+  // An explicit partition, not a score. The old code added `1e15` to a credentialed
+  // directory's mtime and then required the winner to score above zero — which on a machine
+  // where no hook had written anything yet rejected every candidate and fell through to the
+  // bare name. A sign-in is precisely that machine.
+  const withCreds = candidates.filter((c) => c.creds);
+  const pool = withCreds.length ? withCreds : candidates;
+  // Deterministic: newest first, then a suffixed directory ahead of the bare one, then by
+  // path. The middle rung decides the nothing-written-yet tie, and decides it correctly —
+  // the bare name is what this function *falls back* to, never a directory a host points a
+  // hook at.
+  pool.sort((a, b) => (b.at - a.at)
+    || (Number(a.bare) - Number(b.bare))
+    || a.path.localeCompare(b.path));
+  return pool[0].path;
+}
+
+/** Latest mtime of a directory or of the files a live install touches. */
+function dirActivity(dir) {
+  let newest = 0;
+  for (const rel of ['', 'config.json', 'status', 'runs', 'credentials.json']) {
+    try {
+      const t = statSync(rel ? join(dir, rel) : dir).mtimeMs;
+      if (t > newest) newest = t;
+    } catch { /* absent; try the next */ }
+  }
+  return newest;
+}
+
+/**
+ * `homedir()` throws on a machine with no resolvable home (a bare container, some CI
+ * images). Exported because `bin/auth.mjs` resolves the same directory from an environment
+ * the host did not populate, and two different fallbacks for `$HOME` would put the
+ * credentials somewhere the hooks do not look.
+ *
+ * @returns {string}
+ */
+export function safeHome() {
   try { return homedir(); } catch { return '.'; }
 }
 
@@ -152,8 +257,11 @@ export function writeJsonAtomic(p, value, opts = {}) {
  * `session-end.mjs` — never on a blocking hook's critical path — and gated to
  * at most once an hour by an `O_EXCL` `prune.lock`.
  *
- * The sweep is a scalpel: `config.json`, `breaker/*` and `policy/*` are owned by
- * their own TTL logic and are never touched here.
+ * The sweep is a scalpel: `config.json`, `actor.json`, `breaker/*` and `policy/*`
+ * are owned by their own TTL logic and are never touched here. `actor.json` is
+ * `lib/actor.mjs`'s 30-day record of the detected actor id, and it is written only
+ * by `drain.mjs`; expiring it from here on a different schedule would un-attribute
+ * every capture between the sweep and the next drain.
  *
  * @param {Record<string, any>} [cfg]
  * @returns {void}
@@ -204,20 +312,43 @@ export function pruneStale(cfg = {}) {
       for (const name of jsonFiles(join(rd, 'turns'))) {
         expire(join(rd, 'turns', name), 6 * HOUR);
       }
+      // runs/<run_id>/seen.json — 6 h, the same window as the turns it aggregates
+      // (`lib/seen.mjs`). It also expires entry by entry on every read; this is the sweep
+      // for a run nobody comes back to, whose whole file would otherwise outlive its turns.
+      expire(join(rd, 'seen.json'), 6 * HOUR);
+      // runs/<run_id>/resume.json — 1 h. The briefing is already consume-once and
+      // already carries its own 30 min injectability window (`lib/resume.mjs`), so this is
+      // the sweep for the file nobody ever came back to read: a session that was started and
+      // abandoned before its first prompt leaves one behind, and it would otherwise sit in
+      // the data directory for as long as the run does.
+      expire(join(rd, 'resume.json'), 1 * HOUR);
+      // runs/<run_id>/pins.json — 7 d. Longer than the seen-set and the turns because a pin
+      // is scoped to a *run*, and under the default `per-directory` strategy a run is a
+      // project someone comes back to for weeks. It is a cache either way: the next drain
+      // re-derives it from the instance, and a sweep that fired early would only cost the
+      // prompts between it and that drain. Kept in the table rather than left out so a run
+      // nobody returns to does not leave a file behind for ever.
+      expire(join(rd, 'pins.json'), 7 * DAY);
       // runs/<run_id>/drain.lock — 60 s, stolen after
       expire(join(rd, 'drain.lock'), 60 * SEC);
       // runs/<run_id>/checkpoints.json — 30 d; jobs.json — 24 h
       expire(join(rd, 'checkpoints.json'), 30 * DAY);
       expire(join(rd, 'jobs.json'), 24 * HOUR);
       // runs/<run_id>/flushed-<session_id>.marker — 7 d
+      // runs/<run_id>/flush-<session_id>.lock — 90 s, stolen after. A released lease is
+      // unlinked by its holder; this is the sweep for one whose holder was killed, which is
+      // the case the lease exists to survive in the first place.
       for (const e of dirEntries(rd)) {
-        if (e.isFile() && e.name.startsWith('flushed-') && e.name.endsWith('.marker')) {
+        if (!e.isFile()) continue;
+        if (e.name.startsWith('flushed-') && e.name.endsWith('.marker')) {
           expire(join(rd, e.name), 7 * DAY);
+        } else if (e.name.startsWith('flush-') && e.name.endsWith('.lock')) {
+          expire(join(rd, e.name), 90 * SEC);
         }
       }
     }
   } catch {
-    // §12.1-F14: an unusable DATA dir costs the sweep, nothing else.
+    // §12.1: an unusable DATA dir costs the sweep, nothing else.
   }
 }
 
@@ -264,4 +395,42 @@ function jsonFiles(dir) {
  */
 export function ensureDir(dir) {
   try { mkdirSync(dir, { recursive: true }); return true; } catch { return false; }
+}
+
+// ---------------------------------------------------------------------------
+// Path segments
+// ---------------------------------------------------------------------------
+
+/**
+ * The one definition of a path segment this plugin will write.
+ *
+ * A run id normally arrives from `lib/runid.mjs` as `cc-<slug>-<hash>`, but it can also be
+ * pinned by hand in a settings file or an environment variable, and a prompt id arrives
+ * from the host. Both are untrusted input to a path: anything that could climb out of the
+ * directory it is joined under is flattened rather than trusted.
+ *
+ * This lived as four near-identical private copies (`safeSegment`, `safeId`, `idPart`) plus
+ * one join that had none, which is how `stage-prompt` came to write turn state to a path no
+ * sibling would look in. One copy, imported everywhere, is the fix.
+ *
+ * @param {unknown} value
+ * @param {number} [max]  truncate to this many characters; 0 leaves it uncapped
+ * @returns {string}  the flattened segment, or `''` when nothing usable is left
+ */
+export function safeSegment(value, max = 0) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  let safe = raw.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
+  if (max > 0) safe = safe.slice(0, max);
+  return safe && safe !== '.' && safe !== '..' ? safe : '';
+}
+
+/**
+ * `${dataDir}/runs/<run_id>` — the per-run root every hook writes under.
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @returns {string}
+ */
+export function runDir(cfg, runId) {
+  return join(resolveDataDir(cfg), 'runs', safeSegment(runId));
 }

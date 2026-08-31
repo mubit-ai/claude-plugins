@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mubit": {
+      "command": "node",
+      "args": ["{{PLUGIN_ROOT}}/mcp/dist/index.js"]
+    }
+  }
+}

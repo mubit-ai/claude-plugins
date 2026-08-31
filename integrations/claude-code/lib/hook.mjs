@@ -20,8 +20,9 @@
  * Two smaller invariants that fall out of that:
  *
  *   - stdout is ALWAYS a JSON object. `undefined` from a body emits `{}`; a failure emits
- *     `{"suppressOutput": true}`. Claude Code parsing empty stdout is not a contract we get
- *     to rely on, so we never produce it.
+ *     `{"suppressOutput": true}` — or, on the three Codex events that reject that field, `{}`.
+ *     See `forHost`. Neither host parsing empty stdout is a contract we get to rely on, so we
+ *     never produce it.
  *   - the emit is a *synchronous* `write(2)`, not `process.stdout.write`. A body that blew
  *     its deadline still has a live 5-second timer pending; the only way to get out of the
  *     process at that point is `process.exit(0)`, and an async stdout write to a pipe would
@@ -39,7 +40,7 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfig } from './config.mjs';
+import { host, loadConfig } from './config.mjs';
 import { log } from './log.mjs';
 import { dataDir as resolveDataRoot } from './state.mjs';
 
@@ -58,6 +59,55 @@ const DETACHED_ENV = 'MUBIT_CC_DETACHED';
 
 /** @type {'timeout'} */
 const TIMEOUT = 'timeout';
+
+/**
+ * The three Codex events that reject `suppressOutput` (§4.9).
+ *
+ * Codex checks a hook's stdout twice: against a generated JSON Schema, and then against a set
+ * of semantic rules the schema does not carry. `suppressOutput` is a declared property of
+ * *every* Codex output schema and is rejected at parse time on exactly these three:
+ *
+ *     PreToolUse hook returned unsupported suppressOutput
+ *     PostToolUse hook returned unsupported suppressOutput
+ *     PermissionRequest hook returned unsupported suppressOutput
+ *
+ * Rejection is not silent — Codex marks the hook failed in the user's transcript, which is a
+ * memory layer making itself conspicuous while doing its job correctly. The field buys us
+ * nothing on these three: we never attach a `systemMessage` or `additionalContext` to any of
+ * them, so there is no output to suppress.
+ *
+ * Claude Code accepts the field on every event, so this is scoped to the Codex host and the
+ * Claude Code suite is the net that says so.
+ *
+ * `test/fixtures/codex-output-rules.json` in the Codex plugin holds the full extracted table,
+ * and `codex-payload.test.mjs` drives every hook against it.
+ */
+const CODEX_REJECTS_SUPPRESS_OUTPUT = Object.freeze([
+  'PreToolUse', 'PostToolUse', 'PermissionRequest',
+]);
+
+/**
+ * Drop fields the running host would reject. Claude Code gets its value back untouched.
+ *
+ * @param {any} value    what the body returned
+ * @param {string} event `hook_event_name` from the payload, or '' if it never parsed
+ * @returns {any}
+ */
+function forHost(value, event) {
+  if (!isObject(value) || !('suppressOutput' in value)) return value;
+  if (host(process.env) !== 'codex') return value;
+  // An unparseable payload leaves the event unknown. Strip anyway: the field is cosmetic on
+  // every Codex event and a visible hook failure on three of them, so the trade is one-sided.
+  if (event && !CODEX_REJECTS_SUPPRESS_OUTPUT.includes(event)) return value;
+  const { suppressOutput, ...rest } = value;
+  return rest;
+}
+
+/** `hook_event_name` off a parsed payload, '' when it is missing or not a string. */
+function eventNameOf(payload) {
+  const v = isObject(payload) ? payload.hook_event_name : undefined;
+  return typeof v === 'string' ? v.trim() : '';
+}
 
 // ---------------------------------------------------------------------------
 // runHook
@@ -91,13 +141,19 @@ export async function runHook(name, options = {}) {
 
   let settled = false;
   /**
+   * The event being answered, for `forHost`. Set the moment the payload parses; the paths
+   * that emit before that (unparseable stdin, a body that threw on the way in) leave it '',
+   * which `forHost` reads as "strip conservatively".
+   */
+  let hookEvent = '';
+  /**
    * The single exit from this function. Emit, drop the handoff file, leave.
    * @param {any} value
    */
   const finish = (value) => {
     if (settled) return;
     settled = true;
-    emit(value);
+    emit(forHost(value, hookEvent));
     if (payloadPath) {
       // §4.9: "the child unlinks the file when done". Done means here — after the body
       // has run — not at read time, or a crashed child would leave nothing to debug.
@@ -124,13 +180,14 @@ export async function runHook(name, options = {}) {
     const raw = payloadPath ? readFileText(payloadPath) : await readStdin();
     const parsed = parseObject(raw);
     if (!parsed.ok) {
-      // Exactly one line, and it is the only thing this process says. §12.1-F12/F13 count it.
+      // Exactly one line, and it is the only thing this process says. §12.1 counts it.
       safely(() => log(cfg, 'warn',
         `hook ${name}: stdin payload was not parseable JSON; emitting {} and exiting 0`,
         { hook: name, bytes: raw.length }));
       finish({});
       return;
     }
+    hookEvent = eventNameOf(parsed.value);
 
     /** @type {(p: any, c: any, x: any) => any} */
     const body = typeof opts.body === 'function' ? opts.body : () => undefined;

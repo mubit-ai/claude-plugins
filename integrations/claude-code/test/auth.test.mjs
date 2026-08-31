@@ -11,8 +11,8 @@
  * asserts:
  *
  *   1. **A key is never reported as good without being checked against the server.**
- *      `GET /v2/core/health` is the one route the access policy allowlists, so it
- *      answers `OK` for a wrong key, an expired key, and no key at all. Validating
+ *      `GET /v2/core/health` reports whether the instance is up, not whether your key
+ *      is good, so a green health check proves nothing about the credential. Validating
  *      against it would make `/auth` a machine for producing false confidence — the
  *      exact failure the `doctor` skill then has to talk the user back out of.
  *   2. **The four outcomes stay distinct.** "Your key is wrong" and "your network is
@@ -24,9 +24,10 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { statSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
-import { fakeMubit, lib, makeDataDir, mod } from './helpers/harness.mjs';
+import { fakeMubit, lib, makeDataDir, mod, tempDir } from './helpers/harness.mjs';
 
 const IS_ROOT = process.getuid?.() === 0;
 const KEY = 'mbt_a_realistic_looking_test_key';
@@ -89,9 +90,9 @@ test('a good key against a healthy instance is ready', async () => {
 /**
  * The assertion this whole file is built around.
  *
- * `/v2/core/health` is unauthenticated by design — it is the readiness probe the plugin
- * uses before a key exists. So a check that stops there reports success for a key the
- * server would reject on every subsequent call.
+ * `/v2/core/health` is the readiness probe, and the plugin makes it before a key exists —
+ * that is the whole point of it, and it is why its verdict says nothing about the key. A
+ * check that stops there reports success for a key that is rejected on every later call.
  */
 test('a rejected key is auth_failed, even though health says OK', async () => {
   const { verifyCredentials } = await mod('bin/auth.src.mjs');
@@ -130,6 +131,69 @@ test('nothing listening is unreachable, and is never blamed on the key', async (
   assert.equal(res.ok, false);
   assert.equal(res.state, 'unreachable',
     'a user whose VPN is down must not be told to re-issue their key');
+});
+
+test('a transport failure names what went wrong, not just that it went wrong', async () => {
+  const { verifyCredentials } = await mod('bin/auth.src.mjs');
+
+  // A port that was bound and then released: connection refused, immediately. A hardcoded low
+  // port will not do — the WHATWG "bad ports" list makes fetch refuse 1 and 9 before it ever
+  // opens a socket, so the failure carries no errno to report.
+  const probe = await fakeMubit();
+  const deadUrl = probe.url;
+  await probe.close();
+  const refused = await verifyCredentials({
+    endpoint: deadUrl, apiKey: KEY, fetchImpl: fetch, timeoutMs: 1500,
+  });
+  assert.equal(refused.state, 'unreachable');
+  assert.match(refused.detail, /ECONNREFUSED/,
+    'a port with nothing behind it must say so; the errno lives in the cause chain');
+
+  // A name that cannot resolve. `.invalid` is reserved by RFC 2606 for exactly this.
+  const noHost = await verifyCredentials({
+    endpoint: 'https://nothing.invalid', apiKey: KEY, fetchImpl: fetch, timeoutMs: 4000,
+  });
+  assert.equal(noHost.state, 'unreachable');
+  assert.match(noHost.detail, /ENOTFOUND|EAI_AGAIN/);
+
+  assert.notEqual(refused.detail, noHost.detail,
+    'a dead port and a dead name are different problems with different fixes, and both '
+    + 'used to print the same sentence');
+});
+
+// Codex runs an unapproved command inside seatbelt with the network switched off, and DNS is
+// what fails first there — so a healthy endpoint reports ENOTFOUND and the user is sent off to
+// fix a URL that was never wrong.
+test('inside the Codex sandbox the network is blamed, not the endpoint', async (t) => {
+  const { verifyCredentials } = await mod('bin/auth.src.mjs');
+  const before = process.env.CODEX_SANDBOX_NETWORK_DISABLED;
+  t.after(() => {
+    if (before === undefined) delete process.env.CODEX_SANDBOX_NETWORK_DISABLED;
+    else process.env.CODEX_SANDBOX_NETWORK_DISABLED = before;
+  });
+  process.env.CODEX_SANDBOX_NETWORK_DISABLED = '1';
+
+  const res = await verifyCredentials({
+    endpoint: 'https://nothing.invalid', apiKey: KEY, fetchImpl: fetch, timeoutMs: 4000,
+  });
+
+  assert.equal(res.state, 'unreachable');
+  assert.match(res.detail, /no network access/);
+  assert.match(res.detail, /Approve the command/);
+  assert.ok(!/typo/.test(res.detail), 'the endpoint is not the thing to go and fix');
+});
+
+test('a timeout says it did not answer in time, not that the host is wrong', async () => {
+  const { verifyCredentials } = await mod('bin/auth.src.mjs');
+  const server = await fakeMubit({ 'GET /v2/core/health': { hang: true } });
+
+  const res = await verifyCredentials({
+    endpoint: server.url, apiKey: KEY, fetchImpl: fetch, timeoutMs: 200,
+  });
+
+  assert.equal(res.state, 'unreachable');
+  assert.match(res.detail, /did not answer in time/);
+  await server.close();
 });
 
 test('a failing instance is server_error, distinct from a bad key', async () => {
@@ -252,10 +316,10 @@ test('normalizeEndpoint fixes what a user pastes', async () => {
   const { normalizeEndpoint, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
 
   const rows = [
-    ['https://eu.mubit.ai', 'https://eu.mubit.ai'],
-    ['https://eu.mubit.ai/', 'https://eu.mubit.ai'],
-    ['  https://eu.mubit.ai/  ', 'https://eu.mubit.ai'],
-    ['eu.mubit.ai', 'https://eu.mubit.ai'],
+    ['https://api.mubit.ai', 'https://api.mubit.ai'],
+    ['https://api.mubit.ai/', 'https://api.mubit.ai'],
+    ['  https://api.mubit.ai/  ', 'https://api.mubit.ai'],
+    ['api.mubit.ai', 'https://api.mubit.ai'],
     ['http://127.0.0.1:8899', 'http://127.0.0.1:8899'],
     ['', DEFAULT_ENDPOINT],
     [undefined, DEFAULT_ENDPOINT],
@@ -268,7 +332,7 @@ test('normalizeEndpoint fixes what a user pastes', async () => {
 
 test('a bare hostname is upgraded to https, never left as http', async () => {
   const { normalizeEndpoint } = await mod('bin/auth.src.mjs');
-  assert.ok(normalizeEndpoint('eu.mubit.ai').startsWith('https://'),
+  assert.ok(normalizeEndpoint('api.mubit.ai').startsWith('https://'),
     'silently sending a key over http would be worse than failing');
 });
 
@@ -297,9 +361,43 @@ test('a browser that will not open is not a failure — the URL is still surface
     log: (m) => printed.push(m),
   });
 
-  assert.equal(res, false, 'it reports that it could not open one');
+  assert.equal(res.launched, false, 'it reports that it could not open one');
   assert.ok(printed.join('\n').includes('https://console.mubit.ai'),
     'over SSH there is no browser, and printing the URL is the whole fallback');
+});
+
+/**
+ * The launcher `spawn`s and reports ENOENT on the *next tick*, long after `openConsole` has
+ * returned — so a machine with no `open`/`xdg-open` looked like a successful launch. Nothing
+ * printed the URL, and the user was left with a command that sat there and then told them
+ * their workspace was still provisioning. Both halves are wrong, and both come from reading
+ * a synchronous return value for an asynchronous failure.
+ */
+test('a launch that fails asynchronously still surfaces the URL, and still reads as failed', async () => {
+  const { openConsole } = await mod('bin/auth.src.mjs');
+  const printed = [];
+
+  const res = openConsole({
+    url: 'https://console.mubit.ai',
+    // What `defaultOpen` does: returns cleanly, then reports the failure on a later tick.
+    openImpl: (_url, onFailure) => { setTimeout(onFailure, 0); },
+    log: (m) => printed.push(m),
+  });
+
+  assert.equal(res.launched, true, 'nothing has failed yet at the moment this returns');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(res.launched, false, 'and the deadline, much later, reads the settled answer');
+  assert.ok(printed.join('\n').includes('https://console.mubit.ai'));
+});
+
+test('a real launch prints the URL too, so it is always copyable', async () => {
+  const { openConsole } = await mod('bin/auth.src.mjs');
+  const printed = [];
+
+  openConsole({ url: 'https://console.mubit.ai', openImpl: () => {}, log: (m) => printed.push(m) });
+
+  assert.ok(printed.join('\n').includes('https://console.mubit.ai'),
+    'a tab that opened makes this redundant; a tab that silently did not makes it the only way out');
 });
 
 test('openConsole passes the console URL through untouched', async () => {
@@ -387,11 +485,11 @@ test('--status distinguishes signed in from not, and exits accordingly', async (
   assert.equal(await main(['--status'], {}, { dataDir, log: (m) => lines.push(m) }), 1,
     'unconfigured is a non-zero exit, so a script can branch on it');
 
-  writeCredentials(dataDir, { endpoint: 'https://eu.mubit.ai', apiKey: KEY });
+  writeCredentials(dataDir, { endpoint: 'https://api.mubit.ai', apiKey: KEY });
   assert.equal(await main(['--status'], {}, { dataDir, log: (m) => lines.push(m) }), 0);
 
   assert.ok(!lines.join('\n').includes(KEY), '--status reports presence, never the key itself');
-  assert.match(lines.join('\n'), /eu\.mubit\.ai/);
+  assert.match(lines.join('\n'), /api\.mubit\.ai/);
 });
 
 test('--logout removes the stored credentials', async () => {
@@ -399,7 +497,7 @@ test('--logout removes the stored credentials', async () => {
   const { writeCredentials, readCredentials } = await lib('credentials.mjs');
   const dataDir = makeDataDir();
 
-  writeCredentials(dataDir, { endpoint: 'https://eu.mubit.ai', apiKey: KEY });
+  writeCredentials(dataDir, { endpoint: 'https://api.mubit.ai', apiKey: KEY });
   const code = await main(['--logout'], {}, { dataDir, log: () => {} });
 
   assert.equal(code, 0);
@@ -430,7 +528,7 @@ test('parseArgs defaults to the browser flow', async () => {
   assert.equal(parseArgs(['--paste']).mode, 'paste');
   assert.equal(parseArgs(['--status']).mode, 'status');
   assert.equal(parseArgs(['--logout']).mode, 'logout');
-  assert.equal(parseArgs(['--endpoint', 'https://eu.mubit.ai']).endpoint, 'https://eu.mubit.ai');
+  assert.equal(parseArgs(['--endpoint', 'https://api.mubit.ai']).endpoint, 'https://api.mubit.ai');
 });
 
 // ===========================================================================
@@ -445,7 +543,8 @@ test('parseArgs defaults to the browser flow', async () => {
  * exchange when they disagree. That is the entire security property of PKCE, so the
  * fake enforces it rather than rubber-stamping whatever arrives.
  */
-async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false } = {}) {
+async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false,
+  mubitEndpoint = '' } = {}) {
   const { createServer } = await import('node:http');
   const { createHash } = await import('node:crypto');
 
@@ -474,9 +573,20 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
         return res.end(JSON.stringify({ error: 'pkce_mismatch' }));
       }
       res.writeHead(200, { 'content-type': 'application/json' });
+      // Exactly the field set `server/api/cli/token.post.ts` returns, and nothing else.
+      // The old fake was *generous* — it invented a richer payload than the real server —
+      // and that is precisely what hid the missing `mubitEndpoint` from 1487 tests: the
+      // console shipped no endpoint, the plugin fell back to its compiled-in default, and
+      // every test passed. The console asserts the same list from its side, so a change to
+      // either reddens one of them.
       res.end(JSON.stringify({
-        mubitApiKey: key, minimaUrl: 'https://api.minima.sh',
-        instanceId: 'mnm-abcdef', projectId: 'proj_1', namespace: 'ns_1', region: 'eu',
+        mubitApiKey: key,
+        mubitEndpoint,
+        minimaUrl: 'https://harness.example.invalid',
+        instanceId: 'instance-under-test',
+        projectId: 'proj_1',
+        namespace: 'proj_1',
+        region: 'eu',
       }));
     });
   });
@@ -491,7 +601,13 @@ async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false
      * Play the part of the browser: read the URL the CLI wanted to open, register the
      * challenge against a fresh code, and call the loopback back.
      */
-    async browse(authUrl, { code = 'code_ok', tamperState, sendProvisioning = provisioning } = {}) {
+    async browse(authUrl, {
+      code = 'code_ok', tamperState, sendProvisioning = provisioning, delayMs = 0,
+    } = {}) {
+      // `delayMs` stands in for a user who has to create an account, an org and wait out a
+      // workspace coming up. It is the only way to exercise a ten-minute deadline in a suite
+      // that must finish in seconds — the wait is faked, the deadline arithmetic is not.
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs).unref?.());
       const u = new URL(authUrl);
       issued.set(code, u.searchParams.get('challenge'));
       const cbPort = u.searchParams.get('port');
@@ -537,7 +653,7 @@ test('the browser flow returns the key the console issued', async () => {
   });
 
   assert.equal(res.mubitApiKey, 'mbt_issued_by_console');
-  assert.equal(res.namespace, 'ns_1');
+  assert.equal(res.namespace, 'proj_1');
   await console_.close();
 });
 
@@ -685,6 +801,29 @@ test('the auth URL carries the context the console needs to provision', async ()
   await console_.close();
 });
 
+/**
+ * `/app/cli-auth` is shared: a second CLI client drives the same page with the same
+ * parameters, and neither client sent a name until this. So the console cannot brand its
+ * copy for Claude Code unless it is told, and `client` is how it is told.
+ *
+ * Purely additive. The console's neutral wording has to stay for every already-installed
+ * copy of this plugin, which will keep omitting the parameter forever.
+ */
+test('the auth URL names this client, so the console can address it by name', async () => {
+  const { runBrowserAuth } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole();
+  let authUrl = '';
+
+  await runBrowserAuth({
+    consoleUrl: console_.url,
+    openImpl: (url) => { authUrl = url; console_.browse(url); },
+    timeoutMs: 5000,
+  });
+
+  assert.equal(new URL(authUrl).searchParams.get('client'), 'claude-code');
+  await console_.close();
+});
+
 test('the loopback port is released once the flow ends', async () => {
   const { runBrowserAuth } = await mod('bin/auth.src.mjs');
   const { createServer } = await import('node:http');
@@ -711,17 +850,232 @@ test('the loopback port is released once the flow ends', async () => {
 // Mapping the console's answer onto the plugin's two settings
 // ---------------------------------------------------------------------------
 
-test('endpointFor maps a region, and falls back rather than guessing', async () => {
-  const { endpointFor, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+test('the candidates never invent a host from a region', async () => {
+  const { endpointCandidatesFor, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
 
-  assert.equal(endpointFor({ region: 'eu' }), 'https://eu.mubit.ai');
-  assert.equal(endpointFor({ region: 'us' }), 'https://us.mubit.ai');
-  assert.equal(endpointFor({ region: 'EU' }), 'https://eu.mubit.ai', 'case is not meaningful');
-  assert.equal(endpointFor({}), DEFAULT_ENDPOINT, 'no region means the default, not an error');
-  assert.equal(endpointFor({ region: 'moon' }), DEFAULT_ENDPOINT,
-    'an unknown region falls back; inventing https://moon.mubit.ai would fail confusingly');
-  assert.equal(endpointFor({ mubitEndpoint: 'https://custom.example.com' }),
-    'https://custom.example.com', 'an explicit endpoint from the console always wins');
+  // eu.mubit.ai and us.mubit.ai are NXDOMAIN. Mapping a region onto one of them stored an
+  // endpoint that could never answer, and the failure surfaced far from the sign-in.
+  for (const region of ['eu', 'us', 'EU', 'moon']) {
+    assert.deepEqual(endpointCandidatesFor({ region }), [DEFAULT_ENDPOINT],
+      `region ${region} is a console routing hint, not a hostname this side may invent`);
+  }
+  assert.equal(DEFAULT_ENDPOINT, 'https://api.mubit.ai', 'the only prod host that serves TLS');
+  assert.equal(endpointCandidatesFor({ mubitEndpoint: 'https://custom.example.com' })[0],
+    'https://custom.example.com', 'an explicit endpoint from the console is tried first');
+  assert.equal(endpointCandidatesFor({ mubitEndpoint: 'https://custom.example.com', region: 'eu' })[0],
+    'https://custom.example.com', 'an explicit endpoint outranks a region');
+});
+
+/**
+ * The contract, from this side. `server/api/cli/token.post.ts` asserts the same list from
+ * its own side, so the two cannot drift silently: whichever one moves, the other goes red.
+ *
+ * This test is here because the generous fake it replaces is the entire reason the missing
+ * `mubitEndpoint` survived a 1487-test suite. A double that returns more than the real thing
+ * proves the parser works and nothing about the contract.
+ */
+test('the console double returns exactly the field set the real console returns', async () => {
+  const { runBrowserAuth } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole({ mubitEndpoint: 'https://eu.api.mubit.ai' });
+
+  const payload = await runBrowserAuth({
+    consoleUrl: console_.url,
+    openImpl: (url) => { console_.browse(url); },
+    timeoutMs: 5000,
+  });
+
+  assert.deepEqual(Object.keys(payload).sort(), [
+    'instanceId', 'minimaUrl', 'mubitApiKey', 'mubitEndpoint', 'namespace', 'projectId', 'region',
+  ]);
+  await console_.close();
+});
+
+/**
+ * Pinning the fallback as a decision rather than an oversight.
+ *
+ * A console old enough not to send `mubitEndpoint` still has to work, and the default is not
+ * a guess: probing production showed `api.mubit.ai` is a key-routed shared gateway —
+ * `/v2/core/health` answers 200 for keys belonging to different instances — so the bearer
+ * token, not the hostname, selects the instance. Making an absent endpoint fatal would break
+ * users on an older console to fix nothing.
+ */
+test('an older console that sends no endpoint still gets a working default', async () => {
+  const { main, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+  const console_ = await fakeConsole({ key: 'mbt_from_old_console' });   // mubitEndpoint: ''
+  const dataDir = makeDataDir();
+  const lines = [];
+
+  // `fetchImpl` answers the default endpoint, which the test cannot dial for real.
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push(String(url));
+    if (String(url).startsWith(DEFAULT_ENDPOINT)) {
+      return new Response(String(url).endsWith('/health') ? 'OK' : '{}', { status: 200 });
+    }
+    return fetch(url, init);
+  };
+
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir, fetchImpl, log: (m) => lines.push(m), timeoutMs: 5000,
+    openImpl: (url) => { console_.browse(url); },
+  });
+
+  assert.equal(code, 0, lines.join('\n'));
+  assert.equal(readCredentials(dataDir).endpoint, DEFAULT_ENDPOINT);
+  assert.ok(seen.some((u) => u.startsWith(DEFAULT_ENDPOINT)), 'and it was checked, not assumed');
+  await console_.close();
+});
+
+/**
+ * The console may name an endpoint this side must not send a key to — and the answer is
+ * not to throw the whole answer away.
+ *
+ * Measured on 2026-08-28, in two clusters, and they disagree in a way that decides this:
+ *
+ *   api.eu.dev.mubit.ai   https -> 401   http -> 308 to https
+ *   api.eu.mubit.ai       https -> TLS handshake fails   http -> 401
+ *   api.mubit.ai          https -> 401
+ *
+ * Both clusters *report* `http://`, because that is what their platform-api has in
+ * `MUBIT_REGIONAL_HTTP_ENDPOINT`. So a plaintext answer says nothing about whether the host
+ * serves TLS: dev's does, prod's does not.
+ *
+ * Declining outright and falling back was wrong for dev in a way a real run showed: the key
+ * went to `api.mubit.ai` — a *different cluster* — which rejected it, and the user was told
+ * "the instance rejected that key. Issue a new one in the console." There is nothing wrong
+ * with the key, and no new one will help.
+ *
+ * So the scheme is upgraded and the host is kept, and the compiled-in gateway follows it as
+ * a fallback. The key is verified against each in turn and stored against the first that
+ * accepts it, which is machinery this already had. Dev works today; prod's TLS failure falls
+ * through to the gateway that has always served it. Neither ever sees plaintext.
+ */
+test('a plaintext endpoint is upgraded and tried first, with the gateway behind it', async () => {
+  const { endpointCandidatesFor, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+
+  assert.deepEqual(
+    endpointCandidatesFor({ mubitEndpoint: 'http://api.eu.dev.mubit.ai' }),
+    ['https://api.eu.dev.mubit.ai', DEFAULT_ENDPOINT],
+    'dev serves TLS on that exact host, so the upgrade is what makes dev work at all');
+
+  assert.deepEqual(
+    endpointCandidatesFor({ mubitEndpoint: 'http://api.eu.mubit.ai' }),
+    ['https://api.eu.mubit.ai', DEFAULT_ENDPOINT],
+    'prod has no TLS listener there yet, so this one falls through to the gateway');
+
+  assert.deepEqual(
+    endpointCandidatesFor({ mubitEndpoint: 'https://custom.example.com' }),
+    ['https://custom.example.com', DEFAULT_ENDPOINT]);
+
+  assert.deepEqual(endpointCandidatesFor({}), [DEFAULT_ENDPOINT],
+    'an older console that sends nothing still gets the working default');
+
+  assert.deepEqual(endpointCandidatesFor({ mubitEndpoint: DEFAULT_ENDPOINT }), [DEFAULT_ENDPOINT],
+    'no point verifying the same endpoint twice');
+});
+
+/** The point of the upgrade is that nothing is ever *tried* in clear text. */
+test('no candidate ever carries the key over plaintext to a real network', async () => {
+  const { endpointCandidatesFor } = await mod('bin/auth.src.mjs');
+
+  for (const named of [
+    'http://api.eu.mubit.ai', 'http://api.us.mubit.ai', 'http://internal.cluster.local:8080',
+    'api.eu.mubit.ai', 'HTTP://Api.EU.Mubit.AI',
+  ]) {
+    for (const candidate of endpointCandidatesFor({ mubitEndpoint: named })) {
+      assert.ok(candidate.startsWith('https://'),
+        `${named} produced ${candidate}, which would put the key on the wire in clear text`);
+    }
+  }
+});
+
+/**
+ * Loopback is the exception, and the only one: plaintext to 127.0.0.1 does not cross a
+ * network, and there is rarely a TLS listener there to upgrade to. Local development and
+ * `tests/e2e/cli-auth.spec.ts` both depend on it.
+ */
+test('a loopback endpoint is kept as-is, because plaintext there crosses nothing', async () => {
+  const { endpointCandidatesFor } = await mod('bin/auth.src.mjs');
+
+  for (const named of [
+    'http://127.0.0.1:8788', 'http://localhost:3000', 'http://[::1]:8080',
+  ]) {
+    assert.equal(endpointCandidatesFor({ mubitEndpoint: named })[0], named.replace(/\/+$/, ''),
+      'upgrading this one would break every local run');
+  }
+});
+
+/**
+ * The candidates are *verified*, not guessed between. This is the behaviour a real dev-cluster
+ * run needed: the first candidate is unreachable, and the user still ends up signed in rather
+ * than being told their key is bad.
+ */
+test('the first endpoint that accepts the key is the one stored', async () => {
+  const { authenticateAcrossEndpoints, currentCredentials } = await mod('bin/auth.src.mjs');
+  const dir = tempDir('mubit-endpoint-fallback-');
+  const tried = [];
+
+  const res = await authenticateAcrossEndpoints({
+    dataDir: dir,
+    endpoints: ['https://no-tls.example', 'https://gateway.example'],
+    apiKey: 'mbt_a_b_c',
+    // Verification makes more than one request per endpoint; what this asserts is which
+    // endpoints were reached, and in what order, not how many calls each one costs.
+    fetchImpl: async (url) => {
+      const origin = new URL(url).origin;
+      if (tried.at(-1) !== origin) tried.push(origin);
+      if (url.startsWith('https://no-tls.example')) throw new Error('tlsv1 alert protocol version');
+      return new Response('{}', { status: 200 });
+    },
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.endpoint, 'https://gateway.example');
+  assert.deepEqual(tried, ['https://no-tls.example', 'https://gateway.example'],
+    'in order, and the second is only reached because the first failed');
+  assert.equal(currentCredentials(dir).endpoint, 'https://gateway.example',
+    'stored against the endpoint that actually answered, not the one the console named');
+});
+
+test('a later endpoint is never tried once one has accepted the key', async () => {
+  const { authenticateAcrossEndpoints, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+  const tried = [];
+
+  const res = await authenticateAcrossEndpoints({
+    dataDir: tempDir('mubit-endpoint-first-'),
+    endpoints: ['https://mine.example', DEFAULT_ENDPOINT],
+    apiKey: 'mbt_a_b_c',
+    fetchImpl: async (url) => {
+      const origin = new URL(url).origin;
+      if (tried.at(-1) !== origin) tried.push(origin);
+      return new Response('{}', { status: 200 });
+    },
+  });
+
+  assert.equal(res.endpoint, 'https://mine.example');
+  assert.deepEqual(tried, ['https://mine.example'],
+    'the fallback is a fallback, not a second request every user pays for');
+});
+
+/**
+ * When every candidate refuses the key, the failure reported is the *console's own* answer.
+ * The fallback failing too is the less interesting half: it is the endpoint the operator
+ * configured that the user or an operator has to go look at.
+ */
+test('when nothing accepts the key, the console\'s own endpoint is the one reported', async () => {
+  const { authenticateAcrossEndpoints } = await mod('bin/auth.src.mjs');
+
+  const res = await authenticateAcrossEndpoints({
+    dataDir: tempDir('mubit-endpoint-allfail-'),
+    endpoints: ['https://named.example', 'https://gateway.example'],
+    apiKey: 'mbt_a_b_c',
+    fetchImpl: async () => new Response('{}', { status: 401 }),
+  });
+
+  assert.equal(res.ok, false);
+  assert.equal(res.endpoint, 'https://named.example');
+  assert.equal(res.stored, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -755,6 +1109,31 @@ test('main() browser flow: signs in, verifies, and stores — with no key in the
   await server.close();
 });
 
+/**
+ * The half that was broken end to end: the console names an endpoint and the plugin stores
+ * it. Every other browser-flow test pins `--endpoint`, so none of them could have caught the
+ * console not sending one.
+ */
+test('main() stores the endpoint the console named, not its own default', async () => {
+  const { main, DEFAULT_ENDPOINT } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+  const instance = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const console_ = await fakeConsole({ key: 'mbt_regional', mubitEndpoint: instance.url });
+  const dataDir = makeDataDir();
+  const lines = [];
+
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir, fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 5000,
+    openImpl: (url) => { console_.browse(url); },
+  });
+
+  assert.equal(code, 0, lines.join('\n'));
+  assert.equal(readCredentials(dataDir).endpoint, instance.url);
+  assert.notEqual(instance.url, DEFAULT_ENDPOINT, 'the test would be vacuous otherwise');
+  await console_.close();
+  await instance.close();
+});
+
 test('main() reports a still-provisioning workspace as retryable, with its own exit code', async () => {
   const { main } = await mod('bin/auth.src.mjs');
   const console_ = await fakeConsole({ provisioning: true });
@@ -775,23 +1154,277 @@ test('main() reports a still-provisioning workspace as retryable, with its own e
   await console_.close();
 });
 
-test('main() falls back to the paste route when the browser flow cannot finish', async () => {
-  const { main, KEY_ENV_VAR } = await mod('bin/auth.src.mjs');
-  const console_ = await fakeConsole();
+/**
+ * How long a human actually needs.
+ *
+ * The default was two minutes, chosen for "sign in and pick an instance". The user this
+ * command exists for is doing more than that: creating an account, creating an org, and then
+ * waiting out a workspace that takes a minute or two on its own — and the console now waits
+ * for that workspace rather than bouncing. Two minutes fails a flow that is working.
+ *
+ * Ten is the ceiling, not a guess: a Bash tool call is killed at 600 s at the outside, so a
+ * client deadline above that could never be reached. `skills/auth/SKILL.md` sets the tool's
+ * own timeout to match — without that the harness kills this at 120 s and the change is inert.
+ */
+test('the browser deadline is ten minutes, matching the longest a tool call can run', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+  const instance = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const console_ = await fakeConsole({ key: 'mbt_slow_signup', mubitEndpoint: instance.url });
   const dataDir = makeDataDir();
   const lines = [];
 
-  // Nothing ever opens, so the flow times out.
+  const started = Date.now();
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir, fetchImpl: fetch, log: (m) => lines.push(m),
+    // The deadline is shrunk for the test; the point is that the flow survives a callback
+    // arriving long after the old 120 s default would have given up.
+    timeoutMs: 5000,
+    openImpl: (url) => { console_.browse(url, { delayMs: 300 }); },
+  });
+
+  assert.equal(code, 0, lines.join('\n'));
+  assert.equal(readCredentials(dataDir).apiKey, 'mbt_slow_signup');
+  assert.ok(Date.now() - started < 4000, 'no real sleeping in this suite');
+  await console_.close();
+  await instance.close();
+});
+
+test('the shipped default deadline is 600000 ms, and the environment still overrides it', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole();
+  const lines = [];
+
+  // Nothing opens, so the flow runs to its deadline. `MUBIT_CC_AUTH_TIMEOUT_MS` has to still
+  // work, or every test in this file that relies on it would sit out ten minutes.
+  const started = Date.now();
+  await main(['--json'], { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_TIMEOUT_MS: '120' },
+    { dataDir: makeDataDir(), fetchImpl: fetch, log: (m) => lines.push(m), openImpl: () => {} });
+  assert.ok(Date.now() - started < 3000);
+
+  const src = await import('node:fs').then((fs) =>
+    fs.readFileSync(new URL('../bin/auth.src.mjs', import.meta.url), 'utf8'));
+  assert.match(src, /raw > 0 \? raw : 600000/,
+    'a Bash tool call is killed at 600 s at the outside, so nothing above it is reachable');
+  await console_.close();
+});
+
+/**
+ * A browser that opened and a browser that never existed are different problems.
+ *
+ * Timing out after the console page was reached means the sign-up is still in flight, or the
+ * workspace is still coming up — the same command, run again, finishes it. Reporting that as
+ * `browser_failed` sent the user off to issue a key by hand to fix a flow that was working.
+ * The SSH case, where nothing could be opened at all, keeps exit 1 and the paste route.
+ */
+test('a timeout after the browser opened is retryable, not a browser failure', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole();
+  const lines = [];
+
   const code = await main(
     ['--json'],
-    { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_TIMEOUT_MS: '120' },
-    { dataDir, fetchImpl: fetch, log: (m) => lines.push(m), openImpl: () => {} },
+    { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_TIMEOUT_MS: '150' },
+    // A browser opened — it just never came back in time.
+    { dataDir: makeDataDir(), fetchImpl: fetch, log: (m) => lines.push(m), openImpl: () => true },
   );
 
-  assert.equal(code, 1);
+  assert.equal(code, 2, 'the retryable exit code, not the fix-something one');
+  assert.equal(JSON.parse(lines.join('')).state, 'provisioning');
+  await console_.close();
+});
+
+test('a machine with no browser at all still gets the paste route', async () => {
+  const { main, KEY_ENV_VAR } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole();
+  const lines = [];
+
+  const code = await main(
+    ['--json'],
+    { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_TIMEOUT_MS: '150' },
+    {
+      dataDir: makeDataDir(), fetchImpl: fetch, log: (m) => lines.push(m),
+      openImpl: () => { throw new Error('no xdg-open here'); },
+    },
+  );
+
+  assert.equal(code, 1, 'over SSH there is nothing to wait for — waiting again would not help');
   const out = JSON.parse(lines.join(''));
   assert.equal(out.state, 'browser_failed');
-  assert.match(out.detail, new RegExp(KEY_ENV_VAR),
-    'a dead end is not an answer — the manual route must be in the same message');
+  assert.match(out.detail, new RegExp(KEY_ENV_VAR));
   await console_.close();
+});
+
+/**
+ * The authorize URL is printed on every run now, and `--json` callers parse the verdict. They
+ * are two streams for a reason: progress on stderr, exactly one JSON object on stdout.
+ */
+test('--json puts nothing but the verdict on the log channel', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const instance = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const console_ = await fakeConsole({ key: 'mbt_k', mubitEndpoint: instance.url });
+  const lines = [];
+  const progress = [];
+
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir: makeDataDir(), fetchImpl: fetch, timeoutMs: 5000,
+    log: (m) => lines.push(m), logProgress: (m) => progress.push(m),
+    openImpl: (url) => { console_.browse(url); },
+  });
+
+  assert.equal(code, 0, [...progress, ...lines].join('\n'));
+  assert.equal(lines.length, 1);
+  assert.doesNotThrow(() => JSON.parse(lines[0]));
+  assert.match(progress.join('\n'), /\/app\/cli-auth\?/, 'the URL is still surfaced, just not there');
+  await console_.close();
+  await instance.close();
+});
+
+
+// ===========================================================================
+// Which directory the credentials land in
+// ===========================================================================
+
+/**
+ * This is the rung nothing used to cover.
+ *
+ * Every other test in this file injects `deps.dataDir`, so `resolveDataDirFrom()` — the code
+ * that runs on the only path a user ever takes — had zero coverage. It matters more than the
+ * rest put together: a sign-in that stores a good key in a directory no hook reads is
+ * indistinguishable, from the user's side, from a sign-in that failed.
+ *
+ * The skill invokes this command through Bash, and a Bash tool call gets
+ * `CLAUDE_PLUGIN_DATA=""` — measured, not assumed. So the environment rung is not available
+ * where it is needed and the answer has to be passed in as `--data-dir`, interpolated by the
+ * host into the skill body.
+ */
+
+/** A `$HOME` with the named `mubit-memory*` directories, and credentials in some of them. */
+function homeWithDataDirs(dirs = {}) {
+  const home = tempDir('mubit-auth-home-');
+  const root = join(home, '.claude', 'plugins', 'data');
+  for (const [name, spec] of Object.entries(dirs)) {
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    if (spec.endpoint) {
+      writeFileSync(join(dir, 'credentials.json'),
+        JSON.stringify({ endpoint: spec.endpoint, apiKey: KEY }));
+    }
+  }
+  return { home, root };
+}
+
+/**
+ * `--status` reads the resolved directory and reports its endpoint, so it is a
+ * network-free probe for "which directory did the resolver choose?".
+ * @returns {Promise<string>}
+ */
+async function resolvedEndpoint(argv, env) {
+  const { main } = await mod('bin/auth.src.mjs');
+  const lines = [];
+  await main([...argv, '--status', '--json'], env, { log: (m) => lines.push(m) });
+  return JSON.parse(lines.join('')).endpoint;
+}
+
+test('the data directory resolver walks every rung, in order', async () => {
+  const { home, root } = homeWithDataDirs({
+    'mubit-memory': {},
+    'mubit-memory-mubit': { endpoint: 'https://found-by-search.example' },
+  });
+  const pinned = makeDataDir();
+  writeFileSync(join(pinned, 'credentials.json'),
+    JSON.stringify({ endpoint: 'https://pinned.example', apiKey: KEY }));
+  const fromHost = makeDataDir();
+  writeFileSync(join(fromHost, 'credentials.json'),
+    JSON.stringify({ endpoint: 'https://from-host.example', apiKey: KEY }));
+  const fromFlag = makeDataDir();
+  writeFileSync(join(fromFlag, 'credentials.json'),
+    JSON.stringify({ endpoint: 'https://from-flag.example', apiKey: KEY }));
+
+  /** @type {Array<{name: string, argv: string[], env: Record<string,string>, want: string}>} */
+  const table = [
+    {
+      name: '--data-dir outranks everything: it is what the host interpolated into the skill',
+      argv: ['--data-dir', fromFlag],
+      env: { HOME: home, MUBIT_CC_DATA_DIR: pinned, CLAUDE_PLUGIN_DATA: fromHost },
+      want: 'https://from-flag.example',
+    },
+    {
+      name: 'MUBIT_CC_DATA_DIR next — setup recorded it, so it is not a guess',
+      argv: [],
+      env: { HOME: home, MUBIT_CC_DATA_DIR: pinned, CLAUDE_PLUGIN_DATA: fromHost },
+      want: 'https://pinned.example',
+    },
+    {
+      name: 'CLAUDE_PLUGIN_DATA next, for the processes the host does launch itself',
+      argv: [],
+      env: { HOME: home, CLAUDE_PLUGIN_DATA: fromHost },
+      want: 'https://from-host.example',
+    },
+    {
+      name: 'the search last, and it finds the suffixed directory the hooks use',
+      argv: [],
+      env: { HOME: home },
+      want: 'https://found-by-search.example',
+    },
+  ];
+
+  for (const row of table) {
+    assert.equal(await resolvedEndpoint(row.argv, row.env), row.want, row.name);
+  }
+  assert.ok(root);
+});
+
+test('an empty or uninterpolated --data-dir is ignored, not used as a path', async () => {
+  const { home } = homeWithDataDirs({
+    'mubit-memory-mubit': { endpoint: 'https://found-by-search.example' },
+  });
+
+  // A host that does not know the variable leaves the placeholder in the argument verbatim.
+  // Taking it literally would create `./${CLAUDE_PLUGIN_DATA}/credentials.json` under
+  // whatever directory the session happened to be in, and report success.
+  for (const bad of ['', '${CLAUDE_PLUGIN_DATA}', '${MUBIT_CC_DATA_DIR}']) {
+    assert.equal(
+      await resolvedEndpoint(['--data-dir', bad], { HOME: home }),
+      'https://found-by-search.example',
+      `--data-dir ${JSON.stringify(bad)} must fall through to the next rung`,
+    );
+  }
+});
+
+test('parseArgs exposes --data-dir', async () => {
+  const { parseArgs } = await mod('bin/auth.src.mjs');
+  assert.equal(parseArgs(['--data-dir', '/somewhere']).dataDir, '/somewhere');
+  assert.equal(parseArgs([]).dataDir, undefined);
+});
+
+/**
+ * The acceptance criterion for the whole fix, stated where a reader will find it: a
+ * first-ever sign-in, in the environment a Bash tool call actually has, writes exactly one
+ * `credentials.json`, and it is in the directory the host points its hooks at.
+ */
+test('a first-ever sign-in writes to the suffixed directory and never creates the bare one', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const server = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const console_ = await fakeConsole({ key: 'mbt_first_ever_signin' });
+  const { home, root } = homeWithDataDirs({ 'mubit-memory': {}, 'mubit-memory-mubit': {} });
+  const lines = [];
+
+  const code = await main(
+    ['--endpoint', server.url, '--json'],
+    // Exactly what a Bash tool call gets: no CLAUDE_PLUGIN_DATA, no MUBIT_CC_DATA_DIR.
+    { HOME: home, MUBIT_CONSOLE_URL: console_.url },
+    {
+      fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 5000,
+      openImpl: (url) => { console_.browse(url); },
+    },
+  );
+
+  assert.equal(code, 0, lines.join('\n'));
+  assert.ok(existsSync(join(root, 'mubit-memory-mubit', 'credentials.json')),
+    'the key must land where the hooks read');
+  assert.equal(existsSync(join(root, 'mubit-memory', 'credentials.json')), false,
+    'the bare name is not a directory any host hands a hook');
+  await console_.close();
+  await server.close();
 });

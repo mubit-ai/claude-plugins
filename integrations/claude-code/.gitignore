@@ -13,6 +13,14 @@ node_modules/
 !hooks/dist/
 !mcp/dist/
 
+# Same story, different rule. The repo root ignores `.mcp.json` so nobody accidentally
+# commits their own local MCP server config — but this one is the plugin's own manifest:
+# it registers the `mubit` server, and therefore every `mcp__plugin_mubit-memory_mubit__*`
+# tool the skills call. Without this line it stays untracked, the mirror (which publishes
+# `git ls-files`, not the directory) never copies it, and the plugin installs with no MCP
+# server at all — skills load, declare their tools, and every one resolves to nothing.
+!.mcp.json
+
 # Editor / OS noise
 .DS_Store
 *.log

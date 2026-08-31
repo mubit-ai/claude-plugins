@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `bin/statusline.mjs` — build-guide §10 (and §16.2 for the degradation path).
+ * `bin/statusline.mjs` — the status line (§10, and §16.2 for the degradation path).
  *
  * The status line is the only part of this plugin that runs on every frame of the
  * host UI. Three properties matter more than anything it prints:
@@ -25,6 +25,7 @@ import { join } from 'node:path';
 
 import {
   PLUGIN_ROOT, makeDataDir, makeProjectDir, tempDir, baseEnv, fakeMubit, lib,
+  assertWithinBudget,
 } from './helpers/harness.mjs';
 
 // ---------------------------------------------------------------------------
@@ -42,7 +43,7 @@ function statuslineScript() {
   if (existsSync(src)) return src;
   return assert.fail(
     `bin/statusline.mjs does not exist yet (nor bin/statusline.src.mjs) under ${PLUGIN_ROOT}.\n` +
-    '  Build-guide §10 defines it; §11.2 bundles statusline.src.mjs → statusline.mjs.');
+    '  §10 defines it; §11.2 bundles statusline.src.mjs → statusline.mjs.');
 }
 
 /**
@@ -183,21 +184,22 @@ test('makes zero network requests — it only reads local state', async () => {
   }
 });
 
-// §10 — the real budget is 15ms. The ceiling asserted here is deliberately generous
-// (node's own cold start is most of it on CI); it exists to catch an implementation
-// that grew a directory walk, a spawn, or a socket.
+// §10 — the real budget is 15ms of work. The ceiling asserted here is deliberately generous;
+// it exists to catch an implementation that grew a directory walk, a spawn, or a socket.
+//
+// This test already took the best of three samples, which was the right instinct and still not
+// enough: node's own cold start is most of the number, and under a loaded runner that term
+// moves further than the whole budget. `assertWithinBudget` keeps the resampling and subtracts
+// the spawn floor it measures, so the assertion is about the status line rather than the box.
 test('renders well inside its budget (real target < 15ms; ceiling here is generous)', async () => {
   const dataDir = makeDataDir();
   const e = env(dataDir);
   const runId = await derivedRunId(e);
   seedMarker(dataDir, runId);
 
-  const samples = [];
-  for (let i = 0; i < 3; i++) samples.push((await runStatusline({ env: e })).ms);
-  const best = Math.min(...samples);
-  assert.ok(best < 300,
-    `fastest of three status-line renders took ${best}ms including node startup (samples ${samples.join('/')}ms). ` +
-    'The §10 target is <15ms of work; a number this high means it is doing I/O it should not.');
+  const first = (await runStatusline({ env: e })).ms;
+  await assertWithinBudget('status line', 300, first,
+    async () => (await runStatusline({ env: e })).ms);
 });
 
 // §10 — the documented line. Example from the guide:
@@ -217,14 +219,105 @@ test('renders the documented shape: glyph, run, mode, recall, saved, lessons', a
 });
 
 // ---------------------------------------------------------------------------
+// The line has to be able to say "recall is dead"
+// ---------------------------------------------------------------------------
+
+// A run of dry recalls used to render as `recall 0/0 tok` beside a green ●: a healthy-looking
+// line describing a plugin that has injected nothing for the whole session.
+test('a run of dry recalls renders "recall dry N" instead of a healthy count', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  seedMarker(dataDir, runId, {
+    recall: { sources: 0, tokens: 0, ms: 812, empty_reason: 'policy_denied', rung: 0, dropped: 0, dry_streak: 7 },
+  });
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.match(r.line, /recall dry 7/);
+  assert.doesNotMatch(r.line, /recall 0\/0 tok/);
+});
+
+// Below the threshold it stays quiet, for the same reason one AbortError is not a verdict:
+// a fresh run has nothing to recall, and a narrow prompt legitimately matches nothing.
+test('a dry streak under the threshold does not cry wolf', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  seedMarker(dataDir, runId, {
+    recall: { sources: 6, tokens: 1200, ms: 300, empty_reason: '', rung: 1, dropped: 0, dry_streak: 2 },
+  });
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.doesNotMatch(r.line, /recall dry/);
+  assert.match(r.line, /recall 6\/1\.2k tok/);
+});
+
+// §16.2 — reflect is the only call that widens a lesson past `run` scope, so a failed one
+// costs the session its cross-session memory. It failed 12 times over four days in silence:
+// the failure logs at `warn`, the success at `info`, so at the default level a healthy and a
+// broken instance print the same nothing.
+test('a failed reflect is named on the line', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  seedMarker(dataDir, runId, {
+    reflect: { at: 1, lessons_stored: 0, status: 'failed', attempts: 2 },
+  });
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.match(r.line, /reflect failed/);
+  // A content verdict, not a ConnState: reflect fails on instances that answer everything
+  // else, so it must not repaint the glyph as a connection fault.
+  assert.match(r.line, /^● /, 'a failed reflect must not change the connection glyph');
+});
+
+// The skip reasons are all deliberate — disabled, nothing ingested, spool undrained. A line
+// that reports intended behaviour as a fault teaches the user to ignore the line.
+test('a deliberately skipped reflect is not reported as a fault', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  for (const status of ['ok', 'skipped:disabled', 'skipped:not-ingested', 'skipped:undrained']) {
+    seedMarker(dataDir, runId, { reflect: { at: 1, lessons_stored: 0, status, attempts: 0 } });
+    const r = await runStatusline({ env: e });
+    assertNoStackTrace(r);
+    assert.doesNotMatch(r.line, /reflect/, `"${status}" must not render as a fault`);
+  }
+});
+
+// A marker written before this field existed has no `dry_streak`. It must render exactly as
+// it always did rather than printing `recall dry NaN`.
+test('a marker predating dry_streak renders unchanged', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  const m = seedMarker(dataDir, runId);
+  delete m.recall.dry_streak;
+  writeFileSync(join(dataDir, 'status', `${runId}.json`), JSON.stringify(m));
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.equal(r.line, `● mubit: ${runId} · local · recall 6/1.2k tok · saved 12t/1q · lessons 3g`);
+});
+
+// ---------------------------------------------------------------------------
 // §10 — glyph precedence: worst state wins, top to bottom
 // ---------------------------------------------------------------------------
 
 /**
  * §10 precedence, worst first:
- *   ✖ auth failed > ✖ unreachable > ▲ server error > ◌ slow > ◍ warming > ● ready
+ *   ○ not configured > ✖ auth failed > ✖ unreachable > ▲ server error > ◌ slow > ◍ warming
+ *   > ● ready
+ *
+ * `unconfigured` outranks everything because it is the one state that makes the others
+ * meaningless: with no endpoint nothing was dialed, so any verdict sitting in a marker or a
+ * breaker file is about some previous endpoint and cannot be true of this one.
  */
 const PRECEDENCE = [
+  { state: 'unconfigured', glyph: '○', label: 'not configured' },
   { state: 'auth_failed', glyph: '✖', label: 'auth failed' },
   { state: 'unreachable', glyph: '✖', label: 'unreachable' },
   { state: 'server_error', glyph: '▲', label: 'server error' },
@@ -276,7 +369,7 @@ test('cold start renders ◍ warming rather than a failure glyph', async () => {
   assert.ok(r.line.includes('warming'), `expected the "warming" label, got: ${r.line}`);
 });
 
-// The decision phase-2-recall.md leaves open, now recorded: cold start suppresses
+// The question the design left open, now settled and recorded here: cold start suppresses
 // `not_responding` as well. §10 ranks ◍ warming *below* ◌ slow; §4.7 says failures inside the
 // grace window do not show a failure glyph at all. §4.7 wins, because the two sections answer
 // different questions — §10 ranks two simultaneous facts, §4.7 decides whether a fact is a
@@ -325,6 +418,42 @@ test('auth_failed outranks cold start — the one error the user can fix is neve
   assertNoStackTrace(r);
   assert.ok(r.line.startsWith('✖'), `expected ✖ auth failed to outrank ◍ warming, got: ${r.line}`);
   assert.ok(r.line.includes('auth failed'), `expected the "auth failed" label, got: ${r.line}`);
+});
+
+// §4.7 — the second state cold start must not cover. `◍ warming` says "wait, it is coming
+// up"; there is no instance coming up, and waiting never resolves it. The user has to run
+// one command, so the glyph has to keep saying so.
+test('unconfigured outranks cold start — waiting does not set an endpoint', async () => {
+  const dataDir = makeDataDir();
+  const e = env(dataDir);
+  const runId = await derivedRunId(e);
+  seedMarker(dataDir, runId, { state: 'unconfigured', cold_start_until: Date.now() + 20_000 });
+
+  const r = await runStatusline({ env: e });
+  assertNoStackTrace(r);
+  assert.ok(r.line.startsWith('○'), `expected ○ not configured to outrank ◍ warming, got: ${r.line}`);
+  assert.ok(r.line.includes('not configured'), `expected the "not configured" label, got: ${r.line}`);
+});
+
+// A regression guard with an unusually sharp edge. `resolveDisplay` indexes DISPLAY[state]
+// without a guard, safe only because `isConnState` filters against CONN_STATES first — so
+// adding a state to the union and forgetting its glyph row throws, `main()` catches it, and
+// the status line degrades to *nothing at all*. Silent, and indistinguishable from the
+// documented "prints nothing on a fresh install" behaviour. Assert every state renders.
+test('every ConnState has a glyph row — a missing one blanks the status line silently', async () => {
+  const { CONN_STATES } = await lib('breaker.mjs');
+  for (const state of CONN_STATES) {
+    const dataDir = makeDataDir();
+    const e = env(dataDir);
+    const runId = await derivedRunId(e);
+    seedMarker(dataDir, runId, { state });
+
+    const r = await runStatusline({ env: e });
+    assertNoStackTrace(r);
+    assert.ok(r.line.trim().length > 0,
+      `state "${state}" rendered an empty status line — DISPLAY has no row for it, so `
+      + 'resolveDisplay threw and main() swallowed it');
+  }
 });
 
 // ---------------------------------------------------------------------------

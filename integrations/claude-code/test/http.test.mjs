@@ -3,7 +3,7 @@
  * `lib/http.mjs` — "the only network primitive".
  *
  * Guide sections under test: §4.2 (the module), §1.1 (routes and the per-route 256 KiB cap
- * on /v2/control/query), §1.2 (auth, and the one allowlisted unauthenticated route),
+ * on /v2/control/query), §1.2 (auth, and which call precedes a configured key),
  * §1.3 (required fields — a missing one is a 422, not a silent default), §1.8 + §5.2 (the
  * `mode` literal and what a typo costs), §4.3 (the `"default"` run-id guard), §4.7 (the
  * breaker is consulted before dialing).
@@ -121,7 +121,7 @@ test('request: a 500 returns {ok:false, state:"server_error"} without throwing',
   assert.equal(r.status, 500);
 });
 
-// §4.7 / F10: an unparseable body on a JSON route is a server fault, not an unhandled
+// §4.7: an unparseable body on a JSON route is a server fault, not an unhandled
 // rejection. A reverse proxy returning an HTML error page is the real-world shape.
 test('request: a non-JSON body on a JSON route returns server_error, no unhandled rejection', async (t) => {
   const { cfg, http } = await setup(t, {
@@ -134,7 +134,7 @@ test('request: a non-JSON body on a JSON route returns server_error, no unhandle
   assert.equal(r.state, 'server_error');
 });
 
-// §4.7 / F1: nothing listening. The most common state of a local Mubit.
+// §4.7: nothing listening. The most common state of a local Mubit.
 test('request: a refused connection returns {ok:false, state:"unreachable"} without throwing', async (t) => {
   const { cfg, http } = await setupDead(t);
   const r = await noThrow(() => http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN },
@@ -143,6 +143,96 @@ test('request: a refused connection returns {ok:false, state:"unreachable"} with
   assertResultEnvelope(r);
   assert.equal(r.ok, false);
   assert.equal(r.state, 'unreachable');
+});
+
+// A transport failure arrives as `TypeError: fetch failed` with the only actionable part —
+// the errno — buried in the `cause` chain. Reporting the wrapper told the user their request
+// failed and nothing whatsoever about why, or what to change.
+test('request: the error names the errno and what to do about it, not "fetch failed"', async (t) => {
+  const { cfg, http } = await setupDead(t);
+  const r = await noThrow(() => http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN },
+    { timeoutMs: 1000 }), 'request(ECONNREFUSED)');
+
+  assert.match(r.error, /ECONNREFUSED/);
+  assert.match(r.error, /nothing is listening there/);
+  assert.ok(!/fetch failed/.test(r.error), 'the flattened wrapper is not the message');
+});
+
+test('request: a name that does not resolve reads differently from a dead port', async (t) => {
+  const http = await lib('http.mjs');
+  const { loadConfig } = await lib('config.mjs');
+  const dataDir = makeDataDir();
+  // `.invalid` is reserved by RFC 2606 precisely so it can never resolve.
+  const cfg = loadConfig(baseEnv({ dataDir, endpoint: 'https://nothing.invalid' }));
+
+  const r = await noThrow(() => http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN },
+    { timeoutMs: 4000 }), 'request(ENOTFOUND)');
+
+  assert.equal(r.ok, false);
+  assert.match(r.error, /ENOTFOUND|EAI_AGAIN/);
+  assert.match(r.error, /does not resolve|DNS lookup failed/);
+});
+
+// Inside seatbelt DNS fails before anything else, so the endpoint is never the evidence.
+test('request: the Codex sandbox is named as the cause, ahead of the errno', async (t) => {
+  const { cfg, http } = await setupDead(t);
+  const before = process.env.CODEX_SANDBOX;
+  t.after(() => {
+    if (before === undefined) delete process.env.CODEX_SANDBOX;
+    else process.env.CODEX_SANDBOX = before;
+  });
+  process.env.CODEX_SANDBOX = 'seatbelt';
+
+  const r = await noThrow(() => http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN },
+    { timeoutMs: 1000 }), 'request(sandboxed)');
+
+  assert.match(r.error, /no network access/);
+  assert.match(r.error, /Approve the command/);
+  assert.ok(!/check the port/.test(r.error),
+    'a sandboxed process has no evidence about the endpoint to offer');
+});
+
+// The wording table in `NETWORK_HINT` and the classification sets in `lib/breaker.mjs` are two
+// views of one errno list, and they drift silently: a code the breaker calls `unreachable` but
+// http has no sentence for degrades to `TypeError: fetch failed` again. TLS codes are the
+// deliberate exception — they are a rejected handshake, not a classified transport state.
+test('the hinted errnos are the ones the breaker classifies', async (t) => {
+  const { UNREACHABLE_CODES, TIMEOUT_CODES } = await lib('breaker.mjs');
+  const http = await lib('http.mjs');
+  const { loadConfig } = await lib('config.mjs');
+  const cfg = loadConfig(baseEnv({ dataDir: makeDataDir(), endpoint: 'https://x.invalid' }));
+
+  const TLS_ONLY = new Set([
+    'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  ]);
+
+  // `lib/http.mjs` reaches for the global `fetch` on purpose — it is the one network primitive
+  // and has no injection seam — so the only way to hand it a chosen errno is to swap the global.
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+
+  /** Every code `NETWORK_HINT` has wording for, read back through the public surface. */
+  const hinted = [];
+  for (const code of [
+    ...UNREACHABLE_CODES, ...TIMEOUT_CODES, ...TLS_ONLY, 'ENOSPC',
+  ]) {
+    globalThis.fetch = () => Promise.reject(Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('inner'), { code }),
+    }));
+    const r = await http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN },
+      { timeoutMs: 1000, record: false });
+    // The un-hinted path still echoes the code, but only from inside the flattened
+    // `TypeError: fetch failed (CODE)` wrapper — which is the thing this fix replaces.
+    if (r.error.includes(code) && !r.error.includes('fetch failed')) hinted.push(code);
+  }
+
+  for (const code of hinted) {
+    assert.ok(UNREACHABLE_CODES.has(code) || TIMEOUT_CODES.has(code) || TLS_ONLY.has(code),
+      `${code} has wording in lib/http.mjs but no classification in lib/breaker.mjs`);
+  }
+  assert.ok(hinted.includes('ENOTFOUND') && hinted.includes('ECONNREFUSED'),
+    'the two commonest transport failures must both be hinted');
+  assert.ok(!hinted.includes('ENOSPC'), 'a non-network errno gets no network sentence');
 });
 
 // §4.7: a socket that is accepted and then never answered is the timeout path.
@@ -167,7 +257,7 @@ test('request: sends application/json on control routes', async (t) => {
   assert.deepEqual(call.body, { run_id: RUN }, 'the body is sent verbatim as JSON');
 });
 
-// §4.7: http.mjs is what feeds the breaker; without this, F7 can never fire.
+// §4.7: http.mjs is what feeds the breaker; without this, the breaker could never open.
 test('request: a server failure is recorded on the breaker', async (t) => {
   const { cfg, dataDir, http } = await setup(t, {
     routes: { 'POST /v2/control/ingest': { status: 500, json: { error: 'boom' } } },
@@ -199,6 +289,71 @@ test('health: reads the body as TEXT and succeeds against the literal "OK"', asy
   server.assertCalled('GET', '/v2/core/health', 1);
 });
 
+// §4.7 — a 2xx is necessary and not sufficient. An SSO portal, a captive portal, a proxy
+// error page and an unrelated service all answer 200; taking the status alone as healthy
+// opened the session by telling the model memory was active when nothing behind the
+// endpoint was Mubit. The route returns `OK`, so one comparison settles it.
+test('health: a 200 whose body is not "OK" is server_error, never ready', async (t) => {
+  const { cfg, http } = await setup(t, {
+    routes: { 'GET /v2/core/health': { text: '<!DOCTYPE html><title>Sign in</title>' } },
+  });
+
+  const r = await noThrow(() => http.health(cfg), 'health(sso)');
+  assert.equal(r.ok, false, 'an HTML login page at the endpoint is not a healthy Mubit');
+  assert.equal(r.state, 'server_error');
+  assert.match(r.error, /body was not "OK"/);
+});
+
+// The check has to happen before the write, or the 30 s cache remembers a wrong host as
+// healthy and the next four sessions never re-dial to find out otherwise.
+test('health: a non-"OK" 200 is not cached as ready', async (t) => {
+  const { cfg, dataDir, http } = await setup(t, {
+    routes: { 'GET /v2/core/health': { text: 'Gateway Timeout' } },
+  });
+
+  await http.health(cfg);
+  const cached = JSON.parse(readFileSync(join(dataDir, 'status', 'health.json'), 'utf8'));
+  assert.equal(cached.ok, false, 'the failure is what gets cached');
+  assert.equal(cached.state, 'server_error');
+
+  const second = await http.health(cfg);
+  assert.equal(second.ok, false, 'the cached verdict is still a failure');
+});
+
+// Trimmed, not exact: a proxy that appends a newline has still relayed a healthy answer,
+// and failing that would report every instance behind such a proxy as broken.
+test('health: surrounding whitespace on "OK" is still healthy', async (t) => {
+  const { cfg, http } = await setup(t, { routes: { 'GET /v2/core/health': { text: 'OK\n' } } });
+
+  const r = await noThrow(() => http.health(cfg), 'health(OK\\n)');
+  assert.equal(r.ok, true);
+});
+
+// §4.1 — the guard that makes `unconfigured` mean what it says. Before it, `urlFor`
+// handed `fetch` the bare route, `fetch` threw ERR_INVALID_URL before opening a socket, and
+// the throw was classified as a fault in a server that was never contacted.
+test('no endpoint: every call refuses without dialing and without touching the breaker', async (t) => {
+  const http = await lib('http.mjs');
+  const dataDir = makeDataDir();
+  const { loadConfig } = await lib('config.mjs');
+  const { breakerPath } = await lib('breaker.mjs');
+
+  for (const endpoint of ['', '   ', 'api.mubit.ai', 'htp://nope']) {
+    const cfg = loadConfig(baseEnv({ dataDir, endpoint }));
+
+    const h = await noThrow(() => http.health(cfg), `health(${JSON.stringify(endpoint)})`);
+    assert.equal(h.ok, false);
+    assert.equal(h.state, 'unconfigured', `endpoint ${JSON.stringify(endpoint)}`);
+
+    const q = await noThrow(() => http.postQuery(cfg, { run_id: RUN, query: 'why', mode: 'direct_bypass', evidence_only: true }),
+      `postQuery(${JSON.stringify(endpoint)})`);
+    assert.equal(q.state, 'unconfigured');
+
+    assert.equal(existsSync(breakerPath(cfg)), false,
+      `a breaker file was written for endpoint ${JSON.stringify(endpoint)}, which was never dialed`);
+  }
+});
+
 // §1.1/§7: the health result is cached for 30 s, so a SessionStart plus a status refresh
 // do not each pay a round trip.
 test('health: the result is cached for 30s — a second call makes zero extra requests', async (t) => {
@@ -214,10 +369,9 @@ test('health: the result is cached for 30s — a second call makes zero extra re
     'the cached verdict lives at status/health.json (§7)');
 });
 
-// §1.2: health is explicitly allowlisted by enforce_core_access_policy
-// — it is the one route that answers without a key, which is what makes it usable as the
-// readiness probe before the user has pasted one.
-test('health: works with no API key configured', async (t) => {
+// §1.2: the readiness probe is the one call the plugin makes before the user has pasted a
+// key, so it must not require the config to carry one.
+test('health: the readiness probe runs before a key is configured', async (t) => {
   const { server, cfg, http } = await setup(t, { apiKey: '' });
 
   const r = await http.health(cfg);
@@ -270,7 +424,7 @@ test('auth: a missing key sends no Authorization header at all', async (t) => {
 
 // §1.1: /v2/control/query has a per-route 256 KiB cap; everything
 // else inherits 64 MiB. Blowing it produces a 413 that looks like a server fault to the
-// breaker, so the check happens client-side and nothing is dialed. (F17)
+// breaker, so the check happens client-side and nothing is dialed.
 test('postQuery: a body over 256 KiB is rejected pre-flight and nothing is dialed', async (t) => {
   const { server, cfg, http } = await setup(t);
 
@@ -357,9 +511,9 @@ test('postQuery: an omitted mode is rejected pre-flight — omission is the expe
   assert.equal(server.requests.length, 0);
 });
 
-// §4.3 / F21: MUBIT_DEFAULT_SESSION_ID defaults to the literal "default" in the MCP server,
-// collapsing every user, project and machine into one
-// run. request() is the last line of defence and refuses to send it.
+// §4.3: `"default"` is the placeholder a session carries before anything has derived a real
+// run id for it, so nothing sent under it can be attributed to the work that produced it.
+// request() is the last line of defence and refuses to put it on the wire at all.
 test('request: refuses any body whose run_id === "default", and dials nothing', async (t) => {
   const { server, cfg, dataDir, http } = await setup(t);
 
@@ -397,12 +551,12 @@ const ingestItem = () => spoolItem();
 
 /** @type {Array<[string, (h: any, cfg: any) => Promise<any>]>} */
 const REJECT_ROWS = [
-  // StateIngestRequestPayload — run_id
+  // POST /v2/control/ingest — run_id
   ['postIngest requires run_id', (h, c) => h.postIngest(c, { agent_id: AGENT, items: [ingestItem()] })],
-  // Stateingest itemPayload — item_id
+  // POST /v2/control/ingest, per item — item_id
   ['postIngest requires item_id on every item',
     (h, c) => h.postIngest(c, { run_id: RUN, agent_id: AGENT, items: [{ content_type: 'text', text: 'x', intent: 'trace' }] })],
-  // Stateingest itemPayload — content_type
+  // POST /v2/control/ingest, per item — content_type
   ['postIngest requires content_type on every item',
     (h, c) => h.postIngest(c, { run_id: RUN, agent_id: AGENT, items: [{ item_id: 'i1', text: 'x', intent: 'trace' }] })],
   // One bad item poisons the batch: the server rejects the whole request, not the item.
@@ -410,18 +564,18 @@ const REJECT_ROWS = [
     (h, c) => h.postIngest(c, { run_id: RUN, agent_id: AGENT, items: [ingestItem(), { text: 'x' }] })],
   // query payload — run_id
   ['postQuery requires run_id', (h, c) => h.postQuery(c, { query: 'why', mode: 'direct_bypass', evidence_only: true })],
-  // StateContextRequestPayload — run_id
+  // POST /v2/control/context — run_id
   ['postContext requires run_id', (h, c) => h.postContext(c, { query: 'why', mode: 'sections' })],
-  // StateCheckpointPayload — run_id
+  // POST /v2/control/checkpoint — run_id
   ['postCheckpoint requires run_id', (h, c) => h.postCheckpoint(c, { agent_id: AGENT, content: 'tail' })],
-  // StateRecordOutcomePayload — run_id
+  // POST /v2/control/outcome — run_id
   ['postOutcome requires run_id', (h, c) => h.postOutcome(c, { reference_id: 'global', outcome: 'success' })],
-  // StateRecordOutcomePayload — reference_id must be present…
+  // POST /v2/control/outcome — reference_id must be present…
   ['postOutcome requires reference_id', (h, c) => h.postOutcome(c, { run_id: RUN, outcome: 'success' })],
   // …and NON-EMPTY (§1.3: pass "global" for run-level attribution, never "").
   ['postOutcome rejects an empty reference_id',
     (h, c) => h.postOutcome(c, { run_id: RUN, reference_id: '', outcome: 'success', entry_ids: ['ref_1'] })],
-  // StateAgentRegisterRequestPayload — run_id, agent_id
+  // POST /v2/control/agents/register — run_id, agent_id
   ['registerAgent requires run_id', (h, c) => h.registerAgent(c, { agent_id: AGENT, role: 'worker' })],
   ['registerAgent requires agent_id', (h, c) => h.registerAgent(c, { run_id: RUN, role: 'worker' })],
   // job query — run_id on the query string
@@ -557,7 +711,7 @@ test('retry: postIngest forwards {retry:true} to request()', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// The breaker gate — §4.2, §4.7, F7
+// The breaker gate — §4.2, §4.7
 // ---------------------------------------------------------------------------
 
 // §4.2: "consults the breaker before dialing". An open breaker means zero syscalls, which
@@ -635,4 +789,49 @@ test('timeout: a response inside the budget still succeeds', async (t) => {
   assert.equal(r.ok, true);
   assert.equal(r.status, 200);
   assert.ok(r.ms >= 50, `elapsed ms should be measured, got ${r.ms}`);
+});
+
+// ---------------------------------------------------------------------------
+// A deadline the client chose is not a verdict about the server
+// ---------------------------------------------------------------------------
+
+// §4.7/§5.2: `session-start`'s health slice and `prompt-recall`'s budget both dial on a
+// fraction of the configured timeout. Recording those aborts escalated the marker to
+// `not_responding` and, past the threshold, opened the breaker — which also suppresses the
+// capture drain. A dead recall path must not throttle capture as a side effect.
+test('breaker: an abort on a caller-squeezed budget is not recorded', async (t) => {
+  const { cfg, http } = await setup(t, {
+    routes: { 'POST /v2/control/query': { delayMs: 900, json: { ok: true } } },
+    extra: { MUBIT_CC_TIMEOUT_MS: '4000', MUBIT_CC_BREAKER_THRESHOLD: '3', MUBIT_CC_BREAKER_WINDOW_MS: '5000' },
+  });
+  const { readBreaker } = await lib('breaker.mjs');
+
+  for (let i = 0; i < 3; i += 1) {
+    const r = await http.request(cfg, 'POST', '/v2/control/query', { run_id: RUN }, { timeoutMs: 120 });
+    assert.equal(r.ok, false);
+    assert.equal(r.state, 'not_responding');
+  }
+
+  const b = readBreaker(cfg);
+  assert.equal(b.state, 'ready', 'three squeezed aborts must not escalate the reported state');
+  assert.equal(b.timeoutStreak, 0, 'a client-side budget must not move the timeout streak');
+  assert.equal(b.failures.length, 0, 'a client-side budget must not count toward opening the breaker');
+});
+
+// The other half of the same rule: an abort on the *full* configured budget is evidence, and
+// `drain.mjs` — the only caller that dials on it — must still be able to open the breaker.
+test('breaker: an abort on the full configured budget is still recorded', async (t) => {
+  const { cfg, http } = await setup(t, {
+    routes: { 'POST /v2/control/ingest': { delayMs: 900, json: { ok: true } } },
+    extra: { MUBIT_CC_TIMEOUT_MS: '120', MUBIT_CC_BREAKER_THRESHOLD: '3', MUBIT_CC_BREAKER_WINDOW_MS: '5000' },
+  });
+  const { readBreaker } = await lib('breaker.mjs');
+
+  for (let i = 0; i < 3; i += 1) {
+    await http.request(cfg, 'POST', '/v2/control/ingest', { run_id: RUN }, { timeoutMs: 120 });
+  }
+
+  const b = readBreaker(cfg);
+  assert.equal(b.timeoutStreak, 3, 'a timeout on the whole budget is a verdict and must count');
+  assert.equal(b.state, 'not_responding', '§4.7: three in a row escalate');
 });

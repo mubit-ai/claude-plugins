@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { readJson, resolveDataDir, writeJsonAtomic } from './state.mjs';
 
 /**
- * The §4.8 Marker, with every documented sub-key present and correctly typed.
+ * The Marker, with every documented sub-key present and correctly typed.
  * `readMarker` returns this shape even when nothing has ever been written —
  * which is the normal state before the first hook of a session has run.
  * @param {string} [runId]
@@ -25,8 +25,24 @@ function defaultMarker(runId = '') {
     state: 'unknown',
     updated_at: 0,
     cold_start_until: 0,
-    recall: { sources: 0, tokens: 0, ms: 0, empty_reason: '', rung: 0, dropped: 0 },
+    // `dry_streak` and `last_hit_at` are what make a permanently dead recall path visible.
+    // Everything else here describes the *last* recall, which is exactly the wrong shape for
+    // "recall has returned nothing for the last forty prompts": a run of total failures and a
+    // healthy run that happened to draw a blank write identical rows. The streak is the only
+    // field that distinguishes them, and `recall` is the right home for it — the status line
+    // and the doctor already read this group, and it is per-run, which is the scope recall
+    // quality actually has. (Endpoint-scoped health is the breaker's job, not this file's.)
+    recall: {
+      sources: 0, tokens: 0, ms: 0, empty_reason: '', rung: 0, dropped: 0,
+      dry_streak: 0, last_hit_at: 0,
+    },
     captured: { tools: 0, turns: 0, pending: 0 },
+    // What the MCP server sent, which the capture path never sees: an MCP write leaves its
+    // own process and touches neither the spool nor `captured` above. Kept apart from that
+    // group rather than folded into it, so the status line's capture count keeps meaning
+    // "what the hooks captured" — but read beside it at session end, where the question is
+    // the different one of whether this run put anything on the wire at all.
+    mcp: { ingested: 0, at: 0 },
     lessons: { global: 0, checked_at: 0 },
     reflect: { at: 0, lessons_stored: 0, status: '' },
     last_error: '',
@@ -34,7 +50,7 @@ function defaultMarker(runId = '') {
 }
 
 /** The sub-objects that merge key-by-key rather than being replaced wholesale. */
-const GROUPS = ['recall', 'captured', 'lessons', 'reflect'];
+const GROUPS = ['recall', 'captured', 'lessons', 'reflect', 'mcp'];
 
 /** @param {Record<string, any>} cfg @param {string} runId @returns {string} */
 function markerPath(cfg, runId) {

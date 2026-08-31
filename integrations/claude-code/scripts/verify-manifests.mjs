@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Manifest lint — build-guide §12.7. Run by `npm run verify` and by CI.
+ * Manifest lint. Run by `npm run verify` and by CI.
  *
  * The same data assertions as test/manifests.test.mjs, in a form that does not need a test
  * runner: nothing here starts a process, opens a socket, or needs the plugin runtime. It
@@ -23,10 +23,18 @@ const REPO_ROOT = resolve(PLUGIN_ROOT, '../..');
 /** `.mcp.json` names the server `mubit`, so this is the prefix skills must use (§3.2). */
 const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
-/** §8.2 — ten of the twenty-one tools. */
+/** §4.7 — `CONN_STATES` in `lib/breaker.mjs`, restated rather than imported for the same
+ *  reason as the allowlist below: this script must run without the plugin runtime. Adding a
+ *  state there and not here means the README can stop documenting it and nothing notices. */
+const CONN_STATES = [
+  'ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding', 'unconfigured',
+];
+
+/** §8.2 — thirteen of the twenty-one tools; the last three were promoted once each had a skill to reach it. */
 const DEFAULT_ALLOWLIST = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ];
 
 const P = {
@@ -40,7 +48,7 @@ const P = {
   readme: join(PLUGIN_ROOT, 'README.md'),
   contextCost: join(PLUGIN_ROOT, 'scripts', 'context-cost.json'),
   config: join(PLUGIN_ROOT, 'lib', 'config.mjs'),
-  mcpBundle: join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js'),
+  serverBundle: join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js'),
   skills: join(PLUGIN_ROOT, 'skills'),
   agents: join(PLUGIN_ROOT, 'agents'),
 };
@@ -67,12 +75,12 @@ const resolvePluginPath = (s) => s
 
 // --- every manifest parses (§3) --------------------------------------------
 
-const plugin = readJson(P.plugin, '.claude-plugin/plugin.json', 'build-guide §3.1');
-const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
-const mcp = readJson(P.mcp, '.mcp.json', 'build-guide §3.3');
-const settings = readJson(P.settings, 'settings.json', 'build-guide §3.4');
-const pkg = readJson(P.pkg, 'package.json', 'build-guide §11.1');
-const market = readJson(P.marketplace, '.claude-plugin/marketplace.json', 'build-guide §3.5');
+const plugin = readJson(P.plugin, '.claude-plugin/plugin.json', 'the plugin manifest');
+const hooks = readJson(P.hooks, 'hooks/hooks.json', 'the hook manifest');
+const mcp = readJson(P.mcp, '.mcp.json', 'the MCP server manifest');
+const settings = readJson(P.settings, 'settings.json', 'the shipped settings');
+const pkg = readJson(P.pkg, 'package.json', 'the package manifest');
+const market = readJson(P.marketplace, '.claude-plugin/marketplace.json', 'the marketplace catalog');
 
 // --- version lockstep (§12.7) ----------------------------------------------
 
@@ -92,10 +100,11 @@ if (plugin && entry) {
 }
 if (entry) {
   /*
-   * The plugin ships in the same repo as this catalog, so a marketplace-relative path resolves
-   * inside the copy the host already fetched. An explicit {source:"github"} entry makes it clone
-   * a second time — from `mubit-ai/claude-plugins`, which does not exist — and the install fails outright.
-   * See the matching note in test/manifests.test.mjs.
+   * The plugin ships in the same repository as this catalog, so a marketplace-relative path
+   * resolves inside the copy the host has already fetched. An explicit {source:"github"} entry
+   * would make the host clone a second time and re-resolve the path against that clone, which is
+   * a slower way to reach the same files and one more thing to keep in step. See the matching
+   * note in test/manifests.test.mjs.
    */
   ok(entry.source === './integrations/claude-code',
     `marketplace.json source must be the marketplace-relative string "./integrations/claude-code" — the plugin `
@@ -142,18 +151,40 @@ if (hooks) {
       `${where}: ${script} does not exist → ${abs}\n    Build it: npm --prefix integrations/claude-code run build (§11.2)`);
   }
 
-  const expectedEvents = ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
-    'Stop', 'SubagentStop', 'PreCompact', 'PostCompact', 'SessionEnd'];
+  const expectedEvents = ['SessionStart', 'CwdChanged', 'UserPromptSubmit', 'PreToolUse',
+    'SubagentStart', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'SubagentStop',
+    'PreCompact', 'PostCompact', 'SessionEnd'];
   const events = Object.keys(hooks.hooks ?? {});
   const missing = expectedEvents.filter((e) => !events.includes(e));
   const extra = events.filter((e) => !expectedEvents.includes(e));
   ok(missing.length === 0 && extra.length === 0,
-    `hooks.json must register exactly the nine events in §3.2; missing [${missing}], unexpected [${extra}]`);
+    `hooks.json must register exactly the ten events in §3.2; missing [${missing}], unexpected [${extra}]`);
 
-  ok(hooks.hooks?.SessionStart?.[0]?.matcher === 'startup|resume|clear|compact',
-    'SessionStart matcher must be "startup|resume|clear|compact" (§3.2)');
-  ok((hooks.hooks?.PostToolUse ?? []).length === 2,
-    'PostToolUse must declare exactly two matcher groups: the built-in tool regex, then ^mcp__.* (§3.2)');
+  // StopFailure's matcher filters on the payload's `error`, and that taxonomy is not a fixed
+  // list: Claude Code 2.1.235 publishes ten values plus a feature-flagged eleventh
+  // (`account_on_hold`), so an enumerated matcher is right on some accounts and short on
+  // others. The turns it would drop are the ones the hook exists to catch.
+  const stopFailure = hooks.hooks?.StopFailure ?? [];
+  ok(stopFailure.length === 1,
+    `StopFailure must declare exactly one group (§3.2); found ${stopFailure.length}`);
+  ok(['', '*', '.*', undefined].includes(stopFailure[0]?.matcher),
+    'StopFailure must carry no matcher — the error taxonomy is feature-flagged, so an '
+    + `enumerated list is wrong on some accounts; found ${JSON.stringify(stopFailure[0]?.matcher)}`);
+
+  ok(hooks.hooks?.SessionStart?.[0]?.matcher === 'startup|resume|clear|compact|fork',
+    'SessionStart matcher must be "startup|resume|clear|compact|fork" (§3.2) — without '
+    + '"fork" the hook never runs for /fork, /branch or --fork-session');
+  // Exactly ONE group, matching everything. Two groups was the old shape — a built-in tool
+  // alternation plus `^mcp__.*` — and it dropped every tool the alternation had not been
+  // updated for. It is one group now rather than two match-all ones because a second group
+  // would fire capture.mjs twice for every tool call. What to capture is decided in
+  // capture.mjs, where the tool table already lives (§3.2).
+  const postToolUse = hooks.hooks?.PostToolUse ?? [];
+  ok(postToolUse.length === 1,
+    `PostToolUse must declare exactly one match-all group (§3.2); found ${postToolUse.length}`);
+  ok(['*', '', '.*'].includes(String(postToolUse[0]?.matcher ?? '')),
+    'the PostToolUse matcher must match every tool — the host reads "", "*" and ".*" as '
+    + `match-all; found ${JSON.stringify(postToolUse[0]?.matcher)} (§3.2)`);
 }
 
 // --- .mcp.json and settings.json (§3.3, §3.4) ------------------------------
@@ -262,22 +293,24 @@ function frontmatterTools(text) {
   return [];
 }
 
+/*
+ * The tool table comes from the server bundle the plugin ships, not from the upstream
+ * TypeScript it was built from. That source sits outside `PLUGIN_ROOT`, so an installed copy
+ * does not contain it and this check used to fail downstream on a missing file. The bundle is
+ * also the stricter target: an allowlist entry has to name a tool the running server
+ * registers.
+ */
 /** @type {string[]} */
 let realTools = [];
-if (existsSync(P.mcpBundle)) {
-  // Drop the trailing inline sourcemap first: it is several times the size of the code, and
-  // matching across it turns a millisecond scan into a multi-second one.
-  const whole = readFileSync(P.mcpBundle, 'utf8');
-  const cut = whole.indexOf('//# sourceMappingURL=');
-  const code = cut > 0 ? whole.slice(0, cut) : whole;
-  realTools = [...new Set([...code.matchAll(/name:\s?"(mubit_[a-z_0-9]+)"/g)].map((m) => m[1]))];
+if (existsSync(P.serverBundle)) {
+  realTools = [...readFileSync(P.serverBundle, 'utf8').matchAll(/name:\s*"(mubit_[a-z_0-9]+)"/g)].map((m) => m[1]);
   ok(realTools.length > 0, 'could not parse any tool names out of mcp/dist/server.js');
   for (const name of DEFAULT_ALLOWLIST) {
     ok(realTools.includes(name),
-      `default allowlist names "${name}", which the shipped MCP server never registers (§8.2)`);
+      `default allowlist names "${name}", which the bundled MCP server does not register (§8.2)`);
   }
 } else {
-  fail(`mcp/dist/server.js does not exist: ${P.mcpBundle}`);
+  fail(`mcp/dist/server.js does not exist: ${P.serverBundle} — run \`npm run build\``);
 }
 
 /** @type {Array<{file:string, rel:string}>} */
@@ -294,7 +327,7 @@ if (existsSync(P.agents)) {
     if (f.endsWith('.md')) markdown.push({ file: join(P.agents, f), rel: `agents/${f}` });
   }
 }
-ok(markdown.length > 0, 'no skills/*/SKILL.md or agents/*.md exist — build-guide §9 defines six skills and one agent');
+ok(markdown.length > 0, 'no skills/*/SKILL.md or agents/*.md exist — the plugin ships seven skills and one agent');
 
 for (const { file, rel } of markdown) {
   const text = readFileSync(file, 'utf8');
@@ -326,7 +359,7 @@ for (const { file, rel } of markdown) {
       `${rel}: tools entry "${t}" is not fully qualified — a plugin-provided server needs the ${QUALIFIED_PREFIX} prefix; bare mcp__<server>__<tool> matches nothing (§3.2)`)) continue;
     const bare = t.slice(QUALIFIED_PREFIX.length);
     if (realTools.length) {
-      ok(realTools.includes(bare), `${rel}: names MCP tool "${bare}", which the shipped MCP server never registers`);
+      ok(realTools.includes(bare), `${rel}: names MCP tool "${bare}", which the bundled MCP server does not register`);
     }
   }
 }
@@ -358,12 +391,22 @@ if (existsSync(P.readme)) {
     'README.md mentions /reload-plugins but never names SessionStart — the reason the reload is not enough');
 
   /*
-   * The README documents a hosted instance and nothing else: the whole setup is an `endpoint`
-   * and an `apiKey`. Asserting that positively keeps this check from having to spell out the
-   * server-side components it would otherwise be forbidding by name.
+   * The README documents a hosted instance and nothing else. Self-hosting is not a documented
+   * path.
+   *
+   * This asserts what the README must contain rather than listing components it must not name.
+   * A rule written the other way round — an enumerated list of terms the README may not use —
+   * has to spell the internals out in order to forbid them, and it still only catches the
+   * terms someone thought to enumerate. Pinning setup to the two hosted settings leaves no
+   * room for a local-stack walkthrough to be correct, without naming one.
    */
-  ok(has('endpoint') && has('apiKey'),
-    'README.md must document the hosted setup — the `endpoint` and `apiKey` pair is the whole of it');
+  ok(/\bendpoint\b/i.test(readme) && /\bapiKey\b|\bAPI key\b/i.test(readme),
+    'README.md must document the two settings a hosted instance takes — `endpoint` and `apiKey`. '
+    + 'Those are the whole configuration surface; anything else implies a stack the user runs.');
+  ok(/\/plugin\b/.test(readme) && /\/mubit-memory:auth/.test(readme),
+    'README.md must show how those settings get set: `/mubit-memory:auth`, or the `/plugin` config '
+    + 'UI that writes them to the OS keychain. A README that documents neither is documenting '
+    + 'some other install path.');
 
   ok(has('reflectOnEnd') && /reflectOnEnd[\s\S]{0,600}?(cross-session|beyond its own run)/.test(readme),
     'README.md must state what turning off `reflectOnEnd` costs: it is the only path that promotes a lesson '
@@ -387,10 +430,10 @@ if (existsSync(P.readme)) {
   // §4.7 — the states are typed precisely because each has a different fix. A README that
   // says "connection problems" instead of naming them sends every one of them to the same
   // wrong remedy.
-  for (const state of ['ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding']) {
+  for (const state of CONN_STATES) {
     ok(new RegExp(`\\b${state}\\b`).test(readme),
-      `README.md never names the connection state "${state}" (§4.7) — the five states have five distinct `
-      + 'fixes, and the status line shows them by name');
+      `README.md never names the connection state "${state}" (§4.7) — each state has its own `
+      + 'distinct fix, and the status line shows them by name');
   }
 
   // §4.4 — the differentiator. "State it plainly rather than burying it in a table."
@@ -402,7 +445,7 @@ if (existsSync(P.readme)) {
     + 'which is a stronger guarantee than the pattern scrub and is invisible if unstated');
 } else {
   fail(`README.md does not exist: ${P.readme}\n`
-    + '    Build-guide §2: install, configure, troubleshoot. The release guard treats it as part of the '
+    + '    The README covers install, configure and troubleshoot. The release guard treats it as part of the '
     + 'release surface (§13), and it is the only documentation a marketplace installer sees.');
 }
 
@@ -419,7 +462,7 @@ if (existsSync(P.readme)) {
  */
 const REMEASURE = 'Re-measure: node scripts/measure-context-cost.mjs --write';
 const stamp = existsSync(P.contextCost)
-  ? readJson(P.contextCost, 'scripts/context-cost.json', `build-guide §3.5. ${REMEASURE}`)
+  ? readJson(P.contextCost, 'scripts/context-cost.json', `the marketplace catalog. ${REMEASURE}`)
   : (fail(`scripts/context-cost.json does not exist (§3.5) — marketplace.json declares a contextCost that `
     + `nobody measured.\n    ${REMEASURE}`), null);
 
@@ -447,10 +490,183 @@ if (stamp && entry) {
     + `    current:  [${skillIds.join(', ')}]\n    ${REMEASURE}`);
 }
 
+// --- the sibling Codex plugin (integrations/codex) --------------------------
+//
+// The two plugins are built from one source tree, share `lib/`, `hooks/src/` and `mcp/src/`,
+// and — by design — share a data directory and a run id. Anything that can drift between them
+// drifts silently: two versions of one state machine writing one directory, or a Codex
+// registration pointing at a bundle only the Claude Code build produces.
+//
+// Everything here is skipped, loudly, when `integrations/codex` is absent. That is the state
+// of a checkout that predates the port, and of any downstream copy of this plugin alone; a
+// hard failure there would make this script unusable rather than useful.
+
+const CODEX_ROOT = resolve(REPO_ROOT, 'integrations', 'codex');
+
+/** Codex 0.146.0 dispatches these eleven, and nothing else. */
+const CODEX_EVENTS = [
+  'PreToolUse', 'PermissionRequest', 'PostToolUse', 'PreCompact', 'PostCompact',
+  'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'SubagentStart', 'SubagentStop', 'Stop',
+];
+
+if (!existsSync(CODEX_ROOT)) {
+  console.log('verify-manifests: no integrations/codex in this checkout — skipping the Codex checks');
+} else {
+  const C = {
+    plugin: join(CODEX_ROOT, '.codex-plugin', 'plugin.json'),
+    hooks: join(CODEX_ROOT, 'hooks.json'),
+    mcp: join(CODEX_ROOT, '.mcp.json'),
+    pkg: join(CODEX_ROOT, 'package.json'),
+    marketplace: join(REPO_ROOT, '.agents', 'plugins', 'marketplace.json'),
+    skills: join(CODEX_ROOT, 'skills'),
+  };
+
+  const codexPlugin = readJson(C.plugin, 'integrations/codex/.codex-plugin/plugin.json',
+    'the Codex manifest. Codex reads `.codex-plugin/plugin.json` first.');
+  const codexHooks = readJson(C.hooks, 'integrations/codex/hooks.json',
+    'the eleven Codex registrations, as a template /mubit-memory:setup merges into $CODEX_HOME.');
+  const codexMcp = readJson(C.mcp, 'integrations/codex/.mcp.json',
+    'the MCP server template setup registers from.');
+  const codexPkg = readJson(C.pkg, 'integrations/codex/package.json', 'the Codex package manifest.');
+  const codexMkt = readJson(C.marketplace, '.agents/plugins/marketplace.json',
+    'the repo-local Codex marketplace, beside .claude-plugin/marketplace.json.');
+
+  // Version lockstep across both plugins. They share one data directory; two builds of one
+  // state machine writing it is a bug nothing else would report.
+  if (codexPlugin && codexPkg && pkg) {
+    ok(codexPlugin.version === pkg.version,
+      `version drift: integrations/codex/.codex-plugin/plugin.json is ${codexPlugin.version}, `
+      + `the Claude Code plugin is ${pkg.version}. The two share lib/, hooks/src/ and a data directory.`);
+    ok(codexPkg.version === pkg.version,
+      `version drift: integrations/codex/package.json is ${codexPkg.version}, expected ${pkg.version}.`);
+  }
+
+  // Neither `hooks` nor `mcpServers` may appear in the Codex manifest: a plugin-bundled
+  // hooks.json is inert under Codex, and a plugin-declared MCP server cannot resolve its own
+  // path. Declaring either claims an install path that silently does nothing.
+  if (codexPlugin) {
+    ok(codexPlugin.hooks === undefined,
+      'integrations/codex/.codex-plugin/plugin.json declares `hooks`. Codex ignores a '
+      + 'plugin-bundled hooks.json; /mubit-memory:setup merges it into $CODEX_HOME instead.');
+    ok(codexPlugin.mcpServers === undefined,
+      'integrations/codex/.codex-plugin/plugin.json declares `mcpServers`. Codex resolves no '
+      + 'path in a plugin .mcp.json — not ${VAR}, not a relative path — so the server would '
+      + 'fail to start on every session. setup registers it in the user layer.');
+    ok(codexPlugin.userConfig === undefined,
+      'integrations/codex/.codex-plugin/plugin.json declares `userConfig`, which Codex has no '
+      + 'mechanism for: it exports no CODEX_PLUGIN_OPTION_* variables at all.');
+  }
+
+  // The eleven events, no more and no fewer, every command naming a committed bundle.
+  if (codexHooks) {
+    const events = Object.keys(codexHooks.hooks ?? {}).sort();
+    ok(events.join(',') === [...CODEX_EVENTS].sort().join(','),
+      `integrations/codex/hooks.json registers [${events.join(', ')}], expected the eleven Codex `
+      + `events [${[...CODEX_EVENTS].sort().join(', ')}]. A registration Codex does not dispatch `
+      + 'is dead; an event left unregistered is memory the plugin never sees.');
+
+    const extra = Object.keys(codexHooks).filter((k) => k !== 'hooks' && k !== 'description');
+    ok(extra.length === 0,
+      `integrations/codex/hooks.json has unsupported top-level field(s) [${extra.join(', ')}]. `
+      + 'Codex accepts only `description` and `hooks`, and one unknown key fails the whole file.');
+
+    for (const [event, groups] of Object.entries(codexHooks.hooks ?? {})) {
+      for (const group of groups ?? []) {
+        for (const handler of group.hooks ?? []) {
+          ok(handler.if === undefined,
+            `integrations/codex/hooks.json ${event} carries an \`if:\` predicate, which Codex `
+            + 'ignores — the handler fires on every matching call.');
+          ok(handler.args === undefined,
+            `integrations/codex/hooks.json ${event} uses the Claude Code exec form (\`args\`). `
+            + 'Codex runs `command` as one shell string; the arguments would vanish.');
+          ok(typeof handler.command === 'string' && handler.command.includes('{{PLUGIN_ROOT}}'),
+            `integrations/codex/hooks.json ${event} must carry the {{PLUGIN_ROOT}} placeholder: `
+            + 'Codex exports no plugin-root variable, so setup substitutes an absolute path.');
+          ok(typeof handler.timeout === 'number' && Number.isInteger(handler.timeout),
+            `integrations/codex/hooks.json ${event} needs an integer \`timeout\` in seconds.`);
+          if (event === 'SessionEnd') {
+            ok(handler.timeout <= 3,
+              `integrations/codex/hooks.json SessionEnd asks for ${handler.timeout}s; Codex `
+              + 'clamps it to 3s and warns. Anything larger is a budget the hook never gets.');
+          }
+          const m = /\{\{PLUGIN_ROOT\}\}\/(\S+?\.mjs)/.exec(String(handler.command ?? ''));
+          if (ok(!!m, `integrations/codex/hooks.json ${event} names no .mjs bundle.`)) {
+            ok(existsSync(join(CODEX_ROOT, m[1])),
+              `integrations/codex/hooks.json ${event} points at ${m[1]}, which is not committed. `
+              + 'A Codex install copies files; there is no build step.');
+          }
+        }
+      }
+    }
+  }
+
+  // The server name is the tool prefix the model sees, and every Codex skill's prose depends
+  // on it being `mubit`.
+  if (codexMcp) {
+    const servers = Object.keys(codexMcp.mcpServers ?? {});
+    ok(servers.length === 1 && servers[0] === 'mubit',
+      `integrations/codex/.mcp.json names [${servers.join(', ')}]; the server must be \`mubit\`, `
+      + 'because the model sees each tool as mcp__<server>__<tool> and every Codex skill says '
+      + 'mcp__mubit__.');
+  }
+  ok(existsSync(join(CODEX_ROOT, 'mcp', 'dist', 'index.js')),
+    'integrations/codex/mcp/dist/index.js is not committed.');
+  ok(existsSync(join(CODEX_ROOT, 'mcp', 'dist', 'server.js')),
+    'integrations/codex/mcp/dist/server.js is not committed. Two installable plugins cannot '
+    + 'share a path, so this one carries its own copy of the vendored server bundle.');
+
+  // The marketplace has to point at the Codex tree, and the Claude Code one at its own.
+  if (codexMkt) {
+    const codexEntry = (codexMkt.plugins ?? []).find((e) => e.name === 'mubit-memory');
+    if (ok(!!codexEntry, '.agents/plugins/marketplace.json has no `mubit-memory` entry.')) {
+      ok(codexEntry.source?.path === './integrations/codex',
+        `.agents/plugins/marketplace.json points at ${codexEntry.source?.path}; it must be `
+        + './integrations/codex, or Codex installs a plugin whose hooks it cannot run.');
+      ok(!!codexEntry.policy?.installation && !!codexEntry.policy?.authentication && !!codexEntry.category,
+        '.agents/plugins/marketplace.json entries need policy.installation, '
+        + 'policy.authentication and category.');
+    }
+  }
+
+  // The same seven skills, under both hosts, with the right prefix in the Codex copies.
+  const codexSkills = existsSync(C.skills)
+    ? readdirSync(C.skills, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && existsSync(join(C.skills, d.name, 'SKILL.md')))
+      .map((d) => d.name).sort()
+    : [];
+  const ccSkills = existsSync(P.skills)
+    ? readdirSync(P.skills, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && existsSync(join(P.skills, d.name, 'SKILL.md')))
+      .map((d) => d.name).sort()
+    : [];
+  ok(codexSkills.join(',') === ccSkills.join(','),
+    `the two plugins ship different skills.\n    codex:       [${codexSkills.join(', ')}]\n`
+    + `    claude-code: [${ccSkills.join(', ')}]`);
+
+  for (const skill of codexSkills) {
+    const raw = readFileSync(join(C.skills, skill, 'SKILL.md'), 'utf8');
+    ok(!raw.includes(QUALIFIED_PREFIX),
+      `integrations/codex/skills/${skill}/SKILL.md names ${QUALIFIED_PREFIX}…, which is the `
+      + 'Claude Code prefix. Under Codex the tools are mcp__mubit__<tool>.');
+    for (const key of ['tools:', 'allowed-tools:', 'disable-model-invocation:']) {
+      ok(!raw.startsWith('---') || !raw.slice(0, raw.indexOf('\n---', 4)).includes(key),
+        `integrations/codex/skills/${skill}/SKILL.md carries \`${key}\` in its frontmatter, `
+        + 'which Codex does not read — it claims a guarantee the host does not provide.');
+    }
+  }
+
+  ok(!existsSync(join(CODEX_ROOT, 'agents')),
+    'integrations/codex/agents/ exists. Codex has no plugin-defined subagent types — every '
+    + 'SubagentStart reports agent_type "default" — so a markdown subagent there is a file '
+    + 'nothing reads.');
+  ok(!existsSync(join(CODEX_ROOT, 'bin', 'statusline.mjs')),
+    'integrations/codex/bin/statusline.mjs exists. Codex has no scriptable status line.');
+}
+
 // --- report -----------------------------------------------------------------
 
 if (problems.length) {
-  console.error(`verify-manifests: ${problems.length} problem${problems.length === 1 ? '' : 's'} (build-guide §12.7)\n`);
+  console.error(`verify-manifests: ${problems.length} problem${problems.length === 1 ? '' : 's'}\n`);
   for (const p of problems) console.error(`  ✖ ${p}`);
   console.error('');
   process.exit(1);

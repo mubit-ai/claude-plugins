@@ -26,12 +26,27 @@ Read these now and you will skip the three most common support questions.
 
 ## Part 1 — Install
 
-### Option A — from your local checkout (works today)
+### Option A — from GitHub (what everyone should use)
 
-A marketplace source can be a local directory. This is already set up on this machine — the
-marketplace `mubit` is registered and points at your repo:
+```
+/plugin marketplace add mubit-ai/claude-plugins
+/plugin install mubit-memory@mubit
+/reload-plugins
+```
+
+Then `/reload-plugins`, and **quit and start a new session.**
+
+Claude Code fetches a marketplace with `git clone --depth 1`, using your own git credentials —
+there is no separate plugin token. If your git is SSH-only, run `gh auth setup-git` first: the
+clone URL is always HTTPS, even for sources written as `git@`.
+
+### Option B — from a local checkout
+
+A marketplace source can also be a local directory. This is the loop you want when you are
+changing the plugin itself; substitute your own checkout path throughout.
 
 ```bash
+claude plugin marketplace add ~/src/claude-plugins
 claude plugin marketplace list
 ```
 
@@ -44,13 +59,7 @@ Configured marketplaces:
     Source: GitHub (anthropics/claude-plugins-official)
 
   ❯ mubit
-    Source: Directory (/path/to/mubit)
-```
-
-If it is missing, add it:
-
-```bash
-claude plugin marketplace add /path/to/mubit
+    Source: Directory (~/src/claude-plugins)
 ```
 
 Then install — either from `/plugin` → **Browse plugins** → **Mubit Memory** → Install, or from
@@ -85,26 +94,12 @@ To undo the marketplace registration at any time:
 claude plugin marketplace remove mubit
 ```
 
-### Option B — from GitHub
-
-```
-/plugin marketplace add mubit-ai/claude-plugins
-/plugin install mubit-memory@mubit
-/reload-plugins
-```
-
-> **`mubit-ai/claude-plugins` is private during the security review.** Claude Code fetches it
-> with `git clone --depth 1 https://github.com/mubit-ai/claude-plugins.git` — your own git
-> credentials, no separate token. So this works today for anyone with repo access and fails
-> with an authentication error for everyone else. If your git is SSH-only, run
-> `gh auth setup-git` first: the clone URL is always HTTPS.
-
 ### Option C — try it without installing anything
 
-Zero side effects, session-only. Good for a first look:
+Zero side effects, session-only. Good for a first look, and the fastest loop while developing:
 
 ```bash
-claude --plugin-dir /path/to/mubit/integrations/claude-code
+claude --plugin-dir ~/src/claude-plugins/integrations/claude-code
 ```
 
 > Session-only plugins get their own data directory —
@@ -114,7 +109,7 @@ claude --plugin-dir /path/to/mubit/integrations/claude-code
 ### Confirm the install is sound
 
 ```bash
-claude plugin validate /path/to/mubit/integrations/claude-code
+claude plugin validate ~/src/claude-plugins/integrations/claude-code
 ```
 
 **Expect** `✔ Validation passed`. This is the host's own schema check, and it is the only thing
@@ -133,17 +128,17 @@ claude plugin details mubit-memory
 Component inventory
   Skills (7)  auth, doctor, forget, recall, reflect, remember, setup
   Agents (1)  mubit-recall
-  Hooks (9)  SessionStart, UserPromptSubmit, PostToolUse, PostToolUseFailure, Stop,
-             SubagentStop, PreCompact, PostCompact, SessionEnd  (harness-only — no model context cost)
+  Hooks (10)  SessionStart, CwdChanged, UserPromptSubmit, PostToolUse, PostToolUseFailure,
+             Stop, SubagentStop, PreCompact, PostCompact, SessionEnd  (harness-only — no model context cost)
   MCP servers (1)  mubit  (tool schemas resolved at runtime; not counted)
 
 Projected token cost
-  Always-on:   ~515 tok   added to every session
+  Always-on:   ~452 tok   added to every session
 ```
 
-Seven skills, one agent, nine hook events. `~515 tok` is what the seven skill descriptions and
-the agent cost you in every session; hooks cost nothing in context because they run in the
-harness, not the model.
+Seven skills, one agent, ten hook events. That number is what the skill descriptions and the
+agent cost you in every session; hooks cost nothing in context because they run in the harness,
+not the model.
 
 > The plugin's own `contextCost` (5382) is larger because it counts the MCP tool schemas, which
 > the host lists as "resolved at runtime; not counted". Both numbers are honest — they measure
@@ -160,83 +155,62 @@ zero runtime dependencies and ships its bundles pre-built.
 /mubit-memory:auth
 ```
 
-A browser tab opens on the Mubit console. Sign in — or sign up, it is the same page — and the key
-comes back to the plugin by itself, over a loopback callback on `127.0.0.1`. You never copy or
-paste it, which is the point: a key pasted into the conversation is in the transcript, and
-transcripts get shared, exported, and attached to bug reports.
+That is the whole setup. It opens the [Mubit console](https://console.mubit.ai) in your browser,
+signs you in or signs you up, and brings a key back over a loopback callback on `127.0.0.1`. The
+key is checked against your instance *before* it is stored, so a run that reports success means
+it works — not that it looked plausible.
 
-### Two values
+It lands in `${CLAUDE_PLUGIN_DATA}/credentials.json`, owner-only (mode `600`), on a path that
+survives plugin updates. Once per machine, not once per release.
+
+### The two values it sets
 
 | Setting | Value |
 | --- | --- |
-| `endpoint` | your instance URL, e.g. `https://eu.mubit.ai` |
+| `endpoint` | your instance URL, e.g. `https://api.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
-That is the whole configuration, and signing in is how both arrive. They are written to
-`${CLAUDE_PLUGIN_DATA}/credentials.json`, readable only by you (mode `600`). That directory
-survives plugin updates, so you do this once per machine — not once per release.
+Both are needed: an endpoint with no key gets `auth_failed` on every call, and no endpoint at
+all means there is nothing to talk to.
 
-The key is checked against your instance *before* it is stored, so a key the server rejects is
-never written. Read the outcome like this:
+### No browser
 
-| What you see | What it means |
-| --- | --- |
-| It reports the endpoint | Done. Now start a new session — see below. |
-| It says the workspace is still being created | Not a failure. A new workspace takes a minute or two. Run `/mubit-memory:auth` again shortly; it resumes where it left off. |
-| `auth_failed` | The instance rejected the key — wrong, revoked, or issued for a different instance. |
-| `unreachable` | Nothing answered at the endpoint. This is not a key problem; do not reissue one. |
-| `browser_failed` | No browser opened, or you closed the tab. See the fallback below. |
-
-**Then start a new session.** This is the one step people miss. `/reload-plugins` registers the
-hooks but does not fire `SessionStart`, so until you open a fresh session there is no run id and
-nothing on the status line — even though the sign-in worked perfectly.
-
-Confirm with:
-
-```
-/mubit-memory:setup
-```
-
-While an instance is still starting, the status line shows `◍ warming`, not a failure glyph.
-
-### No browser? (SSH, containers)
-
-The flow prints the URL instead of dead-ending. Issue a key at <https://console.mubit.ai>, then
-run it with the key in the environment for that one command:
+Over SSH or in a container there is nothing to open. Issue a key at
+<https://console.mubit.ai> and hand it over for one command:
 
 ```bash
 MUBIT_AUTH_KEY='mbt_…' node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --paste
 ```
 
-Put it in the environment, not in a `--key` flag — a process's arguments are readable by every
-user on the machine; its environment is not.
+The key goes in the environment rather than a `--key` flag because arguments are readable by
+every user on the machine via `ps`, and a process's environment is not.
 
-### Checking and undoing it
+Useful neighbours: `--status` prints what is stored (presence, never the key) and exits non-zero
+when nothing is; `--logout` removes it.
 
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --status   # is a key stored? never prints the key itself
-node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --logout   # remove the stored credentials
+### Or set it by hand
+
+`/plugin` → **Mubit Memory** → configure. There the key is marked sensitive, so it goes to your
+OS keychain rather than to a file — the better home for a long-lived install, and it takes
+precedence over anything `/mubit-memory:auth` writes.
+
+Confirm either route with:
+
+```
+/mubit-memory:setup
 ```
 
-### Or configure it by hand
-
-The manual route still exists, and it still beats what `auth` writes:
-
-```
-/plugin
-```
-
-→ **Mubit Memory** → configure. The key is marked sensitive there, so it goes to your OS keychain
-— genuinely the best place for it. Prefer this for a long-lived install and `/mubit-memory:auth`
-for getting working in the next minute. A slash command has no way to write the keychain, which
-is exactly why signing in needs a file of its own.
+A rejected key reports as `auth_failed`, not as a network problem: the key is missing, wrong, or
+revoked. Before you have set an endpoint at all the status line reads `○ not configured`, which
+is not a failure either — it is the plugin waiting. The first time an endpoint is used, while
+the instance is still starting, the status line shows `◍ warming` rather than a failure glyph.
 
 ### Or configure by environment variable
 
 Handy for a quick trial or a per-project override. Plugin settings win over these.
 
 ```bash
-export MUBIT_ENDPOINT="https://eu.mubit.ai"
+export MUBIT_ENDPOINT="https://api.mubit.ai"
 export MUBIT_API_KEY="mbt_..."
 ```
 
@@ -251,13 +225,8 @@ cat > .mubit-cc.json <<'JSON'
 JSON
 ```
 
-Precedence, highest first: plugin settings → `MUBIT_*` env vars → the credentials store that
-`/mubit-memory:auth` writes → `.mubit-cc.json` → defaults.
-
-Signing in sits below the environment on purpose, so a CI job exporting `MUBIT_API_KEY` is not
-quietly overridden by whoever last logged in on that machine — and above the project file, so a
-fresh sign-in beats a stale committed one. If a sign-in looks like it did nothing, check whether
-a plugin setting or a `MUBIT_*` variable is set above it.
+Precedence, highest first: plugin settings → `MUBIT_*` env vars → `credentials.json` (what
+`/mubit-memory:auth` writes) → `.mubit-cc.json` → defaults.
 
 ---
 
@@ -269,7 +238,8 @@ What happens on its own:
 
 | When | What the plugin does |
 | --- | --- |
-| Session starts | Derives a run id from your directory, registers the agent, pulls up to 5 global lessons, and tells the model memory is active |
+| Session starts | Derives a run id from your directory, registers the agent, pulls up to 5 standing (`global`) lessons, and tells the model memory is active |
+| You `cd` into another repo | Moves the session to that repo's run, and flushes what the run you left had spooled. A `cd` inside one repo changes nothing |
 | Every prompt you send | Queries memory and injects what is relevant, within a 1500 ms budget and a 1500-token cap. **Zero LLM calls** — assembly is local |
 | Every tool call | Redacts and spools it. Zero network on the hot path |
 | Every tool failure | Captured — these produce the most useful lessons |
@@ -311,14 +281,14 @@ cat "$(ls -t ~/.claude/plugins/data/mubit-memory*/status/*.json | grep -v health
   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(JSON.stringify({run_id:j.run_id,mode:j.mode,state:j.state,captured:j.captured,recall:{sources:j.recall.sources,tokens:j.recall.tokens},last_error:j.last_error},null,2))})'
 ```
 
-**Expect** something like this — here with no Mubit running, which is why `state` is `warming`
-and `last_error` is set:
+**Expect** something like this — here with the endpoint set but nothing listening on it, which
+is why `state` is `unreachable` and `last_error` is set:
 
 ```json
 {
   "run_id": "cc-my-project-9f2a11c4",
-  "mode": "local",
-  "state": "warming",
+  "mode": "hosted",
+  "state": "unreachable",
   "captured": { "tools": 0, "turns": 0, "pending": 1 },
   "recall": { "sources": 0, "tokens": 0 },
   "last_error": "GET /v2/core/health: TypeError: fetch failed: (ECONNREFUSED)"
@@ -357,13 +327,13 @@ is not enough.
 
 | Command | Type this when |
 | --- | --- |
-| `/mubit-memory:auth` | Fresh machine, or your key was rotated or revoked. Signs you in and stores the key. **Never installs anything.** |
 | `/mubit-memory:setup` | First run, or after `auth_failed` / `unreachable`. Detects your deployment and tells you what is missing. **Never installs anything.** |
 | `/mubit-memory:doctor` | Memory looks empty, captures are not landing, or the status line shows a failure glyph |
 | `/mubit-memory:recall` | You want detail beyond what was already injected this turn |
 | `/mubit-memory:remember` | Something should outlive this session |
 | `/mubit-memory:reflect` | You want lessons extracted **now** rather than at session end |
 | `/mubit-memory:forget` | A stored lesson is wrong |
+| `/mubit-memory:dashboard` | You want to *look* at any of the above rather than ask about it |
 
 ### Saving something worth keeping
 
@@ -401,6 +371,50 @@ Reports each lesson with its id, type and scope. An empty result is a real answe
 There is no dry run and no undo. For a lesson that is merely *wrong* rather than harmful,
 prefer letting outcome attribution down-weight it.
 
+### Looking at all of it
+
+```
+/mubit-memory:dashboard
+```
+
+Opens a page on `127.0.0.1` — a random port, a token minted for that launch, and nothing on
+your network can reach it. Three tabs:
+
+- **Memory** — every lesson your instance holds, across **every run** unless you switch to
+  *This run*. Filter instantly, or press *Search instance* to ask it properly. There is a filter
+  for lessons **visible outside the run that wrote them**, which is the question nothing else
+  here answers: a rule saved at global scope follows you into every project, and one saved at
+  run scope dies with the session. `session` and `global` are separately selectable, and
+  *scope not recorded* is its own bucket rather than being folded into `run`.
+- **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
+  they cost, and how many were repeats rendered as a one-line pointer. This is read from disk,
+  so it works with the network off.
+- **Analytics** — those numbers as a trend, plus spool depth, ingest counts and breaker state.
+
+Four things it deliberately does not claim:
+
+- **A lesson with no project tag is unattributed, not local.** The `repo:` tag is written by the
+  capture hooks; a lesson you saved through `/mubit-memory:remember`, and every lesson reflection
+  writes, carries none. Those land in *No project tag*, which is a large bucket and is never
+  shown as belonging to the project you have open.
+- **No per-prompt latency.** The recall timing on the status marker is last-write-wins — it
+  describes the most recent prompt, not each one — so there is no honest per-prompt series to
+  plot and the page does not invent one.
+- **A blank in the `used` column means "could not be measured", not "was not used".** It is a
+  term-echo proxy, and its false negatives dominate.
+- **The Analytics trend starts empty.** Turn files are pruned six hours after they are written,
+  so the series is something the dashboard accumulates while it is open.
+
+It shuts itself down after about half an hour of no traffic. To stop it sooner:
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/bin/dashboard.mjs" --stop
+```
+
+This is the one command Claude cannot run for you — opening a browser window is a decision a
+person makes. It is also why it costs nothing until you type it: its description is not loaded
+into the model's context.
+
 ### The subagent, for bigger questions
 
 ```
@@ -434,6 +448,42 @@ Everything below is in `/plugin` → Mubit Memory → configure.
 
 `/clear` starts a fresh run (`-c1`, `-c2` …). Resume, compact and fork reuse the same one.
 
+A `cd` into a different repo moves the session onto that repo's run under `per-directory` and
+`git-branch`, and drains whatever the run you left still had spooled. `per-conversation` and
+`static` are not derived from a directory, so they do not move. A `cd` *within* one repo never
+moves anything — the id resolves through `git rev-parse --show-toplevel`.
+
+> The MCP server does not follow. It derives its run once, when the session starts it, and
+> pins every write to that value; moving it would need a server restart the plugin cannot ask
+> for. After a `cd`, what the hooks capture lands in the new repo's run while what
+> `/mubit-memory:remember` writes lands in the one you started in.
+
+
+### Sharing one run between Codex and Claude Code
+
+The run id is already harness-independent. `per-directory` derives
+`cc-<slug>-<sha256(git root)[:8]>` from the project, not from the host, so a Codex session and
+a Claude Code session opened on the same checkout land on the same run and see each other's
+pins and lessons. The `cc-` prefix reads as "Claude Code" for historical reasons only — it
+means "the run for this directory", and renaming it would strand every run already stored under
+it. What distinguishes the two harnesses is the *agent role* recorded on each entry, `codex` or
+`claude-code`.
+
+They diverge only when the **path** diverges: a second clone, or the same repo on another
+machine where the home directory has a different name. To pin one run across paths, harnesses
+and machines:
+
+```bash
+export MUBIT_CC_RUN_STRATEGY=static
+export MUBIT_CC_RUN_ID=team-<project>
+```
+
+Set both in the same place for both tools — a shell profile, or the `--env` flags the codex
+integration's `setup` writes into its registrations — and re-run setup so the hooks inherit
+them. `static` does not fall back: with `MUBIT_CC_RUN_ID` unset it raises a config error rather
+than quietly writing into a derived run, because a run that is silently un-shared is
+indistinguishable from memory that does not work.
+
 ### How much context memory is allowed to spend
 
 `recallTokenBudget`, default `1500`. Raise it if recall keeps getting trimmed; lower it if you
@@ -444,11 +494,86 @@ want the context back.
 `reflectOnEnd`, default `true`. It is the only path that promotes a lesson beyond its own run.
 Turning it off to save a few seconds at exit trades away cross-session memory entirely.
 
+### How lessons from other sessions reach you
+
+A lesson stored at `global` scope is one that has escaped the run that wrote it. There are
+three ways it can arrive, and **only the first is on at default settings** — which is worth
+knowing before you conclude that cross-session memory is not working.
+
+| Path | Default | What it costs |
+| --- | --- | --- |
+| The **session-start** standing set — up to 5, in the opening context | **on** | one request, inside the 900 ms slice of session start |
+| The **per-prompt** cross-run lane — lessons from other runs alongside this turn's recall | declines | it is the most expensive part of a recall, and at the shipped budget there is no room for it |
+| The **detached refresh** that would pay for that lane out of band | off | a second process on every prompt |
+
+The second one is `recallCrossRun`, default `auto`. `auto` reads the budget the caller already
+passed and spends the lane only where there is room; at the shipped `recallBudgetMs` of
+`1500` there is not, so it declines every time. Two ways to change that, and they are a pair:
+
+```bash
+# Fund it on the prompt path — both, or neither.
+MUBIT_CC_RECALL_BUDGET_MS=3500
+MUBIT_CC_TIMEOUT_MS=6000
+```
+
+```bash
+# Or pay for it out of band: the refresh runs after your turn and the NEXT prompt renders it.
+MUBIT_CC_RECALL_ASYNC=1
+```
+
+`recallAsync` costs one extra process per prompt and one turn of staleness. Both defaults are
+deliberate latency choices, not oversights — the session-start set is the path that carries
+standing lessons without asking you to pay for either.
+
+### A reminder before a dangerous command — off by default
+
+`preToolWarnings`, default **`false`**.
+
+Turn it on and, just before Claude runs an `rm` or a `git push`, the plugin checks the `rule`
+memories this run has already recalled. If one mentions the command, it is shown to Claude —
+and nothing else happens. Try it for a session:
+
+```bash
+MUBIT_CC_PRE_TOOL_WARNINGS=1 claude
+```
+
+Two things about it are worth understanding before you rely on it, because both are easy to
+assume the other way round.
+
+**It warns. It cannot stop anything.** Claude Code gives a pre-tool hook four decisions —
+allow, deny, ask, defer — and a fifth power that rewrites the command's arguments outright.
+This plugin uses none of them, on any code path, and its tests assert that absence across
+every branch and the shipped bundle rather than trusting it. What Claude sees is a note; it
+decides what to do with it, exactly as it does with any other recalled memory. A rule that
+says "never force-push to main" does not become a lock on force-pushing to main.
+
+**And it does not see every command.** The hook is registered with a filter so it is not a
+process spawn in front of every tool call in your session — Claude Code's own description of
+that field is *"Only runs if the tool call matches the pattern. Avoids spawning hooks for
+non-matching commands."* The docs also say the filter is best-effort and **fails open**:
+
+> The filter also fails open, running your hook regardless of pattern, when the Bash command
+> can't be parsed. Because the filter is best-effort, use the permission system rather than a
+> hook to enforce a hard allow or deny.
+
+Read that last sentence as written. **This is a memory-informed guardrail, not a security
+boundary.** If a command must never run, that belongs in `permissions.deny` in your
+`settings.json`, where the host enforces it — not in a Mubit rule, and not here. What this
+setting buys is that a lesson you already paid to learn shows up at the moment it applies
+instead of scrolling past twenty prompts earlier.
+
+One small thing that is *not* documented anywhere, so do not assume it: what Claude Code does
+with a pre-tool hook that times out. The published reference does not say. Nothing here rests
+on it — the plugin denies nothing at any exit it controls, and it exits 0 on every path,
+including the path where its own internal deadline fires — but if you write your own pre-tool
+hook, do not carry the assumption forward.
+
 ### Quieting it temporarily
 
 ```bash
 MUBIT_CC_CAPTURE=0 claude    # stop capturing, keep recall
 MUBIT_CC_RECALL=0 claude     # stop injecting, keep capturing
+MUBIT_CC_PRE_TOOL_WARNINGS=0 claude   # stop the pre-command reminders (already the default)
 ```
 
 ### Fewer MCP tools
@@ -459,8 +584,8 @@ MUBIT_CC_RECALL=0 claude     # stop injecting, keep capturing
 mubit_recall,mubit_learned
 ```
 
-> The bundled server currently registers all 21 tools regardless, so `/mcp` will show 21 and
-> `mcpTools` has no effect yet. Cosmetic — the ten in the default set are the ones the skills
+> The bundled server honours the allowlist: `/mcp` shows the ten in the default set, which
+> are the ones the skills
 > use. Fixed by the next `@mubit-ai/mcp` release.
 
 ---
@@ -481,7 +606,8 @@ Authorization: Bearer abc123...        ->  Authorization: [REDACTED:bearer]
 -----BEGIN RSA PRIVATE KEY-----        ->  [REDACTED:pem]
 ```
 
-Plus a catch-all: 32+ base64/hex characters with Shannon entropy ≥ 4.0. Git SHAs cannot trip it.
+Plus a catch-all for anything that merely looks like a secret: a long run of random-looking
+characters is redacted on sight. Hex-only strings are safe, so git SHAs survive it.
 
 **2. Path denylist — dropped entirely, not scrubbed.** A redacted `.env` is still a map of which
 secrets a project holds:
@@ -513,15 +639,17 @@ no network I/O, ever.
 | Glyph | State | What it means | Fix |
 | --- | --- | --- | --- |
 | `●` | `ready` | Connection is fine | If memory still looks wrong, it is content or scope, not connectivity — run `/mubit-memory:doctor` |
+| `○` | `unconfigured` | No endpoint is set, so nothing was dialed | Run `/mubit-memory:auth`. Nothing is broken and nothing is lost — capture buffers until an endpoint exists |
 | `✖` | `unreachable` | Nothing is listening | Check `endpoint` is correct and your instance is running |
-| `▲` | `server_error` | Mubit is up and failing | Retry, then check the instance in the console; the client cannot fix this |
+| `▲` | `server_error` | Something is up and answering wrongly | Retry, then check the instance in the console. If it persists, check `endpoint` reaches Mubit and not a proxy or SSO page — those answer 200 too |
 | `✖` | `auth_failed` | Key missing, wrong, or revoked | Set a valid `mbt_...` key. Sticky on purpose — it is the one error you can fix |
 | `◌` | `not_responding` | Three consecutive timeouts | Usually load, not death. Retry before concluding anything |
 
 Two displays that look like faults and are not:
 
-- **`◍ warming`** — the 20-second cold-start window. An instance that is still starting is not
-  broken, merely slow to answer.
+- **`◍ warming`** — the 20-second cold-start window, opened the first time a given endpoint is
+  used. An instance that is still starting is not broken, merely slow to answer. It is armed
+  once per endpoint rather than once per session, so it cannot hide a fault that outlasts it.
 - **`· paused 94s`** — the circuit breaker opened after 5 failures in 5 minutes. One probe dials
   when the cooldown ends and a success closes it. Nothing needs restarting.
 
@@ -530,8 +658,6 @@ Two displays that look like faults and are not:
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | No status line, no skills, nothing at all | You have not started a new session since installing | Quit and reopen. `/reload-plugins` does not fire `SessionStart` |
-| `auth_failed`, or nothing works on a new machine | No key stored, or it was rotated or revoked | `/mubit-memory:auth`, then start a new session — signing in does not fire `SessionStart` either |
-| Signed in, but it still behaves as though you had not | A plugin setting or `MUBIT_API_KEY` outranks the credentials store | `bin/auth.mjs --status` shows what is stored; clear the higher rung or set the new key there |
 | Everything connects, recall is always empty | Writes are accepted and indexed a moment later, so a recall right after a capture can miss | Run `/mubit-memory:doctor` and check the ingest job states |
 | Nothing loads and there is no error anywhere | A manifest failed validation. A plugin that fails does not half-load | `claude plugin validate <plugin-dir>` |
 | Memory from `/mubit-memory:remember` never shows up in recall | `runStrategy: per-conversation` splits hook writes from MCP writes | Use `per-directory` |
@@ -581,16 +707,11 @@ or delete the run server-side.
 
 Verified on this machine: `claude plugin validate` on both manifests; adding the local directory
 marketplace and listing it; a real `claude plugin install` from it, `claude plugin details`, and
-`claude plugin uninstall`; the plugin loading with 6 skills / 1 agent / MCP connected; and the
+`claude plugin uninstall`; the plugin loading with 7 skills / 1 agent / MCP connected; and the
 shape of the on-disk status marker. Every expected-output block above is a transcript.
 
-Re-verified for the `/mubit-memory:auth` release: `claude plugin validate`, `claude plugin
-details` (7 skills / 1 agent, and the projected token cost quoted above), and the plugin loading
-under `claude --plugin-dir` with `/mubit-memory:auth` registered alongside the other six. The
-credentials store was exercised offline — written, re-written over a wider-mode file, and
-confirmed at mode `600` — as part of the test suite.
-
-Not verified here: any behaviour that needs a running Mubit or a live console — the browser
-sign-in end to end, recall content, reflection output, and lesson promotion. The sign-in flow is
-covered offline against a stand-in console that enforces the PKCE exchange, which checks the
-client's half of it; the round trip against the real console is covered separately.
+Not verified: a fresh clone-and-install from GitHub. The transcripts above were produced from a
+local directory marketplace, so the install path most people take — `/plugin marketplace add
+mubit-ai/claude-plugins` — is exercised by its parts and not end to end here. Also unverified is
+any behaviour that needs a running Mubit: recall content, reflection output, and lesson
+promotion — those need a live instance and are covered separately.

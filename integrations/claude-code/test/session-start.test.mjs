@@ -3,10 +3,10 @@
  * `hooks/src/session-start.mjs` — SessionStart (blocking, injection only).
  *
  * Guide sections under test:
- *   §5.1  flow, sub-budgets (health 400 ms / register 600 ms / lessons 900 ms), exact stdout
+ *   §5.1  flow, sub-budgets (health half the envelope / register 600 ms / lessons 900 ms)
  *   §4.3  the `source` table: startup | resume | clear | compact | fork
  *   §1.2  `GET /v2/core/health` returns the bare string `OK`, not JSON
- *   §1.3  `ListLessonsRequest.run_id` is optional — empty means all runs
+ *   §1.3  standing lessons come off the activity feed, filtered to `global` here
  *   §4.7  cold-start grace: `marker.cold_start_until = now + coldStartGraceMs`
  *   §4.9  the hook never blocks and never exits non-zero
  *
@@ -16,11 +16,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  runHook, assertHookContract, fakeMubit, makeDataDir, makeProjectDir,
+  runHook, assertHookContract, assertWithinBudget, fakeMubit, makeDataDir, makeProjectDir,
   baseEnv, readJsonFile,
 } from './helpers/harness.mjs';
 import * as fx from './helpers/fixtures.mjs';
@@ -53,6 +53,13 @@ function seedSessionRecord(dataDir, sessionId, over = {}) {
   return rec;
 }
 
+/** §7: `runs/<run_id>/checkpoints.json` — what `checkpoint --pre` leaves behind. */
+function seedCheckpoints(dataDir, runId, entries) {
+  const dir = join(dataDir, 'runs', runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'checkpoints.json'), JSON.stringify(entries));
+}
+
 /** The single status marker (§4.8). `status/health.json` is the health cache, not a marker. */
 function readMarker(dataDir) {
   const dir = join(dataDir, 'status');
@@ -75,7 +82,7 @@ const seq = (server) => server.requests.map((r) => `${r.method} ${r.path}`);
 // ---------------------------------------------------------------------------
 
 // §5.1 steps 4-6: health, then register, then lessons — in that order, and nothing else.
-test('startup calls health -> register -> lessons, in that order', async (t) => {
+test('startup calls health -> register -> the activity feed, in that order', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -87,7 +94,7 @@ test('startup calls health -> register -> lessons, in that order', async (t) => 
   assert.deepEqual(seq(server), [
     'GET /v2/core/health',
     'POST /v2/control/agents/register',
-    'POST /v2/control/lessons',
+    'POST /v2/control/activity',
   ]);
 
   // §1.2 — health is allowlisted and returns the plain string `OK`. A hook that
@@ -111,18 +118,19 @@ test('register body carries run_id, agent_id, role, status and capabilities', as
   assert.equal(body.role, 'worker');
   assert.equal(body.status, 'active');
   assert.deepEqual(body.capabilities, ['code', 'shell', 'edit', 'search']);
-  // §1.3 — run_id and agent_id are mandatory on StateAgentRegisterRequestPayload.
+  // §1.3 — run_id and agent_id are mandatory on the register request body.
   assert.match(body.run_id, /^cc-/);
-  assert.match(body.agent_id, /^claude-code-/);
-  // §4.3 — the MCP server's `MUBIT_DEFAULT_SESSION_ID` default collapses every
-  // project into one run. No strategy may ever emit it.
+  assert.equal(body.agent_id, 'claude-code');
+  // §4.3 — `"default"` is the bundled server's placeholder, and it identifies nothing: a
+  // run id has to name one project on one machine. No strategy may ever emit it.
   assert.notEqual(body.run_id, 'default');
 });
 
-// §1.3 / control.proto — ListLessonsRequest.run_id is optional; empty means
-// all runs, which is exactly what "global lessons" wants. Scoping it to this run
-// would return nothing on a brand-new run.
-test('lessons request is {scope:"global", limit:5} with no run_id', async (t) => {
+// The standing set comes off the activity feed, and the request shape is what makes that
+// possible: `projection: "full"` because a lesson's scope lives in metadata the compact
+// projection drops, no run id because a lesson written elsewhere is the whole point, and a
+// page big enough that the client-side scope filter has something to filter.
+test('the standing-lessons request is one full-projection page of lesson entries', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -131,12 +139,19 @@ test('lessons request is {scope:"global", limit:5} with no run_id', async (t) =>
     { env: env(dataDir, server.url) });
   assertHookContract(r);
 
-  const body = server.lastCall('POST', '/v2/control/lessons').body;
-  assert.equal(body.scope, 'global');
-  assert.equal(body.limit, 5);
+  server.assertCalled('POST', '/v2/control/activity', 1);
+  server.assertNotCalled('POST', '/v2/control/lessons');
+
+  const body = server.lastCall('POST', '/v2/control/activity').body;
+  assert.deepEqual(body.entry_types, ['lesson']);
+  assert.equal(body.projection, 'full',
+    'scope lives in metadata the compact projection drops — a compact page finds every '
+    + 'lesson and knows the scope of none of them');
+  assert.equal(body.sort, 'desc', 'the newest end is the one a standing set wants');
+  assert.equal(body.limit, 200);
   assert.ok(
     body.run_id === undefined || body.run_id === '',
-    `lessons must not be scoped to one run, got run_id=${JSON.stringify(body.run_id)}`,
+    `a lesson written by another run is the point, got run_id=${JSON.stringify(body.run_id)}`,
   );
 });
 
@@ -158,9 +173,21 @@ test('stdout is a SessionStart steer block plus a one-line systemMessage', async
   const ctx = out.additionalContext;
   assert.ok(ctx.includes(runId), `additionalContext must name the run, got:\n${ctx}`);
   assert.match(ctx, /hosted/, 'additionalContext must name the mode');
+  // §5.1 — the steer must carry BOTH halves, and the pair is the contract. This test used to
+  // assert only `/do not search/i`, which is how the plugin shipped a steer that told the
+  // model memory existed and never to reach for it: a negative with no positive beside it,
+  // against tool descriptions that said nothing about when to use them either. Between them
+  // the trained behaviour was to call no memory tool at all — so every measurement of those
+  // tools was really a measurement of this paragraph.
   assert.match(ctx, /injected automatically/i);
-  assert.match(ctx, /do not search/i);
-  // The lesson section renders what /v2/control/lessons returned.
+  assert.match(ctx, /no need to open a turn by searching/i,
+    `the steer must say recall is already injected, so turn one need not search:\n${ctx}`);
+  assert.match(ctx, /do search when the injected memory falls short/i,
+    `the steer must also say when searching IS right, or the negative stands alone:\n${ctx}`);
+  for (const tool of ['mubit_recall', 'mubit_diagnose', 'mubit_dereference']) {
+    assert.ok(ctx.includes(tool), `the steer must name ${tool} as the tool for its case:\n${ctx}`);
+  }
+  // The lesson section renders the global lessons the activity feed returned.
   assert.match(ctx, /standing lessons/i);
   assert.ok(ctx.includes('Run the migration'), `lesson content must render, got:\n${ctx}`);
 
@@ -168,6 +195,48 @@ test('stdout is a SessionStart steer block plus a one-line systemMessage', async
   assert.ok(r.json.systemMessage.includes(runId));
   assert.ok(!r.json.systemMessage.includes('\n'), 'systemMessage is one line');
 });
+
+/** The same qualifier on the other injection surface — these were learned elsewhere too. */
+test('the standing lessons section says they may be out of date', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /standing lessons/i);
+  assert.match(ctx, /may be out of date/i);
+  assert.match(ctx, /verify/i);
+});
+
+/**
+ * A standing lesson steers the whole session, so it has to be able to earn that place — and
+ * to lose it. Attribution runs on ids, and this hook used to parse `lesson_id` off the wire
+ * and throw it away, which left every global lesson permanently uncreditable: never
+ * reinforced when it helped, never corrected when it was wrong.
+ */
+test('the lesson ids are kept on the marker for the first turn to credit', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const marker = readMarker(dataDir);
+  assert.deepEqual(marker.lessons.injected_ids, ['les_g1'],
+    'the lesson id must survive the parse');
+  assert.equal(marker.lessons.credited_at, 0, 'nothing has credited them yet');
+
+  // The id is bookkeeping, not prose: the model sees the lesson, not its id.
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.ok(!ctx.includes('les_g1'), 'the id must not be rendered into the steer block');
+});
+
 
 // §4.7 — the grace window starts here, so failures in the first seconds after
 // still starting up do not tell the user their memory is broken.
@@ -187,6 +256,75 @@ test('marker.cold_start_until = now + coldStartGraceMs', async (t) => {
     `cold_start_until ${marker.cold_start_until} < ${before + 20000}`);
   assert.ok(marker.cold_start_until <= after + 20000,
     `cold_start_until ${marker.cold_start_until} > ${after + 20000}`);
+});
+
+// §4.7 — the window is a property of the *endpoint*, not of the session. Re-arming it on
+// entry meant it was open at the instant every probe failed, on every session, forever: the
+// grace could never expire, so `◍ warming` masked every real fault permanently and no other
+// failure state was reachable through the hook that runs first.
+test('cold_start_until is armed once per endpoint, not once per session', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const e = env(dataDir, server.url, { MUBIT_CC_COLDSTART_GRACE_MS: '20000' });
+
+  const first = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: e });
+  assertHookContract(first);
+  const armed = readMarker(dataDir).cold_start_until;
+  assert.ok(armed > 0, 'the first session for an endpoint arms the window');
+
+  // A later session against the same endpoint inherits the same deadline, so the window
+  // runs down in wall-clock time instead of restarting.
+  const second = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: e });
+  assertHookContract(second);
+  assert.equal(readMarker(dataDir).cold_start_until, armed,
+    'a second session re-armed the grace window instead of inheriting it');
+});
+
+// The other half of the same rule: a genuinely new instance really is starting up, so
+// pointing at one arms a fresh window — and pointing back at a familiar one does not.
+test('a new endpoint arms its own window; returning to the old one does not re-arm', async (t) => {
+  const a = await fakeMubit();
+  const b = await fakeMubit();
+  t.after(() => { a.close(); b.close(); });
+  const dataDir = makeDataDir();
+  const grace = { MUBIT_CC_COLDSTART_GRACE_MS: '20000' };
+
+  await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: env(dataDir, a.url, grace) });
+  const armedA = readMarker(dataDir).cold_start_until;
+
+  await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: env(dataDir, b.url, grace) });
+  const armedB = readMarker(dataDir).cold_start_until;
+  assert.notEqual(armedB, armedA, 'a different endpoint should arm its own grace window');
+
+  await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }), { env: env(dataDir, a.url, grace) });
+  assert.equal(readMarker(dataDir).cold_start_until, armedA,
+    'returning to an endpoint already seen re-armed its window instead of reusing the record');
+});
+
+// §4.1 — the state that used to be reported as `server_error`: `urlFor` handed `fetch` a
+// bare route, `fetch` threw ERR_INVALID_URL before opening a socket, and `classifyError`
+// had no branch for it. The user was then sent to the README row that says the client
+// cannot fix it, for the one problem only the client can fix.
+test('no endpoint reports unconfigured, dials nothing, and names the fix', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, '') });
+  assertHookContract(r);
+
+  const marker = readMarker(dataDir);
+  assert.equal(marker.state, 'unconfigured');
+  assert.equal(marker.cold_start_until, 0, 'an unset endpoint has nothing to warm up');
+  server.assertCalled('GET', '/v2/core/health', 0);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /not configured/i);
+  assert.match(ctx, /\/mubit-memory:auth/, 'the injected block must name the one command that fixes it');
+  assert.doesNotMatch(ctx, /is unreachable|server_error/,
+    'an unset endpoint is not a verdict about a server');
 });
 
 // ---------------------------------------------------------------------------
@@ -264,8 +402,93 @@ test('source=compact reuses the parent session record run', async (t) => {
   assert.deepEqual(outgoingRunIds(server), [MAPPED_RUN]);
 });
 
-// §4.3 `fork`: same rule as compact — the fork inherits the parent record's run.
-test('source=fork reuses the parent session record run', async (t) => {
+// §5.6 — the post-compaction re-anchor is delivered HERE, not by `checkpoint --post`.
+// `PostCompact` is not a `hookSpecificOutput.hookEventName` Claude Code accepts (see
+// `test/hook-output.test.mjs`), so anything that hook injected was discarded whole. This is
+// the only hook that both runs after a compaction and has an accepted event name.
+test('source=compact re-anchors the session to the stored checkpoint', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSessionRecord(dataDir, fx.SESSION_ID);
+  seedCheckpoints(dataDir, MAPPED_RUN, [
+    { checkpoint_id: 'ckpt_older_1', token_estimate: 1200, at: 1765000000000 },
+    { checkpoint_id: 'ckpt_seeded_9', token_estimate: 3400, at: 1765000001000 },
+  ]);
+
+  const r = await runHook('session-start', fx.sessionStart({ source: 'compact', cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const out = r.json.hookSpecificOutput;
+  assert.equal(out.hookEventName, 'SessionStart', 'the one accepted channel after a compaction');
+  assert.ok(out.additionalContext.includes('ckpt_seeded_9'),
+    `the block must name the NEWEST stored checkpoint, got:\n${out.additionalContext}`);
+  assert.ok(!out.additionalContext.includes('ckpt_older_1'),
+    'only the newest anchor is worth the model\'s attention');
+  assert.match(out.additionalContext, /\/mubit-memory:recall/,
+    'and must say how to ask for what was compacted away');
+});
+
+// The same rule in the other direction: a fresh session is not a compacted one, and telling
+// it that a checkpoint "holds the pre-compaction context" for a conversation that never
+// compacted spends the model's attention on a claim about nothing.
+test('source=startup does not re-anchor, even with a stored checkpoint', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSessionRecord(dataDir, fx.SESSION_ID);
+  seedCheckpoints(dataDir, MAPPED_RUN, [
+    { checkpoint_id: 'ckpt_seeded_9', token_estimate: 3400, at: Date.now() },
+  ]);
+
+  const r = await runHook('session-start', fx.sessionStart({ source: 'startup', cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  assert.ok(!r.json.hookSpecificOutput.additionalContext.includes('ckpt_seeded_9'),
+    'a startup session was not compacted; there is nothing to re-anchor');
+});
+
+// §5.6 — with nothing stored there is nothing to anchor to. `--pre` never ran for this run,
+// its call failed, or §7's sweep took the file. Saying "checkpoint undefined holds your
+// context" is strictly worse than silence.
+test('source=compact with no stored checkpoint steers normally and names no anchor', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSessionRecord(dataDir, fx.SESSION_ID);
+
+  const r = await runHook('session-start', fx.sessionStart({ source: 'compact', cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /Mubit memory is active/, 'the ordinary steer block still ships');
+  assert.doesNotMatch(ctx, /checkpoint/i,
+    `no stored anchor must mean no anchor paragraph, got:\n${ctx}`);
+});
+
+/**
+ * §4.3 `fork`: `--fork-session`, the `/fork` background copy and `/branch` all continue an
+ * existing conversation, so the run continues with them — the same rule `compact` and
+ * `resume` follow, for the same reason.
+ *
+ * This is a regression test for a session that got nothing at all. `hooks/hooks.json` matched
+ * `startup|resume|clear|compact`; Claude Code reported `fork` from v2.1.214 onward and
+ * `resume` before it, so the four-source matcher used to catch a fork by accident and then
+ * stopped. Verified live on 2.1.235: a match-all SessionStart group logged
+ * `{"source":"fork"}` while a four-source group beside it logged nothing. Since
+ * this hook is the one that derives the run id, arms the cold-start window, writes the marker
+ * and injects the steer, the miss cost the whole feature — in exactly the sessions a user
+ * branched *because* the work mattered.
+ *
+ * Heartbeat, not register, is the second half. `deriveAgentId` (`lib/runid.mjs:287`) returns
+ * the bare role for a parent session, so the agent the forked-from session announced IS this
+ * agent; re-registering it is the reconciliation noise the `resume` branch already exists to
+ * avoid.
+ */
+test('source=fork reuses the parent run and heartbeats instead of registering', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -275,7 +498,87 @@ test('source=fork reuses the parent session record run', async (t) => {
     { env: env(dataDir, server.url) });
   assertHookContract(r);
 
-  assert.deepEqual(outgoingRunIds(server), [MAPPED_RUN]);
+  assert.deepEqual(seq(server), [
+    'GET /v2/core/health',
+    'POST /v2/control/agents/heartbeat',
+    'POST /v2/control/activity',
+  ], 'a fork continues a session that never left, so re-announcing its agent is noise the '
+    + 'control plane has to reconcile');
+  server.assertNotCalled('POST', '/v2/control/agents/register');
+
+  assert.deepEqual(outgoingRunIds(server), [MAPPED_RUN],
+    'deriving a fresh run id here would cut the fork off from the parent conversation\'s '
+    + 'captured turns, which is the memory the user branched in order to keep');
+
+  // §4.8 — `status/<run_id>.json` is what `bin/statusline.mjs` renders and what every later
+  // hook in this session reads back. Without it a forked session shows no memory state at all.
+  const markers = readdirSync(join(dataDir, 'status')).filter((f) => f !== 'health.json');
+  assert.deepEqual(markers, [`${MAPPED_RUN}.json`],
+    'the marker must be written under the inherited run, not a fresh one or none');
+
+  // The claim this ticket exists to prove: a forked session is given the memory a resumed one
+  // is given — the run named, and the standing lessons rendered.
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.ok(ctx.includes(MAPPED_RUN),
+    `the steer block must name the inherited run, got:\n${ctx}`);
+  assert.match(ctx, /standing lessons/i,
+    'the global lessons a resumed session opens with must reach a forked one too');
+});
+
+/**
+ * The shape a *live* fork actually arrives in, which the mapped case above does not cover.
+ *
+ * A real `--fork-session` payload carries a brand-new `session_id` and no pointer whatsoever
+ * back to the parent — captured verbatim from a live fork on Claude Code 2.1.235:
+ *
+ *     {"session_id":"e8303836-739a-45da-a09a-5861b96df5d1","transcript_path":"…","cwd":"…",
+ *      "hook_event_name":"SessionStart","source":"fork"}
+ *
+ * So on the first SessionStart of a fork there is no session map to reuse and
+ * `resolveRunId` falls through to `deriveFresh` (`lib/runid.mjs:157`). Continuity is then the
+ * strategy's job, and under the default `per-directory` the fork derives the very run its
+ * parent derived from the same directory. That is what makes the matcher fix sufficient
+ * rather than merely necessary: without this the fix would fire the hook and still hand the
+ * fork a run that is not the one it continues.
+ */
+test('an unmapped fork session id still lands on the run its parent derived', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  // The parent: an ordinary startup, mapping nothing this fork can look up.
+  const parent = await runHook('session-start',
+    fx.sessionStart({ source: 'startup', cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(parent);
+  const parentRun = server.lastCall('POST', '/v2/control/agents/register').body.run_id;
+
+  // The fork: a session id the plugin has never seen, exactly as the host delivers it.
+  const forkSession = 'e8303836-739a-45da-a09a-5861b96df5d1';
+  const fork = await runHook('session-start', fx.sessionStart({
+    source: 'fork',
+    session_id: forkSession,
+    transcript_path: `/Users/x/.claude/projects/-Users-x-repo/${forkSession}.jsonl`,
+    cwd: PROJECT_DIR,
+  }), { env: env(dataDir, server.url) });
+  assertHookContract(fork);
+
+  // The matcher change is what makes this hook run at all; the heartbeat is how it says
+  // so. Assert it landed before reading its body, or a fork that never reached the wire
+  // fails as a TypeError instead of as the missing round trip it is.
+  server.assertCalled('POST', '/v2/control/agents/heartbeat', 1);
+  assert.equal(server.lastCall('POST', '/v2/control/agents/heartbeat').body.run_id, parentRun,
+    'a fork carries a new host session id, so only the run strategy can keep it on the '
+    + 'parent\'s memory — a different run id here means the branch starts blind');
+
+  // The fork gets its OWN entry in the session map, beside the parent's rather than over it,
+  // so every later hook in the forked session resolves the run without re-deriving — and the
+  // parent, if it is still open, goes on resolving too.
+  assert.deepEqual(readdirSync(join(dataDir, 'sessions')).sort(),
+    [`${forkSession}.json`, `${fx.SESSION_ID}.json`].sort(),
+    'a fork must map its new session id without unmapping the session it forked from');
+  const rec = readJsonFile(join(dataDir, 'sessions', `${forkSession}.json`));
+  assert.equal(rec.run_id, parentRun, 'the fork\'s session record must point at the same run');
 });
 
 // ---------------------------------------------------------------------------
@@ -284,6 +587,55 @@ test('source=fork reuses the parent session record run', async (t) => {
 
 // §5.1 step 4: health not ok -> skip register and lessons, but STILL steer, so the
 // model knows memory is offline instead of inventing recall it never received.
+/**
+ * The gap health cannot close. Health reports whether the instance is reachable, not whether
+ * your key is good — so a session whose credential is rejected used to open with "Mubit memory
+ * is active" and then silently recall nothing all session. The first authenticated call of the
+ * session is the one that knows, and now it is the one that decides.
+ */
+test('a rejected key produces the unauthenticated block, not "memory is active"', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/agents/register': { status: 401, json: { error: 'invalid api key' } },
+    'POST /v2/control/activity': { status: 401, json: { error: 'invalid api key' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  // Health said OK — the point of the test is that this is no longer enough.
+  server.assertCalled('GET', '/v2/core/health', 1);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /not authenticated/i);
+  assert.ok(!/memory is active/i.test(ctx), 'the steer must not claim memory is working');
+  assert.match(ctx, /do not assume anything was recalled/i);
+  assert.match(ctx, /mubit-memory:auth/, 'the user needs the one command that fixes it');
+  // Capture keeps running: the work is buffered, not dropped.
+  assert.match(ctx, /captured and buffered/i);
+
+  assert.equal(readMarker(dataDir).state, 'auth_failed');
+});
+
+/** A transport hiccup on register is not an authentication verdict, and must not read as one. */
+test('a register failure that is not about the key leaves the steer block alone', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/agents/register': { status: 500, json: { error: 'boom' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /memory is active/i);
+  assert.ok(!/not authenticated/i.test(ctx));
+});
+
 test('health down skips register and lessons but still emits a steer block', async (t) => {
   const server = await fakeMubit({ 'GET /v2/core/health': { status: 503, text: 'unavailable' } });
   t.after(() => server.close());
@@ -295,7 +647,7 @@ test('health down skips register and lessons but still emits a steer block', asy
   assertHookContract(r);
   server.assertNotCalled('POST', '/v2/control/agents/register');
   server.assertNotCalled('POST', '/v2/control/agents/heartbeat');
-  server.assertNotCalled('POST', '/v2/control/lessons');
+  server.assertNotCalled('POST', '/v2/control/activity');
 
   const ctx = r.json.hookSpecificOutput.additionalContext;
   assert.equal(r.json.hookSpecificOutput.hookEventName, 'SessionStart');
@@ -339,11 +691,65 @@ test('capture and recall both disabled emits {} with zero HTTP', async (t) => {
   assert.equal(server.requests.length, 0, `expected no HTTP, saw: ${seq(server).join(', ')}`);
 });
 
+// §5.1 step 4 — health is the GATE, and a gate that is starved fails the whole hook, not one
+// section. With the sub-budget pinned at 400 ms a cold or loaded instance that answered
+// correctly in 700 ms read as `not_responding`: every session then opened by telling the model
+// memory was offline and recall was unavailable, while recall itself worked normally. The
+// budget must clear a realistic cold answer, not a warm one.
+test('a healthy instance that answers health slowly is ready, not offline', async (t) => {
+  const server = await fakeMubit({
+    // Correct answer (§1.2: the bare string `OK`), just slow.
+    'GET /v2/core/health': { text: 'OK', delayMs: 700 },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url, { MUBIT_CC_COLDSTART_GRACE_MS: '0' }) });
+
+  assertHookContract(r);
+  assert.equal(readMarker(dataDir).state, 'ready',
+    'a slow-but-correct health answer is not a server fault');
+
+  // The gate opened, so the steps it gates ran.
+  server.assertCalled('POST', '/v2/control/agents/register', 1);
+  server.assertCalled('POST', '/v2/control/activity', 1);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /Mubit memory is active/,
+    `a healthy instance must get the active steer block, got:\n${ctx}`);
+  assert.doesNotMatch(ctx, /offline|unreachable/i,
+    'steering the model away from its own memory is the cost of a starved health budget');
+});
+
+// The other half of the same change: a bigger health slice must not be able to push the hook
+// past its harness budget. `budgetFor()` clamps each later sub-budget to what health left, so
+// a slow health AND a stalled lesson list still land inside HARNESS_BUDGET_MS.
+test('a slow health plus a stalled lessons call still fits the harness budget', async (t) => {
+  const server = await fakeMubit({
+    'GET /v2/core/health': { text: 'OK', delayMs: 700 },
+    'POST /v2/control/activity': { delayMs: 5000, json: { entries: [], next_page_token: '', total_visible: 0 } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url, { MUBIT_CC_COLDSTART_GRACE_MS: '0' }) });
+
+  assertHookContract(r);
+  assert.equal(readMarker(dataDir).state, 'ready');
+  const out = r.json.hookSpecificOutput;
+  assert.equal(out.hookEventName, 'SessionStart');
+  assert.ok(!/standing lessons/i.test(out.additionalContext),
+    'the lesson section is dropped, not waited for');
+  assert.ok(r.ms < 3200, `session-start took ${r.ms}ms, past its 3200ms harness budget`);
+});
+
 // §5.1 "Missing a sub-budget degrades that section only." Lessons stalls past its
 // 900 ms sub-budget; the hook still steers, just without a lesson section.
 test('a lessons call past its 900ms sub-budget degrades only that section', async (t) => {
   const server = await fakeMubit({
-    'POST /v2/control/lessons': { delayMs: 1200, json: { lessons: [] } },
+    'POST /v2/control/activity': { delayMs: 1200, json: { entries: [], next_page_token: '', total_visible: 0 } },
   });
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -353,7 +759,7 @@ test('a lessons call past its 900ms sub-budget degrades only that section', asyn
 
   assertHookContract(r);
   server.assertCalled('POST', '/v2/control/agents/register', 1);
-  server.assertCalled('POST', '/v2/control/lessons', 1);
+  server.assertCalled('POST', '/v2/control/activity', 1);
 
   const out = r.json.hookSpecificOutput;
   assert.equal(out.hookEventName, 'SessionStart');
@@ -363,5 +769,151 @@ test('a lessons call past its 900ms sub-budget degrades only that section', asyn
     'the lesson section is dropped, not waited for');
 
   // The 2500 ms whole-hook budget still holds; the 900 ms sub-budget is what expired.
-  assert.ok(r.ms < 3200, `session-start took ${r.ms}ms, past its 2500ms internal budget`);
+  await assertWithinBudget('session-start', 3200, r.ms, async () => (await runHook(
+    'session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(makeDataDir(), server.url) },
+  )).ms);
+});
+
+// ---------------------------------------------------------------------------
+// Standing lessons off the activity feed
+// ---------------------------------------------------------------------------
+
+/**
+ * One page of `ActivityEntry` for the feed to serve. Scope and type live inside
+ * `metadata_json`, which is the nesting that makes the projection load-bearing.
+ *
+ * @param {{id: string, run: string, content: string, scope?: string, type?: string}} o
+ */
+function feedLesson(o) {
+  return {
+    id: o.id,
+    created_at: '2026-02-02T00:00:00Z',
+    entry_type: 'lesson',
+    run_id: o.run,
+    content: o.content,
+    source: `reflection:${o.run}`,
+    metadata_json: JSON.stringify({
+      scope: o.scope ?? 'run', lesson_type: o.type ?? 'lesson', importance: 'medium',
+    }),
+  };
+}
+
+const feedPage = (entries, token = '') => ({
+  'POST /v2/control/activity': {
+    json: { entries, next_page_token: token, total_visible: entries.length },
+  },
+});
+
+/**
+ * The point of the whole workstream, stated as the thing a user would notice: a lesson
+ * another run widened past its own reaches this session's opening context. The route this
+ * replaced answered a request for a handful of global lessons with nothing at all, reliably,
+ * which is indistinguishable from an instance that has never promoted one.
+ */
+test('a global lesson written by another run reaches the steer block', async (t) => {
+  const server = await fakeMubit(feedPage([
+    feedLesson({ id: 'l1', run: 'cc-elsewhere', scope: 'global', content: 'ALWAYS drain before upgrading.' }),
+    feedLesson({ id: 'l2', run: 'cc-elsewhere', scope: 'run', content: 'run-local noise' }),
+  ]));
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /standing lessons/i);
+  assert.ok(ctx.includes('ALWAYS drain before upgrading.'),
+    `a global lesson from another run must reach the steer block:\n${ctx}`);
+  assert.ok(!ctx.includes('run-local noise'),
+    'a run-scoped lesson from another run is not a standing lesson');
+  assert.match(r.json.systemMessage, /1 global lesson$/);
+});
+
+/**
+ * The easiest half of this fix to get subtly wrong. `recordRules` reads `lesson_type` off the
+ * entry, and on the feed that field lives one level in — so rows have to be mapped back to
+ * the wire spelling before they are handed over, or the store that feeds `pre-tool` is
+ * starved by the very call that was supposed to fill it.
+ */
+test('a rule-typed global lesson lands in runs/<run>/rules.json', async (t) => {
+  const server = await fakeMubit(feedPage([
+    feedLesson({ id: 'r1', run: 'cc-elsewhere', scope: 'global', type: 'rule', content: 'Never force-push main.' }),
+    feedLesson({ id: 'l2', run: 'cc-elsewhere', scope: 'global', type: 'lesson', content: 'A suggestion, not a rule.' }),
+  ]));
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const runId = server.lastCall('POST', '/v2/control/agents/register').body.run_id;
+  const stored = readJsonFile(join(dataDir, 'runs', runId, 'rules.json'));
+  assert.deepEqual(stored.rules.map((x) => x.text), ['Never force-push main.'],
+    'only the rule-typed lesson is a rule, and it must survive the shape change');
+  assert.equal(stored.rules[0].ref, 'r1', 'the id has to come through for attribution');
+});
+
+/**
+ * One page cannot hide a *newer* global lesson, because the feed sorts before it pages. But
+ * it can hide an older one — so a short page that found fewer standing lessons than it was
+ * asked for must say the set may be incomplete rather than render a confident count.
+ */
+test('a truncated first page never renders a bare "0 standing lessons"', async (t) => {
+  const server = await fakeMubit(feedPage(
+    [feedLesson({ id: 'n1', run: 'cc-elsewhere', scope: 'run', content: 'run-local noise' })],
+    'more-pages-exist',
+  ));
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /may be incomplete|more than this page|not the whole set/i,
+    `a partial listing must say so rather than imply an empty store:\n${ctx}`);
+  assert.doesNotMatch(r.json.systemMessage, /\b0 global lessons\b/,
+    'a page that could not see the whole set must not report a total of zero');
+});
+
+/** The same page, complete: nothing to qualify, and no lesson section to render. */
+test('a complete page with no global lessons says nothing about being incomplete', async (t) => {
+  const server = await fakeMubit(feedPage([
+    feedLesson({ id: 'n1', run: 'cc-elsewhere', scope: 'run', content: 'run-local noise' }),
+  ]));
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.ok(!/standing lessons/i.test(ctx), 'no global lessons, so no section');
+  assert.doesNotMatch(ctx, /may be incomplete/i,
+    'a complete listing that found nothing is a real answer, not a degraded one');
+  assert.match(r.json.systemMessage, /0 global lessons$/);
+});
+
+/** A feed that is down degrades the lesson section and nothing else. */
+test('a failing activity feed degrades only the lesson section', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/activity': { status: 500, json: { error: 'boom' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /Mubit memory is active/, 'the rest of the steer block survives');
+  assert.ok(!/standing lessons/i.test(ctx));
+  assert.equal(readMarker(dataDir).state, 'ready');
 });

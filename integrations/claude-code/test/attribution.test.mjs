@@ -105,7 +105,7 @@ test('recall → stop → drain attributes the outcome to the recalled reference
   assert.equal(body.outcome, 'success');
   assert.equal(body.signal, 0.2,
     'the implicit signal is deliberately weak — a turn completing is not proof the memory helped');
-  assert.ok(body.agent_id.startsWith('claude-code-'));
+  assert.equal(body.agent_id, 'claude-code', 'the outcome is attributed to the role, not the session');
   assert.ok(typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0);
 
   // THE assertion. reference_id, not id.
@@ -143,7 +143,13 @@ test('only the entries that survived the token budget are attributed', async (t)
   assert.deepEqual(turn.recalled, ['ref_rule_1'],
     'a 150-token budget holds one ~100-token item; active_rules fills first');
 
-  assertHookContract(await runHook('capture', stop(), { env: e, args: ['--stop'] }));
+  // The reply has to show the model actually used what survived the budget, or the turn is
+  // an *ignored* injection and `drain` records it as neutral with no entry_ids — correctly,
+  // and this test would then be asserting the budget property through a scenario that never
+  // reaches it. The default `stop()` message answers a different question entirely.
+  assertHookContract(await runHook('capture', stop({
+    last_assistant_message: 'Following the RULE that was recalled: nothing else fit the budget.',
+  }), { env: e, args: ['--stop'] }));
   assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', PROMPT_ID] }));
   await waitFor(() => server.countOf('POST', '/v2/control/outcome') >= 1, 5000);
 
@@ -258,4 +264,228 @@ test('two drains for the same turn send the same idempotency_key', async (t) => 
     assert.deepEqual(call.body.entry_ids, RECALLED, 'every retry carries the same attribution');
     assert.equal(call.body.reference_id, 'global');
   }
+});
+
+// ---------------------------------------------------------------------------
+// Standing lessons enter the same loop
+// ---------------------------------------------------------------------------
+
+/**
+ * A global lesson injected by `session-start` acts on the turn exactly as a recalled item
+ * does, but it never passed through recall, so it used to reach the attribution machinery
+ * with no id at all — never reinforced when it helped, and never corrected when it was
+ * wrong. One bad global lesson then steered every session, forever, with no path back.
+ *
+ * It is credited once, on the first turn of the session that stages ids.
+ */
+test('a standing lesson injected at session start reaches entry_ids, once', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/ingest': SLOW_INGEST });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  const e = env(dataDir, server);
+
+  assertHookContract(await runHook('session-start', { hook_event_name: 'SessionStart', source: 'startup' }, { env: e }));
+
+  // Turn one: the lesson id rides along with what recall found.
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: e }));
+  const first = readJsonFile(turnPath(dataDir));
+  assert.deepEqual(first.recalled, ['les_g1', ...RECALLED],
+    'the standing lesson must be attributable alongside the recalled evidence');
+
+  // Turn two: already credited, so it is not reinforced a second time.
+  const SECOND = 'p_second_prompt';
+  assertHookContract(await runHook('prompt-recall',
+    userPromptSubmit({ prompt_id: SECOND }), { env: e }));
+  assert.deepEqual(readJsonFile(turnPath(dataDir, SECOND)).recalled, RECALLED,
+    'one injection is one credit, not one per prompt');
+
+  // And it travels the rest of the loop as any other id does.
+  assertHookContract(await runHook('capture', stop(), { env: e, args: ['--stop'] }));
+  assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', PROMPT_ID] }));
+  await waitFor(() => server.countOf('POST', '/v2/control/outcome') >= 1, 5000);
+
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.deepEqual(body.entry_ids, ['les_g1', ...RECALLED]);
+});
+
+// ---------------------------------------------------------------------------
+// The replay window
+// ---------------------------------------------------------------------------
+
+/**
+ * A post the server accepted but answered too late to be heard is indistinguishable, from
+ * here, from one that never arrived: the turn stays `outcome_pending`, and the next drain
+ * sends it again — and `session-end` after that, for as long as anything keeps looking. The
+ * stable `idempotency_key` is what is supposed to collapse those, but that is a property of
+ * the other end which this process never observes, and reinforcement is not something to
+ * spend on faith.
+ *
+ * So the attempts are counted locally, in the turn file, before dialling.
+ */
+test('a turn whose outcome never gets a response is not posted forever', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/outcome': { status: 500, json: { error: 'never answered in time' } },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server, { MUBIT_CC_BREAKER_THRESHOLD: '99' });
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: e }));
+  assertHookContract(await runHook('capture', stop(), { env: e, args: ['--stop'] }));
+
+  for (let i = 0; i < 5; i++) {
+    assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', PROMPT_ID] }));
+  }
+
+  assert.equal(server.countOf('POST', '/v2/control/outcome'), 3,
+    'the client bounds its own replays rather than trusting the far end to collapse them');
+
+  const turn = readJsonFile(turnPath(dir));
+  assert.equal(turn.outcome_attempts, 3);
+  assert.equal(turn.outcome_pending, false, 'nothing is going to send this; stop saying it is pending');
+  assert.equal(turn.outcome_abandoned, true);
+});
+
+/** The bound must not cost a turn its attribution when the post simply works. */
+test('a successful outcome post still records one attempt and is never re-sent', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  assertHookContract(await runHook('prompt-recall', userPromptSubmit(), { env: e }));
+  assertHookContract(await runHook('capture', stop(), { env: e, args: ['--stop'] }));
+  assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', PROMPT_ID] }));
+  assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', PROMPT_ID] }));
+
+  assert.equal(server.countOf('POST', '/v2/control/outcome'), 1);
+  const turn = readJsonFile(turnPath(dir));
+  assert.equal(turn.outcome_attempts, 1);
+  assert.ok(turn.outcome_sent_at > 0);
+  assert.notEqual(turn.outcome_abandoned, true);
+});
+
+// ---------------------------------------------------------------------------
+// The seen-set's attribution trap — `lib/outcome.mjs` row 3 vs row 4
+// ---------------------------------------------------------------------------
+
+/*
+ * `hooks/src/prompt-recall.mjs` degrades a memory it has already injected into a one-line
+ * pointer. The pointer keeps its `reference_id` in `recalled[]`, so the entry is still
+ * attributable — that is the whole reason to degrade rather than drop.
+ *
+ * The trap is on the other side of the loop. `capture --stop`'s used-signal works by
+ * matching distinctive memory terms echoed in the reply, and a pointer-only render carries
+ * almost none. `lib/outcome.mjs:129-152` gives that four rows, and two of them are one
+ * character apart in the turn file and worlds apart in meaning:
+ *
+ *   row 3 — `used_evidence.used === false`  → `neutral` 0.0, entry_ids EMPTY
+ *           "memory was injected and the reply shows no sign of it"
+ *   row 4 — `used_evidence.used` ABSENT     → `success` +0.2, entry_ids INTACT
+ *           "the signal could not be computed; this turn was never measured"
+ *
+ * A degraded turn belongs in row 4. If it lands in row 3 instead, every prompt after the
+ * first quietly files a neutral against the memories that are working hardest — the ones
+ * relevant enough to keep surfacing — and the reinforcement signal degrades in exact
+ * proportion to how well recall is doing. That failure is silent, cumulative, and shows up
+ * only as memory that mysteriously stops being trusted.
+ */
+
+/** ~200 tokens each, so every repeat is genuinely worth degrading. */
+const bulky = (tag, ch) => `${tag} because ${ch.repeat(760)} TAIL_${tag}`;
+
+const STICKY = () => queryResponse({
+  evidence: [
+    evidence({ id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', score: 0.91, content: bulky('RULE', 'r') }),
+    evidence({ id: 'e2', reference_id: 'ref_lesson_1', entry_type: 'lesson', score: 0.84, content: bulky('LESSON', 'l') }),
+    evidence({ id: 'e3', reference_id: 'ref_fact_1', entry_type: 'fact', score: 0.55, content: bulky('FACT', 'f') }),
+  ],
+});
+
+/** A reply that echoes none of the injected vocabulary, on purpose. */
+const SILENT_REPLY = 'I read the diff and nothing needed changing there.';
+
+const nth = (n) => `p_degrade_${n}`;
+
+/** The outcome posted for one turn, found by the key `lib/outcome.mjs` derives from it. */
+function outcomeFor(server, promptId) {
+  return server.calls('POST', '/v2/control/outcome')
+    .map((c) => c.body)
+    .find((b) => String(b?.idempotency_key ?? '').endsWith(promptId));
+}
+
+async function turnCycle(e, server, promptId) {
+  assertHookContract(await runHook('prompt-recall',
+    userPromptSubmit({ prompt_id: promptId, prompt: 'why is the ingest job stuck in queued?' }),
+    { env: e }));
+  assertHookContract(await runHook('capture',
+    stop({ prompt_id: promptId, last_assistant_message: SILENT_REPLY }),
+    { env: e, args: ['--stop'] }));
+  assertHookContract(await runHook('drain', {}, { env: e, args: ['--with-outcome', promptId] }));
+  await waitFor(() => outcomeFor(server, promptId) !== undefined, 5000);
+  return outcomeFor(server, promptId);
+}
+
+// THE test. Both landings, same evidence, same reply, one scenario — because the whole
+// point is that the two turns must be read differently.
+test('a degraded repeat lands as unmeasured, not as "the model ignored it"', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { json: STICKY() } });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  // Turn 1 — every entry rendered in full. The reply carries none of it, which is a
+  // measured verdict: row 3.
+  const first = await turnCycle(e, server, nth(1));
+  const t1 = readJsonFile(turnPath(dir, nth(1)));
+  assert.ok(t1.recall.terms.length > 0, 'a full render stages the memory\'s own vocabulary');
+  assert.equal(t1.used_evidence.used, false,
+    'the reply echoed none of it, and the signal could see that — this is a measurement');
+  assert.equal(first.outcome, 'neutral');
+  assert.deepEqual(first.entry_ids, [],
+    'row 3 names no entries: crediting the ones nothing showed were read would invent a '
+    + 'denominator');
+
+  // Turn 2 — identical evidence, now all pointers. Same reply, same silence, and a
+  // completely different fact about the world.
+  const second = await turnCycle(e, server, nth(2));
+  const t2 = readJsonFile(turnPath(dir, nth(2)));
+  assert.equal(t2.recall.pointers, 3, 'all three entries were already shown');
+  assert.deepEqual(t2.recalled, RECALLED, 'a pointer is still attributable');
+
+  assert.equal(t2.used_evidence.reason, 'no_distinct_terms',
+    'a pointer carries no vocabulary to match on, so this turn was never measured');
+  assert.equal('used' in t2.used_evidence, false,
+    'an ABSENT `used` is what `lib/outcome.mjs` reads as unmeasured; a `false` here would '
+    + 'be read as "the model ignored it" and is the whole failure this test exists to catch');
+
+  assert.notEqual(second.outcome, 'neutral',
+    'a degraded repeat must not file a neutral. Doing so would penalise — in reach, not in '
+    + 'score — precisely the memories relevant enough to keep surfacing');
+  assert.equal(second.outcome, 'success');
+  assert.equal(second.signal, 0.2, 'row 4 keeps the pre-signal behaviour unchanged');
+  assert.deepEqual(second.entry_ids, RECALLED,
+    'the entries stay attributed: degrading how a memory is rendered must not change '
+    + 'whether it can be reinforced');
+});
+
+// The concrete mechanism behind the row above, pinned on its own so a future change to the
+// pointer format cannot quietly reintroduce it.
+test('a reference id printed in a pointer never becomes a memory term', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { json: STICKY() } });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+
+  const p = (n) => userPromptSubmit({ prompt_id: nth(n), prompt: 'why is the ingest job stuck in queued?' });
+  assertHookContract(await runHook('prompt-recall', p(1), { env: e }));
+  assertHookContract(await runHook('prompt-recall', p(2), { env: e }));
+
+  const terms = readJsonFile(turnPath(dir, nth(2))).recall.terms;
+  assert.deepEqual(terms, [],
+    `a pointer-only block contributed ${terms.length} terms (${terms.join(', ')}). Every one `
+    + 'of them is a word the model has no reason to echo, so every one of them turns a '
+    + 'working memory into a measured "ignored".');
+  assert.ok(!terms.includes('ref_rule_1'),
+    'a reference id is a handle, not vocabulary — matching on it guarantees a miss');
 });

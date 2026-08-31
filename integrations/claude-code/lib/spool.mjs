@@ -2,7 +2,7 @@
 /**
  * `lib/spool.mjs` — the durable buffer between capture and the network.
  *
- * Build-guide §4.6 (module API), §7 (state layout + the 60 s drain-lock TTL),
+ * The module API, the state layout and the 60 s drain-lock TTL,
  * §5.4/§5.5 (capture writes, drain reads), §12.6 (the 200-concurrent-append property).
  *
  * Capture is synchronous, hot and network-free; drain is detached, batched and networked.
@@ -32,40 +32,58 @@ import {
   closeSync, existsSync, linkSync, openSync, readdirSync, readFileSync,
   renameSync, statSync, unlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
-import { ensureDir, resolveDataDir } from './state.mjs';
+import { ensureDir, resolveDataDir, runDir, safeSegment } from './state.mjs';
 
 /** §7: `runs/<run_id>/drain.lock` is assumed orphaned past this age and stolen. */
 const DRAIN_LOCK_TTL_MS = 60_000;
+
+/**
+ * §7: `runs/<run_id>/flush-<session_id>.lock`. Past the detached body's own 58 s ceiling by
+ * enough that a lease is never stolen from a child that is still working.
+ */
+const FLUSH_LEASE_TTL_MS = 90_000;
 
 /** §6.1 `MUBIT_CC_BATCH_MAX_ITEMS` default, used when a caller passes no usable `max`. */
 const DEFAULT_MAX = 32;
 
 const ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
+/**
+ * The `idempotency_key` for one ingest batch.
+ *
+ * Content-addressed on purpose: `(run_id, the item ids in this batch)` and nothing else.
+ * `drain` and `session-end` drain the same spool — `session-end` steals a lock `drain` left
+ * behind after 60 s, and `drain` has a hard stop that can leave a batch uncommitted — so the
+ * same files are genuinely sent by both. They used to build this key differently (one keyed
+ * on the prompt id under a `cc-` prefix, the other on the session id under `cc-end-`), which
+ * meant the one case the key exists for was the one case it did not cover, while four
+ * comments in this codebase claimed it did.
+ *
+ * The item ids stay in the digest for the reason the older versions gave: a *different*
+ * batch landing on the same sequence number must not be deduped against an earlier one it
+ * has nothing in common with. Content-addressing keeps that and drops the sender.
+ *
+ * @param {string} runId
+ * @param {any[]} items
+ * @returns {string}
+ */
+export function batchIdempotencyKey(runId, items) {
+  const ids = (Array.isArray(items) ? items : [])
+    .map((it) => (it && typeof it === 'object' ? String(it.item_id ?? '') : ''))
+    .join('|');
+  const digest = createHash('sha256')
+    .update(`${String(runId ?? '')}|${ids}`, 'utf8')
+    .digest('hex')
+    .slice(0, 16);
+  return `cc-batch-${digest}`;
+}
+
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
-
-/**
- * A run id reaches us from `lib/runid.mjs` as `cc-<slug>-<hash>`, but it can also come
- * from a `.mubit-cc.json` a user typed by hand. Anything that could climb out of
- * `runs/` is flattened rather than trusted.
- * @param {string} runId
- * @returns {string}
- */
-function safeSegment(runId) {
-  const s = String(runId ?? '').trim();
-  if (!s) return '';
-  return s.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
-}
-
-/** @param {Record<string, any>} cfg @param {string} runId @returns {string} */
-function runDir(cfg, runId) {
-  return join(resolveDataDir(cfg), 'runs', safeSegment(runId));
-}
 
 /** §7: `runs/<run_id>/spool/`. @param {Record<string, any>} cfg @param {string} runId */
 function spoolDir(cfg, runId) {
@@ -130,7 +148,7 @@ export function appendItem(cfg, runId, item) {
     }
     return '';
   } catch {
-    // §4.9/§12.1-F14: an unwritable ${CLAUDE_PLUGIN_DATA} costs the capture, nothing else.
+    // §4.9/§12.1: an unwritable ${CLAUDE_PLUGIN_DATA} costs the capture, nothing else.
     return '';
   }
 }
@@ -188,7 +206,7 @@ function orderedNames(dir) {
  *
  * An unparseable file is a SIGKILL caught mid-write (or a foreign file dropped in the
  * spool). It is unlinked in passing and the batch still ships: retrying a torn file
- * forever is how a spool becomes unbounded (§12.1-F15).
+ * forever is how a spool becomes unbounded (§12.1).
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
@@ -239,9 +257,9 @@ export function readBatch(cfg, runId, max = DEFAULT_MAX) {
  * §5.5 step 6: unlink, and only after a 2xx. A 5xx or a network failure must leave the
  * files exactly where they are so the next drain retries them.
  *
- * A double drain is absorbed server-side by the per-batch `idempotency_key`, so committing
- * an already-unlinked entry is a no-op here rather than a throw that would strand the rest
- * of the batch on disk.
+ * A double drain carries one `idempotency_key` for the server to collapse (see
+ * `batchIdempotencyKey`), so committing an already-unlinked entry is a no-op here rather
+ * than a throw that would strand the rest of the batch on disk.
  *
  * @param {SpoolEntry[]} entries
  * @returns {void}
@@ -322,7 +340,8 @@ function pidAlive(pid) {
  *     TTL for it would stall capture for a minute for no reason.
  *   - It is older than 60 s, *unconditionally* — even when its owner is demonstrably
  *     alive. A stuck lock silently stops ALL capture for a run, which is strictly worse
- *     than the rare double drain the per-batch `idempotency_key` already absorbs. (§7)
+ *     than the rare double drain the per-batch `idempotency_key` covers — including the
+ *     cross-drainer case this lock exists to make rare. (§7)
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
@@ -419,6 +438,82 @@ export function releaseDrainLock(lock) {
 }
 
 // ---------------------------------------------------------------------------
+// The flush lease
+// ---------------------------------------------------------------------------
+
+/**
+ * §5.7 step 1: one SessionEnd flush per session *at a time*.
+ *
+ * `claimHeld`/`claimOnce` answer "has this session already been flushed", and they answer it
+ * that way on purpose — a claim recorded up front marks a session flushed with the drain and
+ * the reflect still undone, and under a host that kills the hook that is how a session ends
+ * up permanently stood down in front of work that never happened.
+ *
+ * The cost of that split is that between two flushes running *concurrently* the claim says
+ * nothing: both read it before either records it. `acquireDrainLock` covers the drain, and
+ * the outcome flush and the heartbeat are both repeatable — but **reflect is not idempotent**,
+ * and a repeat has been observed storing a lesson restating one already held. So "is one in
+ * flight right now" has to be answered too, and it has to be answered without reintroducing
+ * the permanent stand-down: this is a lease, not a marker.
+ *
+ * A lease is taken from a dead holder immediately (`pidAlive`) and from a live one past
+ * `FLUSH_LEASE_TTL_MS`, on the same reasoning as the drain lock: a stuck lease that silences
+ * every later flush is worse than the double it exists to prevent.
+ *
+ * **Returns a lease, not null, when one cannot be recorded at all** — an unwritable or
+ * read-only `${CLAUDE_PLUGIN_DATA}` must not be able to stop the flush entirely (§4.6). That
+ * lease carries an empty `path` and releasing it is a no-op.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {string} name  e.g. `<session_id>`
+ * @returns {DrainLock|null} null when another live flush owns this session
+ */
+export function acquireFlushLease(cfg, runId, name) {
+  const open = { path: '', runId: String(runId ?? ''), pid: process.pid, ts: 0 };
+  try {
+    const safe = safeSegment(name);
+    const dir = runDir(cfg, runId);
+    if (!safe || !ensureDir(dir)) return open;
+    const lockPath = join(dir, `flush-${safe}.lock`);
+
+    const held = create(lockPath);
+    if (held) return { path: lockPath, runId: String(runId ?? ''), pid: process.pid, ts: held };
+
+    // `create` reports 0 both for "someone holds it" and for "this directory took nothing".
+    // The file itself is what tells them apart, and only the first is a reason to stand down.
+    if (!existsSync(lockPath)) return open;
+
+    const owner = readLock(lockPath);
+    const now = Date.now();
+    const expired = !owner || (now - owner.ts) >= FLUSH_LEASE_TTL_MS;
+    const orphaned = !owner || !pidAlive(owner.pid);
+    if (!expired && !orphaned) return null;
+
+    try { unlinkSync(lockPath); } catch { /* another stealer got there first */ }
+    const stolen = create(lockPath);
+    if (stolen) return { path: lockPath, runId: String(runId ?? ''), pid: process.pid, ts: stolen };
+    return existsSync(lockPath) ? null : open;
+  } catch {
+    return open;
+  }
+}
+
+/**
+ * Released in a `finally`, where the lease is legitimately the empty-path one on every path
+ * that could not record a lease at all.
+ * @param {DrainLock|null|undefined} lease
+ * @returns {void}
+ */
+export function releaseFlushLease(lease) {
+  try {
+    if (lease?.path) unlinkSync(lease.path);
+  } catch {
+    // Already released, or stolen out from under us past the TTL. Either way, done.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // claimOnce
 // ---------------------------------------------------------------------------
 
@@ -429,14 +524,47 @@ export function releaseDrainLock(lock) {
  * **Returns `true` on a non-`EEXIST` error — proceed on marker failure.** The marker exists
  * to prevent a *double* flush; a read-only or full `${CLAUDE_PLUGIN_DATA}` must not be able
  * to prevent the flush *entirely*. Losing a session's captures is worse than sending them
- * twice, and the per-batch `idempotency_key` makes a double send a server-side no-op
- * anyway (§4.6, §12.1-F14).
+ * twice, and the same items carry the same per-batch `idempotency_key` either way, so the
+ * double send is one the server can collapse (§4.6, §12.1).
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {string} name  e.g. `flushed-<session_id>`
  * @returns {boolean} true when this process owns the claim (or could not record one)
  */
+/**
+ * Has the claim already been recorded? The read half of `claimOnce`.
+ *
+ * `claimOnce` asks and answers in one step, which is what makes it a claim. That is the wrong
+ * shape when the work being claimed can be *taken away mid-flight*: `session-end` under Codex
+ * runs against a 3-second ceiling and is killed at it, so a claim taken up front marked the
+ * session flushed with the drain and the reflect still undone — and this marker is exactly
+ * what makes every later attempt stand down, so nothing ever retried.
+ *
+ * Splitting the two lets that caller check up front and record afterwards. What it gives up is
+ * mutual exclusion between two flushes running *concurrently*, which was never this marker's
+ * job: `acquireDrainLock` serialises the drain, and the contract below already accepts a
+ * double send in its own failure case — "losing a session's captures is worse than sending
+ * them twice", collapsed server-side by the per-batch idempotency key.
+ *
+ * **Returns `false` on any error**, so an unreadable data directory reads as "not claimed,
+ * go ahead" — the same direction `claimOnce` fails in, for the same reason.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {string} name  e.g. `flushed-<session_id>`
+ * @returns {boolean}
+ */
+export function claimHeld(cfg, runId, name) {
+  try {
+    const safe = safeSegment(name);
+    if (!safe) return false;
+    return existsSync(join(runDir(cfg, runId), `${safe}.marker`));
+  } catch {
+    return false;
+  }
+}
+
 export function claimOnce(cfg, runId, name) {
   try {
     const safe = safeSegment(name);

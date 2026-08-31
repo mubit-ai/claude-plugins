@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Manifest lint, as executable tests — build-guide §12.7.
+ * Manifest lint, as executable tests.
  *
  * These are data assertions over files. Nothing here starts a process, opens a
  * socket, or needs the plugin runtime, so this file is the cheapest possible
@@ -9,7 +9,7 @@
  * produces, a `userConfig` key nobody reads, an allowlisted MCP tool that was
  * renamed upstream.
  *
- * Every missing file fails with the path and the guide section that defines it.
+ * Every missing file fails with the path and a note on what it is for.
  * Nothing is skipped — a skipped manifest check is indistinguishable from a
  * passing one on a CI dashboard.
  */
@@ -43,17 +43,19 @@ const P = {
 /** The plugin's own MCP server prefix. `.mcp.json` names the server `mubit` (§3.3). */
 const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
-/** §8.2 — ten of the twenty-one tools. */
+/** §8.2 — thirteen of the twenty-one tools; the last three were promoted once each had a skill to reach it. */
 const DEFAULT_ALLOWLIST = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ];
 
 /** §6.2 — every key the plugin promises to honour at enable time. */
 const USER_CONFIG_KEYS = [
   'endpoint', 'apiKey', 'userId', 'runStrategy', 'capture', 'recall', 'redact',
   'recallTokenBudget', 'recallAssemble', 'reflectOnEnd', 'outcomeMode', 'statusLine',
-  'mcpTools',
+  'mcpTools', 'preToolWarnings', 'resumeBlock',
+  'pins',
 ];
 
 // ---------------------------------------------------------------------------
@@ -177,19 +179,19 @@ function realToolNames() {
 // §3 — all five plugin manifests plus the repo-root catalog must exist and parse.
 // A manifest that does not parse is not a degraded plugin; it is an uninstallable one.
 test('every manifest exists and parses as JSON', () => {
-  readJson(P.plugin, '.claude-plugin/plugin.json', 'Defined verbatim in build-guide §3.1.');
-  readJson(P.hooks, 'hooks/hooks.json', 'Defined verbatim in build-guide §3.2.');
-  readJson(P.mcp, '.mcp.json', 'Defined verbatim in build-guide §3.3.');
-  readJson(P.settings, 'settings.json', 'Defined verbatim in build-guide §3.4 (statusLine registration).');
-  readJson(P.pkg, 'package.json', 'Defined verbatim in build-guide §11.1.');
+  readJson(P.plugin, '.claude-plugin/plugin.json', 'The plugin manifest: identity, version and the components the host loads.');
+  readJson(P.hooks, 'hooks/hooks.json', 'The hook registration manifest.');
+  readJson(P.mcp, '.mcp.json', 'The MCP server registration.');
+  readJson(P.settings, 'settings.json', 'The plugin settings, including the statusLine registration.');
+  readJson(P.pkg, 'package.json', 'The npm manifest for the plugin package.');
   readJson(P.marketplace, '.claude-plugin/marketplace.json',
-    'Repo-root marketplace catalog, build-guide §3.5. This is what `/plugin marketplace add mubit-ai/claude-plugins` reads.');
+    'Repo-root marketplace catalog. This is what `/plugin marketplace add mubit-ai/claude-plugins` reads.');
 });
 
 // §3.1/§3.5 — identity is duplicated across manifests; it must agree.
 test('plugin identity agrees across plugin.json and the marketplace entry', () => {
-  const plugin = readJson(P.plugin, '.claude-plugin/plugin.json', 'build-guide §3.1');
-  const market = readJson(P.marketplace, '.claude-plugin/marketplace.json', 'build-guide §3.5');
+  const plugin = readJson(P.plugin, '.claude-plugin/plugin.json', 'the plugin manifest');
+  const market = readJson(P.marketplace, '.claude-plugin/marketplace.json', 'the marketplace catalog');
 
   assert.equal(plugin.name, 'mubit-memory', 'plugin.json name must be "mubit-memory"');
   assert.ok(Array.isArray(market.plugins), 'marketplace.json must have a "plugins" array');
@@ -201,9 +203,9 @@ test('plugin identity agrees across plugin.json and the marketplace entry', () =
 // and — at release time — the sibling JS packages). Drift here ships a plugin whose
 // reported version is a lie.
 test('version lockstep: plugin.json === package.json === marketplace.json entry', () => {
-  const plugin = readJson(P.plugin, '.claude-plugin/plugin.json', 'build-guide §3.1');
-  const pkg = readJson(P.pkg, 'package.json', 'build-guide §11.1');
-  const market = readJson(P.marketplace, '.claude-plugin/marketplace.json', 'build-guide §3.5');
+  const plugin = readJson(P.plugin, '.claude-plugin/plugin.json', 'the plugin manifest');
+  const pkg = readJson(P.pkg, 'package.json', 'the npm manifest');
+  const market = readJson(P.marketplace, '.claude-plugin/marketplace.json', 'the marketplace catalog');
   const entry = (market.plugins ?? []).find((p) => p.name === 'mubit-memory');
   assert.ok(entry, 'marketplace.json has no "mubit-memory" entry to compare versions against');
 
@@ -221,7 +223,7 @@ test('version lockstep: plugin.json === package.json === marketplace.json entry'
 // §12.7 — a hook whose bundle is missing is a silently dead event. `dist/` is a
 // committed artifact (§11.3), so "it exists in the repo" is the whole install check.
 test('every hooks.json command/args path exists under hooks/dist/', () => {
-  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'the hook registration manifest');
   const distDir = join(PLUGIN_ROOT, 'hooks', 'dist');
   const entries = hookEntries(hooks);
   assert.ok(entries.length > 0, 'hooks.json registers no commands at all');
@@ -241,7 +243,7 @@ test('every hooks.json command/args path exists under hooks/dist/', () => {
 // blocks it as an injection guard. Exec form also means no shell to fork and no quoting
 // to get wrong.
 test('every hooks.json command uses exec form (command + args), never shell form', () => {
-  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'the hook registration manifest');
   for (const { where, entry } of hookEntries(hooks)) {
     assert.equal(entry.type, 'command', `${where}: hook "type" must be "command"`);
     assert.equal(typeof entry.command, 'string', `${where}: "command" must be a string`);
@@ -257,21 +259,22 @@ test('every hooks.json command uses exec form (command + args), never shell form
   }
 });
 
-// §3.2 — all nine registrations, with the exact events, ordering, matchers, extra args
-// and timeouts. `timeout` is in SECONDS; a millisecond value here silently gives every
-// hook a ~3ms budget.
-test('hooks.json declares all nine registrations with the right events, args and timeouts', () => {
-  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
+// §3.2 — all thirteen registrations, with the exact events, ordering, matchers, extra args,
+// `if` filters and timeouts. `timeout` is in SECONDS; a millisecond value here silently
+// gives every hook a ~3ms budget.
+test('hooks.json declares all ten registrations with the right events, args and timeouts', () => {
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'the hook registration manifest');
   const events = Object.keys(hooks.hooks ?? {});
 
   const expectedEvents = [
-    'SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure',
-    'Stop', 'SubagentStop', 'PreCompact', 'PostCompact', 'SessionEnd',
+    'SessionStart', 'CwdChanged', 'UserPromptSubmit', 'PreToolUse', 'SubagentStart',
+    'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'SubagentStop', 'PreCompact',
+    'PostCompact', 'SessionEnd',
   ];
   assert.deepEqual([...events].sort(), [...expectedEvents].sort(),
-    `hooks.json must register exactly the nine events in §3.2; got [${events.join(', ')}]`);
+    `hooks.json must register exactly the ten events in §3.2; got [${events.join(', ')}]`);
 
-  /** event → flat list of {script, extraArgs, timeout} in declaration order */
+  /** event → flat list of {script, extraArgs, ifPattern, timeout} in declaration order */
   const flat = new Map();
   for (const { event, entry } of hookEntries(hooks)) {
     const args = (entry.args ?? []).map(String);
@@ -279,30 +282,56 @@ test('hooks.json declares all nine registrations with the right events, args and
     const row = {
       script: scriptIdx >= 0 ? args[scriptIdx].split('/').pop() : '(none)',
       extraArgs: scriptIdx >= 0 ? args.slice(scriptIdx + 1) : [],
+      // `if` is per-hook-entry, not per-matcher-group — verified against the host rather
+      // than assumed: it treats two entries that differ only in `if` as two hooks. Pinned
+      // here because it is the only thing standing between the PreToolUse hook and a
+      // process spawn on every tool call in the session.
+      ifPattern: entry.if ?? '',
       timeout: entry.timeout,
     };
     if (!flat.has(event)) flat.set(event, []);
     flat.get(event).push(row);
   }
 
-  /** @type {Record<string, Array<{script:string, extraArgs:string[], timeout:number}>>} */
+  /** @type {Record<string, Array<{script:string, extraArgs:string[], ifPattern:string, timeout:number}>>} */
   const expected = {
-    SessionStart: [{ script: 'session-start.mjs', extraArgs: [], timeout: 5 }],
+    SessionStart: [{ script: 'session-start.mjs', extraArgs: [], ifPattern: '', timeout: 5 }],
+    // The run id is derived from a directory, so a `cd` into another repo has to move it —
+    // and drain the run being left, which nothing else in the plugin would ever revisit.
+    CwdChanged: [{ script: 'cwd-changed.mjs', extraArgs: [], ifPattern: '', timeout: 5 }],
     // Order matters: recall must run before the prompt is staged for the drain trigger.
     UserPromptSubmit: [
-      { script: 'prompt-recall.mjs', extraArgs: [], timeout: 3 },
-      { script: 'stage-prompt.mjs', extraArgs: [], timeout: 3 },
+      { script: 'prompt-recall.mjs', extraArgs: [], ifPattern: '', timeout: 3 },
+      { script: 'stage-prompt.mjs', extraArgs: [], ifPattern: '', timeout: 3 },
     ],
-    PostToolUse: [
-      { script: 'capture.mjs', extraArgs: [], timeout: 3 },
-      { script: 'capture.mjs', extraArgs: [], timeout: 3 },
+    // Two entries, one per `if` pattern, because `if` takes a single permission rule and
+    // there is no list form. The host counts the `if` pattern as part of a hook's identity
+    // alongside its command and args, so two entries differing only in `if` are two hooks —
+    // and a command cannot match both `rm *` and `git push *`, so this never doubles a spawn.
+    // WITHOUT `if` this would be one process per tool call for the whole session.
+    PreToolUse: [
+      { script: 'pre-tool.mjs', extraArgs: [], ifPattern: 'Bash(rm *)', timeout: 3 },
+      { script: 'pre-tool.mjs', extraArgs: [], ifPattern: 'Bash(git push *)', timeout: 3 },
     ],
-    PostToolUseFailure: [{ script: 'capture.mjs', extraArgs: ['--failure'], timeout: 3 }],
-    Stop: [{ script: 'capture.mjs', extraArgs: ['--stop'], timeout: 5 }],
-    SubagentStop: [{ script: 'capture.mjs', extraArgs: ['--subagent'], timeout: 3 }],
-    PreCompact: [{ script: 'checkpoint.mjs', extraArgs: ['--pre'], timeout: 10 }],
-    PostCompact: [{ script: 'checkpoint.mjs', extraArgs: ['--post'], timeout: 5 }],
-    SessionEnd: [{ script: 'session-end.mjs', extraArgs: [], timeout: 8 }],
+    // Registered with NO matcher, deliberately. The matcher field for this event is
+    // `agent_type` and a matcher can only ever be positive, so "every agent except the
+    // plugin's own recall agent" is not a thing it can express — and the set of agent types
+    // a user might spawn is open, so an allowlist would silently exclude most of them. The
+    // self-exclusion therefore lives in the hook, where a test can drive both directions.
+    SubagentStart: [{ script: 'subagent-start.mjs', extraArgs: [], ifPattern: '', timeout: 3 }],
+    // Exactly one, and match-all. Two groups both matching a tool would fire capture twice
+    // for that one call — see the PostToolUse matcher test below.
+    PostToolUse: [{ script: 'capture.mjs', extraArgs: [], ifPattern: '', timeout: 3 }],
+    PostToolUseFailure: [{ script: 'capture.mjs', extraArgs: ['--failure'], ifPattern: '', timeout: 3 }],
+    Stop: [{ script: 'capture.mjs', extraArgs: ['--stop'], ifPattern: '', timeout: 5 }],
+    // Fires INSTEAD of Stop when an API error ended the turn, so it is the only thing that
+    // ever closes those turns. Timeout 3 rather than Stop's 5: it writes one file and never
+    // forces a drain, because there is no outcome for a drain to carry.
+    StopFailure: [{ script: 'capture.mjs', extraArgs: ['--stop-failure'], ifPattern: '', timeout: 3 }],
+    SubagentStop: [{ script: 'capture.mjs', extraArgs: ['--subagent'], ifPattern: '', timeout: 3 }],
+    PreCompact: [{ script: 'checkpoint.mjs', extraArgs: ['--pre'], ifPattern: '', timeout: 10 }],
+    PostCompact: [{ script: 'checkpoint.mjs', extraArgs: ['--post'], ifPattern: '', timeout: 5 }],
+    SessionEnd: [{ script: 'session-end.mjs', extraArgs: [], ifPattern: '', timeout: 8 }],
   };
 
   for (const [event, rows] of Object.entries(expected)) {
@@ -313,41 +342,145 @@ test('hooks.json declares all nine registrations with the right events, args and
 
 // §3.2 — SessionStart is matched on source; without the matcher the hook fires on
 // sources it has no handling for.
-test('hooks.json SessionStart matches startup|resume|clear|compact', () => {
-  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
+//
+// `fork` is the fifth source (`--fork-session`, `/fork`, `/branch`). Before Claude Code
+// v2.1.214 a forked session reported `resume` and this matcher caught it by accident; on
+// 2.1.235 it reports `fork` and the four-source matcher did not match — verified against
+// a live fork, where the four-source group logged nothing and a match-all group beside it
+// logged `{"source":"fork"}`. The cost of the miss is not a
+// missing section: `session-start.mjs` is the hook that derives the run id, writes the
+// marker and injects the steer, so a forked session ran with no memory at all.
+test('hooks.json SessionStart matches startup|resume|clear|compact|fork', () => {
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'the hook registration manifest');
   const groups = hooks.hooks?.SessionStart ?? [];
   assert.equal(groups.length, 1, 'SessionStart should declare exactly one matcher group');
-  assert.equal(groups[0].matcher, 'startup|resume|clear|compact',
-    'SessionStart matcher must be "startup|resume|clear|compact" (§3.2)');
+  assert.equal(groups[0].matcher, 'startup|resume|clear|compact|fork',
+    'SessionStart matcher must be "startup|resume|clear|compact|fork" (§3.2) — dropping '
+    + '"fork" leaves /fork and /branch sessions with no run id, no marker and no memory');
 });
 
-// §3.2 — two PostToolUse matcher groups: the built-in tool regex and `^mcp__.*`.
-// The mcp group deliberately also matches this plugin's own tools; capture.mjs drops
-// those in code (§4.4), because a negative lookahead in a manifest is untestable.
-test('hooks.json PostToolUse has two matcher groups: built-in tools and ^mcp__.*', () => {
-  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
-  const groups = hooks.hooks?.PostToolUse ?? [];
-  assert.equal(groups.length, 2,
-    'PostToolUse must declare exactly two matcher groups (built-in tool regex, then ^mcp__.*)');
+/**
+ * §3.2 — `StopFailure` carries NO matcher, and that is a correctness requirement, not a
+ * shortcut.
+ *
+ * Its matcher filters on the payload's `error`, whose vocabulary is ten values —
+ *
+ *     rate_limit, overloaded, authentication_failed, oauth_org_not_allowed, billing_error,
+ *     invalid_request, model_not_found, server_error, max_output_tokens, unknown
+ *
+ * — plus an eleventh, `account_on_hold`, established against Claude Code 2.1.235 the same way
+ * `hook-output.test.mjs` establishes its constants. **That eleventh value is behind a runtime
+ * feature flag**, so the taxonomy is not the same list on every account. An enumerated
+ * matcher here would be correct on some installs and silently short on others, and the turns
+ * it dropped are exactly the ones this hook exists to catch — an account on hold is not
+ * evidence that a recalled memory was wrong. Matching everything cannot drift.
+ */
+test('hooks.json StopFailure declares no matcher, so no error value can slip past it', () => {
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'the hook registration manifest');
+  const groups = hooks.hooks?.StopFailure ?? [];
+  assert.equal(groups.length, 1, 'StopFailure should declare exactly one group');
+  assert.ok(!('matcher' in groups[0]) || ['', '*', '.*'].includes(String(groups[0].matcher)),
+    'StopFailure must match every error value — the taxonomy is feature-flagged, so an '
+    + `enumerated list is wrong on some accounts; found ${JSON.stringify(groups[0].matcher)}`);
+});
 
-  const builtin = String(groups[0].matcher ?? '');
-  assert.ok(builtin.startsWith('^(') && builtin.endsWith(')$'),
-    `PostToolUse builtin matcher must be a fully anchored alternation, got ${JSON.stringify(builtin)}`);
-  for (const tool of ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit',
-    'Bash', 'WebFetch', 'WebSearch', 'Task']) {
-    assert.ok(new RegExp(`\\b${tool}\\b`).test(builtin),
-      `PostToolUse builtin matcher is missing ${tool} (§3.2): ${builtin}`);
+/**
+ * PreToolUse is filtered twice over, and both filters are cost, not safety.
+ *
+ * The two are different mechanisms and are easy to conflate:
+ *
+ *   - **`matcher`** is tested against one field of the payload, and for this event that
+ *     field is `tool_name` (host 2.1.235). `"Bash"` here means the hook is never even
+ *     considered for an `Edit` or a `Read`.
+ *   - **`if`** is a permission-rule pattern tested against the *contents* of the call —
+ *     `Bash(git *)` and the like. The host offers it precisely so that a hook is not
+ *     spawned for the commands that cannot match it.
+ *
+ * Neither is a security boundary and nothing in this plugin may treat them as one; the
+ * reference says outright to "use the permission system rather than a hook to enforce a
+ * hard allow or deny". What they buy is that the hook is not a process spawn in front of
+ * every tool call for the whole session — which, at ~30 ms of node start each, is the
+ * difference between a feature and a tax.
+ */
+test('hooks.json PreToolUse is narrowed by both a tool matcher and an if pattern', () => {
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'the hook registration manifest');
+  const groups = hooks.hooks?.PreToolUse ?? [];
+  assert.ok(groups.length > 0, 'hooks.json registers no PreToolUse hook');
+
+  for (const [gi, group] of groups.entries()) {
+    assert.equal(group.matcher, 'Bash',
+      `PreToolUse[${gi}] matcher must be "Bash" — the matcher field for this event is `
+      + 'tool_name, and a match-all here spawns a process for every tool call in the session');
+    for (const [hi, entry] of (group.hooks ?? []).entries()) {
+      assert.ok(typeof entry.if === 'string' && entry.if.trim(),
+        `PreToolUse[${gi}].hooks[${hi}] has no "if" filter. Without one this hook runs on `
+        + 'every Bash command the model issues, for a warning that applies to almost none '
+        + 'of them.');
+      assert.match(entry.if, /^Bash\([^)]+\)$/,
+        `PreToolUse[${gi}].hooks[${hi}] "if" is ${JSON.stringify(entry.if)}, which is not the `
+        + 'documented `Tool(pattern)` permission-rule form. A pattern the host cannot parse '
+        + 'is not a narrower filter, it is an unpredictable one.');
+    }
   }
-
-  assert.ok(String(groups[1].matcher ?? '').startsWith('^mcp__'),
-    `second PostToolUse group must match ^mcp__.* (§3.2), got ${JSON.stringify(groups[1].matcher)}`);
 });
+
+/**
+ * §3.2 — PostToolUse is ONE group, and it matches every tool.
+ *
+ * It used to be two: an anchored allowlist of eleven built-in names, and `^mcp__.*`. Both
+ * halves of that were wrong.
+ *
+ * 1. The allowlist enumerated a tool set the plugin does not own and cannot see change. The
+ *    host's names drift under it — `Task` became `Agent`, `KillShell` became `TaskStop`,
+ *    `BashOutput` became `TaskOutput` — and the only reason the renamed ones kept matching
+ *    is that the host tests a matcher against a tool's former names as well as its current
+ *    one. That is a compatibility table the plugin does not control and cannot read, and
+ *    every entry in it is one host release from going away. Meanwhile a dozen names that
+ *    never existed when the list was written (`TaskCreate`, `TaskUpdate`, `Skill`,
+ *    `SendMessage`, `Artifact`, …) had no alias to ride and were simply never captured:
+ *    459 of 7,545 calls (6.1%) over a real transcript corpus, silently dropped, with nothing
+ *    anywhere to report the loss. A rule the plugin cannot keep correct does not belong in a
+ *    manifest; the decision moves into `capture.mjs`, where it is a tested skip list (see
+ *    `test/capture.test.mjs`).
+ * 2. Two groups cannot survive one of them becoming match-all: every `mcp__*` call would
+ *    match both and fire capture twice for a single tool call. So it is exactly one.
+ *
+ * The group deliberately also matches this plugin's own MCP tools; capture drops those in
+ * code (§4.4), because a negative lookahead in a manifest is untestable.
+ */
+test('hooks.json PostToolUse declares exactly one match-all group', () => {
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'the hook registration manifest');
+  const groups = hooks.hooks?.PostToolUse ?? [];
+  assert.equal(groups.length, 1,
+    'PostToolUse must declare exactly ONE matcher group — a second group matching the same '
+    + 'tool fires capture twice for one call');
+
+  // The host treats an absent matcher, `""`, `"*"` and `".*"` as match-all. Anything else
+  // is an allowlist, whatever it is spelled like.
+  const matcher = groups[0].matcher;
+  assert.ok(matcher === undefined || matcher === '' || matcher === '*' || matcher === '.*',
+    `PostToolUse matcher must match every tool, got ${JSON.stringify(matcher)} — the plugin `
+    + 'cannot enumerate the host\'s tool set, so it must not try');
+
+  // The names the old allowlist could never deliver, and the ones the host has since
+  // renamed. Each one must reach capture now.
+  for (const tool of ['Read', 'Bash', 'Edit', 'Agent', 'TaskCreate', 'TaskUpdate', 'TaskStop',
+    'Skill', 'SendMessage', 'Artifact', 'TaskOutput', 'mcp__github__create_issue']) {
+    assert.ok(matchesAll(matcher, tool), `PostToolUse must match ${tool}`);
+  }
+});
+
+/** The host's rule: absent, `""`, `"*"` and `".*"` match every tool; anything else filters. */
+function matchesAll(matcher, toolName) {
+  if (matcher === undefined || matcher === '' || matcher === '*' || matcher === '.*') return true;
+  try { return new RegExp(String(matcher)).test(toolName); } catch { return false; }
+}
 
 // §11.4 — `npx` costs ~500ms of module resolution per invocation, paid on every
 // PostToolUse. A fifty-tool session would burn 25 seconds of process overhead for zero
 // work. A TS loader (tsx/ts-node) has the same shape of cost.
 test('no hooks.json command uses npx or a TypeScript loader', () => {
-  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'build-guide §3.2');
+  const hooks = readJson(P.hooks, 'hooks/hooks.json', 'the hook registration manifest');
   for (const { where, entry } of hookEntries(hooks)) {
     const all = [entry.command, ...(entry.args ?? [])].join(' ');
     assert.ok(!/\bnpx\b/.test(all), `${where}: uses npx — ~500ms of resolution per hook (§11.4): ${all}`);
@@ -364,7 +497,7 @@ test('no hooks.json command uses npx or a TypeScript loader', () => {
 // §3.3 — the server name is load-bearing: the fully qualified tool prefix that skills
 // and hook matchers use is `mcp__plugin_mubit-memory_<server-name>__`.
 test('.mcp.json registers one server named "mubit" pointing at mcp/dist/index.js', () => {
-  const mcp = readJson(P.mcp, '.mcp.json', 'build-guide §3.3');
+  const mcp = readJson(P.mcp, '.mcp.json', 'the MCP server registration');
   const names = Object.keys(mcp.mcpServers ?? {});
   assert.deepEqual(names, ['mubit'],
     `.mcp.json must declare exactly one server named "mubit" — the ${QUALIFIED_PREFIX} prefix depends on it (§3.2 matcher note)`);
@@ -432,7 +565,7 @@ test('every file Claude Code needs at runtime is tracked by git, not merely pres
 // §3.4 — the shipped statusLine registration. Whether a plugin may own the status line
 // is unverified (§16.2), but if we ship the registration it must point at a real file.
 test('settings.json registers the status line in exec form at bin/statusline.mjs', () => {
-  const settings = readJson(P.settings, 'settings.json', 'build-guide §3.4');
+  const settings = readJson(P.settings, 'settings.json', 'the plugin settings');
   const sl = settings.statusLine;
   assert.ok(sl, 'settings.json must declare a "statusLine" entry (§3.4)');
   assert.equal(sl.type, 'command', 'statusLine.type must be "command"');
@@ -452,7 +585,7 @@ test('settings.json registers the status line in exec form at bin/statusline.mjs
 // §6.2 — the enable-time prompt is a promise. A declared-but-unread option is a lie to
 // the user, and an undeclared-but-read one is a setting they can never reach.
 test('every userConfig key declared in plugin.json is read somewhere in lib/config.mjs', () => {
-  const plugin = readJson(P.plugin, '.claude-plugin/plugin.json', 'build-guide §3.1');
+  const plugin = readJson(P.plugin, '.claude-plugin/plugin.json', 'the plugin manifest');
   const src = readText(P.config, 'lib/config.mjs',
     'One resolution function sees every userConfig key (§4.1, §6.3).');
 
@@ -477,7 +610,7 @@ test('every userConfig key declared in plugin.json is read somewhere in lib/conf
 test('every tools: entry in a skill or agent uses the fully qualified plugin prefix', () => {
   const files = markdownWithTools();
   assert.ok(files.length > 0,
-    `no skills/*/SKILL.md or agents/*.md exist yet under ${PLUGIN_ROOT} — build-guide §9 defines six skills and one agent`);
+    `no skills/*/SKILL.md or agents/*.md exist yet under ${PLUGIN_ROOT} — the plugin ships six skills and one agent`);
 
   for (const { file, rel } of files) {
     const tools = frontmatterTools(readFileSync(file, 'utf8'));
@@ -500,7 +633,7 @@ test('every tool in the default allowlist exists in the bundled MCP server', () 
     assert.ok(real.includes(name),
       `default allowlist names "${name}", which the bundled server does not register. Real tools: ${real.join(', ')}`);
   }
-  assert.equal(DEFAULT_ALLOWLIST.length, 10, 'the curated default allowlist is ten of twenty-one (§8.2)');
+  assert.equal(DEFAULT_ALLOWLIST.length, 13, 'the curated default allowlist is thirteen of twenty-one (§8.2)');
 });
 
 // §12.7 — same check, one level down: a tool named in a skill must exist in the server.
@@ -523,7 +656,7 @@ test('every tool named by a skill or agent exists in the bundled MCP server', ()
 // which is exactly the cost that rules out npx. `@mubit-ai/mcp` is bundled at build time,
 // not resolved at runtime, so it is a devDependency.
 test('package.json has zero runtime dependencies, with esbuild and @mubit-ai/mcp as devDependencies', () => {
-  const pkg = readJson(P.pkg, 'package.json', 'build-guide §11.1');
+  const pkg = readJson(P.pkg, 'package.json', 'the npm manifest');
 
   const deps = pkg.dependencies ?? {};
   assert.deepEqual(Object.keys(deps), [],
@@ -542,7 +675,7 @@ test('package.json has zero runtime dependencies, with esbuild and @mubit-ai/mcp
 // step and no build. Whatever is in the repo is what runs; ignoring dist/ ships nothing.
 test('.gitignore ignores node_modules but does NOT ignore dist', () => {
   const raw = readText(P.gitignore, '.gitignore',
-    'build-guide §2/§11.3 — ignores node_modules; must not ignore dist.');
+    'the plugin .gitignore — ignores node_modules; must not ignore dist.');
   const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
 
   assert.ok(lines.some((l) => /(^|\/)node_modules(\/|$)/.test(l.replace(/^!/, ''))),
@@ -556,7 +689,7 @@ test('.gitignore ignores node_modules but does NOT ignore dist', () => {
 // §3.5 — the catalog entry is how the plugin is discovered and fetched. A wrong path
 // installs an empty plugin; a missing contextCost hides the always-loaded surface.
 test('marketplace.json source points at integrations/claude-code and declares contextCost', () => {
-  const market = readJson(P.marketplace, '.claude-plugin/marketplace.json', 'build-guide §3.5');
+  const market = readJson(P.marketplace, '.claude-plugin/marketplace.json', 'the marketplace catalog');
   const entry = (market.plugins ?? []).find((p) => p.name === 'mubit-memory');
   assert.ok(entry, 'marketplace.json has no "mubit-memory" entry (§3.5)');
 
@@ -575,4 +708,43 @@ test('marketplace.json source points at integrations/claude-code and declares co
   assert.ok(entry.contextCost, 'marketplace entry must declare contextCost (§3.5) — ten MCP tool schemas plus six skill descriptions');
   assert.equal(typeof entry.contextCost.value, 'number', 'contextCost.value must be a number');
   assert.ok(entry.contextCost.value > 0, 'contextCost.value must be a real estimate, not 0');
+});
+
+// ---------------------------------------------------------------------------
+// §8.2 — the one list, written down five times
+// ---------------------------------------------------------------------------
+
+/**
+ * The curated allowlist is a literal in `lib/config.mjs` (`DEFAULT_MCP_TOOLS`), a second
+ * literal in `mcp/src/launch.mjs` (`DEFAULT_ALLOWLIST`, the launcher's floor for the case
+ * where config resolution hands back an empty list), and a third at the top of this file.
+ *
+ * Nothing compared them until now, and that is how `f3534e5` was able to promote three tools
+ * through twenty-three files while `mcp/src/instructions.mjs` kept describing the set it had
+ * replaced. A copy nobody checks is not a copy, it is a fork.
+ *
+ * Read out of source text rather than imported: `mcp/src/launch.mjs` does its work at module
+ * scope — it resolves config, derives a run id and imports the 5.9 MB server — so importing
+ * it to read one constant would start a server this test has no use for.
+ */
+function literalList(relPath, name) {
+  const src = readFileSync(join(PLUGIN_ROOT, relPath), 'utf8');
+  const m = new RegExp(`${name}\\s*=\\s*\\[([^\\]]*)\\]`).exec(src);
+  assert.ok(m, `${relPath} no longer declares ${name} as an array literal, so the copies of the `
+    + 'curated allowlist can no longer be compared');
+  return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+}
+
+test('every copy of the curated allowlist is the same list', () => {
+  const fromConfig = literalList('lib/config.mjs', 'DEFAULT_MCP_TOOLS');
+  const fromLauncher = literalList('mcp/src/launch.mjs', 'DEFAULT_ALLOWLIST');
+
+  assert.deepEqual(fromConfig, DEFAULT_ALLOWLIST,
+    'lib/config.mjs\'s DEFAULT_MCP_TOOLS and this file\'s copy have drifted. config.mjs is what a '
+    + 'real session resolves, so it wins — but a test asserting a different list is a test that '
+    + 'stopped describing the plugin.');
+  assert.deepEqual(fromLauncher, DEFAULT_ALLOWLIST,
+    'mcp/src/launch.mjs\'s DEFAULT_ALLOWLIST has drifted from the curated set. It is the floor the '
+    + 'launcher falls back to when config resolution returns an empty list, so a session that takes '
+    + 'that path would be offered a different tool set from every other session.');
 });

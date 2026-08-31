@@ -2,8 +2,8 @@
 /**
  * `lib/http.mjs` — the only network primitive in the plugin.
  *
- * Build-guide §4.2 (the module), §1.1 (routes and the per-route 256 KiB cap on
- * `/v2/control/query`), §1.2 (auth, and the one allowlisted unauthenticated route), §1.3
+ * The module, its routes, and the per-route body cap on
+ * `/v2/control/query`), §1.2 (auth, and which call the plugin may make before a key is set), §1.3
  * (required fields — a missing one is a 422, not a silent default), §1.8 + §5.2 (the `mode`
  * literal and what a typo costs), §4.3 (the `"default"` run-id guard), §4.7 (the breaker is
  * consulted before dialing).
@@ -16,27 +16,32 @@
  *   failure  -> `{ok: false, state, status?, error, ms}`
  *
  * `state` is a `ConnState` from §4.7 (`unreachable | server_error | auth_failed |
- * not_responding`) for anything that reached the socket, plus one extra value that never
- * does: `invalid_request`, for the five pre-flight guards below. A guard failure is a bug in
+ * not_responding`) for anything that reached the socket, plus two values that never do.
+ *
+ * `invalid_request`, for the five pre-flight guards below. A guard failure is a bug in
  * the *caller*, not a verdict about the server, so it is deliberately outside the ConnState
  * union — it must never reach `recordFailure` and must never colour the status line.
+ *
+ * `unconfigured`, for a config with no usable endpoint. Unlike `invalid_request` this one
+ * *is* a ConnState, because it is the honest answer to "what is the connection doing?" and
+ * the user needs to see it on the status line. It shares the important half: nothing is
+ * dialed and nothing is recorded.
  *
  * Five pre-flight guards, each preventing a specific silent failure. All five return
  * `ok:false` having dialed nothing:
  *
- *   1. `/v2/control/query` is capped at 256 KiB server-side;
- *      everything else inherits 64 MiB. Blowing the cap is a 413, which looks like a server
- *      fault to the breaker — so we would open a circuit over our own oversized request.
- *   2. The `mode` literal. the servermaps only `"direct_bypass"` and `"direct"`
- *      to the direct lane; every other value — *including an omitted one*
- * — silently becomes `AgentRouted` with no error, costing an LLM
- *      call per prompt forever. The class being rejected is therefore "anything that
- *      silently becomes agent_routed", which makes `agent_routed` itself legal: it is rung 2
- *      of the §1.8 ladder, entered deliberately after a 403 on rung 1.
- *   3. `run_id === "default"`. The MCP server defaults
- *      `MUBIT_DEFAULT_SESSION_ID` to that literal, which collapses every user, project and
- *      machine into one run. Exact match only — a project legitimately called
- *      `default-config` must still be able to have a run.
+ *   1. Bodies to `/v2/control/query` are held under 256 KiB, everything else under 64 MiB.
+ *      An oversized body comes back a 413, which looks like a server fault to the breaker —
+ *      so we would open a circuit over our own request.
+ *   2. The `mode` literal. Only `"direct_bypass"` and `"direct"` reach the direct lane;
+ *      every other value — *including an omitted one* — falls through to the routed path
+ *      with no error, costing a model call per prompt forever. The class being rejected is
+ *      therefore "anything that silently becomes agent_routed", which makes `agent_routed`
+ *      itself legal: it is the rung entered deliberately after a 403 on the direct one.
+ *   3. `run_id === "default"`. That literal is the bundled server's placeholder, and it
+ *      identifies nothing: a run id has to name one project on one machine. Exact match
+ *      only — a project legitimately called `default-config` must still be able to have
+ *      a run.
  *   4. §1.3 required fields, validated locally so the error names the field instead of
  *      arriving as an opaque 422.
  *   5. `postLessons` deliberately has **no** `run_id`: empty means "all runs", which is
@@ -51,7 +56,7 @@
  * Two `opts` beyond the documented `{timeoutMs, retry}`, both for callers that own the
  * meaning of a result better than this module can:
  *   - `{record: false}` suppresses breaker bookkeeping for one call.
- *   - a **403 is never recorded** by default. §5.2/F22: `permission_denied` on a rung the
+ *   - a **403 is never recorded** by default. §5.2: `permission_denied` on a rung the
  *     plugin deliberately probed is a policy verdict, not a transport fault, and recording it
  *     as `auth_failed` would pin the status line to "✖ auth" on a perfectly healthy instance
  *     whose operator merely set `the instance's direct-search policy disabled`.
@@ -64,11 +69,14 @@
 import { join } from 'node:path';
 
 import { allowRequest, classifyError, readBreaker, recordFailure, recordSuccess } from './breaker.mjs';
-import { authHeaders } from './config.mjs';
+import { authHeaders, isConfigured } from './config.mjs';
 import { log } from './log.mjs';
 import { readJson, resolveDataDir, writeJsonAtomic } from './state.mjs';
 
-/** @typedef {"unreachable"|"server_error"|"auth_failed"|"not_responding"|"invalid_request"} FailState */
+/**
+ * @typedef {"unreachable"|"server_error"|"auth_failed"|"not_responding"|"invalid_request"
+ *   |"unconfigured"} FailState
+ */
 /** @typedef {{ok: true, status: number, body: any, ms: number}} OkResult */
 /** @typedef {{ok: false, state: FailState, status?: number, error: string, ms: number}} ErrResult */
 /** @typedef {OkResult|ErrResult} Result */
@@ -110,7 +118,7 @@ const HEALTH_CACHE = ['status', 'health.json'];
  */
 export const QUERY_MODES = Object.freeze(['direct_bypass', 'direct', 'agent_routed']);
 
-/** §4.3 / F21: the one run id that must never reach the wire. */
+/** §4.3: the one run id that must never reach the wire. */
 const POISONED_RUN_ID = 'default';
 
 // ---------------------------------------------------------------------------
@@ -140,8 +148,8 @@ export async function request(cfg, method, path, body, opts = {}) {
     // 64 MiB batch carrying it costs nothing.
     if (wantsBody && isPoisonedRunId(body)) {
       return refuse(cfg, started,
-        `refusing to send run_id "${POISONED_RUN_ID}" to ${verb} ${route} — the MCP server's `
-        + 'MUBIT_DEFAULT_SESSION_ID default collapses every user, project and machine into one run (§4.3)',
+        `refusing to send run_id "${POISONED_RUN_ID}" to ${verb} ${route} — it is the bundled `
+        + 'server\'s placeholder and identifies no project (§4.3)',
         { route, run_id: POISONED_RUN_ID });
     }
 
@@ -164,6 +172,12 @@ export async function request(cfg, method, path, body, opts = {}) {
           { route, bytes: size, cap });
       }
     }
+
+    // --- §4.1: no endpoint, no dial. `urlFor` would hand `fetch` the bare route, which is a
+    // relative URL and throws `ERR_INVALID_URL` before a socket exists — a throw that reads
+    // downstream as a fault in a server we never contacted. Ahead of `allowRequest` because
+    // that call writes when it spends the half-open probe.
+    if (!isConfigured(cfg)) return refuseUnconfigured(cfg, started, `${verb} ${route}`);
 
     // --- §4.2/§4.7: consult the breaker before dialing. Called exactly once per request:
     // while the breaker is open this consumes the single half-open probe, so asking twice
@@ -213,7 +227,7 @@ export async function request(cfg, method, path, body, opts = {}) {
  *, so `JSON.parse` here is a guaranteed false negative —
  * it would report every healthy server as unhealthy and the plugin would never dial again.
  *
- * This is also the one route `enforce_core_access_policy` allowlists,
+ * This is also the one route that answers before a credential is checked,
  * which is what makes it usable as a readiness probe before the user has pasted a key.
  *
  * @param {Record<string, any>} cfg
@@ -223,6 +237,10 @@ export async function request(cfg, method, path, body, opts = {}) {
 export async function health(cfg, opts = {}) {
   const started = Date.now();
   try {
+    // §4.1, and before the cache read as well as before `allowRequest`: a cached `ready`
+    // from a previous endpoint must not answer for a config that no longer has one.
+    if (!isConfigured(cfg)) return refuseUnconfigured(cfg, started, `GET ${ROUTES.health}`);
+
     if (!opts || opts.force !== true) {
       const hit = readHealthCache(cfg);
       if (hit) return { ...hit, ms: Date.now() - started, cached: true };
@@ -234,7 +252,7 @@ export async function health(cfg, opts = {}) {
       return { ok: false, state, error: `circuit breaker open (${state}); health was not dialed`, ms: Date.now() - started };
     }
 
-    const res = await dial(cfg, {
+    const dialed = await dial(cfg, {
       verb: 'GET',
       url: urlFor(cfg, ROUTES.health),
       route: ROUTES.health,
@@ -243,6 +261,28 @@ export async function health(cfg, opts = {}) {
       parse: 'text',
     });
 
+    // §4.7: a 2xx is necessary and not sufficient. The status alone says only that *some*
+    // host answered — an SSO redirect, a captive portal, a proxy error page and a completely
+    // different service all answer 200 — and taking that as healthy opens the session by
+    // telling the model memory is active when nothing behind it is Mubit. The route returns
+    // the bare string `OK`, so one comparison settles it.
+    //
+    // This lands as `server_error` rather than a state of its own: §4.7 already classes "a
+    // 2xx whose body will not parse" that way for the JSON routes, and "up and answering
+    // wrongly" is the same verdict here.
+    // Only a 2xx is reinterpreted here. A `dial` that already failed carries a verdict about
+    // the transport — `unreachable`, `not_responding`, `auth_failed` — and that verdict is
+    // better than anything this line could say.
+    const res = (dialed.ok && !isOkBody(dialed.body)) ? {
+      ok: /** @type {const} */ (false),
+      status: dialed.status,
+      state: /** @type {FailState} */ ('server_error'),
+      error: `GET ${ROUTES.health}: HTTP ${dialed.status} but the body was not "OK" `
+        + `(${preview(dialed.body)})`,
+      ms: dialed.ms,
+    } : dialed;
+
+    // Validated before it is cached, or a wrong host is remembered as healthy for 30 s.
     settle(cfg, res, opts);
     writeHealthCache(cfg, res);
     return withMs(res, started);
@@ -256,10 +296,9 @@ export async function health(cfg, opts = {}) {
 // ---------------------------------------------------------------------------
 
 /**
- * `POST /v2/control/ingest` — `StateIngestRequestPayload` requires
- * `run_id`; every `Stateingest itemPayload` requires `item_id` and
- * `content_type`. One malformed item rejects the whole batch, because that is exactly what
- * the server does — a 422 on item 2 loses items 1 and 3 as well.
+ * `POST /v2/control/ingest` — the request body requires `run_id`, and every item in it
+ * requires `item_id` and `content_type`. One malformed item rejects the whole batch: a 422
+ * on item 2 loses items 1 and 3 as well, which is why they are validated here first.
  *
  * `opts` is forwarded verbatim: `drain.mjs` is the one caller that asks for `{retry: true}`.
  *
@@ -300,7 +339,7 @@ export async function postQuery(cfg, req, opts = {}) {
 
 /**
  * `POST /v2/control/context` — rung 3 only, and it costs two LLM calls (§1.8).
- * `StateContextRequestPayload` requires `run_id`.
+ * The request body requires `run_id`.
  *
  * @param {Record<string, any>} cfg
  * @param {Record<string, any>} req
@@ -315,7 +354,7 @@ export async function postContext(cfg, req, opts = {}) {
 }
 
 /**
- * `POST /v2/control/outcome` — `StateRecordOutcomePayload` requires
+ * `POST /v2/control/outcome` — the request body requires
  * `run_id` and a **non-empty** `reference_id`. §1.3: for run-level attribution with no single
  * primary lesson, pass `"global"` and put the real ids in `entry_ids[]` — never `""`.
  *
@@ -336,7 +375,7 @@ export async function postOutcome(cfg, req, opts = {}) {
 }
 
 /**
- * `POST /v2/control/checkpoint` — `StateCheckpointPayload` requires
+ * `POST /v2/control/checkpoint` — the request body requires
  * `run_id`.
  *
  * @param {Record<string, any>} cfg
@@ -366,7 +405,7 @@ export async function postLessons(cfg, req = {}, opts = {}) {
 }
 
 /**
- * `POST /v2/control/agents/register` — `StateAgentRegisterRequestPayload`
+ * `POST /v2/control/agents/register` — the request body
  * requires `run_id` and `agent_id`.
  *
  * @param {Record<string, any>} cfg
@@ -485,7 +524,7 @@ async function dial(cfg, o) {
 
       const parsed = decodeJson(text);
       if (parsed.error) {
-        // §4.7/F10: a 200 whose body will not parse is a broken server (a reverse proxy
+        // §4.7: a 200 whose body will not parse is a broken server (a reverse proxy
         // serving an HTML error page is the real-world shape), never an unhandled rejection.
         return {
           ok: false,
@@ -509,6 +548,14 @@ async function dial(cfg, o) {
     return {
       ok: false,
       state,
+      // A deadline the *caller* squeezed below the configured default is the caller's own
+      // budget, not evidence about the server: `session-start`'s health slice and
+      // `prompt-recall`'s budget both dial on a fraction of it. An abort at the full default
+      // is evidence and still records — which is what keeps `drain.mjs`, the only caller that
+      // dials on the whole budget and retries, able to open the breaker on a dead instance.
+      ...(timedOut && o.timeoutMs < deadline(cfg, null)
+        ? { abortedEarly: /** @type {const} */ (true) }
+        : {}),
       error: timedOut
         ? `${o.verb} ${o.route}: aborted after ${o.timeoutMs}ms`
         : `${o.verb} ${o.route}: ${messageOf(err)}`,
@@ -519,21 +566,29 @@ async function dial(cfg, o) {
 }
 
 /**
- * Breaker bookkeeping for one completed `request()`/`health()` — the whole reason F7 can
- * ever fire. Recorded once per call, not once per attempt: a retried timeout is one symptom,
- * and double-counting it would escalate `timeoutStreak` twice as fast as §4.7 allows.
+ * Breaker bookkeeping for one completed `request()`/`health()` — the whole reason the
+ * breaker can ever open. Recorded once per call, not once per attempt: a retried timeout is
+ * one symptom, and double-counting it would escalate `timeoutStreak` twice as fast as §4.7
+ * allows.
  *
  * @param {Record<string, any>} cfg
- * @param {{ok: boolean, state?: string, status?: number}} res
+ * @param {{ok: boolean, state?: string, status?: number, abortedEarly?: boolean}} res
  * @param {{record?: boolean}|undefined} opts
  */
 function settle(cfg, res, opts) {
   if (opts && opts.record === false) return;
   if (res.ok) { recordSuccess(cfg); return; }
-  // §5.2/F22: `permission_denied` is a policy verdict about a rung the caller chose to probe,
+  // §5.2: `permission_denied` is a policy verdict about a rung the caller chose to probe,
   // not a transport fault. Recording it would pin the status line to "✖ auth" on an instance
   // that is merely running with the instance's direct-search policy disabled.
   if (res.status === 403) return;
+  // Same reasoning: a deadline this client chose is not evidence about the server. A caller
+  // on a 400 ms slice and one on 30 s learn different things from the same healthy instance,
+  // so recording it escalates the marker to `not_responding` — and past five, opens the
+  // breaker, which also suppresses the capture drain — over a budget nobody else agreed to.
+  // `dial()` sets this only for a deadline tighter than the configured default, so an abort
+  // on the full budget is still a verdict.
+  if (res.abortedEarly) return;
   recordFailure(cfg, /** @type {any} */ (res.state));
 }
 
@@ -618,7 +673,47 @@ function refuse(cfg, started, error, fields = {}) {
 }
 
 /**
- * §1.3: fields without `#[serde(default)]` are mandatory, and a missing one is a 422 — which
+ * The same shape for "no endpoint is set", at `debug` rather than `error`: an install nobody
+ * has signed in to yet is an ordinary state, not a fault, and one log line per dial per
+ * prompt would be noise on a machine whose only problem is that it has not been configured.
+ *
+ * Every caller of this must run *before* `allowRequest`, which writes the breaker file when
+ * it spends a half-open probe. Refusing after that point would still leave a breaker record
+ * for a server that was never dialed.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {number} started
+ * @param {string} what the verb and route, for the message
+ * @returns {ErrResult}
+ */
+function refuseUnconfigured(cfg, started, what) {
+  const error = `${what}: no Mubit endpoint is configured; nothing was dialed`;
+  log(cfg, 'debug', error);
+  return { ok: false, state: 'unconfigured', error, ms: Date.now() - started };
+}
+
+/**
+ * Was that body Mubit answering, rather than merely something answering? The health handler
+ * returns the bare string `OK`, so this is an equality test and not a heuristic. Trimmed,
+ * because a proxy that appends a newline has still relayed a healthy answer.
+ *
+ * @param {any} body the text body of a 2xx
+ * @returns {boolean}
+ */
+function isOkBody(body) {
+  return String(body ?? '').trim() === 'OK';
+}
+
+/** A short, single-line, quoted glimpse of an unexpected body — enough to recognise a login
+ *  page or a proxy error in a log without pasting a kilobyte of HTML into it. */
+function preview(body) {
+  const s = String(body ?? '').replace(/\s+/g, ' ').trim();
+  if (!s) return 'empty body';
+  return s.length > 60 ? `${JSON.stringify(s.slice(0, 60))}…` : JSON.stringify(s);
+}
+
+/**
+ * A field with no server-side default is mandatory, and a missing one is a 422 — which
  * looks like a server fault to everything downstream. Empty strings count as missing.
  *
  * @param {any} req
@@ -686,7 +781,7 @@ function safeMode(req) {
 }
 
 /**
- * §4.3 / F21: exact match only. `cc-default-config-9f2a11c4` is a legitimate run id and must
+ * §4.3: exact match only. `cc-default-config-9f2a11c4` is a legitimate run id and must
  * still be able to reach the wire — this is a ban on one poisoned literal, not a substring.
  * @param {any} body
  */
@@ -762,11 +857,69 @@ function withMs(res, started) {
   return { ...res, ms: Date.now() - started };
 }
 
+/**
+ * The actionable sentence for a transport failure, or `''` when the error is not one.
+ *
+ * Node flattens a failed connection to `TypeError: fetch failed` and hides the errno one or
+ * more `cause` levels down, so the chain is walked the same eight levels `causeChain()` in
+ * `lib/breaker.mjs` walks. The codes below are the ones with wording worth printing; the
+ * authority on which errno means *unreachable* rather than *timeout* stays
+ * `UNREACHABLE_CODES` / `TIMEOUT_CODES` there, and `test/http.test.mjs` holds the two in step.
+ *
+ * @param {any} err
+ * @returns {string}
+ */
+function NETWORK_HINT(err) {
+  /** @type {Record<string, string>} */
+  const HINTS = {
+    ENOTFOUND: 'no such host — the endpoint name does not resolve; check it for a typo',
+    EAI_AGAIN: 'the DNS lookup failed — check the network, or the endpoint for a typo',
+    ECONNREFUSED: 'nothing is listening there — check the port, and that the instance is running',
+    EHOSTUNREACH: 'the host is unreachable from this network',
+    ENETUNREACH: 'the network is unreachable',
+    ENETDOWN: 'the network is down',
+    ECONNRESET: 'the connection was reset in flight',
+    ETIMEDOUT: 'the connection timed out',
+    UND_ERR_CONNECT_TIMEOUT: 'the connection timed out',
+    UND_ERR_HEADERS_TIMEOUT: 'the instance accepted the connection but sent no headers in time',
+    CERT_HAS_EXPIRED: "the instance's TLS certificate has expired",
+    DEPTH_ZERO_SELF_SIGNED_CERT: "the instance's TLS certificate is self-signed and not trusted",
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: "the instance's TLS certificate could not be verified",
+  };
+  let cur = err;
+  for (let i = 0; i < 8 && cur && typeof cur === 'object'; i++) {
+    const code = typeof cur.code === 'string' ? cur.code.toUpperCase() : '';
+    if (HINTS[code]) return SANDBOX_BLOCKED() || `${HINTS[code]} (${code})`;
+    cur = cur.cause;
+  }
+  return '';
+}
+
+/**
+ * Codex runs an unapproved command inside seatbelt with the network switched off, and DNS is
+ * what fails first there — so a perfectly healthy endpoint reports ENOTFOUND. Reading that
+ * as a bad endpoint sends the reader off to fix a URL that was never wrong; the fix is to
+ * approve the command. No network error carries information about the endpoint in here.
+ *
+ * @returns {string}
+ */
+function SANDBOX_BLOCKED() {
+  const env = (typeof process === 'object' && process) ? (process.env || {}) : {};
+  if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return '';
+  return 'this process has no network access — Codex ran it inside its sandbox. Approve the '
+    + 'command and run it again; the endpoint is almost certainly fine';
+}
+
 /** @param {any} err */
 function messageOf(err) {
   try {
     if (!err) return 'unknown error';
     if (typeof err === 'string') return err;
+    // A transport failure surfaces as a bare `TypeError: fetch failed`, whose only actionable
+    // part is a code one or two `cause` levels down. Printing just the wrapper told the user
+    // their request failed and nothing whatsoever about why, or what to change.
+    const hint = NETWORK_HINT(err);
+    if (hint) return hint;
     const parts = [];
     if (err.name) parts.push(String(err.name));
     if (err.message) parts.push(String(err.message));

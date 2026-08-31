@@ -2,8 +2,8 @@
 /**
  * `lib/state.mjs`, `lib/markers.mjs`, `lib/log.mjs`.
  *
- * Protects build-guide §4.8 (module API + the exact Marker shape) and §7 (state
- * layout under `${CLAUDE_PLUGIN_DATA}` and its TTL table).
+ * Protects the module API and the exact Marker shape (§4.8), and the state
+ * layout under `${CLAUDE_PLUGIN_DATA}` and its TTL table (§7).
  *
  * These three modules are the plugin's only durable surface: every hook is a
  * short-lived process, so anything that must survive a process boundary goes
@@ -243,7 +243,7 @@ test('readJson(): returns the fallback for a missing file', async () => {
   assert.deepEqual(state.readJson(join(dir, 'status', 'nope.json'), sentinel), sentinel);
 });
 
-// §4.8 + §12.1/F15: a truncated or corrupt file is normal after a SIGKILL.
+// §4.8 + §12.1: a truncated or corrupt file is normal after a SIGKILL.
 test('readJson(): returns the fallback for corrupt and truncated files', async () => {
   const state = await lib('state.mjs');
   const dir = makeDataDir();
@@ -287,6 +287,10 @@ const TTL_ROWS = [
   { what: 'status marker', rel: 'status/cc-x.json', ttl: 12 * HOUR },
   { what: 'cached health', rel: 'status/health.json', ttl: 30 * SEC },
   { what: 'detached payload handoff', rel: 'tmp/0c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f.json', ttl: 1 * HOUR },
+  // W2-2. The briefing is consume-once and carries its own 30 min injectability window, so
+  // this row is the sweep for the one nobody came back to read: a session started and
+  // abandoned before its first prompt leaves a file that would otherwise outlive the run.
+  { what: 'resume briefing', rel: 'runs/cc-x/resume.json', ttl: 1 * HOUR },
 ];
 
 for (const row of TTL_ROWS) {
@@ -356,7 +360,7 @@ test('pruneStale(): leaves files it does not own alone', async () => {
   assert.equal(existsSync(foreign), true);
 });
 
-// §4.9/§12.1-F14: state helpers never throw, even when DATA is unusable.
+// §4.9/§12.1: state helpers never throw, even when DATA is unusable.
 test('pruneStale(): does not throw when the data dir does not exist', async () => {
   const state = await lib('state.mjs');
   const dir = tempDir('mubit-cc-gone-');
@@ -369,14 +373,17 @@ test('pruneStale(): does not throw when the data dir does not exist', async () =
 // markers.mjs
 // ===========================================================================
 
-/** The Marker, verbatim from build-guide §4.8. */
+/** The Marker, verbatim (§4.8). */
 const MARKER = {
   run_id: 'cc-my-project-9f2a11c4',
   mode: 'local',
   state: 'ready',
   updated_at: 1765000000000,
   cold_start_until: 1765000020000,
-  recall: { sources: 6, tokens: 1187, ms: 842, empty_reason: '', rung: 1, dropped: 0 },
+  recall: {
+    sources: 6, tokens: 1187, ms: 842, empty_reason: '', rung: 1, dropped: 0,
+    dry_streak: 0, last_hit_at: 1765000000000,
+  },
   captured: { tools: 12, turns: 1, pending: 3 },
   lessons: { global: 3, checked_at: 1765000000000 },
   reflect: { at: 1765000000000, lessons_stored: 3, status: 'ok' },
@@ -461,7 +468,7 @@ test('readMarker(): a missing marker yields a usable default, never a throw', as
   }
 });
 
-// §4.8/§12.1-F14: a corrupt marker degrades to the default rather than taking
+// §4.8/§12.1: a corrupt marker degrades to the default rather than taking
 // the status line (or the hook that writes it) down with it.
 test('readMarker(): a corrupt marker file degrades to the default', async () => {
   const markers = await lib('markers.mjs');
@@ -563,7 +570,7 @@ test('log(): rings at 1 MiB keeping exactly two files', async () => {
   }
 });
 
-// §4.9/§12.1-F14: logging is never allowed to be the thing that breaks a hook.
+// §4.9/§12.1: logging is never allowed to be the thing that breaks a hook.
 test('log(): does not throw when the log directory cannot be created', async () => {
   const log = await lib('log.mjs');
   const dir = tempDir('mubit-cc-nolog-');
@@ -572,4 +579,168 @@ test('log(): does not throw when the log directory cannot be created', async () 
   const cfg = mkCfg(dir, { logLevel: 'debug' });
   inData(dir, () => log.log(cfg, 'error', 'this cannot be written anywhere'));
   assert.ok(true);
+});
+
+// ---------------------------------------------------------------------------
+// dataDir / liveDataDir — §4.8, and the directory a command actually finds
+// ---------------------------------------------------------------------------
+
+/** A fake `$HOME` with the named `mubit-memory*` directories under it. */
+function fakeHome(dirs = {}) {
+  const home = tempDir('mubit-home-');
+  const root = join(home, '.claude', 'plugins', 'data');
+  for (const [name, spec] of Object.entries(dirs)) {
+    const dir = join(root, name);
+    mkdirSync(join(dir, 'status'), { recursive: true });
+    if (spec.creds) writeFileSync(join(dir, 'credentials.json'), '{}');
+    for (const [file, at] of Object.entries(spec.markers ?? {})) {
+      const p = join(dir, 'status', file);
+      writeFileSync(p, '{}');
+      utimesSync(p, at / 1000, at / 1000);
+    }
+  }
+  return { home, root };
+}
+
+test('dataDir: an explicitly pinned directory is honoured verbatim, search or no search', async () => {
+  const { dataDir } = await lib('state.mjs');
+  const { home } = fakeHome({ 'mubit-memory-mubit': { creds: true } });
+
+  assert.equal(dataDir({}, { HOME: home, MUBIT_CC_DATA_DIR: '/pinned/by/setup' }),
+    '/pinned/by/setup', 'MUBIT_CC_DATA_DIR outranks everything; setup recorded it');
+  assert.equal(dataDir({}, { HOME: home, CLAUDE_PLUGIN_DATA: '/from/the/host' }),
+    '/from/the/host');
+  assert.equal(dataDir({ dataDir: '/from/config' }, { HOME: home }), '/from/config');
+});
+
+// The reported defect: `pin list` said "no hook has written a run marker yet" in a session
+// whose hooks had written one for every prompt — because the hooks were writing to
+// `mubit-memory-mubit` and the bare-name fallback scanned `mubit-memory`, which nothing uses.
+test('dataDir: with nothing pinned, the suffixed directory the hooks use is found', async () => {
+  const { dataDir } = await lib('state.mjs');
+  const now = Date.now();
+  const { home, root } = fakeHome({
+    'mubit-memory': {},
+    'mubit-memory-mubit': { markers: { 'cc-proj-1234abcd.json': now - 1000 } },
+  });
+
+  assert.equal(dataDir({}, { HOME: home }), join(root, 'mubit-memory-mubit'));
+});
+
+test('dataDir: a signed-in directory outranks a livelier one that holds no credentials', async () => {
+  const { dataDir } = await lib('state.mjs');
+  const now = Date.now();
+  const { home, root } = fakeHome({
+    'mubit-memory-inline': { markers: { 'cc-a-1111aaaa.json': now } },
+    'mubit-memory-mubit': { creds: true, markers: { 'cc-b-2222bbbb.json': now - 10 * MIN } },
+  });
+
+  assert.equal(dataDir({}, { HOME: home }), join(root, 'mubit-memory-mubit'),
+    'the install that was actually authenticated is the live one');
+});
+
+test('dataDir: what setup pinned into the Codex registrations outranks the search', async () => {
+  const { dataDir } = await lib('state.mjs');
+  const now = Date.now();
+  const { home } = fakeHome({
+    'mubit-memory-mubit': { creds: true, markers: { 'cc-a-1111aaaa.json': now } },
+  });
+  const codexHome = join(home, '.codex');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(join(codexHome, 'hooks.json'), JSON.stringify({
+    hooks: [{ command: 'env MUBIT_CC_DATA_DIR="/recorded/by/setup" node hook.mjs' }],
+  }));
+
+  assert.equal(dataDir({}, { HOME: home }), '/recorded/by/setup',
+    'a recorded answer is not a guess, so it beats the liveliest candidate');
+});
+
+test('dataDir: no ~/.claude at all still answers with the bare name, never an error', async () => {
+  const { dataDir } = await lib('state.mjs');
+  const home = tempDir('mubit-home-empty-');
+
+  assert.equal(dataDir({}, { HOME: home }),
+    join(home, '.claude', 'plugins', 'data', 'mubit-memory'));
+});
+
+test('liveDataDir stays in step with the codex integration copy of the same search', async () => {
+  const { liveDataDir } = await lib('state.mjs');
+  const boot = await import(pathToFileURL(
+    join(PLUGIN_ROOT, '..', 'codex', 'lib', 'boot.mjs')).href);
+  const now = Date.now();
+  const { home, root } = fakeHome({
+    'mubit-memory': {},
+    'mubit-memory-inline': { markers: { 'cc-a-1111aaaa.json': now } },
+    'mubit-memory-mubit': { creds: true, markers: { 'cc-b-2222bbbb.json': now - 10 * MIN } },
+  });
+
+  // Two copies on purpose — boot.mjs is loaded unbundled and ships only the codex lib/, so it
+  // cannot import this one. Nothing but a test keeps them agreeing.
+  assert.equal(liveDataDir(home, {}), join(root, 'mubit-memory-mubit'));
+  assert.equal(boot.claudeCodeDataDir({ HOME: home }), join(root, 'mubit-memory-mubit'));
+});
+
+// ---------------------------------------------------------------------------
+// liveDataDir on a machine nothing has written to yet
+// ---------------------------------------------------------------------------
+
+/**
+ * The first-ever sign-in, which is the only run that matters here.
+ *
+ * `/mubit-memory:auth` is what a brand-new install runs, and on that machine no hook has
+ * written a status marker anywhere — every candidate directory scores zero. The old code
+ * required a *positive* score before it would trust the search (`bestAt > 0`), so it fell
+ * through to the bare `mubit-memory`, which no host ever hands a hook. The credentials the
+ * command then wrote were invisible to the very session that asked for them.
+ *
+ * The bare name is the fallback for "no candidates at all", never a candidate that outranks
+ * a suffixed sibling. It is also the tie-break loser, because a tie is exactly the
+ * nothing-written-yet case.
+ */
+test('liveDataDir: with nothing written anywhere, a suffixed directory still beats the bare name', async () => {
+  const { liveDataDir } = await lib('state.mjs');
+  const { home, root } = fakeHome({ 'mubit-memory': {}, 'mubit-memory-mubit': {} });
+
+  assert.equal(liveDataDir(home, {}), join(root, 'mubit-memory-mubit'),
+    'a first-ever sign-in must land where the host actually points its hooks');
+});
+
+test('liveDataDir: an untouched sole candidate is still the answer', async () => {
+  const { liveDataDir } = await lib('state.mjs');
+  const { home, root } = fakeHome({ 'mubit-memory-inline': {} });
+
+  assert.equal(liveDataDir(home, {}), join(root, 'mubit-memory-inline'));
+});
+
+test('liveDataDir: nothing to choose between leaves the bare name as the fallback', async () => {
+  const { liveDataDir } = await lib('state.mjs');
+  const home = tempDir('mubit-home-none-');
+
+  assert.equal(liveDataDir(home, {}),
+    join(home, '.claude', 'plugins', 'data', 'mubit-memory'),
+    'no candidates at all is the one case the bare name answers');
+});
+
+test('liveDataDir and the codex twin agree on a machine where nothing has been written yet', async () => {
+  const { liveDataDir } = await lib('state.mjs');
+  const boot = await import(pathToFileURL(
+    join(PLUGIN_ROOT, '..', 'codex', 'lib', 'boot.mjs')).href);
+
+  // Three shapes, all of them scoring zero, which is where the two copies used to diverge:
+  // this one had a `bestAt > 0` guard and the twin had none.
+  for (const dirs of [
+    { 'mubit-memory': {}, 'mubit-memory-mubit': {} },
+    { 'mubit-memory-inline': {}, 'mubit-memory-mubit': {} },
+    { 'mubit-memory': {} },
+  ]) {
+    const { home } = fakeHome(dirs);
+    assert.equal(liveDataDir(home, {}), boot.claudeCodeDataDir({ HOME: home }),
+      `the two hand-maintained copies must agree for ${JSON.stringify(Object.keys(dirs))}`);
+  }
+});
+
+test('state.mjs exports safeHome so bin/ commands share one HOME fallback', async () => {
+  const { safeHome } = await lib('state.mjs');
+  assert.equal(typeof safeHome, 'function');
+  assert.ok(safeHome().length > 0, 'never the empty string — a path is always returned');
 });

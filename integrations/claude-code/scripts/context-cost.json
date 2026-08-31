@@ -1,54 +1,55 @@
 {
-  "measuredAt": "2026-08-15T12:20:33.228Z",
-  "value": 5382,
+  "measuredAt": "2026-08-27T14:37:57.083Z",
+  "value": 4787,
   "cached": 0,
-  "curatedValue": 2664,
-  "allowlistHonoured": false,
+  "curatedValue": 4787,
+  "allowlistHonoured": true,
   "method": "word/number/symbol segmentation; see the header of scripts/measure-context-cost.mjs",
   "surface": {
     "allowlist": [
       "mubit_archive",
-      "mubit_dereference",
-      "mubit_diagnose",
-      "mubit_forget",
-      "mubit_learned",
-      "mubit_lessons",
-      "mubit_outcome",
-      "mubit_recall",
-      "mubit_reflect",
-      "mubit_status"
-    ],
-    "registered": [
-      "mubit_archive",
       "mubit_checkpoint",
-      "mubit_context",
       "mubit_dereference",
       "mubit_diagnose",
-      "mubit_feedback",
       "mubit_forget",
-      "mubit_handoff",
-      "mubit_ingest_status",
       "mubit_learned",
       "mubit_lessons",
-      "mubit_list_agents",
       "mubit_memory_health",
       "mubit_outcome",
       "mubit_recall",
       "mubit_reflect",
-      "mubit_register_agent",
-      "mubit_remember",
       "mubit_status",
-      "mubit_step_outcome",
+      "mubit_strategies"
+    ],
+    "registered": [
+      "mubit_archive",
+      "mubit_checkpoint",
+      "mubit_dereference",
+      "mubit_diagnose",
+      "mubit_forget",
+      "mubit_learned",
+      "mubit_lessons",
+      "mubit_memory_health",
+      "mubit_outcome",
+      "mubit_recall",
+      "mubit_reflect",
+      "mubit_status",
       "mubit_strategies"
     ],
     "skills": [
+      "activity",
       "auth",
+      "checkpoint",
+      "dashboard",
       "doctor",
       "forget",
+      "memory-health",
+      "pin",
       "recall",
       "reflect",
       "remember",
-      "setup"
+      "setup",
+      "strategies"
     ],
     "agents": [
       "mubit-recall"
@@ -56,19 +57,24 @@
   },
   "breakdown": {
     "toolSchemas": {
-      "tokens": 4973,
-      "chars": 12688,
-      "count": 21
+      "tokens": 3515,
+      "chars": 9658,
+      "count": 13
+    },
+    "serverInstructions": {
+      "tokens": 379,
+      "chars": 1287,
+      "count": 1
     },
     "curatedToolSchemas": {
-      "tokens": 2255,
-      "chars": 5817,
-      "count": 10
+      "tokens": 3515,
+      "chars": 9658,
+      "count": 13
     },
     "skillFrontmatter": {
-      "tokens": 347,
-      "chars": 1165,
-      "count": 7
+      "tokens": 831,
+      "chars": 2813,
+      "count": 13
     },
     "agentFrontmatter": {
       "tokens": 62,

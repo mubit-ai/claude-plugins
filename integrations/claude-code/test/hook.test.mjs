@@ -220,7 +220,7 @@ test('runHook: a body over budget is cut off, still exits 0 with valid JSON', as
     'the late body result must not be emitted after the deadline');
 });
 
-// §4.9 / F12 — malformed stdin emits {} and exits 0, and says so exactly once in the log.
+// §4.9 — malformed stdin emits {} and exits 0, and says so exactly once in the log.
 test('runHook: malformed stdin emits {}, exits 0, logs once, and never runs body', async (t) => {
   requireHookLib();
   const dataDir = makeDataDir();
@@ -239,7 +239,7 @@ test('runHook: malformed stdin emits {}, exits 0, logs once, and never runs body
   assert.equal(hits.length, 1, `expected exactly one log entry, got:\n${hits.join('\n')}`);
 });
 
-// §4.9 / F13 — empty stdin is the same story: {} and exit 0, never a crash.
+// §4.9 — empty stdin is the same story: {} and exit 0, never a crash.
 test('runHook: empty stdin emits {} and exits 0', async (t) => {
   requireHookLib();
   const dataDir = makeDataDir();

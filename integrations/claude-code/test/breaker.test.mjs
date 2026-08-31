@@ -3,7 +3,7 @@
  * `lib/breaker.mjs` — the connection-state classifier and the circuit breaker.
  *
  * Guide sections under test: §4.7 (breaker), §7 (state layout), §12.6 (test plan),
- * §1.1/§1.2 (status codes and the one unauthenticated route).
+ * §1.1/§1.2 (status codes, and which call is made before a key is set).
  *
  * Two rules dominate this file and both exist to stop the plugin from lying to the user:
  *   1. "A timeout is not a verdict."  A cold start, a laptop waking from sleep, and
@@ -13,8 +13,9 @@
  *   2. `auth_failed` is sticky and never feeds the failure-count breaker. Opening a breaker
  *      on a 401 hides the single error the user can actually fix.
  *
- * Every window/cooldown is shrunk through `MUBIT_CC_BREAKER_*` (§6.1) — this file must
- * never sleep for real seconds.
+ * Every window/cooldown is set through `MUBIT_CC_BREAKER_*` (§6.1). Shrinking them is how this
+ * file avoids sleeping for real seconds — but not the cooldown, which is long by default and
+ * short only in the three tests that sleep through it deliberately. See `TIGHT` for why.
  */
 
 import test from 'node:test';
@@ -26,14 +27,46 @@ import { join } from 'node:path';
 import { lib, baseEnv, makeDataDir } from './helpers/harness.mjs';
 
 /** The complete `ConnState` union (§4.7). Nothing outside this set may ever be produced. */
-const CONN_STATES = ['ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding'];
+const CONN_STATES = [
+  'ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding', 'unconfigured',
+];
 
-/** Tiny breaker parameters so the whole file runs in well under a second. */
+/**
+ * The subset `classifyError` is allowed to return. `unconfigured` is a ConnState but never a
+ * classification: it is decided in `lib/http.mjs` *before* a dial, and no error object or
+ * status code should be able to produce it. If it ever shows up here, some caller has reached
+ * the socket on a config with no endpoint — which is the bug this state was added to end.
+ */
+const CLASSIFIABLE = CONN_STATES.filter((s) => s !== 'unconfigured');
+
+/**
+ * Small breaker parameters so the file stays quick — except the cooldown, which is long on
+ * purpose.
+ *
+ * Almost every test here opens the breaker and then asserts it is open. That assertion is a
+ * race against the cooldown: the breaker half-opens on its own once the cooldown elapses, so a
+ * short one turns "is it open?" into "did the assertion run fast enough?". At 40 ms it did not,
+ * under a runner that executes 28 files concurrently — `recordFailure` writes a file, the next
+ * line reads it back, and 40 ms of scheduling delay in between is ordinary. The breaker had
+ * quietly earned a probe and `allowRequest` correctly returned `true`.
+ *
+ * A cooldown no test can outrun costs nothing, because a test that is not sleeping through it
+ * does not care how long it is. The three that *do* exercise the half-open probe opt into a
+ * short one by name, and pay for it in sleeps.
+ */
 const TIGHT = {
   MUBIT_CC_BREAKER_THRESHOLD: '3',
   MUBIT_CC_BREAKER_WINDOW_MS: '5000',
-  MUBIT_CC_BREAKER_COOLDOWN_MS: '40',
+  MUBIT_CC_BREAKER_COOLDOWN_MS: '60000',
 };
+
+/**
+ * For the half-open tests only. Wide enough that two consecutive calls cannot straddle it under
+ * a loaded runner, short enough to sleep through three times without noticing.
+ */
+const PROBE_COOLDOWN = { MUBIT_CC_BREAKER_COOLDOWN_MS: '400' };
+const PROBE_WINDOW_MS = 400;
+const PAST_COOLDOWN_MS = 450;
 
 const LOCAL = 'https://unreachable.example.com';
 const HOSTED = 'https://mubit.example.com';
@@ -125,7 +158,7 @@ test('classifyError: undici-wrapped AbortError still classifies as not_respondin
 
 // §4.7: the ConnState union is closed. Anything else leaks into the status line and the
 // marker, where `bin/statusline.mjs` has no glyph for it.
-test('classifyError: never produces a state outside the five-value ConnState union', async () => {
+test('classifyError: never produces a state outside the classifiable ConnState values', async () => {
   const { classifyError } = await lib('breaker.mjs');
   /** @type {Array<[any, any]>} */
   const grid = [];
@@ -144,9 +177,27 @@ test('classifyError: never produces a state outside the five-value ConnState uni
 
   for (const [e, s] of grid) {
     const got = classifyError(e, s);
-    assert.ok(CONN_STATES.includes(got),
+    assert.ok(CLASSIFIABLE.includes(got),
       `classifyError(${e && (e.code || e.name)}, ${s}) produced "${got}", outside ConnState`);
   }
+});
+
+// §4.7 — a breaker exists to stop dialing a server that is failing. An unconfigured
+// install never dialed one, so there is nothing to trip and nothing to cool down. Recording
+// it opened the breaker on a local config gap and then suppressed recall for the cooldown,
+// against an instance the user was one command away from having.
+test('recordFailure: `unconfigured` is never recorded — no file, no failures, no open', async () => {
+  const { recordFailure, readBreaker, breakerPath } = await lib('breaker.mjs');
+  const dataDir = makeDataDir();
+  const cfg = { dataDir, endpoint: '', breaker: { threshold: 3, windowMs: 5000, cooldownMs: 1000 } };
+
+  for (let i = 0; i < 10; i++) recordFailure(cfg, 'unconfigured');
+
+  assert.equal(existsSync(breakerPath(cfg)), false,
+    'ten unconfigured "failures" wrote a breaker file for an endpoint that was never dialed');
+  const b = readBreaker(cfg);
+  assert.equal(b.openedAt, 0);
+  assert.equal(b.failures.length, 0);
 });
 
 // §1.3/§5.5: a 422 is a bad payload, a 413 is an oversized body, a 429 is backpressure.
@@ -251,7 +302,7 @@ test('readBreaker: an empty state file degrades to a fresh closed breaker', asyn
 // "A timeout is not a verdict." — §4.7
 // ---------------------------------------------------------------------------
 
-// §4.7 / F4: one AbortError sets no state. It increments the streak and nothing else.
+// §4.7: one AbortError sets no state. It increments the streak and nothing else.
 test('timeout: a single AbortError increments timeoutStreak and leaves the state unchanged', async () => {
   const { cfg, B } = await setup();
   B.recordSuccess(cfg);
@@ -287,7 +338,7 @@ test('timeout: two consecutive timeouts still do not escalate', async () => {
   assert.equal(b.state, 'ready');
 });
 
-// §4.7 / F5: only `timeoutStreak >= 3` escalates, and only to `not_responding`.
+// §4.7: only `timeoutStreak >= 3` escalates, and only to `not_responding`.
 test('timeout: three consecutive timeouts escalate to not_responding', async () => {
   const { cfg, B } = await setup();
   B.recordSuccess(cfg);
@@ -309,7 +360,7 @@ test('timeout: ten timeouts still say not_responding, never unreachable or serve
   assert.equal(b.timeoutStreak, 10);
 });
 
-// §4.7 / F6: a success resets the streak, so intermittent slowness never accumulates into
+// §4.7: a success resets the streak, so intermittent slowness never accumulates into
 // a verdict across a whole session.
 test('timeout: a success resets timeoutStreak to zero', async () => {
   const { cfg, B } = await setup();
@@ -327,7 +378,7 @@ test('timeout: a success resets timeoutStreak to zero', async () => {
   assert.equal(b.state, 'ready');
 });
 
-// §4.7 + F7: "not a verdict" governs the *reported state*, not the breaker. A wedged
+// §4.7: "not a verdict" governs the *reported state*, not the breaker. A wedged
 // server that times out every request must still trip the failure counter, or every prompt
 // pays the full recall budget forever.
 test('timeout: timeouts still count toward the failure-count breaker', async () => {
@@ -342,7 +393,7 @@ test('timeout: timeouts still count toward the failure-count breaker', async () 
 // auth_failed is sticky and does not feed the breaker — §4.7
 // ---------------------------------------------------------------------------
 
-// §4.7 / F3: ten consecutive 401s leave `failures` empty and the breaker closed. Opening
+// §4.7: ten consecutive 401s leave `failures` empty and the breaker closed. Opening
 // on a 401 hides the one error the user can actually fix by pasting a key.
 test('auth_failed: ten consecutive 401s record no failures and never open the breaker', async () => {
   const { cfg, B } = await setup();
@@ -410,12 +461,16 @@ test('breaker: allowRequest is idempotent while closed', async () => {
 
 // §4.7 / §12.6: the window is rolling — failures older than it drop out and stop counting.
 // Without expiry, five failures spread over a week would open the breaker on a healthy box.
+//
+// The window is wide for the same reason the cooldown is (see `TIGHT`): the two "fresh"
+// failures below must land inside one window as well as after the sleep, and at 40 ms a
+// scheduling stall between two file writes was enough to expire the first of them.
 test('breaker: failures older than the window expire and no longer count', async () => {
-  const { cfg, B } = await setup({ MUBIT_CC_BREAKER_WINDOW_MS: '40' });
+  const { cfg, B } = await setup({ MUBIT_CC_BREAKER_WINDOW_MS: String(PROBE_WINDOW_MS) });
 
   B.recordFailure(cfg, 'unreachable');
   B.recordFailure(cfg, 'unreachable');
-  await sleep(70);                        // both fall out of the 40 ms window
+  await sleep(PAST_COOLDOWN_MS);          // both fall out of the window
 
   B.recordFailure(cfg, 'unreachable');
   B.recordFailure(cfg, 'unreachable');
@@ -425,25 +480,29 @@ test('breaker: failures older than the window expire and no longer count', async
   assert.equal(B.allowRequest(cfg), true, 'two fresh failures are below the threshold of 3');
 });
 
-// §4.7 / F8: after the cooldown exactly one half-open probe dials; a second short-circuits.
+// §4.7: after the cooldown exactly one half-open probe dials; a second short-circuits.
+//
+// One of the three tests that sleeps through a cooldown, so one of the three that takes the
+// short one. It is also the sharpest case for why the default is long: it needs two
+// *consecutive* calls to land inside a single cooldown window.
 test('breaker: after the cooldown exactly one half-open probe is allowed', async () => {
-  const { cfg, B } = await setup();       // cooldown 40 ms
+  const { cfg, B } = await setup(PROBE_COOLDOWN);
   for (let i = 0; i < 3; i++) B.recordFailure(cfg, 'unreachable');
   assert.equal(B.allowRequest(cfg), false, 'open inside the cooldown');
 
-  await sleep(60);
+  await sleep(PAST_COOLDOWN_MS);
   assert.equal(B.allowRequest(cfg), true, 'first call after the cooldown is the probe');
   assert.equal(B.allowRequest(cfg), false, 'the probe is consumed — no second dial');
 
-  await sleep(60);
+  await sleep(PAST_COOLDOWN_MS);
   assert.equal(B.allowRequest(cfg), true, 'a further cooldown earns another single probe');
 });
 
-// §4.7 / F9: a successful probe closes the breaker and clears the failure window.
+// §4.7: a successful probe closes the breaker and clears the failure window.
 test('breaker: a successful half-open probe closes it and clears failures', async () => {
-  const { cfg, B } = await setup();
+  const { cfg, B } = await setup(PROBE_COOLDOWN);
   for (let i = 0; i < 3; i++) B.recordFailure(cfg, 'unreachable');
-  await sleep(60);
+  await sleep(PAST_COOLDOWN_MS);
   assert.equal(B.allowRequest(cfg), true);
 
   B.recordSuccess(cfg);
@@ -459,11 +518,11 @@ test('breaker: a successful half-open probe closes it and clears failures', asyn
 // §4.7: a failed probe re-opens with a FRESH openedAt, so the next probe is a full cooldown
 // away rather than immediately available.
 test('breaker: a failed half-open probe re-opens with a fresh openedAt', async () => {
-  const { cfg, B } = await setup();
+  const { cfg, B } = await setup(PROBE_COOLDOWN);
   for (let i = 0; i < 3; i++) B.recordFailure(cfg, 'unreachable');
   const firstOpenedAt = B.readBreaker(cfg).openedAt;
 
-  await sleep(60);
+  await sleep(PAST_COOLDOWN_MS);
   assert.equal(B.allowRequest(cfg), true, 'probe allowed');
   B.recordFailure(cfg, 'unreachable');
 
@@ -474,7 +533,7 @@ test('breaker: a failed half-open probe re-opens with a fresh openedAt', async (
 });
 
 // ---------------------------------------------------------------------------
-// Cold-start suppression — §4.7, §4.8 (marker.cold_start_until), F20
+// Cold-start suppression — §4.7, §4.8 (marker.cold_start_until)
 // ---------------------------------------------------------------------------
 
 // §4.7: within `coldStartGraceMs` of the run's first SessionStart the failure is still

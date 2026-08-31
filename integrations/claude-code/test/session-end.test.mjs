@@ -42,7 +42,16 @@ function env(dataDir, endpoint, extra = {}) {
     dataDir,
     endpoint,
     projectDir: PROJECT_DIR,
-    extra: { MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: RUN_ID, ...extra },
+    extra: {
+      MUBIT_CC_RUN_STRATEGY: 'static',
+      MUBIT_CC_RUN_ID: RUN_ID,
+      // Every assertion in this file is about the BODY — what it sends, in what order, and
+      // what it writes. That body now runs in a detached child by default, so this switch
+      // keeps it here where the assertions can see it. The hand-off itself, and the
+      // fact the body survives the hook being killed, are `session-end-detach.test.mjs`.
+      MUBIT_CC_SESSION_END_DETACH: '0',
+      ...extra,
+    },
   });
 }
 
@@ -143,17 +152,110 @@ test('issues POST /v2/control/reflect BY DEFAULT with no opt-in env', async (t) 
   assertHookContract(r);
   server.assertCalled('POST', '/v2/control/reflect', 1);
 
-  // §5.7 — the body, verbatim. `last_n_items` bounds reflection to the recent tail
-  // instead of replaying the whole run (control.proto), which keeps the
-  // LLM-backed call inside its 4000 ms budget on a long session.
-  // `include_step_outcomes` folds outcome signals in (control.proto) — the
-  // NEGATIVE ones produce the highest-value lessons.
+  // §5.7 — the body, verbatim. `include_step_outcomes` folds outcome signals in
+  // (`control.proto`) — the NEGATIVE ones produce the highest-value lessons. `last_n_items`
+  // bounds the evidence to the most recent items of the run, which at a session end is
+  // this session.
   const body = server.lastCall('POST', '/v2/control/reflect').body;
   assert.equal(body.run_id, RUN_ID);
   assert.notEqual(body.run_id, 'default');
   assert.equal(body.include_linked_runs, false);
   assert.equal(body.include_step_outcomes, true);
   assert.equal(body.last_n_items, 200);
+});
+
+// ---------------------------------------------------------------------------
+// §5.7 step 4 — the 504 retry
+// ---------------------------------------------------------------------------
+
+/*
+ * Why reflect, alone among this hook's calls, retries.
+ *
+ * 12 reflect failures were logged over four days and every one was an HTTP 504. A reflection
+ * over a real run finishes close to the point where it is given up on, so the call sits on a
+ * cliff where latency variance alone decides it: the identical request, issued four times in
+ * a row, returned 504, 504, 200, 504.
+ *
+ * So the second attempt is not hoping the server reconsidered — it is re-rolling a throw.
+ * These three tests pin the policy: retry a 5xx, stop at two, and never retry a verdict a
+ * repeat cannot change.
+ */
+
+test('retries reflect once on 504 and keeps the second attempt\'s lessons', async (t) => {
+  const server = await fakeMubit({
+    // fakeMubit walks an array of replies and holds the last, so this is "504 then 200".
+    'POST /v2/control/reflect': [
+      { status: 504, json: { error: 'request could not be processed' } },
+      { json: { lessons: [], summary: 'ok', confidence: 0.9, degraded: false, lessons_stored: 3 } },
+    ],
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/reflect', 2);
+
+  const marker = readMarker(dataDir);
+  assert.equal(marker.reflect.status, 'ok',
+    'a 504 that succeeds on retry is a successful reflect, not a failed one');
+  assert.equal(marker.reflect.lessons_stored, 3);
+  assert.equal(marker.reflect.attempts, 2,
+    'the marker records how many attempts it took — one 504 is invisible otherwise');
+
+  // The retry must be the same request. A retry that quietly narrows its own evidence
+  // would make the second attempt succeed for a reason we did not intend.
+  const [first, second] = server.calls('POST', '/v2/control/reflect');
+  assert.deepEqual(second.body, first.body, 'the retry must re-send an identical body');
+});
+
+test('stops after two reflect attempts when the 504 persists', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/reflect': { status: 504, json: { error: 'request could not be processed' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  // §5.7 — a failing reflect is best-effort. It costs scope promotion, never the hook.
+  assertHookContract(r);
+  assert.deepEqual(r.json, { suppressOutput: true });
+  server.assertCalled('POST', '/v2/control/reflect', 2);
+
+  const marker = readMarker(dataDir);
+  assert.equal(marker.reflect.status, 'failed');
+  assert.equal(marker.reflect.attempts, 2, 'two attempts, and no third');
+  assert.equal(marker.reflect.lessons_stored, 0);
+  assert.match(String(marker.last_error ?? ''), /504/,
+    'the marker keeps the reason, so the doctor skill can name it');
+
+  // The captures were already committed before reflect was attempted (§5.7): a reflect that
+  // fails twice must still not cost the session its ingest.
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0);
+});
+
+test('does not retry reflect on 403 — an identical request cannot fix auth', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/reflect': { status: 403, json: { error: 'request could not be processed' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/reflect', 1);
+  assert.equal(readMarker(dataDir).reflect.attempts, 1,
+    'a 4xx is a verdict about the request, not a dice throw — going again only doubles the cost');
 });
 
 // §5.7 — "Runs INLINE, not detached." The ingest is deliberately slow: a detached
@@ -210,6 +312,239 @@ test('flushes a turn left outcome_pending, before reflecting', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
+// §5.7 step 3, conditioned on evidence — one rule, shared with `drain` (§5.5 step 7)
+// ---------------------------------------------------------------------------
+
+/**
+ * `session-end` fires only for turns the drain never reached, so for a while the two hooks
+ * were free to disagree without either one looking wrong: `drain` learned the four-case rule
+ * and this hook kept posting `success`/+0.2 with `entry_ids` for every pending turn. The
+ * series that came out mixed two definitions of the same measurement, with nothing on the
+ * wire to say which record came from which — worse than either rule applied consistently.
+ *
+ * `lib/outcome.mjs` owns the rule now. These tests pin this hook's half of it; the parity
+ * test below pins that the halves are the same.
+ */
+
+/** A pending turn as `capture --stop` leaves it once it could compute the used-signal. */
+function seedMeasuredTurn(dataDir, promptId, used, over = {}) {
+  const dir = join(runDir(dataDir), 'turns');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${promptId}.json`), JSON.stringify({
+    prompt_id: promptId,
+    session_id: fx.SESSION_ID,
+    prompt: 'why is the ingest job stuck in queued?',
+    started_at: Date.now() - 30_000,
+    ended_at: Date.now() - 1_000,
+    recalled: ['ref_lesson_1', 'ref_rule_1'],
+    outcome_pending: true,
+    ...(used === null ? {} : {
+      used_evidence: {
+        method: 'memory-term-echo/v1',
+        at: Date.now(),
+        candidates: 12,
+        matched: used ? 3 : 0,
+        terms: used ? ['indexing', 'queued', 'poll'] : [],
+        answer_chars: 180,
+        used,
+      },
+    }),
+    ...over,
+  }));
+}
+
+// §5.5 step 7: injected and the reply carried none of the memory's vocabulary. Recorded at
+// exactly 0.0 with an EMPTY entry_ids[] — naming the entries here would credit precisely the
+// memories nothing showed were read.
+test('an ignored injection flushes as neutral 0.0 with no entry_ids', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 1);
+  seedMeasuredTurn(dataDir, fx.PROMPT_ID, false);
+
+  assertHookContract(await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) }));
+
+  server.assertCalled('POST', '/v2/control/outcome', 1);
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'neutral',
+    'the four accepted outcomes are success/failure/partial/neutral; anything else is a 400');
+  assert.equal(body.signal, 0,
+    'no evidence of use is not evidence of harm — a penalty here would punish memory for a '
+    + 'signal that is mostly false negatives');
+  assert.deepEqual(body.entry_ids, [],
+    'a neutral record must not name the entries it could not credit');
+  assert.equal(body.reference_id, 'global', 'reference_id must still be non-empty (§1.3)');
+  assert.ok(body.rationale.includes('memory-term-echo/v1'),
+    `the rationale must name the method that decided this: ${body.rationale}`);
+});
+
+// The same asymmetry `drain` keeps: a failed turn is not proof the memory was wrong when
+// nothing shows the memory was used at all. -0.3 against an entry the model never touched is
+// the same mistake as +0.2, pointed the other way.
+test('a failed turn with no evidence of use is not punished for it', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 1);
+  seedMeasuredTurn(dataDir, fx.PROMPT_ID, false, { outcome: 'failure' });
+
+  assertHookContract(await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) }));
+
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'neutral');
+  assert.equal(body.signal, 0);
+  assert.deepEqual(body.entry_ids, []);
+});
+
+// A turn staged before the used-signal existed was never measured. Reading that as "the
+// model ignored it" would invent a denominator, so it keeps the old behaviour — which is
+// also every turn this hook has ever flushed until now.
+test('a turn with no used_evidence keeps the +0.2 and the attribution', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 1);
+  seedMeasuredTurn(dataDir, fx.PROMPT_ID, null);
+
+  assertHookContract(await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) }));
+
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'success');
+  assert.equal(body.signal, 0.2);
+  assert.deepEqual(body.entry_ids, ['ref_lesson_1', 'ref_rule_1']);
+});
+
+// §5.5/§6.1: the neutral record is implicit attribution as much as the +0.2 is. "off" means
+// the hook posts nothing, "explicit" means the model owns the call — and a user who turned
+// this off did not ask to be measured either.
+for (const mode of ['off', 'explicit']) {
+  test(`outcomeMode "${mode}" silences the flush, neutral records included`, async (t) => {
+    const server = await fakeMubit();
+    t.after(() => server.close());
+    const dataDir = makeDataDir();
+    seedSpool(dataDir, 1);
+    seedMeasuredTurn(dataDir, fx.PROMPT_ID, false);
+
+    assertHookContract(await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+      { env: env(dataDir, server.url, { MUBIT_CC_OUTCOME_MODE: mode }) }));
+
+    server.assertCalled('POST', '/v2/control/ingest', 1);
+    server.assertNotCalled('POST', '/v2/control/outcome');
+  });
+}
+
+/**
+ * THE test for this divergence: the same turn file, through both hooks, must reach the wire
+ * as the same record — down to the idempotency key, which is what makes a concurrent drain
+ * and a session-end flush a no-op instead of double reinforcement.
+ *
+ * Both hooks are given the same run id, the same prompt id and a payload carrying the same
+ * session id, so every field of the request is a function of the turn file alone. Anything
+ * that differs is a second definition of the measurement.
+ */
+for (const row of [
+  { name: 'measured used', used: true, over: {} },
+  { name: 'measured unused', used: false, over: {} },
+  { name: 'measured used, turn failed', used: true, over: { outcome: 'failure' } },
+  { name: 'measured unused, turn failed', used: false, over: { outcome: 'failure' } },
+  { name: 'unmeasured', used: null, over: {} },
+  { name: 'unmeasured, turn failed', used: null, over: { outcome: 'failure' } },
+]) {
+  test(`drain and session-end post an identical outcome — ${row.name}`, async (t) => {
+    const drainServer = await fakeMubit();
+    const endServer = await fakeMubit();
+    t.after(() => drainServer.close());
+    t.after(() => endServer.close());
+
+    const drainDir = makeDataDir();
+    const endDir = makeDataDir();
+    seedMeasuredTurn(drainDir, fx.PROMPT_ID, row.used, row.over);
+    seedMeasuredTurn(endDir, fx.PROMPT_ID, row.used, row.over);
+
+    assertHookContract(await runHook('drain', fx.stop({ cwd: PROJECT_DIR }), {
+      env: env(drainDir, drainServer.url),
+      args: ['--with-outcome', fx.PROMPT_ID],
+    }));
+    assertHookContract(await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+      { env: env(endDir, endServer.url) }));
+
+    drainServer.assertCalled('POST', '/v2/control/outcome', 1);
+    endServer.assertCalled('POST', '/v2/control/outcome', 1);
+
+    const fromDrain = drainServer.lastCall('POST', '/v2/control/outcome').body;
+    const fromEnd = endServer.lastCall('POST', '/v2/control/outcome').body;
+    assert.deepEqual(fromEnd, fromDrain,
+      'the two hooks implement one rule; a difference here is a run whose outcome series '
+      + `silently mixes two definitions.\n  drain:       ${JSON.stringify(fromDrain)}\n`
+      + `  session-end: ${JSON.stringify(fromEnd)}`);
+    assert.equal(fromEnd.idempotency_key, `cc-outcome-${RUN_ID}-${fx.PROMPT_ID}`,
+      'the key is derived from (run_id, prompt_id), never random — it is what makes a '
+      + 'concurrent drain and this flush a no-op rather than a double count');
+  });
+}
+
+/**
+ * THE test for this ticket, on the flush side — and the one that has to exist because of
+ * *how* `StopFailure` fires.
+ *
+ * The host's registry (Claude Code 2.1.235) has `StopFailure` firing **instead of** Stop when
+ * an API error ended the turn. So `capture --stop` never runs on a rate-limited turn, and
+ * `capture --stop-failure` is what closes it — `outcome_pending: true`, exactly like any
+ * other closed turn, because hiding the turn from the sweep is not the same as deciding
+ * about it. This flush therefore genuinely picks the turn up, reads it, and posts nothing;
+ * `lib/outcome.mjs` is the only thing standing between it and a `-0.3`.
+ *
+ * That is also why this is a *pair* of tests with `drain.test.mjs` rather than one: the two
+ * hooks are separate esbuild entry points that cannot import one another, and the last time
+ * a rule like this lived in both files the copies drifted for a release without either one
+ * looking wrong on its own.
+ */
+test('a turn the API killed is swept, and flushed as nothing at all', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 1);
+  seedPendingTurn(dataDir, fx.PROMPT_ID, ['ref_lesson_1', 'ref_rule_1']);
+  // `capture --stop-failure`'s mark, on a turn that is otherwise the +0.2 row: recalled ids,
+  // pending, and no used-signal because the reply was cut off.
+  const turnPath = join(runDir(dataDir), 'turns', `${fx.PROMPT_ID}.json`);
+  writeFileSync(turnPath, JSON.stringify({ ...readJsonFile(turnPath), api_error: 'rate_limit' }));
+
+  assertHookContract(await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) }));
+
+  // The session still ingests and still reflects: the model's API fell over, not Mubit's.
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  server.assertNotCalled('POST', '/v2/control/outcome');
+
+  const after = readJsonFile(turnPath);
+  assert.equal(after.api_error, 'rate_limit', 'the mark is the flush\'s input, not its scratch space');
+  assert.ok(!(Number(after.outcome_attempts) > 0),
+    `a suppressed turn must not spend an attempt: ${JSON.stringify(after.outcome_attempts)}`);
+  assert.ok(!after.outcome_sent_at, 'nothing was sent, so nothing may claim it was');
+});
+
+// The other half of the distinction, in this hook too: nothing injected is still silence, so
+// "no post" means one thing only.
+test('a turn that recalled nothing is not flushed at all', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSpool(dataDir, 1);
+  seedPendingTurn(dataDir, fx.PROMPT_ID, []);
+
+  assertHookContract(await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) }));
+
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  server.assertNotCalled('POST', '/v2/control/outcome');
+});
+
+// ---------------------------------------------------------------------------
 // The two — and only two — reflect skip conditions (§5.7 step 4)
 // ---------------------------------------------------------------------------
 
@@ -232,6 +567,32 @@ test('skips reflect when MUBIT_CC_REFLECT_ON_END=0, but still drains and heartbe
 
 // §5.7 — nothing ingested this session means there is nothing to reflect ON; an
 // LLM-backed call over an empty tail is pure cost.
+/**
+ * Reflection reads the server's tail of the run, so it is only meaningful over a run the
+ * server actually has. A non-empty spool means two opposite things: another drainer is about
+ * to land the work — which is why it counts as evidence in flight — or *our* drain stopped
+ * (budget spent, breaker open, ingest failed) and nobody is going to. In the second case
+ * reflecting draws conclusions from half a session and stores them as if they were the whole
+ * one; the next session drains the rest and can reflect over the real thing.
+ */
+test('skips reflect when this drain left the spool undelivered', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await fakeMubit({
+    'POST /v2/control/ingest': { status: 500, json: { error: 'nope' } },
+  });
+  t.after(() => server.close());
+  seedSpool(dataDir, 3);
+
+  const r = await runHook('session-end', fx.sessionEnd(),
+    { env: env(dataDir, server.url, { MUBIT_CC_BREAKER_THRESHOLD: '99' }) });
+  assertHookContract(r);
+
+  server.assertNotCalled('POST', '/v2/control/reflect');
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 3, 'precondition: the items are still here');
+  assert.equal(readMarker(dataDir).reflect.status, 'skipped:undrained',
+    'the marker has to say which skip this was');
+});
+
 test('skips reflect when nothing was ingested this session', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
@@ -244,6 +605,36 @@ test('skips reflect when nothing was ingested this session', async (t) => {
   server.assertNotCalled('POST', '/v2/control/ingest');
   server.assertNotCalled('POST', '/v2/control/reflect');
   server.assertCalled('POST', '/v2/control/agents/heartbeat', 1);
+});
+
+/**
+ * The hook spool is not the only way work reaches the server. An MCP write goes out of the
+ * MCP server's own process and never touches the spool or the capture path — so a session
+ * whose whole memory contribution was `mubit_learned` used to reach here looking empty,
+ * skip reflect, and take the one call authorised to widen a lesson with it.
+ *
+ * The guard on that write path records what it sent into the same run marker this hook
+ * already reads, which is what puts an MCP write on the same road to reflect that a hook
+ * capture has always been on.
+ */
+test('reflects a session whose only ingest went through the MCP server', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir(); // empty spool, no pending turns
+
+  // What the MCP egress guard leaves behind after an accepted write.
+  mkdirSync(join(dataDir, 'status'), { recursive: true });
+  writeFileSync(join(dataDir, 'status', `${RUN_ID}.json`), JSON.stringify({
+    run_id: RUN_ID, mcp: { ingested: 1, at: Date.now() },
+  }));
+
+  const r = await runHook('session-end', fx.sessionEnd({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+
+  assertHookContract(r);
+  server.assertNotCalled('POST', '/v2/control/ingest');
+  server.assertCalled('POST', '/v2/control/reflect', 1);
+  assert.equal(readMarker(dataDir).reflect.status, 'ok');
 });
 
 // ---------------------------------------------------------------------------
@@ -317,7 +708,7 @@ test('marker gains reflect {at, lessons_stored, status} from the response', asyn
   assert.ok(marker.reflect.at >= before);
 });
 
-// §5.7 "Failure" / §12.1 F29 — a failed reflect is best-effort. What must NOT happen is
+// §5.7 "Failure" / §12.1 — a failed reflect is best-effort. What must NOT happen is
 // losing the drain with it: the captures are already gone from the spool's perspective.
 test('a failed reflect is logged, marked failed, exits 0 — and the drain still commits', async (t) => {
   const server = await fakeMubit({ 'POST /v2/control/reflect': { status: 500, json: { error: 'llm down' } } });
@@ -345,13 +736,9 @@ test('a failed reflect is logged, marked failed, exits 0 — and the drain still
 
 /**
  * §1.4 / §5.7 "Expectation-setting". A reflect that stores 3 lessons has NOT made them
- * cross-session durable. Promotion past `run` scope is gated three more ways, all in the
- * same server-side loop:
- *
- *   1. not a rule           — `lesson.is_rule` entries never scope-promote
- *   2. validation `Active`  — pending/rejected candidates must earn trust first 
- *   3. recurrence           — the normalized key must recur
- *                             the promotion threshold times, default 3 
+ * cross-session durable. Storing a lesson and that lesson outliving its own run are two
+ * different events; only the first is anything this hook can see, and nothing in the reflect
+ * response says whether the second will follow.
  *
  * One reflect per session is the NECESSARY condition, not the sufficient one. So the hook
  * reports a count and nothing more — a marker or systemMessage promising durability would

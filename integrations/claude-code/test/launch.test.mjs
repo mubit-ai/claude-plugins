@@ -1,17 +1,17 @@
 // @ts-check
 /**
- * `mcp/src/launch.mjs` — build-guide §8.3 (and §8.1 for the upstream allowlist patch).
+ * `mcp/src/launch.mjs` — the MCP entry point (§8.3, and §8.1 for the upstream allowlist patch).
  *
  * The launcher is bundled to `mcp/dist/index.js`, which is the `.mcp.json` entry point.
  * It exists for one reason: the MCP server reads its configuration from `process.env` at
- * MODULE SCOPE, and one of those reads has a poisoned default — in effect:
+ * MODULE SCOPE, and one of those reads falls back to a placeholder — in effect:
  *
  *     const DEFAULT_SESSION_ID = process.env.MUBIT_DEFAULT_SESSION_ID || "default";
  *
- * The literal `"default"` collapses every user, every project and every machine into a
- * single Mubit run. The launcher's job is to overwrite that with the same run id the
- * hooks derive, *before* importing the server — after the import it is too late, because
- * the constant has already been captured.
+ * `"default"` is the bundled server's placeholder, and it identifies nothing: a run id has
+ * to name one project on one machine. The launcher's job is to overwrite it with the same
+ * run id the hooks derive, *before* importing the server — after the import it is too late,
+ * because the constant has already been captured.
  *
  * These tests import the launcher in a child process with a module-resolution hook that
  * swaps `./server.js` for a stub. The stub snapshots `process.env` at the instant it is
@@ -21,15 +21,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { PLUGIN_ROOT, REPO_ROOT, makeDataDir, makeProjectDir, tempDir, baseEnv, lib } from './helpers/harness.mjs';
+import { PLUGIN_ROOT, REPO_ROOT, makeDataDir, makeProjectDir, tempDir, baseEnv, lib, mod } from './helpers/harness.mjs';
 
-/** §8.2 — the curated ten, in the guide's order. */
+/** §8.2 — the curated set, in the guide's order, with the three promoted tools last. */
 const DEFAULT_ALLOWLIST = [
   'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
   'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
+  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
 ];
 
 // ---------------------------------------------------------------------------
@@ -44,15 +45,24 @@ function launcherScript() {
   if (existsSync(dist)) return dist;
   return assert.fail(
     `mcp/src/launch.mjs does not exist yet (nor the bundled mcp/dist/index.js) under ${PLUGIN_ROOT}.\n` +
-    '  Build-guide §8.3 defines it: loadConfig() → deriveRunId() → set env → await import("./server.js").');
+    '  §8.3 defines it: loadConfig() → deriveRunId() → set env → await import("./server.js").');
 }
 
 const STUB_SERVER = `
 // Stands in for the bundled @mubit-ai/mcp server. It records process.env at the exact
 // moment the module is evaluated — i.e. everything the real server would read at module
 // scope — and does nothing else.
+//
+// It also records both guards' markers. Neither is an env var — one wraps globalThis.fetch,
+// the other process.stdout.write — and "installed before the import" is the same ordering
+// property the env vars have, for the same reason: the real server captures its transport
+// at module scope, so a guard installed afterwards would never see the frame it is for.
 import { writeFileSync } from 'node:fs';
-writeFileSync(process.env.MUBIT_TEST_ENV_SNAPSHOT, JSON.stringify({ ...process.env }));
+writeFileSync(process.env.MUBIT_TEST_ENV_SNAPSHOT, JSON.stringify({
+  env: { ...process.env },
+  guard: globalThis.fetch?.mubitEgressGuard ?? null,
+  instructions: process.stdout.write?.mubitInstructionsGuard ?? null,
+}));
 export function createServer() { return { tool() {}, connect: async () => {} }; }
 export default { createServer };
 `;
@@ -86,9 +96,10 @@ setTimeout(() => process.exit(0), 1500).unref();
 
 /**
  * Run the launcher with a stubbed server.
- * @param {{extra?: Record<string,string>, projectDir?: string}} [o]
+ * @param {{extra?: Record<string,string>, projectDir?: string, dataDir?: string}} [o]
  * @returns {Promise<{code:number|null, stdout:string, stderr:string,
- *                    importedServer:boolean, envAtImport:Record<string,string>}>}
+ *                    importedServer:boolean, envAtImport:Record<string,string>,
+ *                    guardAtImport:any, instructionsAtImport:any}>}
  */
 async function runLauncher(o = {}) {
   const launch = launcherScript();
@@ -101,7 +112,7 @@ async function runLauncher(o = {}) {
   writeFileSync(hooks, LOADER_HOOKS);
   writeFileSync(entry, ENTRY);
 
-  const dataDir = makeDataDir();
+  const dataDir = o.dataDir ?? makeDataDir();
   const projectDir = o.projectDir ?? makeProjectDir();
   const env = baseEnv({
     dataDir,
@@ -129,8 +140,14 @@ async function runLauncher(o = {}) {
   });
 
   const importedServer = existsSync(snapshot);
-  const envAtImport = importedServer ? JSON.parse(readFileSync(snapshot, 'utf8')) : {};
-  return { code, stdout: out, stderr: err, importedServer, envAtImport, env, projectDir };
+  const snap = importedServer ? JSON.parse(readFileSync(snapshot, 'utf8')) : {};
+  const envAtImport = snap.env ?? {};
+  const guardAtImport = snap.guard ?? null;
+  const instructionsAtImport = snap.instructions ?? null;
+  return {
+    code, stdout: out, stderr: err, importedServer,
+    envAtImport, guardAtImport, instructionsAtImport, env, projectDir, dataDir,
+  };
 }
 
 /** The run id the hooks would derive for the same directory (§4.3). */
@@ -152,8 +169,9 @@ test('never leaves MUBIT_DEFAULT_SESSION_ID as the literal "default"', async () 
   assert.ok(r.importedServer,
     `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
   assert.notEqual(r.envAtImport.MUBIT_DEFAULT_SESSION_ID, 'default',
-    'MUBIT_DEFAULT_SESSION_ID was still "default" when the server was imported — that literal ' +
-    'collapses every user, project and machine into one Mubit run (§4.3)');
+    'MUBIT_DEFAULT_SESSION_ID was still "default" when the server was imported — that is the ' +
+    'bundled server\'s placeholder, and it identifies nothing: a run id has to name one ' +
+    'project on one machine (§4.3)');
   assert.ok((r.envAtImport.MUBIT_DEFAULT_SESSION_ID ?? '').length > 0,
     'MUBIT_DEFAULT_SESSION_ID must be set to a derived run id, not blanked');
 });
@@ -166,6 +184,99 @@ test('sets MUBIT_DEFAULT_SESSION_ID to the run id the hooks derive for the same 
   assert.equal(r.envAtImport.MUBIT_DEFAULT_SESSION_ID, expected,
     'the launcher must derive the run id with the same strategy as lib/runid.mjs so MCP-tool ' +
     'writes and hook captures share a run (§8.3)');
+});
+
+// ---------------------------------------------------------------------------
+// §4.3 — the session map belongs to the hooks, and the launcher has to read it
+// ---------------------------------------------------------------------------
+
+/** A synthetic host session id, in the shape the CLI actually hands out. */
+const HOST_SESSION_ID = '8f2c1d40-0000-4000-8000-0000000000a1';
+
+/**
+ * Seed the record a SessionStart hook would have written, so the launcher meets the
+ * mapping it is meant to honour rather than an empty data directory.
+ *
+ * @param {string} dataDir
+ * @param {string} sessionId
+ * @param {Record<string, any>} record
+ */
+function seedSessionMap(dataDir, sessionId, record) {
+  const dir = join(dataDir, 'sessions');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${sessionId}.json`), JSON.stringify(record));
+}
+
+// The host puts `CLAUDE_CODE_SESSION_ID` in every MCP server's environment, and it is the
+// same id the hook payloads carry as `session_id` — so the launcher can read the mapping
+// the hooks wrote instead of deriving past it.
+//
+// It matters because the mapped run is not always the derived one. `/clear` appends
+// `-c<n>` (§4.3), so a launcher that derives fresh pins the server to the unsuffixed run
+// while every hook in the same session writes to the suffixed one: `/mubit-memory:remember`
+// then saves into a run that pre-prompt recall never reads. That divergence is observable
+// on a live session today — `mubit_status` reports the bare run id while the hooks report
+// the `-c1` one.
+test('reuses the run the hooks mapped for this session, /clear suffix and all', async () => {
+  const dataDir = makeDataDir();
+  const projectDir = makeProjectDir();
+  const cleared = 'cc-launch-fixture-c1';
+  seedSessionMap(dataDir, HOST_SESSION_ID, {
+    run_id: cleared,
+    strategy: 'per-directory',
+    project_dir: projectDir,
+    clear_count: 1,
+  });
+
+  const r = await runLauncher({
+    dataDir,
+    projectDir,
+    extra: { CLAUDE_CODE_SESSION_ID: HOST_SESSION_ID },
+  });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+  assert.equal(r.envAtImport.MUBIT_DEFAULT_SESSION_ID, cleared,
+    'the launcher derived past the session map, so MCP-tool writes land in the unsuffixed '
+    + 'run while every hook in the same session writes to the cleared one (§4.3)');
+});
+
+// The startup race: MCP servers and the SessionStart hook both start at session start, and
+// nothing orders them. Meeting no mapping has to mean today's answer, not a refusal.
+test('derives fresh when the session has no mapping yet', async () => {
+  const r = await runLauncher({ extra: { CLAUDE_CODE_SESSION_ID: HOST_SESSION_ID } });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+  const expected = await hookDerivedRunId(r.env);
+  assert.equal(r.envAtImport.MUBIT_DEFAULT_SESSION_ID, expected,
+    'with no record to read, the launcher must still answer with the run id the hooks '
+    + 'derive for this directory (§8.3)');
+});
+
+// The hooks own this file. They are the only thing that ever sees `SessionStart.source`,
+// which is what makes a `/clear` a new run at all — so a launcher that wrote its own answer
+// back would overwrite a mapping derived from strictly more information than it has. The
+// recorded strategy here disagrees with the launcher's, which is the case where the two
+// answers differ and a writer would therefore clobber.
+test('leaves the session map exactly as the hooks wrote it', async () => {
+  const dataDir = makeDataDir();
+  const projectDir = makeProjectDir();
+  const file = join(dataDir, 'sessions', `${HOST_SESSION_ID}.json`);
+  seedSessionMap(dataDir, HOST_SESSION_ID, {
+    run_id: 'cc-launch-fixture-c1',
+    strategy: 'per-conversation',
+    project_dir: projectDir,
+    clear_count: 1,
+  });
+  const before = readFileSync(file, 'utf8');
+
+  const r = await runLauncher({
+    dataDir,
+    projectDir,
+    extra: { CLAUDE_CODE_SESSION_ID: HOST_SESSION_ID },
+  });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+  assert.equal(readFileSync(file, 'utf8'), before,
+    'the launcher rewrote the session map. Only the hooks see the source that decides what a '
+    + 'new run is; the launcher reading and then overwriting turns a `/clear` into a race '
+    + '(§4.3)');
 });
 
 // §8.3 step 3 — the server reads env at MODULE scope. Setting any of these after the
@@ -217,15 +328,15 @@ test('per-conversation falls back to per-directory and says so on stderr', async
 // §8.2 — the allowlist the launcher hands to the server
 // ---------------------------------------------------------------------------
 
-// §8.2 — blank config means the curated ten, not "all 21". The whole point of the
+// §8.2 — blank config means the curated set, not "all 21". The whole point of the
 // allowlist is bounding the always-loaded context cost of the tool schemas (§3.5).
-test('MUBIT_MCP_TOOLS defaults to the curated ten when mcpTools is blank', async () => {
+test('MUBIT_MCP_TOOLS defaults to the curated set when mcpTools is blank', async () => {
   const r = await runLauncher({ extra: { MUBIT_MCP_TOOLS: '', CLAUDE_PLUGIN_OPTION_MCP_TOOLS: '' } });
   assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
 
   const got = String(r.envAtImport.MUBIT_MCP_TOOLS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   assert.deepEqual([...got].sort(), [...DEFAULT_ALLOWLIST].sort(),
-    `MUBIT_MCP_TOOLS must default to the curated ten (§8.2), got: ${got.join(', ') || '(empty)'}`);
+    `MUBIT_MCP_TOOLS must default to the curated ${DEFAULT_ALLOWLIST.length} (§8.2), got: ${got.join(', ') || '(empty)'}`);
 });
 
 // §8.2 — "Users restore any of them with mcpTools / MUBIT_MCP_TOOLS." A user-supplied
@@ -297,11 +408,12 @@ test('[mirror of @mubit-ai/mcp tools suite] a two-name allowlist registers exact
   assert.deepEqual(got, ['mubit_recall', 'mubit_status'], 'a two-name allowlist must register exactly those two');
 });
 
-// §8.2 — and the curated ten must select ten of the twenty-one.
-test('[mirror of @mubit-ai/mcp tools suite] the curated default allowlist selects ten of twenty-one', () => {
+// §8.2 — and the curated set must select exactly itself out of the twenty-one.
+test('[mirror of @mubit-ai/mcp tools suite] the curated default allowlist selects thirteen of twenty-one', () => {
   const names = realToolNames();
   const got = applyAllowlist(names, DEFAULT_ALLOWLIST.join(','));
-  assert.equal(got.length, 10, `curated allowlist selected ${got.length} tools: ${got.join(', ')}`);
+  assert.equal(got.length, DEFAULT_ALLOWLIST.length,
+    `curated allowlist selected ${got.length} tools: ${got.join(', ')}`);
   for (const n of DEFAULT_ALLOWLIST) {
     assert.ok(names.includes(n), `default allowlist names "${n}", which the bundled server does not register`);
   }
@@ -314,33 +426,130 @@ test('[mirror of @mubit-ai/mcp tools suite] the curated default allowlist select
 // business and is tested in its suite; what matters here is what the bundle in `mcp/dist`
 // does, because that is the server a user actually runs.
 //
-// The check is deliberately two-sided rather than a bare `assert.match`. Until the patched
-// package ships, the bundled server ignores the allowlist and registers all 21 tools — so
-// asserting the patch is present would fail on a true statement about today's artifact. What
-// must always hold is that the recorded context cost describes the server as actually built:
-// claiming ten tools' worth of context while shipping twenty-one is the user-visible defect
-// (§3.5). `scripts/context-cost.json` already carries both facts, so this pins them together
-// and flips on its own the day a patched `@mubit-ai/mcp` is bundled.
-test('context-cost.json agrees with the bundled server about the allowlist', () => {
+// This assertion used to be two-sided — it checked only that `context-cost.json` *agreed*
+// with whatever the bundle did, so it stayed green while the plugin shipped 21 tools where
+// ten were configured, and was written to "flip on its own the day a patched @mubit-ai/mcp
+// is bundled". That day came: the bundle is now built from the in-repo `@mubit-ai/mcp`
+// (esbuild.config.mjs), so the accommodation is gone and the patch is simply required.
+// A server that ignores the allowlist is a defect, not a state to be recorded faithfully.
+test('the bundled server honours the allowlist, and context-cost.json says so', () => {
   const bundle = readFileSync(join(PLUGIN_ROOT, 'mcp', 'dist', 'server.js'), 'utf8');
-  const honoursAllowlist = /MUBIT_MCP_TOOLS/.test(bundle);
-  const registered = realToolNames();
+  const defined = realToolNames();
+
+  assert.match(bundle, /MUBIT_MCP_TOOLS/,
+    'mcp/dist/server.js does not read MUBIT_MCP_TOOLS, so the allowlist is inert and every '
+    + 'session pays for all 21 tool schemas (§8.1, §3.5).\n'
+    + '  It is bundled from the in-repo @mubit-ai/mcp — rebuild both:\n'
+    + '    npm --prefix ../mcp ci && npm --prefix ../mcp run build\n'
+    + '    npm run build');
 
   const cost = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'scripts', 'context-cost.json'), 'utf8'));
 
-  assert.equal(cost.allowlistHonoured, honoursAllowlist,
-    `context-cost.json records allowlistHonoured=${cost.allowlistHonoured}, but mcp/dist/server.js `
-    + `${honoursAllowlist ? 'does' : 'does not'} read MUBIT_MCP_TOOLS. Re-measure with `
+  assert.equal(cost.allowlistHonoured, true,
+    `context-cost.json records allowlistHonoured=${cost.allowlistHonoured}. Re-measure with `
     + '`node scripts/measure-context-cost.mjs --write`.');
 
-  assert.deepEqual(cost.surface?.registered, registered.slice().sort(),
-    'context-cost.json was measured against a different tool table than mcp/dist/server.js '
-    + 'registers — re-measure with `node scripts/measure-context-cost.mjs --write`');
+  // `surface.registered` is the real `tools/list` answer, so under a blank `mcpTools` it is
+  // the curated set — not the 21 the bundle *defines*. Both facts are checked, because
+  // "advertises the curated set" and "still carries all 21 for users who restore them" are separate
+  // promises and only the first one bounds the context cost.
+  assert.deepEqual(cost.surface?.registered, [...DEFAULT_ALLOWLIST].sort(),
+    'context-cost.json was measured against a tool surface that is not the curated set — '
+    + 're-measure with `node scripts/measure-context-cost.mjs --write`');
 
-  // The consequence, stated so it cannot be lost: while the allowlist is inert, every session
-  // pays for all 21 schemas, not the curated 10.
-  const paidFor = honoursAllowlist ? DEFAULT_ALLOWLIST.length : registered.length;
-  assert.equal(cost.breakdown?.toolSchemas?.count, paidFor,
-    `every session pays for ${paidFor} tool schemas, but context-cost.json bills for `
+  for (const name of cost.surface?.registered ?? []) {
+    assert.ok(defined.includes(name),
+      `context-cost.json records "${name}" as advertised, but mcp/dist/server.js does not define it`);
+  }
+
+  assert.equal(cost.breakdown?.toolSchemas?.count, DEFAULT_ALLOWLIST.length,
+    `every session pays for ${DEFAULT_ALLOWLIST.length} tool schemas, but context-cost.json bills for `
     + `${cost.breakdown?.toolSchemas?.count}`);
+});
+
+// ---------------------------------------------------------------------------
+// §8.3 — the egress guard, installed on the same schedule as the env
+// ---------------------------------------------------------------------------
+
+// The bundled server dials the endpoint itself: nothing in this repo sees the request, and
+// the SDK inside it hard-codes `lesson_scope: "session"` on the one write tool a default
+// install exposes — a scope the control plane reads across runs. The guard wraps
+// `globalThis.fetch` to clamp that, and it is subject to the same ordering rule as every
+// env var here: the server captures its transport at module scope, so a guard installed
+// after the import would never see a single request.
+test('installs the egress guard BEFORE importing the server', async () => {
+  const r = await runLauncher();
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+
+  assert.ok(r.guardAtImport,
+    'globalThis.fetch carried no egress guard when the server was imported — every MCP write '
+    + 'then leaves this machine unexamined (§8.3)');
+  assert.equal(r.guardAtImport.ceiling, 'session',
+    'the default ceiling is what `mubit_learned` tells the model it writes at, and the '
+    + 'narrowest scope from which a lesson has any path out of the run that wrote it');
+  assert.equal(r.guardAtImport.pinRun, true,
+    'a plugin-launched server must ignore a caller-supplied session_id — the launcher '
+    + 'already derived the run, and a write that follows the caller elsewhere breaks the '
+    + 'per-run boundary the run id exists to draw');
+});
+
+// §6.2 — the ceiling is a userConfig key, so it has to travel the same path as the rest of
+// the config rather than being read out of the environment a second time inside the guard.
+test('carries mcpLessonScope through to the guard', async () => {
+  const r = await runLauncher({ extra: { MUBIT_MCP_LESSON_SCOPE: 'global' } });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+
+  assert.equal(r.guardAtImport?.ceiling, 'global');
+});
+
+// The guard clamps to a run id, so it needs the same one the rest of the launcher published.
+// If these two ever disagreed, a pinned write would land in a run the hooks never read.
+test('the guard pins to the same run id the server was given', async () => {
+  const r = await runLauncher({ extra: { MUBIT_DEFAULT_SESSION_ID: 'default' } });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+
+  assert.equal(r.guardAtImport?.runId, r.envAtImport.MUBIT_DEFAULT_SESSION_ID,
+    'the guard and the server must agree on which run this session writes into');
+});
+
+// ---------------------------------------------------------------------------
+// §8.3 — the instructions guard, on the same schedule as everything else
+// ---------------------------------------------------------------------------
+
+// Under tool search the host loads only tool *names* and the server's `instructions` field
+// at session start, and a subagent is handed neither the SessionStart preamble nor the
+// per-turn injection (`hooks.json` registers both in the parent conversation only). So
+// `instructions` is the only statement of when Mubit is worth reaching for that some models
+// ever see — and the bundled server has no way to set it. `createServer()` builds
+// `new McpServer({name, version})` with no options object, and no MUBIT_* variable feeds the
+// field, so the launcher fills it in on the outbound `initialize` frame instead.
+//
+// That wrapper goes on `process.stdout.write`, which is the transport's only exit
+// (`StdioServerTransport.send` calls `this._stdout.write(serializeMessage(message))`), and
+// it is subject to the same ordering rule as the env vars and the egress guard: the
+// transport captures `process.stdout` when it is constructed, so a wrapper installed after
+// the import is a wrapper on a handle nobody is holding. This assertion is the whole
+// correctness argument for the feature.
+test('installs the instructions guard BEFORE importing the server', async () => {
+  const r = await runLauncher();
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+
+  assert.ok(r.instructionsAtImport,
+    'process.stdout.write carried no instructions guard when the server was imported, so the '
+    + 'initialize frame goes out exactly as the bundle built it — with no `instructions` field '
+    + 'at all (§8.3)');
+  assert.ok(Number(r.instructionsAtImport.chars) > 0,
+    'the instructions guard was installed with nothing to say, which is indistinguishable '
+    + 'from not installing it');
+});
+
+// The guard is handed a constant that lives in source and is edited there. If the launcher
+// passed anything else, editing `INSTRUCTIONS` would change nothing a model reads.
+test('the guard carries the launcher\'s own INSTRUCTIONS constant', async () => {
+  const r = await runLauncher();
+  const { INSTRUCTIONS } = await mod('mcp/src/instructions.mjs');
+
+  assert.equal(r.instructionsAtImport?.chars, INSTRUCTIONS.length,
+    'the text installed before the import is not the INSTRUCTIONS constant in '
+    + 'mcp/src/instructions.mjs — the editable copy and the shipped copy have drifted');
 });

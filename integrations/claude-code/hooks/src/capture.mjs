@@ -1,9 +1,15 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * `hooks/src/capture.mjs` — PostToolUse / PostToolUseFailure / Stop / SubagentStop (§5.4).
+ * `hooks/src/capture.mjs` — PostToolUse / PostToolUseFailure / PermissionRequest / Stop /
+ * StopFailure / SubagentStop (§5.4).
  *
- * One script, four modes by argv: none, `--failure`, `--stop`, `--subagent`.
+ * One script, six modes by argv: none, `--failure`, `--permission`, `--stop`,
+ * `--stop-failure`, `--subagent`.
+ *
+ * `--permission` is Codex-only, because `PermissionRequest` is an event Claude Code does not
+ * have. See `buildPermissionItem` for why it earns a mode of its own rather than riding on
+ * the ordinary tool path.
  *
  * ---------------------------------------------------------------------------
  * The two properties that dominate this file
@@ -29,13 +35,15 @@
 
 import { join } from 'node:path';
 
-import { envTags } from '../../lib/config.mjs';
+import { readActor } from '../../lib/actor.mjs';
+import { envTags, host } from '../../lib/config.mjs';
+import { firstUserText, toolCallRecord } from '../../lib/codex-rollout.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { classifyTool, classifyTurn } from '../../lib/classify.mjs';
 import { isDeniedPath, isSelfReference, redactParams, redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey, turnNumber } from '../../lib/runid.mjs';
 import { appendItem, spoolStats } from '../../lib/spool.mjs';
-import { readJson, resolveDataDir, writeJsonAtomic } from '../../lib/state.mjs';
+import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
 /**
  * Nothing here is allowed to be slow, so the budget exists only to bound a pathological
@@ -47,6 +55,60 @@ const BUDGET_MS = 1500;
 const PATH_KEYS = [
   'file_path', 'filePath', 'path', 'notebook_path', 'notebookPath', 'target_file',
 ];
+
+/**
+ * The tools worth no memory. §3.2's matcher used to be an allowlist of eleven built-in tool
+ * names, which is a rule this plugin cannot keep correct: the host owns that set and renames
+ * it under us (`Task` -> `Agent`, `KillShell` -> `TaskStop`, `BashOutput` -> `TaskOutput`).
+ * What kept the allowlist working at all was the host's own legacy-alias table — it tests a
+ * matcher against a tool's current name AND its former ones, so `Task` went on quietly
+ * matching `Agent` long after the rename. That is a compatibility shim the plugin does not
+ * control, cannot see, and is one host release away from losing. Everything the allowlist
+ * had never heard of was dropped in the manifest, silently, with nothing to report the loss.
+ *
+ * So `hooks.json` now matches every tool and the decision lives here, where a test can reach
+ * it — and it is a *deny* list, so a tool that does not exist yet is captured by default.
+ * Each row, and why it is not an episode:
+ *
+ *   TodoWrite        the model rewriting its own checklist. The plan that matters is in the
+ *                    turn itself, which `Stop` already stores.
+ *   EnterPlanMode    a mode transition, and so is its twin below. The plan they bracket was
+ *   ExitPlanMode     written by the turn; the transition itself carries none of it.
+ *   ToolSearch       loading a tool's schema. It says what was looked up, never what was done.
+ *   ListAgents       who happens to be running right now; stale the moment it is stored.
+ *   TaskList         likewise an enumeration of current state, not a change to it.
+ *   CronList         likewise.
+ *   Monitor          a poll. One wait becomes fifty identical items at recall time.
+ *   ScheduleWakeup   a timer being set. Whatever it wakes up to is the episode, not this.
+ *   StructuredOutput the plumbing by which a subagent hands its result back. The result is
+ *                    already captured — at that subagent's `SubagentStop` — so storing this
+ *                    too buys a duplicate of the most-duplicated content there is.
+ *
+ * **Kept on purpose**, because each records a decision or a result rather than bookkeeping:
+ * `AskUserQuestion` (see below), `ReportFindings` (the findings ARE the content),
+ * `CronCreate`/`CronDelete` (durable config mutated — the same shape of act as `Write`),
+ * `EnterWorktree`/`ExitWorktree` (they decide where every later `Edit` lands, so an episode
+ * that omits them misreads), `LSP` (code intelligence — read-shaped, exactly like `Grep`),
+ * and `Workflow`. Absence from this list is the default; a name earns a row here only with a
+ * reason written next to it.
+ *
+ * `AskUserQuestion` is the one that looks like bookkeeping and is not, so it gets its own
+ * paragraph: its `tool_response` carries **what the human chose, and the options they turned
+ * down**. §4.5 already grades it `feedback` — "the one entry type that records what the
+ * human, not the model, decided" — and that is precisely the class of fact a model cannot
+ * re-derive by reading the codebase, which is the whole reason a memory layer exists. It was
+ * on this list in an early draft only because, before the `tool_response` fix, the payload
+ * looked empty. Do not tidy it back on.
+ *
+ * Applied to SUCCESSFUL calls only, for the same reason self-reference suppression is
+ * (step 2 below): a failure is the highest-value thing a coding agent can remember (§4.5),
+ * and "the todo write blew up" is a diagnostic nobody else is keeping.
+ */
+const SKIP_TOOLS = new Set([
+  'TodoWrite', 'EnterPlanMode', 'ExitPlanMode', 'ToolSearch',
+  'ListAgents', 'TaskList', 'CronList', 'Monitor', 'ScheduleWakeup',
+  'StructuredOutput',
+]);
 
 /**
  * How far into a nested `tool_input` the human-readable render descends before collapsing
@@ -63,7 +125,57 @@ const MAX_VALUE_CHARS = 4096;
 /** `item_id` is a wire value and a dedup key; keep it boring. */
 const MAX_ID_CHARS = 160;
 
+/**
+ * The used-signal's name, written onto every record it produces.
+ *
+ * A bare `0.4` on a turn file is unreadable a version later — nobody can tell whether it was
+ * a probability, a ratio, or a threshold somebody tuned. The version suffix is load-bearing
+ * too: when the method changes, old records stay interpretable instead of being silently
+ * pooled with new ones that were measured differently.
+ */
+const USED_SIGNAL_METHOD = 'memory-term-echo/v1';
+
+/** How many matched terms are kept as evidence. Enough to read; not a copy of the block. */
+const MAX_EVIDENCE_TERMS = 12;
+
+/** The reply is scanned, never stored. This bounds the scan on a pathological message. */
+const MAX_ANSWER_SCAN = 64 * 1024;
+
+/** Sanity bounds on terms read back from a turn file, which is editable local state. */
+const MAX_TERMS_READ = 64;
+const TERM_MIN_CHARS = 4;
+const TERM_MAX_CHARS = 24;
+
+/**
+ * The mark `--stop-failure` writes on the turn file, and the whole reason that mode exists.
+ *
+ * `lib/outcome.mjs` reads this key and posts nothing for the turn. It is deliberately NOT
+ * `outcome: "failure"`, which the original design called for ("On a StopFailure turn:
+ * outcome 'failure', signal -0.3"): -0.3 against the turn's recalled ids is a claim that the
+ * *memory* was wrong, and a rate limit is not evidence about memory. See the fifth row of
+ * `decideOutcome`'s table.
+ */
+const API_ERROR_KEY = 'api_error';
+
+/**
+ * The taxonomy value is a closed vocabulary of short identifiers; this only bounds a host
+ * that sends something else. The free-text `error_details` beside it is deliberately not
+ * stored: the decision keys on the taxonomy value alone, and an unbounded API message is a
+ * §4.4 question with nothing on the other side of it.
+ */
+const MAX_API_ERROR_CHARS = 64;
+
+/**
+ * What the host itself substitutes for a missing `error` on the way to the matcher, and the
+ * taxonomy's own catch-all. An empty mark would read as "no API error at all" and put the
+ * turn straight back into the outcome path, so there is no path out of `--stop-failure` with
+ * a blank one.
+ */
+const API_ERROR_UNKNOWN = 'unknown';
+
 // ---------------------------------------------------------------------------
+
+/** @typedef {'tool'|'failure'|'permission'|'stop'|'stop-failure'|'subagent'} Mode */
 
 const MODE = pickMode(process.argv.slice(2));
 
@@ -78,12 +190,18 @@ await runHook('capture', {
 });
 
 /**
+ * `Array.includes` is exact equality, not a prefix test, so `--stop-failure` and `--stop`
+ * cannot be confused for one another however these rows are ordered. The specific flag is
+ * checked first anyway, because the next person to read this will wonder.
+ *
  * @param {string[]} argv
- * @returns {'tool'|'failure'|'stop'|'subagent'}
+ * @returns {Mode}
  */
 function pickMode(argv) {
   const args = Array.isArray(argv) ? argv : [];
   if (args.includes('--failure')) return 'failure';
+  if (args.includes('--permission')) return 'permission';
+  if (args.includes('--stop-failure')) return 'stop-failure';
   if (args.includes('--stop')) return 'stop';
   if (args.includes('--subagent')) return 'subagent';
   return 'tool';
@@ -95,13 +213,21 @@ function pickMode(argv) {
  *
  * @param {Record<string, any>} rawPayload
  * @param {Record<string, any>} cfg
- * @param {'tool'|'failure'|'stop'|'subagent'} mode
+ * @param {Mode} mode
  */
 function capture(rawPayload, cfg, mode) {
   const payload = isObject(rawPayload) ? rawPayload : {};
 
   // 1. capture disabled -> nothing to do.
   if (cfg && cfg.capture === false) return;
+
+  // 2a. §3.2: the matcher lets every tool through, so the bookkeeping tools are dropped
+  //     here. See `SKIP_TOOLS` for why an allowlist in the manifest could not do this job.
+  //
+  //     `--permission` is dropped by the same list: a permission request for `TodoWrite` is
+  //     as much bookkeeping as the write would have been.
+  if ((mode === 'tool' || mode === 'permission')
+      && SKIP_TOOLS.has(str(payload.tool_name).trim())) return;
 
   // 2. §4.4 self-reference suppression. Without it the plugin records its own traffic,
   //    recalls it, then records the recall.
@@ -112,13 +238,17 @@ function capture(rawPayload, cfg, mode) {
   //    doctor skill exists to surface. Suppressing it would also swallow every failure in
   //    any repo whose crate names happen to contain `mubit` — the fixture
   //    `cargo check -p my-crate` is precisely that case.
-  if (mode === 'tool') {
+  //    `--permission` is suppressed too, and here the reason is sharper than the loop: under
+  //    Codex the plugin's own MCP tools are the ones most likely to be gated, so without this
+  //    every `mubit_recall` approval would be recorded as an episode by the thing being
+  //    approved.
+  if (mode === 'tool' || mode === 'permission') {
     if (attempt(() => isSelfReference(payload.tool_name, payload.tool_input, cfg), false)) return;
   }
 
   // 3. §4.4 stage 2: a denylisted subject is DROPPED, never scrubbed. A scrubbed `.env` is
   //    still a map of which secrets the project holds.
-  if (mode === 'tool' || mode === 'failure') {
+  if (mode === 'tool' || mode === 'failure' || mode === 'permission') {
     if (attempt(() => hasDeniedSubject(payload, cfg), false)) return;
   }
 
@@ -126,10 +256,19 @@ function capture(rawPayload, cfg, mode) {
   if (!runId) return;
 
   // 4-6. classify, build the text, redact.
+  //
+  // `--stop-failure` builds nothing. The turn produced no episode: its answer is whatever
+  // fragment the API managed before it fell over, and `Q: <prompt>\n\nA: <half a sentence>`
+  // is the half-a-conversation this file already refuses to store — except this time it would
+  // also be recalled later as though it were what the assistant had to say on the subject.
   const item = attempt(
-    () => (mode === 'stop' || mode === 'subagent'
-      ? buildTurnItem(payload, cfg, runId, mode)
-      : buildToolItem(payload, cfg, mode)),
+    () => {
+      if (mode === 'stop-failure') return null;
+      if (mode === 'permission') return buildPermissionItem(payload, cfg);
+      return mode === 'stop' || mode === 'subagent'
+        ? buildTurnItem(payload, cfg, runId, mode)
+        : buildToolItem(payload, cfg, mode);
+    },
     null,
   );
 
@@ -144,9 +283,49 @@ function capture(rawPayload, cfg, mode) {
     attempt(() => fireDrain(cfg, runId, payload, outcomeArgs(payload)));
     return;
   }
+
+  // 8b. `--stop-failure` closes the turn too — and it is the ONLY thing that ever will.
+  //
+  //     The host fires `StopFailure` **instead of** `Stop` (its own registry: "Fires instead
+  //     of Stop when an API error (rate limit, auth failure, etc.) ended the turn"), so on a
+  //     rate-limited turn `--stop` never runs. Before this mode existed the turn file was
+  //     simply abandoned mid-write: `prompt` and `recalled` staged, no `ended_at`, nothing
+  //     anywhere recording that the turn had died or why.
+  //
+  //     It closes the turn `outcome_pending` exactly like `--stop` does, on purpose. Leaving
+  //     the flag off would also stop `session-end`'s flush from posting — but by hiding the
+  //     turn from the sweep rather than by deciding about it, which puts the rule in the
+  //     shape of an omission that the next person to touch that filter deletes by accident.
+  //     One rule, in `lib/outcome.mjs`, read by both hooks (see its header).
+  //
+  //     And it does NOT force a drain. The only reason `--stop` always does is to carry
+  //     `--with-outcome`; there is no outcome to carry here, so this falls through to the
+  //     ordinary batch trigger below — the turn's captured tool calls were real work, and
+  //     the model's API falling over says nothing about Mubit's.
+  if (mode === 'stop-failure') {
+    attempt(() => closeTurn(cfg, runId, payload, apiErrorOf(payload)));
+  }
+
   if (attempt(() => drainTriggerFired(cfg, runId), false)) {
     attempt(() => fireDrain(cfg, runId, payload, []));
   }
+}
+
+/**
+ * The `StopFailure` payload's error kind, as the host spells it.
+ *
+ * The field is **`error`** — observed on the live payload from Claude Code 2.1.235, which
+ * carries `error` beside an optional `error_details` and `last_assistant_message`. It is not
+ * the name in the published hook reference, which calls it `error_type` in one place and
+ * `reason` in another. Reading the wrong name here would stamp every API-failed turn
+ * `unknown` while every test agreed with it.
+ *
+ * @param {Record<string, any>} payload
+ * @returns {string} never empty
+ */
+function apiErrorOf(payload) {
+  const raw = str(payload.error).trim();
+  return raw ? clamp(raw, MAX_API_ERROR_CHARS) : API_ERROR_UNKNOWN;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +342,19 @@ function capture(rawPayload, cfg, mode) {
  * @returns {Record<string, any>|null}
  */
 function buildToolItem(payload, cfg, mode) {
-  const failed = mode === 'failure';
+  // Codex has no `PostToolUseFailure`, so `mode` is `'tool'` for every call this host ever
+  // makes and `failed` would be permanently false — every failed command stored as a success,
+  // which empties the half of memory `mubit_diagnose` matches against.
+  //
+  // The host records the real outcome in the rollout transcript, under this call's own
+  // `tool_use_id`; `lib/codex-rollout.mjs` explains why that is the only place it exists.
+  // Consulted only when no failure event fired, and only when it answers: a miss leaves the
+  // item exactly as it would have been, because the fix for "the host said failed and we wrote
+  // ok" must not become "we guessed".
+  const recorded = mode === 'tool' && host() === 'codex'
+    ? attempt(() => toolCallRecord(payload.transcript_path, payload.tool_use_id), null)
+    : null;
+  const failed = mode === 'failure' || !!recorded?.failed;
   const toolName = clamp(str(payload.tool_name) || 'Tool', 128);
 
   // 4. §4.5. `classifyTool` is a function of the tool name and the outcome alone, so a
@@ -182,7 +373,11 @@ function buildToolItem(payload, cfg, mode) {
     { text: '', redactions: 0, truncated: false },
   );
 
-  const rawTail = failed ? errorText(payload) : outputText(payload.tool_output);
+  // The host sends the result as **`tool_response`**. `tool_output` is the older name and
+  // is kept only as a fallback — reading it alone is what made every memory this plugin ever
+  // shipped read `Read(file_path=X) -> ` with nothing after the arrow: the plugin recorded
+  // that a file had been read and never what was in it.
+  const rawTail = failed ? errorText(payload) : outputText(payload.tool_response ?? payload.tool_output);
   const tail = attempt(
     () => redactText(rawTail, cfg, 'output'),
     { text: '', redactions: 0, truncated: false },
@@ -191,10 +386,18 @@ function buildToolItem(payload, cfg, mode) {
   const text = failed
     ? `${toolName}(${params.text}) FAILED: ${tail.text}`
     : `${toolName}(${params.text}) -> ${tail.text}`;
-  if (!text.trim()) return null;
+
+  // Both halves empty means the item is a tool name and two brackets — `Tool() -> `, which
+  // is not a memory. An empty TAIL alone is kept on purpose: `Bash(command=rm x) -> ` and
+  // `Write(file_path=…) -> ` are real episodes whose content is entirely in the params, and
+  // plenty of tools legitimately answer with nothing. Note the old test here was
+  // `!text.trim()`, which could never fire — `toolName` falls back to `'Tool'`, so the
+  // string always had characters in it.
+  if (!params.text.trim() && !tail.text.trim()) return null;
 
   return item({
     cfg,
+    payload,
     // §5.4: "item_id is stable per tool call so a retried drain deduplicates." Derived from
     // `tool_use_id` and nothing else — a timestamp in here would make every retry a new
     // entry, which is the exact failure the dedup exists to prevent.
@@ -207,12 +410,100 @@ function buildToolItem(payload, cfg, mode) {
       tool_use_id: str(payload.tool_use_id),
       hook_event: str(payload.hook_event_name) || (failed ? 'PostToolUseFailure' : 'PostToolUse'),
       session_id: str(payload.session_id),
-      prompt_id: str(payload.prompt_id),
-      execution_time_ms: finiteOr(payload.execution_time_ms, 0),
+      prompt_id: turnKey(payload),
+      // The host names it `duration_ms`; `execution_time_ms` is the older payload name and
+      // stays as a fallback. The metadata key keeps the old spelling because it is already
+      // on the wire in every stored item.
+      //
+      // Codex sends neither: `duration_ms` is in none of its eleven input schemas, so every
+      // item stored on that host read 0 and "which calls are slow" had no answer. The rollout
+      // record carries the duration the host itself measured, and it is the last rung here
+      // rather than the first so no Claude Code item changes shape.
+      execution_time_ms: finiteOr(
+        payload.duration_ms ?? payload.execution_time_ms ?? recorded?.durationMs, 0),
+      // Present only when the host recorded one, which is the one thing distinguishing this
+      // failure from every other.
+      ...(typeof recorded?.exitCode === 'number' ? { exit_code: recorded.exitCode } : {}),
       outcome: failed ? 'failure' : 'ok',
       truncated: !!(params.truncated || tail.truncated),
       redactions: num(scrubbed.redactions) + num(params.redactions) + num(tail.redactions),
       ...(isObject(cls.metadata) ? cls.metadata : {}),
+    },
+  });
+}
+
+/**
+ * PermissionRequest (Codex only): `"<tool>(<params>) NEEDS APPROVAL"`.
+ *
+ * ---------------------------------------------------------------------------
+ * Why this is an item at all
+ * ---------------------------------------------------------------------------
+ * A permission request looks like half a fact — it says a gated call was *attempted* and
+ * never says what the human answered. That reads like a reason to drop it, and it is
+ * exactly backwards.
+ *
+ * When the user **allows** the call, `PostToolUse` fires and records the whole episode, so
+ * this item is redundant and cheap. When the user **denies** it, no `PostToolUse` ever
+ * fires — observed live against a real session — and this is the only trace anywhere
+ * that the attempt happened. "We tried this and were not allowed to" is precisely the class
+ * of fact a model cannot re-derive by reading the codebase, and without this mode a coding
+ * agent rediscovers the same forbidden operation once a session, forever.
+ *
+ * ---------------------------------------------------------------------------
+ * Why a mode of its own rather than the ordinary tool path
+ * ---------------------------------------------------------------------------
+ * Three things differ, and each would be wrong on the tool path:
+ *
+ *   1. **There is no `tool_response`.** `buildToolItem` would render `Tool(params) -> ` with
+ *      nothing after the arrow, which is the exact string that made every early memory this
+ *      plugin shipped useless.
+ *   2. **The intent is `feedback`, not `tool_output`.** §4.5 grades `feedback` as "the one
+ *      entry type that records what the human, not the model, decided", and a request for
+ *      approval is a question put to a human. Grading it as tool output files it with the
+ *      file reads.
+ *   3. **There is no `tool_use_id`.** Codex's `permission-request.command.input` has no such
+ *      field, so the stable id has to come from the fallback hash. Two identical requests in
+ *      one turn therefore dedupe to one item, which is the right answer: they are the same
+ *      question asked twice.
+ *
+ * `medium`, not `high`: a gated call is a routine event under `dontAsk`, and grading every
+ * one of them `high` would outrank the failures that §4.5 reserves `high` for.
+ *
+ * @param {Record<string, any>} payload
+ * @param {Record<string, any>} cfg
+ * @returns {Record<string, any>|null}
+ */
+function buildPermissionItem(payload, cfg) {
+  const toolName = clamp(str(payload.tool_name) || 'Tool', 128);
+
+  const scrubbed = attempt(() => redactParams(payload.tool_input, cfg), { params: null, redactions: 0 });
+  const params = attempt(
+    () => redactText(renderParams(scrubbed.params), cfg, 'param'),
+    { text: '', redactions: 0, truncated: false },
+  );
+
+  // Unlike `buildToolItem`, an empty render is fatal here rather than merely thin: with no
+  // output half either, `Tool() NEEDS APPROVAL` names no operation at all.
+  if (!params.text.trim()) return null;
+
+  return item({
+    cfg,
+    payload,
+    id: `cc-perm-${fallbackId(payload, `${toolName}|${params.text}`)}`,
+    text: `${toolName}(${params.text}) NEEDS APPROVAL`,
+    intent: 'feedback',
+    importance: 'medium',
+    metadata: {
+      tool: toolName,
+      hook_event: str(payload.hook_event_name) || 'PermissionRequest',
+      session_id: str(payload.session_id),
+      prompt_id: turnKey(payload),
+      permission_requested: true,
+      // Deliberately not an `outcome`: this event fires *before* the human answers, and the
+      // plugin never learns what they said. Stamping `ok` here would be a claim about a
+      // decision nobody recorded.
+      truncated: !!params.truncated,
+      redactions: num(scrubbed.redactions) + num(params.redactions),
     },
   });
 }
@@ -240,8 +531,18 @@ function buildTurnItem(payload, cfg, runId, mode) {
     { intent: 'task_result', importance: 'medium', contentType: 'text', agentId: '', agentType: '' },
   );
 
-  const turn = attempt(() => readTurn(cfg, runId, payload.prompt_id), null);
-  const staged = str(turn?.prompt) || str(payload.prompt);
+  const turn = attempt(() => readTurn(cfg, runId, turnKey(payload)), null);
+
+  // A subagent's question is its OWN, and the turn file above belongs to its parent — shared
+  // with every sibling in the fan-out, so six subagents in one turn would all be stored as
+  // answers to one identical question. `agent_transcript_path` arrives on SubagentStop and is
+  // the only coordinate that differs between siblings; its opening user message is the task
+  // this one was actually given. Falls back to the parent's staged prompt, which is what was
+  // stored before any of this, whenever the transcript does not answer.
+  const own = mode === 'subagent'
+    ? attempt(() => firstUserText(payload.agent_transcript_path), '')
+    : '';
+  const staged = own || str(turn?.prompt) || str(payload.prompt);
   const answer = str(payload.last_assistant_message) || str(payload.message);
   if (!staged && !answer) return null;
 
@@ -257,19 +558,26 @@ function buildTurnItem(payload, cfg, runId, mode) {
 
   return item({
     cfg,
+    payload,
     id: mode === 'subagent'
-      ? `cc-sub-${idPart(payload.agent_id) || 'anon'}-${idPart(payload.prompt_id) || idPart(payload.session_id) || 'turn'}`
-      : `cc-stop-${idPart(payload.prompt_id) || idPart(payload.session_id) || 'turn'}`,
+      ? `cc-sub-${idPart(payload.agent_id) || 'anon'}-${idPart(turnKey(payload)) || idPart(payload.session_id) || 'turn'}`
+      : `cc-stop-${idPart(turnKey(payload)) || idPart(payload.session_id) || 'turn'}`,
     text,
     intent: cls.intent,
     importance: cls.importance,
     metadata: {
       hook_event: str(payload.hook_event_name) || event,
       session_id: str(payload.session_id),
-      prompt_id: str(payload.prompt_id),
-      turn_number: finiteOr(payload.turn_number, 0),
+      prompt_id: turnKey(payload),
+      // Payload first, then the ordinal `stage-prompt` staged — Codex sends no `turn_number`
+      // on any event, so without the second source every item here recorded 0.
+      turn_number: attempt(() => turnNumber(cfg, runId, payload), 0),
       ...(subAgent ? { agent_id: subAgent, agent_type: str(cls.agentType) } : {}),
       ...(subAgent ? { mubit_agent_id: attempt(() => deriveAgentId(payload), '') } : {}),
+      // The path itself, so a later reader can rejoin this subagent to its own rollout —
+      // which is what `persistSubRun` names as the next step on real per-subagent isolation.
+      ...(str(payload.agent_transcript_path)
+        ? { agent_transcript_path: str(payload.agent_transcript_path) } : {}),
       truncated: !!(q.truncated || a.truncated),
       redactions: num(q.redactions) + num(a.redactions),
     },
@@ -280,12 +588,20 @@ function buildTurnItem(payload, cfg, runId, mode) {
  * The §5.4 wire shape. `item_id` and `content_type` are REQUIRED (§1.3) — a missing one is a
  * 422 for the whole batch, not just this item — and `intent` is always set (§1.5).
  *
- * @param {{cfg: Record<string, any>, id: string, text: string, intent: any,
- *          importance: any, metadata: Record<string, any>}} o
+ * @param {{cfg: Record<string, any>, payload: Record<string, any>, id: string, text: string,
+ *          intent: any, importance: any, metadata: Record<string, any>}} o
  * @returns {Record<string, any>}
  */
 function item(o) {
   const cfg = o.cfg ?? {};
+  // Who this is attributed to. A pure cache read — `lib/actor.mjs` keeps the detection
+  // ladder, which shells out to git, on `drain`'s side of the line and nowhere near here.
+  //
+  // It goes into `metadata_json` and it must NEVER go into `user_id`. `user_id` is a
+  // retrieval *scope* the server enforces as a filter on query, and `lib/recall.mjs` sends
+  // none — so an actor written there would scope every item this hook captures out of the
+  // recall meant to find it, silently, for as long as attribution was switched on.
+  const actor = attempt(() => readActor(cfg), '');
   /** @type {Record<string, any>} */
   const out = {
     item_id: clamp(o.id || `cc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, MAX_ID_CHARS),
@@ -297,12 +613,51 @@ function item(o) {
     // Unix SECONDS, as in the §5.4 example — `occurrence_time` is an int64 of seconds
     // (control.proto) and handing it milliseconds dates every memory to the year 57000.
     occurrence_time: Math.floor(Date.now() / 1000),
-    env_tags: attempt(() => envTags(cfg, str(cfg.projectDir)), ['tool:claude-code']),
-    metadata_json: safeJson(o.metadata),
+    // The tags are derived from a directory too, and they ride on every ingested item. A
+    // run id that follows a mid-session `cd` while `repo:`/`branch:` stay on the launch repo
+    // would be half a fix: the memory would land in the right run wearing the wrong labels.
+    env_tags: attempt(
+      () => envTags(cfg, resolveProjectDir(cfg, o.payload)), ['tool:claude-code']),
+    // Both merged here rather than at each call site, so *every* ingest item this hook
+    // writes carries them uniformly, and both omitted entirely when unknown rather than
+    // written empty — a field that is always present and never says anything is worse
+    // than an absent one.
+    //
+    // `model` rides on the payload of ten of Codex's eleven events and was recorded nowhere,
+    // so memory could not say which model produced a lesson — or notice that two of them
+    // disagreed about the same thing. Claude Code sends it on SessionStart only, and an
+    // empty string would read as "the host said the model is blank".
+    metadata_json: safeJson(withActor(withModel(o.metadata, o.payload), actor)),
   };
   const userId = str(cfg.userId);
   if (userId) out.user_id = userId;
   return out;
+}
+
+/**
+ * `metadata` plus the model that produced it, when the payload names one.
+ *
+ * @param {Record<string, any>} metadata
+ * @param {Record<string, any>} payload
+ * @returns {Record<string, any>}
+ */
+function withModel(metadata, payload) {
+  const base = isObject(metadata) ? metadata : {};
+  if ('model' in base) return base;
+  const model = clamp(str(payload?.model), 128);
+  return model ? { ...base, model } : base;
+}
+
+/**
+ * `metadata` plus who it is attributed to, when the actor is known.
+ *
+ * @param {Record<string, any>} metadata
+ * @param {string} actor
+ * @returns {Record<string, any>}
+ */
+function withActor(metadata, actor) {
+  const base = isObject(metadata) ? metadata : {};
+  return actor ? { ...base, actor } : base;
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +714,12 @@ function renderValue(v, depth) {
 }
 
 /**
- * `tool_output` arrives in half a dozen shapes depending on the tool.
+ * `tool_response` arrives in half a dozen shapes depending on the tool, and no two of them
+ * agree: `Read` buries the payload under `file.content`, `Bash` splits it across
+ * `stdout`/`stderr`, and most of the rest are flat result objects with no text field at all.
+ * The `JSON.stringify` at the bottom is the deliberate floor — an unknown shape rendered as
+ * JSON is still the tool's answer, and `redactText` caps it either way.
+ *
  * @param {any} v
  * @param {number} [depth]
  * @returns {string}
@@ -375,6 +735,10 @@ function outputText(v, depth = 0) {
       return v.map((x) => outputText(x, depth + 1)).filter(Boolean).join('\n');
     }
     if (typeof v.text === 'string') return v.text;
+    // `Read` — `{type: "text", file: {filePath, content, numLines, …}}`. Without this row the
+    // most-called tool in the session stores its JSON envelope instead of the file, and the
+    // envelope's keys eat the output cap the excerpt was supposed to get.
+    if (isObject(v.file) && typeof v.file.content === 'string') return v.file.content;
     if (typeof v.content === 'string') return v.content;
     if (Array.isArray(v.content)) return outputText(v.content, depth + 1);
     if (typeof v.output === 'string') return v.output;
@@ -391,7 +755,9 @@ function outputText(v, depth = 0) {
 function errorText(payload) {
   const direct = str(payload.error) || str(payload.tool_error) || str(payload.error_message);
   if (direct) return direct;
-  return outputText(payload.error ?? payload.tool_output);
+  // `PostToolUseFailure` carries `error`; the two result fields are the fallback, newest
+  // name first, for a host that reported the failure inside the result instead.
+  return outputText(payload.error ?? payload.tool_response ?? payload.tool_output);
 }
 
 // ---------------------------------------------------------------------------
@@ -418,20 +784,149 @@ function readTurn(cfg, runId, promptId) {
  * `stage-prompt.mjs` and are what `drain --with-outcome` attributes against — writing a
  * fresh object here would silently delete the attribution the next step depends on.
  *
+ * This is also where the used-signal lands (§5.5), for the same reason: everything it needs
+ * — the staged terms and `last_assistant_message` — is in scope at one point in one function,
+ * and the file is already being rewritten. One read, one write, no new lifecycle.
+ *
+ * `apiError` is `StopFailure`'s half. It is the only difference between the two closes, and
+ * it turns the used-signal off — see below.
+ *
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {Record<string, any>} payload
+ * @param {string} [apiError]  the taxonomy value that ended the turn; '' on a normal Stop
  */
-function closeTurn(cfg, runId, payload) {
-  const p = turnPath(cfg, runId, payload.prompt_id);
+function closeTurn(cfg, runId, payload, apiError = '') {
+  const p = turnPath(cfg, runId, turnKey(payload));
   if (!p) return;
   const prev = readJson(p, null);
   const base = isObject(prev) ? prev : {
-    prompt_id: str(payload.prompt_id),
+    prompt_id: turnKey(payload),
     session_id: str(payload.session_id),
     started_at: Date.now(),
   };
-  writeJsonAtomic(p, { ...base, ended_at: Date.now(), outcome_pending: true });
+  // The signal asks whether the reply carried the injected memory's vocabulary. A reply the
+  // API cut off has no denominator for that question — `max_output_tokens` is literally "the
+  // answer stopped early" — and the answer it would produce is `used: false`, which
+  // `decideOutcome` reads as "the model ignored the memory". Unmeasurable is not unused, and
+  // this is the one place that distinction can still be made honestly.
+  const evidence = apiError ? null : attempt(() => usedEvidence(base, payload), null);
+  writeJsonAtomic(p, {
+    ...base,
+    // Absent when nothing was staged to look for. An absent key means "unmeasured" and the
+    // drain falls back to the old turn-completed reading; `used: false` means "measured, and
+    // nothing was found". Collapsing the two would report every turn from before this
+    // existed as an injection the model ignored.
+    ...(evidence ? { used_evidence: evidence } : {}),
+    ...(apiError ? { [API_ERROR_KEY]: apiError } : {}),
+    ended_at: Date.now(),
+    outcome_pending: true,
+  });
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * The used-signal — what it can show, and what it cannot
+ * ---------------------------------------------------------------------------
+ * Recall injects on every prompt over 8 characters. The cost of that is measured; whether
+ * any of it was *read* is not, and this hook cannot answer that question — the plugin sees
+ * what the model said, never what it attended to. So this does not claim to measure use. It
+ * measures one observable proxy and records the raw ingredients of it:
+ *
+ *   **did the reply carry vocabulary that came from the injected block and not from the
+ *   prompt?**
+ *
+ * The prompt subtraction happens in `prompt-recall.mjs`, and it is the only reason the
+ * number is worth anything: retrieval matched the prompt in the first place, so an overlap
+ * with the prompt's own words is what you would see with the memory layer switched off.
+ *
+ * No score is emitted, deliberately. A ratio over a term list of arbitrary size has no
+ * calibration behind it, and a `0.4` would be read as one. What is recorded is the matched
+ * terms, the size of the set they were drawn from, and the method's name — the ingredients
+ * any later calibration would need, and none of the confidence it has not earned.
+ *
+ * **Its weaknesses, in order of how often they will bite:**
+ *
+ *  1. *False negatives dominate.* A model that reads "never run the migration twice" and
+ *     then simply does not run it twice has used the memory perfectly and echoed nothing.
+ *     Rules and prohibitions are the entries most likely to be used silently, which is
+ *     exactly the class this signal is worst at.
+ *  2. *Only the final message is visible.* Memory used in intermediate reasoning or in a
+ *     tool call it prompted is invisible here; `Stop` carries the last message and no more.
+ *  3. *False positives from shared subject matter.* Memory and reply are both about this
+ *     codebase, so a term can coincide without the memory having been read.
+ *  4. *Paraphrase defeats it entirely.* The match is lexical, with a left word boundary
+ *     only — `poll` matches `polling` — and nothing beyond that.
+ *
+ * **What it would take to falsify it:** a few dozen turns where a human reads the injected
+ * block and the reply and judges "used / not used", scored against `used_evidence.used`. If
+ * the two distributions do not separate — if the signal fires about as often on turns a
+ * human calls unused as on turns they call used — the method is noise and belongs deleted,
+ * not tuned. Tightening a threshold on a signal that has never been checked against a label
+ * is how this codebase acquired a 400 ms health budget that failed every trial it was given.
+ * Until that check exists, nothing may gate recall on this: it is a measurement, not a
+ * verdict, and `drain` treats it as one.
+ *
+ * §4.4: nothing from the reply is written down. The record carries only terms that
+ * `prompt-recall` already staged and already scrubbed, so a secret the assistant happened to
+ * print cannot land here — the reply is read, matched against, and dropped.
+ *
+ * @param {Record<string, any>} turn   the staged turn, as read
+ * @param {Record<string, any>} payload
+ * @returns {Record<string, any>|null} null when there was nothing to measure against
+ */
+function usedEvidence(turn, payload) {
+  const recall = isObject(turn.recall) ? turn.recall : null;
+  if (!recall || !Array.isArray(recall.terms)) return null;
+
+  const terms = recall.terms
+    .filter((t) => typeof t === 'string'
+      && t.length >= TERM_MIN_CHARS && t.length <= TERM_MAX_CHARS)
+    .map((t) => t.toLowerCase())
+    .slice(0, MAX_TERMS_READ);
+
+  const answer = str(payload.last_assistant_message) || str(payload.message);
+
+  /** @type {Record<string, any>} */
+  const out = {
+    method: USED_SIGNAL_METHOD,
+    at: Date.now(),
+    candidates: terms.length,
+    matched: 0,
+    terms: [],
+    answer_chars: answer.length,
+  };
+
+  // Both of these are "unmeasurable", not "unused", so neither sets `used`. An injection
+  // whose every distinctive word was already in the prompt cannot be told apart from one
+  // the model ignored, and saying otherwise would put a fabricated denominator on the wire.
+  if (terms.length === 0) { out.reason = 'no_distinct_terms'; return out; }
+  if (!answer.trim()) { out.reason = 'no_reply'; return out; }
+
+  const hits = matchTerms(terms, answer.slice(0, MAX_ANSWER_SCAN));
+  out.matched = hits.length;
+  out.terms = hits.slice(0, MAX_EVIDENCE_TERMS);
+  out.used = hits.length > 0;
+  return out;
+}
+
+/**
+ * Which of `terms` the reply carries.
+ *
+ * Every run of non-word characters becomes a single space, so the haystack is a stream of
+ * space-delimited words and a term preceded by a space is a match at a left word boundary.
+ * The *right* boundary is deliberately absent: `queue` matches `queued`, `idempotency`
+ * matches `idempotency_key`. English inflection is the common case, and demanding an exact
+ * match would turn ordinary suffixing into a false negative — the failure mode this signal
+ * already has too much of.
+ *
+ * @param {string[]} terms  lowercased
+ * @param {string} text
+ * @returns {string[]} the matched terms, in the order they were staged
+ */
+function matchTerms(terms, text) {
+  const hay = ` ${text.toLowerCase().replace(/[^a-z0-9_]+/g, ' ')} `;
+  return terms.filter((t) => hay.includes(` ${t}`));
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +949,7 @@ function drainTriggerFired(cfg, runId) {
 
 /** `--with-outcome <prompt_id>`, or nothing when the turn has no id to attribute against. */
 function outcomeArgs(payload) {
-  const id = str(payload.prompt_id);
+  const id = turnKey(payload);
   return id ? ['--with-outcome', id] : [];
 }
 
@@ -473,13 +968,14 @@ function fireDrain(cfg, runId, payload, args) {
   const handoff = stashPayload(cfg, {
     hook_event_name: str(payload.hook_event_name),
     session_id: str(payload.session_id),
-    prompt_id: str(payload.prompt_id),
+    prompt_id: turnKey(payload),
     transcript_path: str(payload.transcript_path),
     cwd: str(payload.cwd),
     permission_mode: str(payload.permission_mode),
     agent_id: str(payload.agent_id),
     agent_type: str(payload.agent_type),
-    turn_number: finiteOr(payload.turn_number, 0),
+    // Resolved here rather than in the child: the child reads this stash, not the payload.
+    turn_number: attempt(() => turnNumber(cfg, runId, payload), 0),
     run_id: runId,
   });
   spawnDetached(cfg, 'drain', args, handoff);
@@ -566,7 +1062,7 @@ function clamp(s, max) {
 
 /** An id fragment safe as both a path segment and a wire value. @param {any} v */
 function idPart(v) {
-  return String(v ?? '').trim().replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, MAX_ID_CHARS);
+  return safeSegment(v, MAX_ID_CHARS);
 }
 
 /**
@@ -577,7 +1073,7 @@ function idPart(v) {
  */
 function fallbackId(payload, text) {
   let h = 0x811c9dc5;
-  const seed = `${str(payload.session_id)}|${str(payload.prompt_id)}|${str(payload.tool_name)}|${text}`;
+  const seed = `${str(payload.session_id)}|${turnKey(payload)}|${str(payload.tool_name)}|${text}`;
   for (let i = 0; i < seed.length; i++) {
     h ^= seed.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;

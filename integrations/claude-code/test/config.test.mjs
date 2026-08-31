@@ -2,10 +2,9 @@
 /**
  * `lib/config.mjs`.
  *
- * Protects build-guide §4.1 (the module API and the frozen `Config` shape),
- * §6.1 (environment variables and their defaults), §6.2 (`userConfig` keys and
- * the env var each maps to), §6.3 (the `CLAUDE_PLUGIN_OPTION_*` injection
- * guard), §7 (`config.json`, 300 s TTL) and §12.6.
+ * Protects the module API and the frozen `Config` shape, every environment variable
+ * and its default, each `userConfig` key and the env var it maps to, the
+ * `CLAUDE_PLUGIN_OPTION_*` injection guard, and the 300 s `config.json` cache.
  *
  * `loadConfig(env = process.env)` takes its environment as an argument, so most
  * of this file drives it with explicit env objects. `process.env` is patched to
@@ -277,7 +276,7 @@ test('precedence: the built-in default is the floor', async () => {
   assert.equal(cfg.runStrategy, 'per-directory');
 });
 
-// §4.1/§12.1-F14: a malformed project file cannot take the plugin down.
+// §4.1/§12.1: a malformed project file cannot take the plugin down.
 test('precedence: a corrupt .mubit-cc.json falls through to the default', async () => {
   const config = await lib('config.mjs');
   const dataDir = makeDataDir();
@@ -334,6 +333,37 @@ test('optionValue(): both spellings resolve into Config.apiKey', async () => {
   }
 });
 
+/**
+ * Characterization, not a wish: a *set-but-blank* key at a higher rung shadows a perfectly
+ * good `credentials.json` below it, and the plugin then reports `auth_failed` on a machine
+ * where `/mubit-memory:auth` has just succeeded.
+ *
+ * This is deliberate and stays. Both rungs test presence rather than truthiness because a
+ * blank value is an answer: `endpoint: ""` means "explicitly local, send nothing", and a CI
+ * job exporting `MUBIT_API_KEY=` is switching a developer's stored key off on purpose. Making
+ * either rung skip blanks would take that away to fix a case a user can see and clear.
+ *
+ * The cost is a support path, so it is written down rather than designed away: `skills/setup`
+ * step 1 tells the reader to check `/plugin` -> configure for an emptied field before
+ * believing anything else, and this test is why that paragraph exists.
+ */
+test('a set-but-blank key at a higher rung deliberately shadows a stored one', async () => {
+  const config = await lib('config.mjs');
+  const projectDir = makeProjectDir();
+  const key = 'mbt_stored_by_auth_0123456789abcdef';
+
+  for (const shadow of [{ CLAUDE_PLUGIN_OPTION_APIKEY: '' }, { MUBIT_API_KEY: '' }]) {
+    const dataDir = makeDataDir();
+    writeFileSync(join(dataDir, 'credentials.json'),
+      JSON.stringify({ endpoint: 'https://api.mubit.ai', apiKey: key }));
+
+    assert.equal(load(config, envOf(dataDir, projectDir, {})).apiKey, key,
+      'the control: with nothing above it, the stored key is used');
+    assert.equal(load(config, envOf(dataDir, projectDir, shadow)).apiKey, '',
+      `${Object.keys(shadow)[0]}='' is a value, not an absence — it wins`);
+  }
+});
+
 // ===========================================================================
 // §4.1 connection mode
 // ===========================================================================
@@ -368,7 +398,7 @@ test('no configuration path can produce a loopback endpoint by default', async (
 
 test('the endpoint is used verbatim, whatever host it names', async () => {
   const config = await lib('config.mjs');
-  for (const url of ['https://mubit.example.com', 'https://eu.mubit.ai']) {
+  for (const url of ['https://mubit.example.com', 'https://api.mubit.ai']) {
     const cfg = load(config, envOf(makeDataDir(), makeProjectDir(), { MUBIT_ENDPOINT: url }));
     assert.equal(cfg.endpoint, url);
     assert.equal(cfg.mode, 'hosted', 'mode is a constant now — there is no second mode');
@@ -379,7 +409,7 @@ test('the endpoint is used verbatim, whatever host it names', async () => {
 // §1.2 authHeaders
 // ===========================================================================
 
-// §1.2: header is `Authorization: Bearer <key>`; §12.1-F3 depends on it being
+// §1.2: header is `Authorization: Bearer <key>`; §12.1 depends on it being
 // absent (not empty) when no key is configured, so a 401 is unambiguous.
 test('authHeaders(): {} when there is no key', async () => {
   const config = await lib('config.mjs');
@@ -474,25 +504,50 @@ test('envTags(): caps at 8 tags', async () => {
 // ===========================================================================
 
 /**
- * Every `userConfig` key declared in build-guide §3.1, the §6.2 env var it maps
- * to, and the resolved `Config` field it lands in. Booleans are asserted with
- * the `0`/`1` convention §6.1 uses for env vars and the `"false"` a JSON
+ * Every `userConfig` key the manifest declares, the env var it maps to, and the
+ * resolved `Config` field it lands in. Booleans are asserted with the `0`/`1`
+ * convention the env vars use and the `"false"` a JSON
  * boolean stringifies to when the host exports it as an option.
  */
 const USER_CONFIG_ROWS = [
   { key: 'endpoint', env: 'MUBIT_ENDPOINT', field: 'endpoint', raw: 'https://mubit.example.com', want: 'https://mubit.example.com' },
   { key: 'apiKey', env: 'MUBIT_API_KEY', field: 'apiKey', raw: 'mbt_acme_kid_secret', want: 'mbt_acme_kid_secret' },
-  { key: 'userId', env: 'MUBIT_CC_USER_ID', field: 'userId', raw: 'eldar@mubit.ai', want: 'eldar@mubit.ai' },
+  { key: 'userId', env: 'MUBIT_CC_USER_ID', field: 'userId', raw: 'you@example.com', want: 'you@example.com' },
+  // The neighbour of `userId` it must never be confused with: `actorId` is attribution, and
+  // rides along with what you save; `userId` narrows what a search can return.
+  { key: 'actorId', env: 'MUBIT_CC_ACTOR_ID', field: 'actorId', raw: 'ada', want: 'ada' },
   { key: 'runStrategy', env: 'MUBIT_CC_RUN_STRATEGY', field: 'runStrategy', raw: 'git-branch', want: 'git-branch' },
   { key: 'capture', env: 'MUBIT_CC_CAPTURE', field: 'capture', raw: '0', optRaw: 'false', want: false },
   { key: 'recall', env: 'MUBIT_CC_RECALL', field: 'recall', raw: '0', optRaw: 'false', want: false },
   { key: 'redact', env: 'MUBIT_CC_REDACT', field: 'redact', raw: '0', optRaw: 'false', want: false },
   { key: 'recallTokenBudget', env: 'MUBIT_CC_RECALL_TOKENS', field: 'recallTokenBudget', raw: '900', want: 900 },
   { key: 'recallAssemble', env: 'MUBIT_CC_RECALL_ASSEMBLE', field: 'recallAssemble', raw: 'server', want: 'server' },
+  { key: 'recallRepeatMode', env: 'MUBIT_CC_RECALL_REPEAT_MODE', field: 'recallRepeatMode', raw: 'full', want: 'full' },
+  // Asserted at a concrete mode rather than at `auto`: `auto` is the default, so a row that
+  // set it there would pass just as well against a key `loadConfig` never reads. `freshness`
+  // is also the value an operator most plausibly pins, since it is the whole point of the key.
+  { key: 'recallRankBy', env: 'MUBIT_CC_RECALL_RANK_BY', field: 'recallRankBy', raw: 'freshness', want: 'freshness' },
+  // Asserted ON rather than off: the default is already false, so a row that set it to false
+  // would pass just as well against a key `loadConfig` never reads.
+  { key: 'recallAsync', env: 'MUBIT_CC_RECALL_ASYNC', field: 'recallAsync', raw: '1', optRaw: 'true', want: true },
   { key: 'reflectOnEnd', env: 'MUBIT_CC_REFLECT_ON_END', field: 'reflectOnEnd', raw: '0', optRaw: 'false', want: false },
+  // The escape hatch for an environment that forbids background processes. Asserted off,
+  // because on is the default and a row that set it to true would pass just as well against
+  // a key `loadConfig` never reads.
+  { key: 'sessionEndDetach', env: 'MUBIT_CC_SESSION_END_DETACH', field: 'sessionEndDetach', raw: '0', optRaw: 'false', want: false },
   { key: 'outcomeMode', env: 'MUBIT_CC_OUTCOME_MODE', field: 'outcomeMode', raw: 'explicit', want: 'explicit' },
   { key: 'statusLine', env: 'MUBIT_CC_STATUSLINE', field: 'statusLine', raw: '0', optRaw: 'false', want: false },
   { key: 'mcpTools', env: 'MUBIT_MCP_TOOLS', field: 'mcpTools', raw: 'mubit_recall,mubit_remember', want: ['mubit_recall', 'mubit_remember'] },
+  { key: 'mcpLessonScope', env: 'MUBIT_MCP_LESSON_SCOPE', field: 'mcpLessonScope', raw: 'global', want: 'global' },
+  // The only row that defaults to `false`, so it is the opt-*in* direction that has to be
+  // proven here. Its default is asserted separately below, and again in `pre-tool.test.mjs`
+  // against the running hook — this is the stage that can put text in front of a tool call.
+  { key: 'preToolWarnings', env: 'MUBIT_CC_PRE_TOOL_WARNINGS', field: 'preToolWarnings', raw: '1', optRaw: 'true', want: true },
+  // Asserted OFF, because on is the default and a row that set it to true would pass
+  // just as well against a key `loadConfig` never reads. The default itself is asserted below
+  // and, against the running hooks, in `session-resume.test.mjs` — which is the only place in
+  // the repo that can see it, since `baseEnv` pins the flag off for every other suite.
+  { key: 'resumeBlock', env: 'MUBIT_CC_RESUME_BLOCK', field: 'resumeBlock', raw: '0', optRaw: 'false', want: false },
 ];
 
 for (const row of USER_CONFIG_ROWS) {
@@ -528,6 +583,10 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.mode, 'hosted');
   assert.equal(cfg.apiKey, '');
   assert.equal(cfg.userId, '');
+  // Empty by default, and detection deliberately stays out of `resolveAll`: a subprocess
+  // result cached for 300 s under an input hash that cannot invalidate it is a bug waiting
+  // to happen, and `drain` — detached, unbudgeted — is where the ladder belongs.
+  assert.equal(cfg.actorId, '');
   assert.equal(cfg.runStrategy, 'per-directory');
   assert.equal(cfg.capture, true);
   assert.equal(cfg.recall, true);
@@ -535,9 +594,36 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.recallBudgetMs, 1500);
   assert.equal(cfg.recallTokenBudget, 1500);
   assert.equal(cfg.recallAssemble, 'client');
+  // §5.2: a memory already injected this run is repeated as a one-line pointer rather than
+  // in full. `full` is the pre-seen-set behaviour and costs up to 1500 tokens every prompt.
+  assert.equal(cfg.recallRepeatMode, 'pointer');
+  // §5.2: `auto` decides per prompt — a handoff question ("where were we?") is ranked by
+  // recency, everything else by similarity. Defaulting to `relevance` would keep the bug;
+  // defaulting to `freshness` would rank every ordinary question by recency, which is the
+  // same mistake pointed the other way.
+  assert.equal(cfg.recallRankBy, 'auto');
+  // Carry-forward recall is opt-in. Default-on would hand every install a first prompt with
+  // no memory and a turn of staleness on every prompt after it, in exchange for latency
+  // most instances do not have a problem with.
+  assert.equal(cfg.recallAsync, false);
   assert.equal(cfg.outcomeMode, 'implicit');
   assert.equal(cfg.reflectOnEnd, true);
+  // On, because the hook it governs is cancelled by the host on the way out and everything
+  // left inside it — the last drain and the only call that promotes a lesson — dies there.
+  assert.equal(cfg.sessionEndDetach, true);
   assert.equal(cfg.statusLine, true);
+  // Off. This is the one setting that can put text in front of a tool call, so nothing
+  // changes for an existing user until they ask for it — which is also what makes "measure
+  // how often it fires" a safe thing to run.
+  assert.equal(cfg.preToolWarnings, false);
+  // On, and the only opt-in feature in this table that ships on. The three above it are off
+  // because each costs something on EVERY prompt; this costs one detached process and two LLM
+  // calls once per session, at the one moment the model knows least about what it is walking
+  // into. A session that has none of it is the status quo this feature exists to end.
+  assert.equal(cfg.resumeBlock, true);
+  // §6.1 — environment-only. Lower than `recallTokenBudget` because the two are spent in the
+  // same message on the first prompt of a session.
+  assert.equal(cfg.resumeTokenBudget, 1000);
   assert.equal(cfg.maxParamBytes, 4096);
   assert.equal(cfg.maxOutputBytes, 8192);
   assert.equal(cfg.batchMaxItems, 32);
@@ -550,6 +636,10 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.projectDir, projectDir);
   assert.ok(Array.isArray(cfg.mcpTools), 'mcpTools must be an array');
   assert.ok(cfg.mcpTools.length > 0, 'a blank MUBIT_MCP_TOOLS means the curated set, not none');
+  assert.equal(cfg.mcpLessonScope, 'session',
+    'the ceiling on an agent-written lesson defaults to `session`, which is what the tool\n'
+    + 'that writes it tells the model it does. At `run` an agent-written lesson has no path\n'
+    + 'out of its own run at all: reflect stamps `run` too, measured against a live instance.');
   assert.ok(Array.isArray(cfg.denyGlobs), 'denyGlobs must be an array');
 });
 
@@ -652,7 +742,7 @@ test('loadConfig(): a config.json older than the 300 s TTL is not served', async
   assert.ok(statSync(p).mtimeMs > agedMtime, 'the expired cache was not refreshed');
 });
 
-// §7/§12.1-F14: a corrupt cache is a bad day, not an outage.
+// §7/§12.1: a corrupt cache is a bad day, not an outage.
 test('loadConfig(): a corrupt config.json is ignored', async () => {
   const config = await lib('config.mjs');
   const dataDir = makeDataDir();
@@ -663,4 +753,41 @@ test('loadConfig(): a corrupt config.json is ignored', async () => {
     MUBIT_ENDPOINT: 'https://mubit.example.com',
   }));
   assert.equal(cfg.endpoint, 'https://mubit.example.com');
+});
+
+// ===========================================================================
+// §8.2 mcpLessonScope — the ceiling on what an MCP write may claim
+// ===========================================================================
+
+// The config layer's fallback is the DEFAULT, exactly as it is for every other enum here.
+// The guard has a second, narrower net of its own, and `mcp-egress.test.mjs` owns that one —
+// the two used to be asserted here together, which made a single test read as proof of a
+// property only one of the two layers actually has.
+test('loadConfig(): an unrecognised mcpLessonScope falls back to the default', async () => {
+  const config = await lib('config.mjs');
+  const projectDir = makeProjectDir();
+
+  for (const bad of ['', '   ', 'banana', 'org', 'RUN?', 'session,global']) {
+    const cfg = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: bad }));
+    assert.equal(cfg.mcpLessonScope, 'session',
+      `${JSON.stringify(bad)} resolved to ${JSON.stringify(cfg.mcpLessonScope)} — an `
+      + 'unrecognised value takes the documented default, never the widest scope');
+  }
+});
+
+// The three scopes a client may set. The widest one is not among them: it is not a value a
+// client sets for itself, so there is nothing here for it to be clamped down from.
+test('loadConfig(): mcpLessonScope accepts run, session and global — and nothing else', async () => {
+  const config = await lib('config.mjs');
+  const projectDir = makeProjectDir();
+
+  for (const good of ['run', 'session', 'global']) {
+    const cfg = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: good }));
+    assert.equal(cfg.mcpLessonScope, good);
+  }
+
+  const org = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: 'org' }));
+  assert.equal(org.mcpLessonScope, 'session',
+    'the widest scope is not a value a client sets for itself, so it takes the default like '
+    + 'any other unrecognised string');
 });

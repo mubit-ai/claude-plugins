@@ -41,10 +41,10 @@ test('writeCredentials then readCredentials round-trips', async () => {
   const { writeCredentials, readCredentials } = await lib('credentials.mjs');
   const dir = makeDataDir();
 
-  assert.equal(writeCredentials(dir, { endpoint: 'https://eu.mubit.ai', apiKey: KEY }), true,
+  assert.equal(writeCredentials(dir, { endpoint: 'https://api.mubit.ai', apiKey: KEY }), true,
     'writeCredentials must report success');
 
-  assert.deepEqual(readCredentials(dir), { endpoint: 'https://eu.mubit.ai', apiKey: KEY });
+  assert.deepEqual(readCredentials(dir), { endpoint: 'https://api.mubit.ai', apiKey: KEY });
 });
 
 test('readCredentials returns {} when the file has never been written', async () => {
@@ -57,10 +57,10 @@ test('writeCredentials merges rather than replacing', async () => {
   const { writeCredentials, readCredentials } = await lib('credentials.mjs');
   const dir = makeDataDir();
 
-  writeCredentials(dir, { endpoint: 'https://eu.mubit.ai', apiKey: KEY });
+  writeCredentials(dir, { endpoint: 'https://api.mubit.ai', apiKey: KEY });
   writeCredentials(dir, { apiKey: 'mbt_rotated' });
 
-  assert.deepEqual(readCredentials(dir), { endpoint: 'https://eu.mubit.ai', apiKey: 'mbt_rotated' },
+  assert.deepEqual(readCredentials(dir), { endpoint: 'https://api.mubit.ai', apiKey: 'mbt_rotated' },
     're-authenticating rotates the key; it must not silently drop the endpoint alongside it');
 });
 
@@ -68,10 +68,10 @@ test('a blank or null value removes its key instead of storing an empty string',
   const { writeCredentials, readCredentials } = await lib('credentials.mjs');
   const dir = makeDataDir();
 
-  writeCredentials(dir, { endpoint: 'https://eu.mubit.ai', apiKey: KEY });
+  writeCredentials(dir, { endpoint: 'https://api.mubit.ai', apiKey: KEY });
   writeCredentials(dir, { apiKey: '' });
 
-  assert.deepEqual(readCredentials(dir), { endpoint: 'https://eu.mubit.ai' },
+  assert.deepEqual(readCredentials(dir), { endpoint: 'https://api.mubit.ai' },
     'config precedence tests `!== undefined`, so a stored "" would shadow the rungs below it');
 });
 
@@ -193,7 +193,7 @@ test('the stored JSON is a flat object, so config.mjs can read it like the proje
   const { writeCredentials, credentialsPath } = await lib('credentials.mjs');
   const dir = makeDataDir();
 
-  writeCredentials(dir, { endpoint: 'https://eu.mubit.ai', apiKey: KEY });
+  writeCredentials(dir, { endpoint: 'https://api.mubit.ai', apiKey: KEY });
 
   const parsed = JSON.parse(readFileSync(credentialsPath(dir), 'utf8'));
   assert.equal(typeof parsed, 'object');

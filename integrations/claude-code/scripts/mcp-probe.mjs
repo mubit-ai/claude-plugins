@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Speak real stdio MCP to the plugin's server and report what it exposes — build-guide §8.
+ * Speak real stdio MCP to the plugin's server and report what it exposes.
  *
  * This is the manual counterpart to `test/launch.test.mjs`. The tests stub the server out to
  * assert the launcher's env ordering; this drives the whole chain the way Claude Code does:
@@ -16,13 +16,16 @@
  *   node scripts/mcp-probe.mjs --call mubit_status --args '{}'
  *   node scripts/mcp-probe.mjs --json                   # machine-readable
  *
- * `--server` is the one that matters before a release: the committed `mcp/dist/server.js` is
- * bundled from the *published* `@mubit-ai/mcp`, so it does not carry the §8.1 allowlist patch
- * until that package ships. Point `--server` at a locally built
- * `mcp/dist/index.js` to see what the plugin will do once it does.
+ * `--server` swaps in a different server bundle without touching the committed one. It used
+ * to be the flag that mattered most: `mcp/dist/server.js` was bundled from the *published*
+ * `@mubit-ai/mcp`, which predated the §8.1 allowlist patch, so the committed server ignored
+ * `MUBIT_MCP_TOOLS` and this probe printed all 21 tools. It is now built from the in-repo
+ * package (`esbuild.config.mjs`) and prints ten. Use `--server` to compare against another
+ * build — a published tarball, or a branch you are patching.
  *
- * Reads `MUBIT_ENDPOINT` / `MUBIT_API_KEY` from the environment like every other entry point;
- * `. ./.local/env` first. Never prints the key.
+ * Reads `MUBIT_ENDPOINT` / `MUBIT_API_KEY` from the environment, so a stored credential from
+ * `/mubit-memory:auth` is not enough on its own — export them for this one command. Never
+ * prints the key.
  */
 
 import { spawn } from 'node:child_process';
@@ -173,6 +176,10 @@ function report(r, opt) {
   if (version === '0.1.0') {
     process.stdout.write('\nnote: version "0.1.0" is the pre-§8.1 hardcode — this server predates the '
       + 'allowlist patch, so MUBIT_MCP_TOOLS is inert and every tool registers.\n');
+  } else if (version === '0.0.0-unpackaged') {
+    process.stdout.write('\nnote: "0.0.0-unpackaged" means the server could not read its own version. It '
+      + 'reads `../package.json`, which does not resolve once bundled to mcp/dist/server.js, so the '
+      + 'launcher passes MUBIT_MCP_VERSION in — and did not. Rebuild with `npm run build`.\n');
   }
   if (r.called) {
     process.stdout.write(`\n${opt.call} →\n`);
@@ -183,7 +190,7 @@ function report(r, opt) {
 }
 
 function usage() {
-  process.stdout.write(`mcp-probe — speak real stdio MCP to the plugin's server (build-guide §8)
+  process.stdout.write(`mcp-probe — speak real stdio MCP to the plugin's server
 
   --server <path>   run the plugin launcher with ./server.js redirected at <path>
   --entry  <path>   run <path> as the server outright (default: mcp/dist/index.js)

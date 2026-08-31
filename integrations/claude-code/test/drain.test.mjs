@@ -15,13 +15,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  existsSync, mkdirSync, readdirSync, statSync, utimesSync, writeFileSync,
+  existsSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir,
-  readJsonFile, readJsonDir, spoolFiles,
+  runHook, assertHookContract, fakeMubit, baseEnv, makeDataDir, makeProjectDir,
+  readJsonFile, readJsonDir, spoolFiles, waitFor,
 } from './helpers/harness.mjs';
 import { stop, spoolItem, PROMPT_ID } from './helpers/fixtures.mjs';
 
@@ -206,6 +206,48 @@ test('drain: two drains of the same batch send the same idempotency_key', async 
   );
 });
 
+/**
+ * The case the key exists for, and the one it used not to cover.
+ *
+ * `drain` and `session-end` drain the same spool. `session-end` steals a lock `drain` left
+ * behind after 60 s, and `drain` has a hard stop that can leave a batch uncommitted, so the
+ * same files really are sent by both. They each built the key their own way — one from the
+ * prompt id under a `cc-` prefix, the other from the session id under `cc-end-` — so the
+ * cross-drainer resend, the one thing four comments in this codebase claimed was covered,
+ * produced two different keys and re-posted the batch.
+ */
+test('drain and session-end send one batch under one idempotency_key', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/ingest': [
+      { status: 500, json: { error: 'transport' } },
+      { json: { accepted: true, job_id: 'job_test_1', deduplicated: true, status: 'queued' } },
+    ],
+  });
+  seedSpool(dataDir, 4);
+  const env = envFor(dataDir, server.url, { MUBIT_CC_BREAKER_THRESHOLD: '10' });
+
+  // The drain tries and fails; the batch stays on disk.
+  assertHookContract(await runHook('drain', stop(), { env }));
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 4, 'a 5xx leaves the batch in place');
+
+  // The session ends, and the other drainer picks up exactly those files — in a detached
+  // child, since the host cancels the session-end hook on the way out.
+  assertHookContract(await runHook('session-end',
+    { hook_event_name: 'SessionEnd', reason: 'exit' }, { env }));
+  await waitFor(() => server.countOf('POST', '/v2/control/ingest') >= 2, 12_000);
+
+  const calls = server.calls('POST', '/v2/control/ingest');
+  assert.equal(calls.length, 2, 'both drainers sent the batch');
+  assert.deepEqual(
+    calls[0].body.items.map((i) => i.item_id),
+    calls[1].body.items.map((i) => i.item_id),
+    'precondition: it is the same batch',
+  );
+  assert.equal(calls[0].body.idempotency_key, calls[1].body.idempotency_key,
+    'the same items must carry the same key whichever drainer sends them');
+});
+
 // §5.5 step 6 — 2xx commits: spool unlinked, marker advanced, job_id kept for the doctor skill.
 test('drain: a 2xx unlinks the batch, advances the marker, and records the job_id', async (t) => {
   const dataDir = makeDataDir();
@@ -235,12 +277,12 @@ test('drain: a 2xx unlinks the batch, advances the marker, and records the job_i
   assert.ok(captured.reduce((a, b) => a + b, 0) >= 3, `marker.captured did not advance: ${JSON.stringify(marker.captured)}`);
 });
 
-// §5.5 step 6 / F1 — a transport failure records a breaker failure and LEAVES the spool alone.
+// §5.5 step 6 — a transport failure records a breaker failure and LEAVES the spool alone.
 // The spool is keyed by run_id, not session, so nothing is lost by waiting.
 test('drain: a network failure leaves every spool file in place', async (t) => {
   const dataDir = makeDataDir();
   seedSpool(dataDir, 4);
-  // Nothing is listening on port 1 — ECONNREFUSED, the F1 scenario.
+  // Nothing is listening on port 1 — ECONNREFUSED, the nothing-listening scenario.
   const r = await runHook('drain', stop(), { env: envFor(dataDir, 'http://127.0.0.1:1') });
 
   assertHookContract(r);
@@ -253,7 +295,7 @@ test('drain: a network failure leaves every spool file in place', async (t) => {
     `recordFailure did not run: ${JSON.stringify(breakers[0].json)}`);
 });
 
-// §5.5 step 6 / F16 — a non-retryable 4xx means the payload is bad, not the server.
+// §5.5 step 6 — a non-retryable 4xx means the payload is bad, not the server.
 // Retrying a 422 forever is how a spool becomes unbounded.
 test('drain: a 422 quarantines the batch under spool/rejected/ and never retries it', async (t) => {
   const dataDir = makeDataDir();
@@ -312,13 +354,16 @@ test('drain --with-outcome: posts one outcome carrying the turn\'s recalled entr
   const body = server.lastCall('POST', '/v2/control/outcome').body;
   assert.equal(body.run_id, RUN_ID);
   assert.equal(body.reference_id, 'global');
-  assert.ok(body.reference_id.length > 0, 'RecordOutcomeRequest.reference_id must be non-empty (§1.3)');
+  assert.ok(body.reference_id.length > 0, 'reference_id must be non-empty on an outcome (§1.3)');
   assert.equal(body.outcome, 'success');
   assert.equal(body.signal, 0.2);
   assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
   assert.ok(typeof body.agent_id === 'string' && body.agent_id.length > 0);
-  assert.ok(typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0);
   assert.ok(typeof body.rationale === 'string' && body.rationale.length > 0);
+  // Derived from (run_id, prompt_id) and never random — and spelled the same way in
+  // `session-end`, since that is what makes a concurrent flush a server-side no-op rather
+  // than double reinforcement. `session-end.test.mjs` asserts the two agree end to end.
+  assert.equal(body.idempotency_key, `cc-outcome-${RUN_ID}-${PROMPT_ID}`);
 });
 
 // §5.5 — no recalled ids means there is nothing to reinforce; the call is skipped entirely
@@ -354,9 +399,22 @@ test('drain --with-outcome: skips the outcome call when outcomeMode is "off"', a
   server.assertNotCalled('POST', '/v2/control/outcome');
 });
 
-// §5.5 — "On a StopFailure turn: outcome: "failure", signal: -0.3." The turn file records
-// how the turn ended, so the drain never has to re-derive it.
-test('drain --with-outcome: a StopFailure turn posts outcome "failure" at signal -0.3', async (t) => {
+/**
+ * §5.5 — a turn whose file records `outcome: "failure"` posts `failure` / -0.3. The turn file
+ * records how the turn ended, so the drain never has to re-derive it.
+ *
+ * This used to be titled "a StopFailure turn", after §5.5's line *"On a StopFailure turn:
+ * outcome: 'failure', signal: -0.3."* It never was one. Nothing in the plugin has ever
+ * written `outcome` onto a turn file — the key exists only here and in the other tests that
+ * seed it — because `StopFailure` was not registered, and the host fires it **instead of**
+ * `Stop`, so the hook that would have written it never ran on those turns.
+ *
+ * Now that `StopFailure` IS registered, the guide's row is the one thing this ticket
+ * overturns: an API-failed turn posts nothing at all (see `api_error` below). The row this
+ * test covers is the different and still-real one — a turn the *file* records as having
+ * failed, whatever wrote that.
+ */
+test('drain --with-outcome: a turn recorded as failed posts outcome "failure" at signal -0.3', async (t) => {
   const dataDir = makeDataDir();
   const server = await mubit(t);
   seedSpool(dataDir, 1);
@@ -374,6 +432,163 @@ test('drain --with-outcome: a StopFailure turn posts outcome "failure" at signal
   assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
 });
 
+/**
+ * The `StopFailure` row, through the drain — one of the two hooks that share
+ * `lib/outcome.mjs`, and the one the ticket's claim is written against: *a turn that died on
+ * `rate_limit` never reaches `record_outcome`.*
+ *
+ * The drain reaches this turn only if something hands it `--with-outcome`, which
+ * `capture --stop-failure` deliberately does not do. That makes this the belt to
+ * `capture.mjs`'s braces: the ingest still goes out (those tool calls were real work), and
+ * the outcome does not, even when the argv says to attribute.
+ */
+test('drain --with-outcome: a turn the API killed ingests, and posts no outcome', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 2);
+  seedTurn(dataDir, { api_error: 'rate_limit' });
+
+  const r = await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--with-outcome', PROMPT_ID],
+  });
+  assertHookContract(r);
+
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  server.assertNotCalled('POST', '/v2/control/outcome');
+
+  // Not dialled, so not counted. `attempts` is a budget for posts that may have landed
+  // unanswered; spending it on a turn nothing will ever send would eventually mark a turn
+  // abandoned for a failure that never happened.
+  const turn = readJsonFile(join(runDir(dataDir), 'turns', `${PROMPT_ID}.json`));
+  assert.ok(!(Number(turn.outcome_attempts) > 0),
+    `a suppressed turn must not spend an attempt: ${JSON.stringify(turn.outcome_attempts)}`);
+  assert.ok(!turn.outcome_sent_at, 'nothing was sent, so nothing may claim it was');
+});
+
+// ---------------------------------------------------------------------------
+// §5.5 step 7, conditioned on evidence — "ignored" is not the same as "not injected"
+// ---------------------------------------------------------------------------
+
+/** A turn as `capture --stop` leaves it once it could compute the used-signal. */
+function seedMeasuredTurn(dataDir, used, over = {}) {
+  return seedTurn(dataDir, {
+    used_evidence: {
+      method: 'memory-term-echo/v1',
+      at: Date.now(),
+      candidates: 12,
+      matched: used ? 3 : 0,
+      terms: used ? ['indexing', 'queued', 'poll'] : [],
+      answer_chars: 180,
+      used,
+    },
+    ...over,
+  });
+}
+
+// THE test for this finding. Before it, a turn whose injected memory was plainly ignored
+// and a turn where nothing was injected at all were the same thing on the wire: silence.
+// Precision cannot be computed from a denominator that never leaves the machine.
+test('drain --with-outcome: an ignored injection is distinguishable from no injection', async (t) => {
+  const ignoredDir = makeDataDir();
+  const ignored = await mubit(t);
+  seedSpool(ignoredDir, 1);
+  seedMeasuredTurn(ignoredDir, false);
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(ignoredDir, ignored.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+
+  ignored.assertCalled('POST', '/v2/control/outcome', 1);
+  const body = ignored.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'neutral',
+    'the four accepted outcomes are success/failure/partial/neutral; anything else is a 400');
+  assert.equal(body.signal, 0,
+    'no evidence of use is not evidence of harm — a penalty here would punish memory for '
+    + 'a signal that is mostly false negatives');
+  assert.deepEqual(body.entry_ids, [],
+    'a neutral record must not name the entries: attributed reinforcement counts any signal '
+    + '>= 0 as one reinforcement, so naming them would credit exactly what was ignored');
+  assert.equal(body.reference_id, 'global');
+  assert.ok(typeof body.rationale === 'string' && body.rationale.length > 0,
+    'the rationale is the only field that can carry what was measured');
+
+  // The other half of the distinction: nothing injected is still silence.
+  const emptyDir = makeDataDir();
+  const empty = await mubit(t);
+  seedSpool(emptyDir, 1);
+  seedTurn(emptyDir, { recalled: [] });
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(emptyDir, empty.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+  empty.assertNotCalled('POST', '/v2/control/outcome');
+});
+
+// §5.5: the weak +0.2 was always defended as "a turn completing is weak positive evidence".
+// It now stands on something narrower and checkable — the reply carried the memory's own
+// vocabulary — and the record says which method decided that.
+test('drain --with-outcome: evidence of use keeps the +0.2 and the entry attribution', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+  seedMeasuredTurn(dataDir, true);
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'success');
+  assert.equal(body.signal, 0.2);
+  assert.deepEqual(body.entry_ids, ['ref_rule_1', 'ref_lesson_1']);
+  assert.ok(body.rationale.includes('memory-term-echo/v1'),
+    `the rationale must name the method that decided this: ${body.rationale}`);
+});
+
+// A turn that failed is not proof the memory was wrong when nothing shows the memory was
+// used at all. -0.3 against an entry the model never touched is the same mistake as +0.2,
+// pointed the other way.
+test('drain --with-outcome: a failed turn with no evidence of use is not punished for it', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+  seedMeasuredTurn(dataDir, false, { outcome: 'failure' });
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--with-outcome', PROMPT_ID],
+  }));
+
+  const body = server.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(body.outcome, 'neutral');
+  assert.equal(body.signal, 0);
+  assert.deepEqual(body.entry_ids, []);
+});
+
+// §5.5/§6.1: the new record is still implicit attribution. "off" means the hook posts
+// nothing, and "explicit" means the model owns the call — a measurement that ignores either
+// is a measurement the user did not consent to.
+for (const mode of ['off', 'explicit']) {
+  test(`drain --with-outcome: outcomeMode "${mode}" silences the neutral record too`, async (t) => {
+    const dataDir = makeDataDir();
+    const server = await mubit(t);
+    seedSpool(dataDir, 1);
+    seedMeasuredTurn(dataDir, false);
+
+    assertHookContract(await runHook('drain', stop(), {
+      env: envFor(dataDir, server.url, { MUBIT_CC_OUTCOME_MODE: mode }),
+      args: ['--with-outcome', PROMPT_ID],
+    }));
+
+    server.assertCalled('POST', '/v2/control/ingest', 1);
+    server.assertNotCalled('POST', '/v2/control/outcome');
+  });
+}
+
 // §5.5 step 9 + §7 — the lock is released on every exit path, including after a throw.
 // A stuck lock silently stops all capture, which is worse than a rare double drain.
 test('drain: releases the lock even when a post-send step throws', async (t) => {
@@ -389,4 +604,267 @@ test('drain: releases the lock even when a post-send step throws', async (t) => 
   assert.equal(existsSync(lockPath(dataDir)), false,
     'a throw must not leave drain.lock behind — it would stop all capture for 60s');
   assert.ok(statSync(join(runDir(dataDir), 'jobs.json')).isDirectory());
+});
+
+// ---------------------------------------------------------------------------
+// --run — draining a run the session has already left
+// ---------------------------------------------------------------------------
+
+/*
+ * `cwd-changed` spawns this drain for the run a session is walking away from, and then
+ * rewrites `sessions/<host_session_id>.json` to name the new one. A detached child that
+ * re-derived would read whichever version of that file it happened to win the race against,
+ * so the run it must drain is passed on the argv instead of being worked out.
+ *
+ * The two runs here differ in every input the derivation has: the pin in the environment
+ * says one thing, the flag says another, and only the flag may be obeyed.
+ */
+test('drain --run: drains the named run and ignores the derivation', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const LEFT = 'cc-left-behind-0000';
+
+  // Two spools: the run this process would derive, and the run it is told to drain.
+  seedSpool(dataDir, 2);
+  const leftDir = join(dataDir, 'runs', LEFT, 'spool');
+  mkdirSync(leftDir, { recursive: true });
+  writeFileSync(join(leftDir, `${Date.now()}-000000.json`),
+    JSON.stringify(spoolItem({ item_id: 'cc-orphan-1', text: 'left behind by a cd' })));
+
+  const r = await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--run', LEFT],
+  });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  const body = server.lastCall('POST', '/v2/control/ingest').body;
+  assert.equal(body.run_id, LEFT,
+    'the batch must be attributed to the run named on the argv, not to MUBIT_CC_RUN_ID');
+  assert.deepEqual(body.items.map((i) => i.item_id), ['cc-orphan-1']);
+
+  assert.equal(spoolFiles(dataDir, LEFT).length, 0, 'the named run is drained');
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 2,
+    'the run this process would have derived is left alone entirely');
+});
+
+// A pin that could only name the poisoned shared run is refused, exactly as a derivation
+// that could only answer `"default"` is (§4.3). The spool waits for a run id worth writing to.
+test('drain --run: a "default" pin drains nothing', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 2);
+
+  const r = await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url),
+    args: ['--run', 'default'],
+  });
+
+  assertHookContract(r);
+  assert.equal(server.requests.length, 0, `saw unexpected HTTP: ${server.summary()}`);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// The actor cache — drain is its only writer
+// ---------------------------------------------------------------------------
+
+// `lib/actor.mjs` splits detection from reading precisely so that the `git` spawns land
+// here, in the one process nothing is waiting on, and never on `capture`'s per-tool-call
+// path. If the drainer stops writing the cache, capture reads an empty file forever and
+// every memory the plugin stores goes unattributed — quietly, with nothing failing.
+test('drain: resolves the actor once and caches it for capture to read', async (t) => {
+  const dataDir = makeDataDir();
+  // A real repo, so the ladder has something to find: `makeProjectDir({git:true})` sets
+  // `user.email = test@example.com`, and rung 3 takes the local-part.
+  const projectDir = makeProjectDir({ git: true });
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+
+  const r = await runHook('drain', { ...stop(), cwd: projectDir }, {
+    env: baseEnv({
+      dataDir,
+      endpoint: server.url,
+      projectDir,
+      extra: { MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: RUN_ID },
+    }),
+  });
+
+  assertHookContract(r);
+  const cached = readJsonFile(join(dataDir, 'actor.json'));
+  assert.equal(cached.v, 1);
+  assert.equal(cached.actor, 'test', `expected the git email local-part, got ${JSON.stringify(cached.actor)}`);
+  assert.equal(typeof cached.at, 'number');
+  // Recorded so "why does it think I am that?" is answerable from the file alone.
+  assert.ok(String(cached.source).length > 0, 'the record must name the rung that answered');
+});
+
+// The drainer ships memory. A machine with no git, no configured actor and no `$USER` has
+// nothing to attribute to, and that must cost the name and nothing else (§4.9).
+test('drain: an unresolvable actor costs the name, not the batch', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  const ids = seedSpool(dataDir, 2);
+
+  const r = await runHook('drain', stop(), {
+    // `projectDir` is the data dir, which is not a repo, so every git rung is skipped by the
+    // `hasGitDir` guard before it can spawn anything.
+    env: envFor(dataDir, server.url, { USER: '', USERNAME: '', LOGNAME: '' }),
+  });
+
+  assertHookContract(r);
+  server.assertCalled('POST', '/v2/control/ingest', 1);
+  assert.deepEqual(server.lastCall('POST', '/v2/control/ingest').body.items.map((i) => i.item_id), ids);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0, 'the batch still committed');
+  assert.equal(existsSync(join(dataDir, 'actor.json')), false,
+    'a failed detection is not cached — a 30-day negative would outlive the fix for it');
+});
+
+// ---------------------------------------------------------------------------
+// The pin refresh
+// ---------------------------------------------------------------------------
+
+/**
+ * `refreshPins` lives here for the same reason `resolveActor` does: this is the one process in
+ * the plugin that is detached, unbudgeted and has nothing waiting on it. `readPins`, on the
+ * blocking side, is a single `readJson` — and it can only be that because the network half is
+ * down here.
+ */
+
+const pinsPath = (dataDir) => join(runDir(dataDir), 'pins.json');
+
+/** A cache old enough that a refresh is due. */
+function seedPins(dataDir, endpoint, pins, over = {}) {
+  mkdirSync(runDir(dataDir), { recursive: true });
+  writeFileSync(pinsPath(dataDir), JSON.stringify({
+    v: 1,
+    run_id: RUN_ID,
+    endpoint,
+    at: Date.now() - 10 * 60 * 1000,
+    pins: pins.map((text, i) => ({ slug: `p${i}`, text, at: Date.now() - 10 * 60 * 1000 })),
+    ...over,
+  }));
+}
+
+test('drain: refreshes the pin cache from the instance in its unbudgeted tail', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/variables/list': {
+      json: {
+        variables: [
+          { name: 'cc.pin.vendored', value_json: '"no vendored server edits"' },
+          { name: 'somebody.else', value_json: '"not ours"' },
+        ],
+      },
+    },
+  });
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['a stale constraint']);
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  server.assertCalled('POST', '/v2/control/variables/list', 1);
+  assert.equal(server.lastCall('POST', '/v2/control/variables/list').body.run_id, RUN_ID);
+
+  const cached = readJsonFile(pinsPath(dataDir));
+  assert.deepEqual(cached.pins.map((p) => p.text), ['no vendored server edits'],
+    'the cache is the instance\'s answer, narrowed to this plugin\'s namespace');
+  assert.equal(cached.run_id, RUN_ID);
+  assert.equal(cached.endpoint, server.url,
+    'the reader refuses a cache from another endpoint, so the writer has to stamp one');
+});
+
+/**
+ * **The most dangerous bug this ticket could ship.**
+ *
+ * A refresh that emptied the cache when `variables/list` failed would silently remove the
+ * user's standing constraint on a network blip — and the next prompt would look entirely
+ * normal, with a full recall block and nothing to suggest anything had been dropped. The user
+ * would discover it by being burned by exactly the thing they pinned against.
+ *
+ * So a failed refresh writes **nothing**. Byte-identical is the assertion, not "still has some
+ * pins": a rewrite that happened to preserve the contents would still have moved `at`, which
+ * is what decides when the next refresh is due.
+ */
+test('drain: a failed variables/list leaves the previous pin cache byte-identical', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/variables/list': { status: 503, json: { error: 'upstream down' } },
+  });
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['no vendored server edits']);
+  const before = readFileSync(pinsPath(dataDir), 'utf8');
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  assert.equal(readFileSync(pinsPath(dataDir), 'utf8'), before,
+    'a blip must not be able to clear a constraint the user is relying on');
+});
+
+// A successful list that returns nothing is a different answer entirely, and it does
+// overwrite: that is how `pin clear` in one terminal reaches the other.
+test('drain: an empty variables/list clears the cache, because that is how a cleared pin travels', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/variables/list': { json: { variables: [] } },
+  });
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['cleared elsewhere']);
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  assert.deepEqual(readJsonFile(pinsPath(dataDir)).pins, []);
+});
+
+// The TTL is a refresh cadence, and the drainer is spawned per prompt. Without the floor this
+// would be one request per keystroke-worth-of-typing on a path that has no business
+// generating traffic proportional to typing.
+test('drain: a cache refreshed a moment ago is not re-fetched', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+  seedPins(dataDir, server.url, ['fresh'], { at: Date.now() });
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  server.assertNotCalled('POST', '/v2/control/variables/list');
+});
+
+// The switch has to reach the network half too, or a user who turned pins off would still be
+// paying a request per drain for a feature they cannot see.
+test('drain: pins turned off means no variables call at all', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedSpool(dataDir, 1);
+
+  assertHookContract(await runHook('drain', stop(), {
+    env: envFor(dataDir, server.url, { MUBIT_CC_PINS: '0' }),
+  }));
+
+  server.assertNotCalled('POST', '/v2/control/variables/list');
+  assert.ok(!existsSync(pinsPath(dataDir)), 'nothing writes a cache for a feature that is off');
+});
+
+/**
+ * The refresh is skipped when the connection state is anything but `ready`, and the reason is
+ * the *verdict* rather than the traffic.
+ *
+ * `recordSuccess` clears the state for the whole endpoint — the breaker is per instance, not
+ * per route. So a successful `variables/list` issued in the tail, moments after a 500 on
+ * `/v2/control/ingest`, would reset `server_error` to `ready` and the status line would stop
+ * showing the failure that just happened. A pin is not worth erasing a diagnosis for.
+ */
+test('drain: a failed ingest is not whitewashed by a successful pin refresh', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t, {
+    'POST /v2/control/ingest': { status: 500, json: { error: 'internal' } },
+  });
+  seedSpool(dataDir, 2);
+  seedPins(dataDir, server.url, ['a stale constraint']);
+
+  assertHookContract(await runHook('drain', stop(), { env: envFor(dataDir, server.url) }));
+
+  server.assertNotCalled('POST', '/v2/control/variables/list');
+  assert.equal(readJsonFile(pinsPath(dataDir)).pins.length, 1,
+    'and the pin the user set is still there, unrefreshed and still rendering');
 });

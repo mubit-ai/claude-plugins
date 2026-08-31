@@ -2,21 +2,21 @@
 /**
  * `lib/runid.mjs`.
  *
- * Protects build-guide §4.3 (the four strategies, the `SessionStart.source`
- * table, `SessionRecord`) and §12.3, plus spec §7 (identity and session model).
+ * Protects the four run-id strategies, the `SessionStart.source` table and
+ * `SessionRecord` (§4.3, §12.3), plus spec §7 (identity and session model).
  *
  * The run id is the data scope: get it wrong and a user's memory either leaks
  * across projects or is silently written somewhere they will never read it
  * from. The single most important rule in this file is that no input — no
- * matter how hostile — may ever produce the literal `"default"`, the value
- * the MCP server still defaults `MUBIT_DEFAULT_SESSION_ID` to, which collapses
- * every user and project into one shared run.
+ * matter how hostile — may ever produce the literal `"default"`. That is the bundled
+ * server's placeholder, and it identifies nothing: a run id has to name one project on
+ * one machine.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -146,6 +146,41 @@ test('static: an unset MUBIT_CC_RUN_ID is a config error', async () => {
   }
   assert.equal(threw, true,
     'static without MUBIT_CC_RUN_ID must raise a config error, not fall back to another strategy');
+});
+
+/**
+ * A run id names a directory under the plugin data dir as well as a run. A pin carrying a
+ * separator meant two different things at once — one value on the wire, another after the
+ * write flattened it — and `stage-prompt` used to join it raw, so the turn file landed
+ * somewhere no sibling hook would read.
+ */
+test('static: a MUBIT_CC_RUN_ID that is a path is a config error', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+
+  for (const pinned of ['../../escaped', 'cc-a/b', 'cc-a\\b', '..']) {
+    const env = envFor(makeDataDir(), makeProjectDir({ git: true }), 'static',
+      { MUBIT_CC_RUN_ID: pinned });
+    let threw = false;
+    try {
+      withEnv(env, () => runid.deriveRunId(config.loadConfig(env), fx.sessionStart()));
+    } catch {
+      threw = true;
+    }
+    assert.equal(threw, true, `"${pinned}" must be refused, not turned into a directory`);
+  }
+});
+
+// The pins that merely need flattening are still legal — refusing those would break a run
+// id a user has been using for months.
+test('static: a run id with unusual but harmless characters is still accepted', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const env = envFor(makeDataDir(), makeProjectDir({ git: true }), 'static',
+    { MUBIT_CC_RUN_ID: 'cc-a:b*c' });
+
+  assert.equal(derive(config, runid, env, fx.sessionStart()), 'cc-a:b*c',
+    'the wire value is the pin verbatim; only the path segment is flattened');
 });
 
 // ===========================================================================
@@ -330,8 +365,8 @@ const HOSTILE = [
 ];
 
 for (const strategy of ['per-directory', 'git-branch', 'per-conversation', 'static']) {
-  // §4.3/§12.3: no strategy can ever emit "default" — the MCP server's poisoned
-  // default is what collapses every project on a machine into one run.
+  // §4.3/§12.3: no strategy can ever emit "default" — it is the bundled server's
+  // placeholder, and it identifies nothing: a run id has to name one project on one machine.
   test(`${strategy}: no input can produce "default" or an empty run id`, async () => {
     const config = await lib('config.mjs');
     const runid = await lib('runid.mjs');
@@ -361,23 +396,24 @@ for (const strategy of ['per-directory', 'git-branch', 'per-conversation', 'stat
 // §4.3 — deriveAgentId
 // ===========================================================================
 
-// §4.3/§5.1: claude-code-<sessionShort>.
-test('deriveAgentId(): claude-code-<sessionShort>, derived from the session id', async () => {
+// §4.3/§5.1: a role, not a session. The session id must not leak into the identity — a new
+// principal per session makes any upstream "how many distinct actors confirmed this?" count
+// meaningless, because one person working two days running satisfies it alone.
+test('deriveAgentId(): the stable role claude-code, with no session in it', async () => {
   const runid = await lib('runid.mjs');
 
   const id = runid.deriveAgentId(fx.stop());
-  assert.match(id, /^claude-code-[0-9a-z]+$/, `"${id}" is not claude-code-<sessionShort>`);
+  assert.equal(id, 'claude-code', `"${id}" is not the bare role`);
 
-  const short = id.slice('claude-code-'.length);
-  assert.ok(short.length >= 6, `session short "${short}" is too short to be distinctive`);
-  assert.ok(fx.SESSION_ID.replace(/-/g, '').startsWith(short),
-    `"${short}" is not a prefix of the host session id`);
-
-  assert.equal(runid.deriveAgentId(fx.userPromptSubmit()), id, 'agent id must be stable per session');
-  assert.notEqual(runid.deriveAgentId(fx.stop({ session_id: '9999abcd-1111-2222-3333-444455556666' })), id);
+  assert.equal(runid.deriveAgentId(fx.userPromptSubmit()), id, 'agent id must not vary by hook');
+  assert.equal(runid.deriveAgentId(fx.stop({ session_id: '9999abcd-1111-2222-3333-444455556666' })), id,
+    'a different session is the same actor');
+  assert.ok(!id.includes(fx.SESSION_ID.replace(/-/g, '').slice(0, 8)),
+    'the host session id must not appear in the agent id');
 });
 
-// §4.3: subagents get their own identity — claude-code-<sessionShort>-sub-<agentShort>.
+// §4.3: subagents still get their own identity — claude-code-sub-<agentShort>. This is the
+// one distinctness the value has to provide, and making the parent stable must not cost it.
 test('deriveAgentId(): appends -sub-<agentShort> for a subagent payload', async () => {
   const runid = await lib('runid.mjs');
 
@@ -387,7 +423,79 @@ test('deriveAgentId(): appends -sub-<agentShort> for a subagent payload', async 
   assert.ok(sub.startsWith(`${parent}-sub-`), `"${sub}" is not "${parent}-sub-<agentShort>"`);
   assert.ok(sub.slice(`${parent}-sub-`.length).length > 0, 'the subagent short id is empty');
   assert.notEqual(runid.deriveAgentId(fx.subagentStop({ agent_id: 'sub_ZZZZZZZZZZZZ' })), sub,
-    'two subagents of one session must not share an agent id');
+    'two subagents working at once must not share an agent id');
+});
+
+// A payload echoing the derived parent back at us is not a subagent. With the parent now the
+// bare role, the equality case is as reachable as the prefix one.
+test('deriveAgentId(): a payload echoing the parent id is not a subagent', async () => {
+  const runid = await lib('runid.mjs');
+
+  assert.equal(runid.deriveAgentId(fx.stop({ agent_id: 'claude-code' })), 'claude-code');
+  assert.equal(runid.deriveAgentId(fx.stop({ agent_id: 'claude-code-sub-abc123' })), 'claude-code');
+});
+
+// ===========================================================================
+// §4.3 — deriveSubRunId
+// ===========================================================================
+
+/**
+ * Why a sub-run id exists at all, measured rather than assumed.
+ *
+ * A live fan-out of two subagents on Claude Code 2.1.235 produced two `SubagentStart`s and
+ * two `SubagentStop`s that shared the parent's `session_id` **and** its `prompt_id`, and
+ * differed only in `agent_id`. Every coordinate the plugin keys state on is therefore the
+ * same for all siblings: `runs/<run_id>/turns/<prompt_id>.json` is one file that six
+ * subagents all read as "their" turn. `agent_id` is the only thing that separates them, so
+ * the run-scoped form of it is the only lane a subagent's own evidence can live in.
+ */
+test('deriveSubRunId(): <parent>-sub-<agentShort>, one lane per subagent', async () => {
+  const runid = await lib('runid.mjs');
+  const parent = 'cc-my-project-9f2a11c4';
+
+  const a = runid.deriveSubRunId(parent, fx.subagentStart({ agent_id: 'ab55bb82d19855fbc' }));
+  const b = runid.deriveSubRunId(parent, fx.subagentStart({ agent_id: 'a0a7d24f87136bee1' }));
+
+  assert.ok(a.startsWith(`${parent}-sub-`), `"${a}" is not derivable from its parent`);
+  assert.notEqual(a, b,
+    'the two ids the live fan-out produced must not collapse — that collapse is the entire '
+    + 'reason this function exists');
+  assert.equal(runid.deriveSubRunId(parent, fx.subagentStart({ agent_id: 'ab55bb82d19855fbc' })), a,
+    'SubagentStart and SubagentStop carry the same agent_id, so the same input must give the '
+    + 'same lane on both events or nothing can ever be joined back up');
+});
+
+// A run id names a directory under the data dir. A sub-run id is a run id, so it inherits
+// every restriction — including the one this whole module exists for.
+test('deriveSubRunId(): the poisoned literal cannot be reached through the sub form', async () => {
+  const runid = await lib('runid.mjs');
+
+  assert.throws(() => runid.deriveSubRunId('default', fx.subagentStart()), /default/i,
+    'a poisoned parent must not be laundered into a usable id by appending a suffix');
+  assert.throws(() => runid.deriveSubRunId('', fx.subagentStart()),
+    'an empty parent would resolve to a bare "-sub-…" directly under runs/');
+  assert.doesNotMatch(runid.deriveSubRunId('cc-x-1', fx.subagentStart({ agent_id: '../../etc' })),
+    /[\\/]|\.\./, 'agent_id arrives from outside the process and lands in a path');
+});
+
+// No subagent means nothing to isolate. Minting a suffix anyway would produce a lane that
+// `SubagentStop` — which derives from the same missing field — could never find again.
+test('deriveSubRunId(): a payload with no subagent identity answers with the parent', async () => {
+  const runid = await lib('runid.mjs');
+  const parent = 'cc-my-project-9f2a11c4';
+  const anon = fx.subagentStart();
+  delete anon.agent_id;
+
+  assert.equal(runid.deriveSubRunId(parent, anon), parent);
+  assert.equal(runid.deriveSubRunId(parent, {}), parent);
+});
+
+// Idempotent, because a caller holding an already-derived id is the normal case once more
+// than one hook derives one. `cc-x-1-sub-ab-sub-ab` would be a second lane for one subagent.
+test('deriveSubRunId(): deriving twice is deriving once', async () => {
+  const runid = await lib('runid.mjs');
+  const once = runid.deriveSubRunId('cc-x-1', fx.subagentStart());
+  assert.equal(runid.deriveSubRunId(once, fx.subagentStart()), once);
 });
 
 // ===========================================================================
@@ -426,7 +534,7 @@ test('loadSessionMap(): an unknown session returns null', async () => {
   assert.equal(got, null);
 });
 
-// §4.3 + §12.1-F14: a corrupt record is treated as "no record", never a throw.
+// §4.3 + §12.1: a corrupt record is treated as "no record", never a throw.
 test('loadSessionMap(): a corrupt session file returns null', async () => {
   const runid = await lib('runid.mjs');
   const dataDir = makeDataDir();
@@ -436,4 +544,109 @@ test('loadSessionMap(): a corrupt session file returns null', async () => {
 
   const got = withEnv(env, () => runid.loadSessionMap(fx.SESSION_ID));
   assert.equal(got, null);
+});
+
+// ===========================================================================
+// §4.3 — one session that changes directory
+// ===========================================================================
+
+/*
+ * `per-directory` is the default, and until now the directory it meant was the one the
+ * session was *launched* in: `cfg.projectDir` is `CLAUDE_PROJECT_DIR`, which is fixed for
+ * the life of the process, and every non-SessionStart hook took the reuse branch, which
+ * validated the strategy and never the directory. A `cd` into another repo mid-session kept
+ * writing the first repo's run — memory crossing projects by a different route than the
+ * `session`-scope leak.
+ *
+ * Every hook payload has carried `cwd` from the start (`test/helpers/fixtures.mjs`). Nothing
+ * read it. The cases below are the ones the existing suite could not fail on: the stability
+ * test above deliberately uses separate data dirs AND separate session ids, so no session map
+ * is in play at all, and that is exactly the file this bug lives in.
+ */
+
+test('per-directory: one session that cd\'s into another repo follows it', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repoA = makeProjectDir({ git: true });
+  const repoB = makeProjectDir({ git: true });
+  // One data dir, one session id, and `CLAUDE_PROJECT_DIR` pinned to the launch repo — it
+  // is the launch root and never moves, which is the whole reason the payload has to win.
+  const env = envFor(dataDir, repoA, 'per-directory');
+
+  const inA = derive(config, runid, env, fx.sessionStart({ cwd: repoA }));
+  // No `source`: this is the reuse branch, which is where every hook after SessionStart goes.
+  const inB = derive(config, runid, env, fx.postToolUse({ cwd: repoB }));
+
+  assert.notEqual(inA, inB,
+    'work done in repo B was written to repo A\'s run — the mid-session cwd drift');
+  assert.match(inB, HASH8);
+
+  const rec = readJsonFile(sessionFile(dataDir, fx.SESSION_ID));
+  assert.equal(rec.run_id, inB, 'the session map must follow the session');
+  assert.equal(rec.project_dir, repoB);
+  // `git rev-parse --show-toplevel` resolves symlinks and the raw path does not (on macOS
+  // every temp dir is one), so the two fields legitimately differ. That is the point of
+  // recording the root separately: it is the value the run id is actually hashed from.
+  assert.equal(rec.project_root, realpathSync(repoB),
+    'the record carries the resolved git root, not the raw dir');
+});
+
+// The churn guard. `directoryRunId` resolves through `git rev-parse --show-toplevel`, so a
+// `cd` *within* one repo must not move the run — otherwise every `cd src/` would fork the
+// memory of the project it is inside.
+test('per-directory: a cd within one repo keeps the same run', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repo = makeProjectDir({ git: true });
+  const deep = join(repo, 'src', 'service');
+  mkdirSync(deep, { recursive: true });
+  const env = envFor(dataDir, repo, 'per-directory');
+
+  const atRoot = derive(config, runid, env, fx.sessionStart({ cwd: repo }));
+  const inSub = derive(config, runid, env, fx.postToolUse({ cwd: deep }));
+
+  assert.equal(inSub, atRoot, 'a subdirectory of the same repo is the same run');
+});
+
+// Upgrade safety. Every record written before `project_root` existed says nothing about
+// where it was written, and "unknown" must not invalidate a mapping that is working: the
+// alternative is that installing this version moves every live session to a new run.
+test('a session record with no project_root is still reused', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const env = envFor(dataDir, makeProjectDir({ git: true }), 'per-directory');
+
+  // `record()` is the §4.3 shape as it shipped: `project_dir`, no `project_root`.
+  withEnv(env, () => runid.saveSessionMap(fx.SESSION_ID, record({ run_id: 'cc-upgraded-deadbeef' })));
+  const id = derive(config, runid, env, fx.postToolUse({ cwd: makeProjectDir({ git: true }) }));
+
+  assert.equal(id, 'cc-upgraded-deadbeef',
+    'an unknown root is not a mismatch; the next write stamps it');
+});
+
+/*
+ * `deriveRunId(cfg, {})` is the shape `mcp/src/launch.mjs` and `bin/statusline.src.mjs` pass
+ * deliberately — an empty payload, so the derivation takes the "no host session id" path and
+ * never writes a `SessionRecord`. It has no `cwd` either, so it must keep answering from
+ * `CLAUDE_PROJECT_DIR` exactly as before, whatever the session has since done.
+ */
+test('deriveRunId(cfg, {}) still answers from CLAUDE_PROJECT_DIR after the session moved', async () => {
+  const config = await lib('config.mjs');
+  const runid = await lib('runid.mjs');
+  const dataDir = makeDataDir();
+  const repoA = makeProjectDir({ git: true });
+  const repoB = makeProjectDir({ git: true });
+  const env = envFor(dataDir, repoA, 'per-directory');
+
+  const inA = derive(config, runid, env, fx.sessionStart({ cwd: repoA }));
+  const bare = withEnv(env, () => runid.deriveRunId(config.loadConfig(env), {}));
+  assert.equal(bare, inA);
+
+  derive(config, runid, env, fx.postToolUse({ cwd: repoB }));
+
+  assert.equal(withEnv(env, () => runid.deriveRunId(config.loadConfig(env), {})), bare,
+    'the empty-payload derivation is the launcher\'s and the status line\'s; it may not move');
 });

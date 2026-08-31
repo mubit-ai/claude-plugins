@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `bin/statusline.mjs` — build-guide §10 (the line, the glyph precedence, the cooldown and
+ * `bin/statusline.mjs` — the line, the glyph precedence, the cooldown and
  * the rung label) and §16.2 (the degradation ladder).
  *
  * ```
@@ -25,7 +25,8 @@
  * Bundled to `bin/statusline.mjs` by §11.2 and registered by `settings.json` (§3.4).
  */
 
-import { join, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CONN_STATES, readBreaker } from '../lib/breaker.mjs';
@@ -42,6 +43,13 @@ import { dataDir, readJson, writeJsonAtomic } from '../lib/state.mjs';
  * asserting the install exists, and §16.2 wants a fresh install to touch nothing at all.
  */
 const LIVENESS_FILE = 'statusline-installed.json';
+
+/**
+ * Consecutive dry recalls before the line says so, mirroring §4.7's `TIMEOUT_ESCALATION`.
+ * The reasoning is the same one: a single empty recall is not a verdict — a fresh run has
+ * nothing to recall, and a narrow prompt legitimately matches nothing. A run of them is.
+ */
+const RECALL_DRY_ESCALATION = 3;
 
 /**
  * Claude Code writes the session blob and closes stdin immediately, so this only ever
@@ -62,12 +70,13 @@ const STDIN_TIMEOUT_MS = 300;
  * @type {Record<string, {rank: number, glyph: string, label: string}>}
  */
 const DISPLAY = {
-  auth_failed:    { rank: 0, glyph: '✖', label: 'auth failed' },
-  unreachable:    { rank: 1, glyph: '✖', label: 'unreachable' },
-  server_error:   { rank: 2, glyph: '▲', label: 'server error' },
-  not_responding: { rank: 3, glyph: '◌', label: 'slow' },
-  warming:        { rank: 4, glyph: '◍', label: 'warming' },
-  ready:          { rank: 5, glyph: '●', label: '' },
+  unconfigured:   { rank: 0, glyph: '○', label: 'not configured' },
+  auth_failed:    { rank: 1, glyph: '✖', label: 'auth failed' },
+  unreachable:    { rank: 2, glyph: '✖', label: 'unreachable' },
+  server_error:   { rank: 3, glyph: '▲', label: 'server error' },
+  not_responding: { rank: 4, glyph: '◌', label: 'slow' },
+  warming:        { rank: 5, glyph: '◍', label: 'warming' },
+  ready:          { rank: 6, glyph: '●', label: '' },
 };
 
 /**
@@ -126,9 +135,20 @@ function resolveDisplay(markerState, breakerState, coldStart) {
     if (!isConnState(s)) continue;                  // `unknown`, '', or junk: not a verdict
     if (DISPLAY[s].rank < DISPLAY[worst].rank) worst = s;
   }
-  if (coldStart && worst !== 'auth_failed') worst = 'warming';
+  // The lens, and the two states it must not cover. `auth_failed` because a server still
+  // warming up does not answer 401. `unconfigured` because nothing is warming up — there is
+  // no endpoint, and `◍ warming` would promise that waiting fixes it when only the user can.
+  if (coldStart && !NEVER_WARMING.has(worst)) worst = 'warming';
   return DISPLAY[worst] ?? DISPLAY.ready;
 }
+
+/**
+ * The two states the cold-start lens never paints over. Mirrors the set `lib/breaker.mjs`
+ * applies inside `readBreaker`; kept as its own copy because this file is bundled standalone
+ * and the two lenses are applied to different views (the breaker's own state there, the
+ * merged marker-and-breaker view here — see the DECISION note above).
+ */
+const NEVER_WARMING = new Set(['auth_failed', 'unconfigured']);
 
 /** §4.7: the ConnState union is closed — anything else has no glyph and is not a verdict. */
 function isConnState(v) {
@@ -254,7 +274,18 @@ export function render(payload = {}) {
 
   const sources = num(recall.sources);
   const tokens = num(recall.tokens);
-  if (sources > 0 || tokens > 0 || num(recall.ms) > 0) {
+  // §16.2 — a recall path that is permanently dead must say so somewhere the user looks.
+  // Until this, the worst case rendered as a green `●` beside `recall 0/0 tok`: every hook
+  // firing, every call timing out, nothing injected, and no fault reported anywhere. That is
+  // the failure that makes a memory plugin look useless rather than broken.
+  //
+  // Not a ConnState. `resolveDisplay` merges verdicts *about the connection*, and this is a
+  // verdict about content — the connection may be perfectly healthy and the store simply
+  // unreachable by policy. So it renders as its own segment and leaves the glyph alone.
+  const dry = int(num(recall.dry_streak));
+  if (dry >= RECALL_DRY_ESCALATION) {
+    parts.push(`recall dry ${dry}`);
+  } else if (sources > 0 || tokens > 0 || num(recall.ms) > 0) {
     parts.push(`recall ${int(sources)}/${compact(tokens)} tok`);
   }
 
@@ -264,6 +295,24 @@ export function render(payload = {}) {
 
   const global = num(lessons.global);
   if (global > 0) parts.push(`lessons ${int(global)}g`);
+
+  // §16.2 — the reflect verdict, for the same reason `recall dry` is above it.
+  //
+  // Reflect at session end is the only call that can widen a lesson past `run` scope, so a
+  // reflect that fails costs the session its cross-session memory outright. It failed 12
+  // times over four days and nobody noticed, because the failure logs at `warn` while the
+  // success logs at `info`: at the default level a healthy instance and a broken one print
+  // exactly the same nothing, and the only other record is a JSON marker nobody cats.
+  //
+  // Deliberately NOT a ConnState. `resolveDisplay` merges verdicts about the *connection*,
+  // and this is a verdict about content — reflect can fail on an instance that is answering
+  // everything else perfectly (it does: the failure is a timeout upstream of a healthy
+  // service). So it takes a segment and leaves the glyph alone.
+  //
+  // `failed` only. The skip reasons are all deliberate — disabled, nothing ingested, spool
+  // undrained — and a status line that reports intended behaviour as a fault teaches the
+  // user to ignore it.
+  if (str(group(marker.reflect).status) === 'failed') parts.push('reflect failed');
 
   // §10/§1.8: rung 1 is the free path at zero LLM calls and needs no label. `rung` is only
   // a label when it is a rung the user is *paying* for — `0` is the §4.8 default for "no
@@ -442,10 +491,31 @@ export async function main() {
   try { return render(payload); } catch { return ''; }
 }
 
-const selfPath = fileURLToPath(import.meta.url);
-const entryPath = process.argv[1] ? resolve(process.argv[1]) : '';
+/**
+ * `p` with its symlinks resolved, or `p` unchanged when it cannot be resolved.
+ *
+ * The module loader resolves symlinks in `import.meta.url` but `process.argv[1]` keeps them,
+ * so a plugin installed behind a symlinked cache directory (`~/.codex/plugins/cache/...`)
+ * failed the entry-point guard below: `main()` never ran, and the caller saw exit 0 with no
+ * output and no error to explain it.
+ */
+function realPath(p) {
+  try { return p ? realpathSync(p) : p; } catch { return p; }
+}
 
-if (entryPath === selfPath) {
+const selfPath = fileURLToPath(import.meta.url);
+const selfReal = realPath(selfPath);
+const entryPath = process.argv[1] ? realPath(resolve(process.argv[1])) : '';
+// The built status line sits behind a runtime-floor launcher (esbuild.config.mjs §11.1):
+// `settings.json` names `bin/statusline.mjs`, which checks the Node version and then imports
+// `bin/impl/statusline.mjs`. That handoff is still "run as the entry point" as far as the
+// user is concerned, but `process.argv[1]` names the launcher, so the identity check above
+// cannot see it. The launcher sets this flag immediately before the import; a test that
+// imports this module as a library sets nothing and still gets no side effects.
+const launched = typeof globalThis.__mubitLauncherEntry === 'string'
+  && basename(selfPath) === basename(globalThis.__mubitLauncherEntry);
+
+if (entryPath === selfReal || launched) {
   process.exitCode = 0;
   // An unhandled rejection or a stray throw from anything above would print a stack trace
   // onto the user's prompt line and exit non-zero. §16.2 forbids both, so both are pinned

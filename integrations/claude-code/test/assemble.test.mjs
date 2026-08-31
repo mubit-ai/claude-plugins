@@ -284,6 +284,26 @@ test('a stale entry loses to a fresh entry of equal score', async () => {
   assert.equal(r.dropped, 1);
 });
 
+/**
+ * The mark has to reach the model. The server sends `is_stale` "for transparency", and this
+ * module used it only as a sort key — so an entry it knew was stale was rendered
+ * indistinguishably from a fresh one, under a heading like "Active rules". A qualifier the
+ * client never renders qualifies nothing.
+ */
+test('a stale entry is rendered marked, and a fresh one is not', async () => {
+  const { assembleContext } = await load();
+  const ev = [
+    item(1, { reference_id: 'ref_stale', score: 0.70, is_stale: true, content: 'old truth' }),
+    item(2, { reference_id: 'ref_fresh', score: 0.90, is_stale: false, content: 'current truth' }),
+  ];
+
+  const r = assembleContext(ev, { tokenBudget: 4000 });
+
+  assert.match(r.block, /- \(stale\) old truth/);
+  assert.match(r.block, /- current truth/);
+  assert.ok(!/\(stale\) current truth/.test(r.block), 'a fresh entry must not be marked');
+});
+
 // Same rule with room for both: the fresh entry still sorts first.
 test('a fresh entry outranks a stale entry of equal score even when both fit', async () => {
   const { assembleContext } = await load();
@@ -413,4 +433,243 @@ test('estimateTokens is roughly four characters per token', async () => {
   assert.ok(small >= 70 && small <= 140, `400 chars estimated at ${small} tokens`);
   const big = estimateTokens('y'.repeat(4000));
   assert.ok(big >= 700 && big <= 1400, `4000 chars estimated at ${big} tokens`);
+});
+
+// ---------------------------------------------------------------------------
+// The cross-turn seen-set — a repeat is degraded, never dropped
+// ---------------------------------------------------------------------------
+
+/*
+ * §4.10 renders one block. Nothing in it knew about the *previous* block, so a lesson that
+ * stays relevant for twenty prompts was rendered twenty times at full price and all twenty
+ * copies sat in the transcript competing with each other.
+ *
+ * `seen` is the set of `reference_id`s already injected in this run (`lib/seen.mjs`). An
+ * entry in it renders as a pointer — the id plus its first clause — instead of its whole
+ * content.
+ *
+ * **The single most important property in this section:** a pointer still pushes its
+ * `reference_id` into `sourceRefIds`. That array is what `Stop` attributes against and what
+ * becomes `RecordOutcome.entry_ids` (control.proto). Dropping a repeat would silently stop
+ * reinforcing precisely the memories that are helping most, which is the exact opposite of
+ * what `record_outcome` is for.
+ */
+
+/** ~200 tokens — the per-memory size a 1500-token budget over six memories implies. */
+const longContent = (tag, ch) => `${tag} because ${ch.repeat(760)} TAIL_${tag}`;
+
+const RULE = () => evidence({
+  id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', score: 0.91,
+  content: 'Ingest returns when queued, not when stored; poll the job until it completes.',
+});
+
+test('a seen entry renders as a pointer instead of its whole content', async () => {
+  const { assembleContext } = await load();
+  const ev = [evidence({
+    id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule',
+    content: longContent('RULE', 'r'),
+  })];
+
+  const first = assembleContext(ev, { tokenBudget: 1500 });
+  const repeat = assembleContext(ev, { tokenBudget: 1500, seen: new Set(['ref_rule_1']) });
+
+  assert.ok(first.block.includes('TAIL_RULE'), 'the first injection carries the whole entry');
+  assert.ok(!repeat.block.includes('TAIL_RULE'),
+    'the repeat must not re-send the body the model has already been given');
+  assert.ok(repeat.block.includes('ref_rule_1'),
+    'the pointer names the reference id, which is the handle mubit_dereference takes');
+  assert.ok(repeat.block.includes('RULE because'),
+    'the first clause is what lets the model recognise which memory is being pointed at');
+});
+
+// THE assertion of this section. See the note above: attribution is the reason to degrade
+// rather than drop.
+test('a pointer still reaches sourceRefIds, so Stop can attribute against it', async () => {
+  const { assembleContext } = await load();
+  const ev = [
+    evidence({ id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', content: longContent('RULE', 'r') }),
+    evidence({ id: 'e2', reference_id: 'ref_lesson_1', entry_type: 'lesson', content: longContent('LESSON', 'l') }),
+  ];
+
+  const r = assembleContext(ev, { tokenBudget: 1500, seen: ['ref_rule_1', 'ref_lesson_1'] });
+
+  assert.deepEqual(r.sourceRefIds, ['ref_rule_1', 'ref_lesson_1'],
+    'every pointed-at memory must still be reinforceable — dropping it would stop crediting '
+    + 'exactly the entries that stayed relevant longest');
+  assert.equal(r.emptyReason, '', 'a block of pointers is a rendered block, not an empty one');
+  assert.equal(r.dropped, 0, 'a degraded entry is not a dropped one');
+});
+
+test('a seen entry is far cheaper as a pointer than in full', async () => {
+  const { assembleContext } = await load();
+  const ev = [evidence({
+    id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule',
+    content: longContent('RULE', 'r'),
+  })];
+
+  const full = assembleContext(ev, { tokenBudget: 1500 }).tokenEstimate;
+  const pointed = assembleContext(ev, { tokenBudget: 1500, seen: ['ref_rule_1'] }).tokenEstimate;
+
+  assert.ok(pointed * 3 < full,
+    `a pointer cost ${pointed} tokens against ${full} for the full entry — the saving is the `
+    + 'whole reason this path exists, and under 3x it is not worth the complexity');
+});
+
+test('the rendered result reports how many entries were degraded', async () => {
+  const { assembleContext } = await load();
+  const ev = [
+    evidence({ id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', content: longContent('RULE', 'r') }),
+    evidence({ id: 'e2', reference_id: 'ref_lesson_1', entry_type: 'lesson', content: longContent('LESSON', 'l') }),
+  ];
+
+  assert.equal(assembleContext(ev, { tokenBudget: 1500 }).pointers, 0);
+  assert.equal(assembleContext(ev, { tokenBudget: 1500, seen: ['ref_rule_1'] }).pointers, 1,
+    'the count is what tells a reader the saving came from this mechanism and not from an '
+    + 'empty recall');
+});
+
+test('an unseen entry in the same block still renders in full', async () => {
+  const { assembleContext } = await load();
+  const ev = [
+    evidence({ id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', content: longContent('RULE', 'r') }),
+    evidence({ id: 'e2', reference_id: 'ref_lesson_1', entry_type: 'lesson', content: longContent('LESSON', 'l') }),
+  ];
+
+  const r = assembleContext(ev, { tokenBudget: 1500, seen: ['ref_rule_1'] });
+  assert.ok(!r.block.includes('TAIL_RULE'), 'the seen rule is pointed at');
+  assert.ok(r.block.includes('TAIL_LESSON'), 'the unseen lesson is new to the model and pays in full');
+  assert.equal(r.pointers, 1);
+});
+
+// The opt-out. `recallRepeatMode: "full"` is the pre-seen-set behaviour, byte for byte.
+test('repeatMode "full" ignores the seen set entirely', async () => {
+  const { assembleContext } = await load();
+  const ev = [evidence({
+    id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule',
+    content: longContent('RULE', 'r'),
+  })];
+
+  const baseline = assembleContext(ev, { tokenBudget: 1500 });
+  const forced = assembleContext(ev, {
+    tokenBudget: 1500, seen: ['ref_rule_1'], repeatMode: 'full',
+  });
+
+  assert.equal(forced.block, baseline.block,
+    'repeatMode "full" must reproduce the block a pre-seen-set release rendered, byte for byte');
+  assert.equal(forced.pointers, 0);
+});
+
+// A pointer that costs more than the thing it points at is a pessimisation wearing the
+// costume of an optimisation. One-line lessons are common and are already cheap.
+test('an entry shorter than its own pointer is rendered in full', async () => {
+  const { assembleContext } = await load();
+  const ev = [evidence({
+    id: 'e1', reference_id: 'ref_a_rather_long_reference_id_here', entry_type: 'rule',
+    content: 'Poll the job.',
+  })];
+
+  const r = assembleContext(ev, { tokenBudget: 1500, seen: ['ref_a_rather_long_reference_id_here'] });
+  assert.ok(r.block.includes('Poll the job.'),
+    'degrading a 13-character entry into a 40-character pointer spends tokens to save them');
+  assert.equal(r.pointers, 0, 'a line that was not shortened was not degraded');
+});
+
+// §4.10: the server marks an entry stale for transparency, and a mark the client renders
+// nowhere is a mark that does nothing. A pointer is still a rendered entry.
+test('a seen entry that is stale keeps its stale mark on the pointer', async () => {
+  const { assembleContext } = await load();
+  const ev = [evidence({
+    id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', is_stale: true,
+    content: longContent('RULE', 'r'),
+  })];
+
+  const r = assembleContext(ev, { tokenBudget: 1500, seen: ['ref_rule_1'] });
+  assert.ok(r.block.includes('(stale)'),
+    'staleness survives the second showing; the model still has to know not to trust it');
+});
+
+// The budget is the point: pointers are how a run with more relevant memory than budget
+// stops choosing between "show the new one" and "keep showing the old one".
+test('pointers free budget for entries that would otherwise be dropped', async () => {
+  const { assembleContext } = await load();
+  const ev = [
+    evidence({ id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', content: longContent('RULE', 'r') }),
+    evidence({ id: 'e2', reference_id: 'ref_lesson_1', entry_type: 'lesson', content: longContent('LESSON', 'l') }),
+  ];
+
+  const tight = { tokenBudget: 250 };
+  const cold = assembleContext(ev, tight);
+  assert.equal(cold.dropped, 1, 'a 250-token budget holds one ~200-token entry, not two');
+
+  const warm = assembleContext(ev, { ...tight, seen: ['ref_rule_1'] });
+  assert.equal(warm.dropped, 0,
+    'pointing at the entry the model already has is what makes room for the one it does not');
+  assert.deepEqual(warm.sourceRefIds, ['ref_rule_1', 'ref_lesson_1']);
+});
+
+// The seam `prompt-recall.mjs` uses to keep a pointer's vocabulary out of the used-signal.
+// See `test/attribution.test.mjs`: counting a reference id as "memory vocabulary" would make
+// every degraded turn look like an ignored injection.
+test('isPointerLine names the lines a caller must not tokenise', async () => {
+  const { assembleContext, isPointerLine } = await load();
+  const ev = [
+    evidence({ id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', content: longContent('RULE', 'r') }),
+    evidence({ id: 'e2', reference_id: 'ref_lesson_1', entry_type: 'lesson', content: longContent('LESSON', 'l') }),
+  ];
+
+  const r = assembleContext(ev, { tokenBudget: 1500, seen: ['ref_rule_1'] });
+  const lines = r.block.split('\n').filter((l) => l.startsWith('- '));
+
+  assert.equal(lines.filter(isPointerLine).length, 1,
+    'exactly the degraded line is recognisable as a pointer');
+  assert.equal(isPointerLine('- Ingest returns when queued.'), false);
+  assert.equal(isPointerLine('## Lessons'), false);
+});
+
+// `seen` arrives from `readSeen(...).ids`, but a caller with an array must not silently get
+// full-price rendering — that failure is invisible until someone measures the tokens.
+test('the seen set is accepted as a Set or an array, and a bad value is ignored', async () => {
+  const { assembleContext } = await load();
+  const ev = [evidence({
+    id: 'e1', reference_id: 'ref_rule_1', entry_type: 'rule', content: longContent('RULE', 'r'),
+  })];
+
+  const asSet = assembleContext(ev, { tokenBudget: 1500, seen: new Set(['ref_rule_1']) });
+  const asArray = assembleContext(ev, { tokenBudget: 1500, seen: ['ref_rule_1'] });
+  assert.equal(asSet.block, asArray.block);
+
+  for (const bad of [null, undefined, 'ref_rule_1', 42, {}]) {
+    const r = assembleContext(ev, { tokenBudget: 1500, seen: /** @type {any} */ (bad) });
+    assert.equal(r.pointers, 0, `seen=${JSON.stringify(bad)} must degrade nothing`);
+    assert.ok(r.block.includes('TAIL_RULE'));
+  }
+});
+
+// An entry with no `reference_id` can never be pointed at: there is no handle to print and
+// nothing that could have put it in the seen set.
+test('an entry with no reference_id is never rendered as a pointer', async () => {
+  const { assembleContext } = await load();
+  const ev = [evidence({
+    id: 'e1', reference_id: '', entry_type: 'rule', content: longContent('RULE', 'r'),
+  })];
+
+  const r = assembleContext(ev, { tokenBudget: 1500, seen: [''] });
+  assert.equal(r.pointers, 0);
+  assert.ok(r.block.includes('TAIL_RULE'));
+});
+
+// §4.10's ordering rules are not suspended by the seen set: two runs with the same evidence
+// and the same seen set must still produce the same block.
+test('degrading an entry does not move it out of its section or its order', async () => {
+  const { assembleContext } = await load();
+  const ev = [
+    RULE(),
+    evidence({ id: 'e2', reference_id: 'ref_lesson_1', entry_type: 'lesson', content: longContent('LESSON', 'l') }),
+    evidence({ id: 'e3', reference_id: 'ref_fact_1', entry_type: 'fact', content: longContent('FACT', 'f') }),
+  ];
+
+  const r = assembleContext(ev, { tokenBudget: 1500, seen: ['ref_lesson_1'] });
+  assert.deepEqual(r.sections.map((s) => s.section), ['active_rules', 'lessons', 'facts'],
+    'a pointer occupies the same slot in the same section as the entry it replaces');
+  assert.deepEqual(r.sourceRefIds, ['ref_rule_1', 'ref_lesson_1', 'ref_fact_1']);
 });

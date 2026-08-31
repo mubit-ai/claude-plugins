@@ -7,9 +7,11 @@
  * whole plugin that ever asks `lib/http.mjs` for `{retry: true}` — it is detached and
  * nobody is waiting on it, so one extra dial after a transport timeout costs nothing.
  *
- * Not registered in `hooks.json`. It is spawned only by `stage-prompt`, `capture --stop`
- * or `session-end`, which is what keeps the per-tool-call hot path free of node's startup
- * cost a second time. Nothing waits on it, so everything here must be safe to abandon:
+ * Not registered in `hooks.json`. It is spawned only by `stage-prompt`, `capture --stop`,
+ * `session-end` or `cwd-changed`, which is what keeps the per-tool-call hot path free of
+ * node's startup cost a second time. The last of those passes `--run <id>`: it drains the
+ * run a session has just walked away from, and a child that re-derived would read the
+ * session map that hook is in the middle of rewriting. Nothing waits on it, so everything here must be safe to abandon:
  * one drainer at a time, one request per batch, and a spool that is only ever unlinked
  * after a 2xx.
  *
@@ -31,28 +33,31 @@
  * **The lock is released on every exit path** — the breaker short-circuit, a throw after the
  * send, the hard stop — because a stuck `drain.lock` silently stops all capture for the
  * length of its 60 s TTL, which is far worse than the rare double drain that the per-batch
- * `idempotency_key` already absorbs. The one exception: a drainer that *lost* the race never
- * deletes the winner's lock.
+ * `idempotency_key` covers — it is content-addressed on `(run_id, item ids)`, so the same
+ * items carry the same key whichever drainer sends them (`lib/spool.mjs`). The one
+ * exception: a drainer that *lost* the race never deletes the winner's lock.
  *
  * Constraints, shared with the rest of the plugin: zero dependencies, Node >= 20 built-ins,
  * and **exit code 0, always** (§4.9). A memory layer has no business breaking a prompt.
  */
 
-import { createHash } from 'node:crypto';
 import { renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
+import { resolveActor } from '../../lib/actor.mjs';
 import { readBreaker } from '../../lib/breaker.mjs';
 import { loadConfig } from '../../lib/config.mjs';
 import { postIngest, postOutcome } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
-import { deriveAgentId, deriveRunId } from '../../lib/runid.mjs';
+import { decideOutcome, implicitOutcomesEnabled, outcomeRequest } from '../../lib/outcome.mjs';
+import { refreshPins } from '../../lib/pins.mjs';
+import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import {
-  acquireDrainLock, commitBatch, readBatch, releaseDrainLock, spoolStats,
+  acquireDrainLock, batchIdempotencyKey, commitBatch, readBatch, releaseDrainLock, spoolStats,
 } from '../../lib/spool.mjs';
 import {
-  ensureDir, pruneStale, readJson, resolveDataDir, writeJsonAtomic,
+  ensureDir, pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
 } from '../../lib/state.mjs';
 
 /** §5.5: "Budget 10 s soft" — nothing waits on it, but it still bounds itself. */
@@ -94,21 +99,6 @@ const LOCK_POLL_MS = 25;
 
 /** §6.1 `MUBIT_CC_BATCH_MAX_ITEMS`, used when a config could not be resolved. */
 const DEFAULT_BATCH = 32;
-
-/**
- * §5.5: "the implicit signal is deliberately weak (0.2, not 1.0) — a turn completing is not
- * proof the recalled memory helped, only weak positive evidence." A `StopFailure` turn is
- * stronger evidence in the other direction, but still an inference, not a user verdict.
- */
-const SIGNAL_SUCCESS = 0.2;
-const SIGNAL_FAILURE = -0.3;
-
-/**
- * §1.3: `RecordOutcomeRequest.reference_id` must be non-empty, so run-level attribution
- * uses this sentinel and puts the real ids in `entry_ids[]` — where each one is reinforced
- * individually (`control.proto`).
- */
-const RUN_LEVEL_REFERENCE = 'global';
 
 /**
  * The 4xx that are NOT a verdict on the payload.
@@ -167,6 +157,7 @@ async function main() {
   const payloadPath = flagValue(argv, '--payload');
   const outcomeArg = flagValue(argv, '--with-outcome');
   const wantsOutcome = argv.includes('--with-outcome');
+  const pinnedRun = flagValue(argv, '--run');
 
   // Invoked two ways: with the payload on stdin (foreground, as the tests do) and with
   // `--payload <file>` (detached — a detached child's inherited stdin is not reliably
@@ -177,17 +168,36 @@ async function main() {
   cfgRef = cfg;
 
   let runId = '';
-  try {
-    runId = deriveRunId(cfg, payload);
-  } catch (err) {
-    // `static` with no pin, or a derivation that could only have answered "default".
-    // Refusing is the honest answer; the spool waits for a run id worth writing to (§4.3).
-    log(cfg, 'error', `drain: no usable run id — ${messageOf(err)}`);
-    return;
+  if (pinnedRun) {
+    // `--run <id>`: drain THIS run, whatever this process would have derived.
+    //
+    // `cwd-changed` spawns a drain for the run a session is walking away from and then
+    // rewrites `sessions/<host_session_id>.json` to name the new one. A child that
+    // re-derived would read whichever version of that file it won the race against, and
+    // would drain the run it was spawned to leave alone. The flag removes the race rather
+    // than making it unlikely.
+    //
+    // It is still checked: a run id names a directory under the data dir as well as a run,
+    // and `"default"` is the placeholder that names no project (§4.3). An unusable pin
+    // drains nothing — the spool waits.
+    runId = usableRunId(pinnedRun);
+    if (!runId) {
+      log(cfg, 'error', `drain: refusing the pinned run id ${JSON.stringify(pinnedRun)}`);
+      return;
+    }
+  } else {
+    try {
+      runId = deriveRunId(cfg, payload);
+    } catch (err) {
+      // `static` with no pin, or a derivation that could only have answered "default".
+      // Refusing is the honest answer; the spool waits for a run id worth writing to (§4.3).
+      log(cfg, 'error', `drain: no usable run id — ${messageOf(err)}`);
+      return;
+    }
   }
 
   const agentId = deriveAgentId(payload);
-  const promptId = str(outcomeArg) || str(payload.prompt_id);
+  const promptId = str(outcomeArg) || turnKey(payload);
 
   // §5.5 step 1: exactly one drainer per run.
   const lock = await acquireConfirmed(cfg, runId, wantsOutcome, started);
@@ -217,6 +227,48 @@ async function main() {
   } finally {
     clearTimeout(hardStop);
     letGo();
+  }
+
+  // Who the work belongs to, refreshed at most once every 30 days (`lib/actor.mjs`).
+  //
+  // This is the one caller of the detection ladder, and this is the only place in the plugin
+  // that can afford it: the ladder shells out to `git` twice on a cache miss, and every other
+  // hook is either blocking or on the per-tool-call path. `capture` and `checkpoint` only
+  // ever *read* the cache this writes.
+  //
+  // It sits here, in the same unbudgeted tail as the TTL sweep, rather than up beside
+  // `loadConfig`: the drainer's job is shipping memory, and a once-a-month cache miss must
+  // not put up to two 2000 ms `git` timeouts in front of the ingest that a user is waiting
+  // to see land. The cost of running late is one uncredited item on a fresh install.
+  try {
+    resolveActor(cfg, resolveProjectDir(cfg, payload));
+  } catch {
+    // §4.9: a name is never worth a drain. The items ship either way.
+  }
+
+  // The run's pinned context, refreshed at most once a minute (`lib/pins.mjs`).
+  //
+  // It sits beside `resolveActor` for exactly the same reason. `hooks/src/prompt-recall.mjs`
+  // renders pins on a hook that blocks every prompt inside a 1500 ms budget, so its half of
+  // this is one `readJson` and cannot be anything more — which means the dial has to happen
+  // somewhere, and this is the only process in the plugin that can afford one.
+  //
+  // After the items have shipped, in the same unbudgeted tail as the actor and the TTL sweep:
+  // the drainer's job is memory, and a slow control-plane call must not sit in front of an
+  // ingest a user is waiting to see land. Running late costs one prompt's worth of staleness
+  // in a cache whose whole design says a stale pin still renders.
+  //
+  // Skipped when the breaker is not reporting `ready`. That guard is about the *verdict*, not
+  // the traffic: `recordSuccess` clears the connection state for the whole endpoint, so a
+  // successful `variables/list` issued moments after a 500 on `/v2/control/ingest` would
+  // whitewash the failure the status line is meant to be showing. The instance has just said
+  // it is unwell; the pins can wait for the drain that finds it well again, and until then a
+  // stale pin still renders.
+  try {
+    if (readBreaker(cfg).state === 'ready') await refreshPins(cfg, runId);
+  } catch {
+    // §4.9: a pin is never worth a drain. A failed refresh leaves the previous cache alone,
+    // which is the behaviour that matters — see `lib/pins.mjs`.
   }
 
   // §7's TTL sweep runs only from here and from `session-end` — never on a blocking hook's
@@ -269,7 +321,7 @@ async function drainSpool(cfg, runId, agentId, promptId, started) {
     const res = await postIngest(cfg, {
       run_id: runId,
       agent_id: agentId,
-      idempotency_key: idempotencyKey(runId, promptId, seq, items),
+      idempotency_key: batchIdempotencyKey(runId, items),
       parallel: true,               // batch items are independent of each other
       items,
       ...(str(cfg.userId) ? { user_id: str(cfg.userId) } : {}),
@@ -290,7 +342,7 @@ async function drainSpool(cfg, runId, agentId, promptId, started) {
     }
 
     if (isRejectedPayload(res)) {
-      // §5.5 step 6 / F16: the payload is bad, not the server. Quarantine and never retry.
+      // §5.5 step 6: the payload is bad, not the server. Quarantine and never retry.
       quarantine(cfg, runId, batch, res);
       rejected += batch.length;
       continue;
@@ -364,29 +416,6 @@ async function stillOurs(lock) {
 /** @param {number} ms @returns {Promise<void>} */
 function sleep(ms) {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
-}
-
-/**
- * §5.5: "the `idempotency_key` is per batch, derived from `(run_id, prompt_id, batch
- * sequence)`, so a retry after a transport timeout is a server-side no-op."
- *
- * The item ids ride in the digest as well as the triple. Two drains of the *same* batch
- * still agree — nothing was committed, so the same files come back in the same order — while
- * a later batch that happens to land on the same sequence number with *different* items gets
- * its own key. Without that, a re-drain's batch 0 would be silently deduped away against an
- * earlier batch 0 it has nothing in common with, and those captures would be lost with no
- * error anywhere.
- *
- * @param {string} runId @param {string} promptId @param {number} seq @param {any[]} items
- * @returns {string}
- */
-function idempotencyKey(runId, promptId, seq, items) {
-  const ids = items.map((it) => str(it?.item_id)).join('|');
-  const digest = createHash('sha256')
-    .update(`${runId}|${promptId}|${seq}|${ids}`, 'utf8')
-    .digest('hex')
-    .slice(0, 12);
-  return `cc-${slug(promptId || 'noturn', 26)}-${seq}-${digest}`;
 }
 
 /**
@@ -539,58 +568,58 @@ async function flushOutcome(cfg, runId, agentId, promptId, wanted) {
  * `--with-outcome <prompt_id>`: read `runs/<run_id>/turns/<prompt_id>.json` and post exactly
  * one `/v2/control/outcome`.
  *
- * Skipped entirely — never sent with an empty `entry_ids[]` — when the turn recalled nothing,
- * because an outcome attributed to nothing is a wasted round trip that also pollutes the
- * run-level signal history the reflect path reads.
+ * **The rule itself lives in `lib/outcome.mjs`, and this hook is one of its two callers.**
+ * `session-end.mjs` is the other, for turns this drain never reached (§5.7 step 3), and the
+ * two are separate esbuild entry points that cannot import one another — so the rule sat in
+ * both files, and the copies disagreed for a while. `decideOutcome` answers the four-case
+ * table (including "post nothing", which is a real answer here) and `outcomeRequest` addresses
+ * the record; everything left in this function is the parts a drain owns: the file, the
+ * clock, and what a failure means.
  *
- * Two `outcomeMode` values silence it. `"off"` disables implicit attribution altogether.
- * `"explicit"` hands the call to the model through `mubit_outcome` — so the hook must stay
- * quiet there too, or the model's deliberate judgement is diluted by an automatic 0.2.
+ * `outcomeMode` "off" and "explicit" silence all of it — including the neutral record, which
+ * is implicit attribution as much as the +0.2 is.
  *
  * @param {Record<string, any>} cfg @param {string} runId @param {string} agentId
  * @param {string} promptId
  */
 async function sendOutcome(cfg, runId, agentId, promptId) {
   try {
-    const mode = str(cfg.outcomeMode);
-    if (mode === 'off' || mode === 'explicit') return;
+    if (!implicitOutcomesEnabled(cfg)) return;
     if (!promptId) return;
 
     const p = join(runDir(cfg, runId), 'turns', `${safeSegment(promptId)}.json`);
     const turn = readJson(p, null);
-    if (!turn || typeof turn !== 'object' || Array.isArray(turn)) return;
 
-    // Already attributed by an earlier drain. The key below makes a re-post a server-side
-    // no-op anyway, but there is no reason to spend the round trip.
-    if (numOr(turn.outcome_sent_at, 0) > 0) return;
+    const decision = decideOutcome(turn);
+    if (!decision.post) {
+      // One reason needs the file changed: nothing is going to send this turn's outcome, so
+      // it must stop claiming to be pending.
+      if (decision.reason === 'attempts_exhausted') {
+        writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_abandoned: true });
+      }
+      log(cfg, 'debug', `drain: no outcome to post (${decision.reason})`, {
+        run_id: runId, prompt_id: promptId,
+      });
+      return;
+    }
 
-    const entryIds = Array.isArray(turn.recalled)
-      ? turn.recalled.filter((v) => typeof v === 'string' && v.trim())
-      : [];
-    if (entryIds.length === 0) return;
+    // Counted before dialling, in the file. See MAX_OUTCOME_ATTEMPTS.
+    const attempts = numOr(turn.outcome_attempts, 0);
+    writeJsonAtomic(p, { ...turn, outcome_attempts: attempts + 1 });
 
-    // The turn file records how the turn ended, so the drain never has to re-derive it.
-    const failed = str(turn.outcome).toLowerCase() === 'failure';
-
-    const res = await postOutcome(cfg, {
-      run_id: runId,
-      reference_id: RUN_LEVEL_REFERENCE,
-      outcome: failed ? 'failure' : 'success',
-      signal: failed ? SIGNAL_FAILURE : SIGNAL_SUCCESS,
-      rationale: failed
-        ? 'Claude Code turn ended in failure after these memories were injected.'
-        : 'Claude Code turn completed after these memories were injected.',
-      agent_id: agentId,
-      entry_ids: entryIds,
-      // Derived from (run_id, prompt_id), never random: the server keeps an outcome
-      // idempotency ledger across restarts, which only helps if the key is stable.
-      idempotency_key: `cc-outcome-${runId}-${promptId}`,
-    }, { timeoutMs: numOr(cfg.timeoutMs, 4000), retry: true });
+    const res = await postOutcome(cfg, outcomeRequest({ runId, agentId, promptId, decision }),
+      // Deliberately no `retry`. The transport's one silent re-dial on timeout doubles a post
+      // that may already have landed, inside the same second — the widest part of the window,
+      // and the least useful, since the next drain retries anyway.
+      { timeoutMs: numOr(cfg.timeoutMs, 4000) });
 
     if (res.ok) {
-      writeJsonAtomic(p, { ...turn, outcome_pending: false, outcome_sent_at: Date.now() });
+      writeJsonAtomic(p, {
+        ...turn, outcome_attempts: attempts + 1, outcome_pending: false, outcome_sent_at: Date.now(),
+      });
     } else {
-      // Left pending on purpose: the next drain re-posts it under the same key.
+      // Left pending on purpose: the next drain re-posts it under the same key, up to the
+      // attempt bound above.
       log(cfg, 'warn', `drain: outcome post failed (${res.state})`, {
         run_id: runId, prompt_id: promptId, error: str(res.error).slice(0, 300),
       });
@@ -696,6 +725,19 @@ function readStdin(limitMs = 1000) {
  * @param {string[]} argv @param {string} name
  * @returns {string}
  */
+/**
+ * The same refusal `lib/runid.mjs` applies to a `static` pin, for a run id that arrived on
+ * this process's argv instead. `''` means "not a run id", and the caller drains nothing.
+ * @param {string} raw
+ * @returns {string}
+ */
+function usableRunId(raw) {
+  const id = typeof raw === 'string' ? raw.trim() : '';
+  if (!id || id.toLowerCase() === 'default') return '';
+  if (/[\\/]/.test(id) || /^\.+$/.test(id)) return '';
+  return id;
+}
+
 function flagValue(argv, name) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -712,23 +754,6 @@ function flagValue(argv, name) {
 // Paths and coercion
 // ---------------------------------------------------------------------------
 
-/**
- * The same flattening `lib/spool.mjs` applies, so `runs/<run_id>/` means one directory to
- * every module. A run id can come from a hand-written `.mubit-cc.json`, so it is treated as
- * untrusted input to a path.
- * @param {any} v @returns {string}
- */
-function safeSegment(v) {
-  const s = String(v ?? '').trim();
-  if (!s) return '';
-  return s.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
-}
-
-/** @param {Record<string, any>} cfg @param {string} runId @returns {string} */
-function runDir(cfg, runId) {
-  return join(resolveDataDir(cfg), 'runs', safeSegment(runId));
-}
-
 /** §6.1 `MUBIT_CC_BATCH_MAX_ITEMS`. @param {Record<string, any>} cfg @returns {number} */
 function batchMax(cfg) {
   const n = Math.trunc(numOr(cfg?.batchMaxItems, DEFAULT_BATCH));
@@ -744,12 +769,6 @@ function str(v) {
 function numOr(v, d) {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : d;
-}
-
-/** A readable, log-safe fragment for an idempotency key. */
-function slug(v, max) {
-  const s = String(v ?? '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
-  return s.slice(0, max) || 'noturn';
 }
 
 /** @param {any} err @returns {string} */

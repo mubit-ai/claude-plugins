@@ -1,0 +1,1554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Mubit memory</title>
+<style>
+/* Brand tokens. Dark is the base, so an install with no expressed preference gets dark;
+   light is opted into by the system setting or by the toggle. */
+:root {
+  --bg: hsl(28 9% 8%);
+  --panel: hsl(28 10% 10%);
+  --panel-2: hsl(28 10% 13%);
+  --border: hsl(28 9% 21%);
+  --text: hsl(32 10% 85%);
+  --muted: hsl(30 9% 60%);
+  --accent: hsl(16 100% 55%);
+  --accent-dim: hsl(16 100% 55% / 0.14);
+  --success: hsl(142 50% 50%);
+  --danger: hsl(0 72% 58%);
+  --danger-dim: hsl(0 72% 58% / 0.12);
+
+  --r-sm: 2px;
+  --r-md: 4px;
+  --r-card: 8px;
+
+  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: hsl(32 36% 97%);
+    --panel: hsl(36 50% 99%);
+    --panel-2: hsl(32 30% 95%);
+    --border: hsl(30 18% 84%);
+    --text: hsl(30 22% 14%);
+    --muted: hsl(30 10% 42%);
+    --accent: hsl(16 100% 50%);
+    --accent-dim: hsl(16 100% 50% / 0.12);
+    --success: hsl(149 70% 33%);
+    --danger: hsl(0 82% 54%);
+    --danger-dim: hsl(0 82% 54% / 0.10);
+  }
+}
+:root[data-theme="light"] {
+  --bg: hsl(32 36% 97%);
+  --panel: hsl(36 50% 99%);
+  --panel-2: hsl(32 30% 95%);
+  --border: hsl(30 18% 84%);
+  --text: hsl(30 22% 14%);
+  --muted: hsl(30 10% 42%);
+  --accent: hsl(16 100% 50%);
+  --accent-dim: hsl(16 100% 50% / 0.12);
+  --success: hsl(149 70% 33%);
+  --danger: hsl(0 82% 54%);
+  --danger-dim: hsl(0 82% 54% / 0.10);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/19px var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+a { color: var(--accent); }
+
+.app { display: grid; grid-template-rows: auto auto 1fr; height: 100%; }
+
+/* ---- header ---------------------------------------------------------- */
+header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--panel);
+}
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: -0.01em; }
+.brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+.spacer { flex: 1; }
+.endpoint { font: 11px/16px var(--mono); color: var(--muted); }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border);
+  font-size: 11px; color: var(--muted); background: var(--panel-2);
+}
+.pill .led { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.pill.ok .led { background: var(--success); }
+.pill.bad .led { background: var(--danger); }
+.iconbtn {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 3px 9px; cursor: pointer; font-size: 12px;
+}
+.iconbtn:hover { border-color: var(--accent); }
+
+/* ---- banner ---------------------------------------------------------- */
+.banner {
+  display: none; gap: 10px; align-items: baseline;
+  padding: 7px 14px; border-bottom: 1px solid var(--border);
+  background: var(--danger-dim); color: var(--text); font-size: 12px;
+}
+.banner.show { display: flex; }
+.banner code { font: 11px/16px var(--mono); color: var(--muted); }
+
+/* ---- layout ---------------------------------------------------------- */
+.body { display: grid; grid-template-columns: 268px 1fr; min-height: 0; }
+aside {
+  border-right: 1px solid var(--border); background: var(--panel);
+  overflow-y: auto; padding: 10px; min-height: 0;
+}
+main { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0; }
+
+.rail-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); margin: 10px 2px 6px;
+}
+select, input[type="text"], input[type="search"] {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 4px 7px;
+}
+input:focus, select:focus, button:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+
+.run { display: block; width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 1px solid transparent; border-radius: var(--r-md);
+  padding: 6px 8px; margin-bottom: 2px; }
+.run:hover { background: var(--panel-2); }
+.run[aria-current="true"] { background: var(--accent-dim); border-color: var(--accent); }
+.run .id { font: 12px/17px var(--mono); overflow-wrap: anywhere; }
+.run .meta { font-size: 11px; color: var(--muted); }
+
+/* ---- tabs ------------------------------------------------------------ */
+nav.tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-bottom: 1px solid var(--border); }
+nav.tabs button {
+  background: none; border: 1px solid transparent; border-bottom: none;
+  border-radius: var(--r-md) var(--r-md) 0 0; padding: 6px 14px; cursor: pointer;
+  color: var(--muted); margin-bottom: -1px;
+}
+nav.tabs button[aria-selected="true"] {
+  color: var(--text); background: var(--bg);
+  border-color: var(--border); border-bottom-color: var(--bg);
+}
+.tabpanel { display: none; min-height: 0; overflow: auto; padding: 12px; }
+.tabpanel.active { display: block; }
+
+/* ---- shared ---------------------------------------------------------- */
+.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.toolbar > * { flex: 0 0 auto; }
+.toolbar .grow { flex: 1 1 220px; min-width: 160px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
+.seg button { background: var(--panel-2); border: none; padding: 4px 11px; cursor: pointer; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--accent-dim); color: var(--text); }
+.btn {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 4px 11px; cursor: pointer;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-dim); }
+/* A facet that cannot answer the question is dimmed rather than hidden. Hiding it would leave
+   a person hunting for a control they saw a moment ago; the `title` says why it is off. */
+select:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.link { background: none; border: none; padding: 0 2px; color: var(--accent); text-decoration: underline; }
+
+.split { display: grid; grid-template-columns: minmax(240px, 380px) 1fr; gap: 12px; align-items: start; }
+/* The turns table carries seven columns plus a prompt that has to stay readable, so it takes
+   the larger half rather than the master-detail rail width. */
+.split.wide { grid-template-columns: minmax(0, 1.7fr) minmax(260px, 1fr); }
+@media (max-width: 1100px) { .split, .split.wide { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-card); }
+.list { max-height: calc(100vh - 210px); overflow: auto; }
+.item {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  background: none; border: none; border-bottom: 1px solid var(--border);
+  padding: 8px 10px;
+}
+.item:last-child { border-bottom: none; }
+.item:hover { background: var(--panel-2); }
+.item[aria-current="true"] { background: var(--accent-dim); }
+.item .line1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .line2 { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.tag {
+  display: inline-block; padding: 0 6px; border-radius: var(--r-sm);
+  border: 1px solid var(--border); font-size: 11px; color: var(--muted);
+  margin-right: 4px; background: var(--panel-2);
+}
+.tag.leak { color: var(--accent); border-color: var(--accent); }
+.tag.ok { color: var(--success); border-color: var(--success); }
+.tag.bad { color: var(--danger); border-color: var(--danger); }
+/* Dashed, because the badge is reporting the absence of a fact rather than a fact. */
+.tag.unknown { border-style: dashed; }
+
+.detail { padding: 14px; }
+.detail h2 { font-size: 14px; margin: 0 0 8px; }
+.detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 12px 0 0; }
+.detail dt { color: var(--muted); font-size: 12px; }
+.detail dd { margin: 0; font: 12px/18px var(--mono); overflow-wrap: anywhere; }
+.prose { white-space: pre-wrap; overflow-wrap: anywhere; }
+.empty { color: var(--muted); padding: 22px 14px; text-align: center; }
+
+/* ---- tables ---------------------------------------------------------- */
+.scroll-x { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { text-align: left; padding: 5px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+td.num, th.num { text-align: right; font-family: var(--mono); }
+td.prompt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 1px; width: 100%; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--panel-2); }
+tbody tr[aria-current="true"] { background: var(--accent-dim); }
+
+/* ---- tiles ----------------------------------------------------------- */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 10px; }
+.tile { padding: 10px 12px; }
+.tile .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.tile .v { font: 600 21px/28px var(--mono); }
+.tile .s { font-size: 11px; color: var(--muted); }
+.tile svg { display: block; width: 100%; height: 30px; margin-top: 4px; }
+.note { color: var(--muted); font-size: 11px; margin: 10px 2px 0; }
+
+.confirm { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
+.confirm input { font-family: var(--mono); }
+.row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <span class="brand"><span class="dot"></span>Mubit memory</span>
+    <span class="endpoint" id="endpoint"></span>
+    <span class="spacer"></span>
+    <span class="pill" id="conn"><span class="led"></span><span id="conn-text">connecting</span></span>
+    <button class="iconbtn" id="theme" title="Switch between light and dark">theme</button>
+  </header>
+
+  <div class="banner" id="banner">
+    <strong id="banner-title"></strong>
+    <span id="banner-text"></span>
+    <code id="banner-code"></code>
+  </div>
+
+  <div class="body">
+    <aside>
+      <div class="rail-label">Data directory</div>
+      <select id="dirs" aria-label="Data directory"></select>
+
+      <div class="rail-label">Runs</div>
+      <div id="runs"></div>
+    </aside>
+
+    <main>
+      <nav class="tabs" role="tablist">
+        <button role="tab" id="tab-memory" aria-selected="true" aria-controls="panel-memory">Memory</button>
+        <button role="tab" id="tab-turns" aria-selected="false" aria-controls="panel-turns">Turns</button>
+        <button role="tab" id="tab-analytics" aria-selected="false" aria-controls="panel-analytics">Analytics</button>
+      </nav>
+
+      <!-- ---------------- Memory ---------------- -->
+      <section class="tabpanel active" id="panel-memory" role="tabpanel" aria-labelledby="tab-memory">
+        <div class="toolbar">
+          <span class="seg">
+            <button id="mode-lessons" aria-pressed="true">Lessons</button>
+            <button id="mode-activity" aria-pressed="false">Activity</button>
+          </span>
+          <span class="seg">
+            <button id="runs-this" aria-pressed="false">This run</button>
+            <button id="runs-all" aria-pressed="true">All runs</button>
+          </span>
+          <input class="grow" type="search" id="filter" placeholder="Filter what is loaded (instant)" aria-label="Filter loaded entries">
+          <!-- One control, not a value plus a "leaks?" toggle. Reach and exact scope are the same
+               axis asked at two grains, and two controls would let a person select "global" and
+               "only its own run" at once — a state with no rows in it by construction. -->
+          <select id="scope-filter" style="width:auto" aria-label="Scope filter">
+            <option value="">Every scope</option>
+            <optgroup label="Reach">
+              <option value="leak">Visible outside its own run</option>
+              <option value="run">Only its own run</option>
+            </optgroup>
+            <optgroup label="Exact">
+              <option value="session">session</option>
+              <option value="global">global</option>
+              <!-- `org` is written by promotion and by nothing on the client, so offering it on an
+                   instance that has never promoted anything is offering a guaranteed empty result.
+                   It is unhidden by `syncScopeVocabulary()` the moment a loaded row carries it. -->
+              <option value="org" hidden disabled>org</option>
+              <option value="unknown">scope not recorded</option>
+            </optgroup>
+          </select>
+          <select id="project-filter" style="width:auto" aria-label="Project filter"></select>
+          <button class="btn" id="do-search" title="Ask the instance, rather than filtering what is already loaded">Search instance</button>
+        </div>
+
+        <div class="split">
+          <div class="card list" id="memory-list"></div>
+          <div class="card detail" id="memory-detail"><p class="empty">Select an entry.</p></div>
+        </div>
+        <p class="note" id="memory-footer"></p>
+        <p class="note" id="memory-scope-note"></p>
+      </section>
+
+      <!-- ---------------- Turns ---------------- -->
+      <section class="tabpanel" id="panel-turns" role="tabpanel" aria-labelledby="tab-turns">
+        <div class="toolbar">
+          <input class="grow" type="search" id="turn-filter" placeholder="Filter prompts" aria-label="Filter turns">
+          <span class="pill"><span id="turn-count">0</span>&nbsp;turns on disk</span>
+        </div>
+        <div class="split wide">
+          <div class="card scroll-x list">
+            <table>
+              <thead><tr>
+                <th>Prompt</th><th class="num">rung</th><th class="num">src</th>
+                <th class="num">tok</th><th class="num">ptr</th><th>used</th><th>outcome</th>
+              </tr></thead>
+              <tbody id="turn-rows"></tbody>
+            </table>
+          </div>
+          <div class="card detail" id="turn-detail"><p class="empty">Select a turn.</p></div>
+        </div>
+        <p class="note">
+          Turn files are pruned six hours after they are written, so this table is the recent
+          past only. There is no per-prompt latency column because per-prompt latency is not
+          recorded anywhere: the timing on the status marker describes the last prompt, not each one.
+        </p>
+      </section>
+
+      <!-- ---------------- Analytics ---------------- -->
+      <section class="tabpanel" id="panel-analytics" role="tabpanel" aria-labelledby="tab-analytics">
+        <div class="tiles" id="tiles"></div>
+        <p class="note" id="analytics-note"></p>
+
+        <div class="rail-label">Ingest health</div>
+        <div class="tiles" id="health-tiles"></div>
+        <p class="note" id="health-note"></p>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // -------------------------------------------------------------------------
+  // Transport
+  // -------------------------------------------------------------------------
+
+  // The token arrives in the launch URL because a browser navigating to a page cannot set a
+  // header. It is lifted out immediately and the address bar is rewritten, so it does not sit
+  // in history or in whatever the user pastes into a bug report. Every call after this one
+  // carries it as an Authorization header instead.
+  const params = new URLSearchParams(location.search);
+  const AUTH = params.get('token') || '';
+  if (AUTH) history.replaceState({}, '', location.pathname);
+
+  const state = {
+    meta: null,
+    dir: '',
+    run: '',
+    // Memory-only, and it does not touch `state.run`. An empty `run=` upstream means *every*
+    // run, which is the only way the scope question can be asked at all — but /api/search,
+    // /api/outcome, /api/archive and /api/health/remote all refuse an empty run, and the Turns
+    // and Analytics tabs read a run's files off local disk. So the rail keeps naming one
+    // concrete run and this flag re-points one fetch. It defaults on because the tab's whole
+    // claim is "what does this instance remember", not "what did this session write".
+    allRuns: true,
+    mode: 'lessons',
+    tab: 'memory',
+    lessons: [],
+    activity: [],
+    turns: [],
+    scope: '',
+    project: '',
+    selectedEntry: null,
+    selectedTurn: null,
+    searchResults: null,
+    searchQuery: '',
+    lastRemoteAt: 0,
+    // How many remote refreshes are in the air. The poll declines to add to it; only a forced
+    // refresh cuts in, so a census slower than the cadence cannot be lapped by its own timer.
+    remoteBusy: 0,
+    // "" is not the same as "not asked yet", and neither is the same as "the call failed".
+    // Collapsing the three is what made an unreachable instance render as an empty one.
+    loaded: false,
+    lessonsError: '',
+    activityError: '',
+    joinError: '',
+    // The census the server counted before paging, which is the only number that can tell a
+    // person their filter matched nothing rather than their instance holding nothing.
+    census: null,
+    // A slow all-runs fetch started before a fast this-run one must not land after it and
+    // repaint the older answer. Every render path checks the sequence it was issued under.
+    reqSeq: 0,
+  };
+
+  async function api(path, init) {
+    const res = await fetch(path, Object.assign({}, init, {
+      headers: Object.assign(
+        { authorization: 'Bearer ' + AUTH },
+        init && init.body ? { 'content-type': 'application/json' } : {},
+        (init && init.headers) || {},
+      ),
+    }));
+    const text = await res.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
+    if (!res.ok) {
+      const err = new Error((body && body.error && body.error.message) || ('HTTP ' + res.status));
+      err.code = (body && body.error && body.error.code) || 'bad_request';
+      err.status = res.status;
+      throw err;
+    }
+    return body;
+  }
+
+  const post = (path, payload) => api(path, { method: 'POST', body: JSON.stringify(payload) });
+
+  // -------------------------------------------------------------------------
+  // Rendering helpers
+  // -------------------------------------------------------------------------
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  };
+  const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
+  const num = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
+  const short = (id, n) => (id ? String(id).slice(0, n || 8) : '—');
+  const clock = (ms) => (ms ? new Date(ms).toLocaleTimeString() : '—');
+  const day = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? String(iso) : d.toLocaleDateString();
+  };
+
+  function tag(text, cls) {
+    return el('span', 'tag' + (cls ? ' ' + cls : ''), text);
+  }
+
+  /**
+   * A sparkline, drawn by hand because a charting library is a dependency and this is six
+   * lines of arithmetic. A flat series still draws a line rather than collapsing to nothing.
+   */
+  function sparkline(values) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 100 30');
+    svg.setAttribute('preserveAspectRatio', 'none');
+    svg.setAttribute('aria-hidden', 'true');
+    if (!values.length) return svg;
+
+    const lo = Math.min.apply(null, values);
+    const hi = Math.max.apply(null, values);
+    const span = hi - lo || 1;
+    const step = values.length > 1 ? 100 / (values.length - 1) : 0;
+    const points = values.map((v, i) => {
+      const x = values.length > 1 ? i * step : 50;
+      const y = 28 - ((v - lo) / span) * 26;
+      return x.toFixed(2) + ',' + y.toFixed(2);
+    }).join(' ');
+
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    line.setAttribute('points', points);
+    line.setAttribute('fill', 'none');
+    line.setAttribute('stroke', 'currentColor');
+    line.setAttribute('stroke-width', '1.5');
+    line.setAttribute('vector-effect', 'non-scaling-stroke');
+    svg.appendChild(line);
+    svg.style.color = 'var(--accent)';
+    return svg;
+  }
+
+  function tile(key, value, sub, series) {
+    const card = el('div', 'card tile');
+    card.appendChild(el('div', 'k', key));
+    card.appendChild(el('div', 'v', value));
+    if (sub) card.appendChild(el('div', 's', sub));
+    if (series && series.length > 1) card.appendChild(sparkline(series));
+    return card;
+  }
+
+  // -------------------------------------------------------------------------
+  // Banner
+  // -------------------------------------------------------------------------
+
+  const BANNER_TEXT = {
+    upstream_unreachable: ['Instance unreachable',
+      'Lessons, activity and search are unavailable. Everything on disk — turns, analytics and '
+      + 'ingest health — is still live below.'],
+    auth_failed: ['Instance rejected the key',
+      'The stored API key is wrong, revoked, or issued for a different instance. Run '
+      + '/mubit-memory:auth in Claude Code to replace it.'],
+    bad_request: ['Request refused', 'The dashboard refused its own request rather than sending it.'],
+    unauthorized: ['Token expired',
+      'This page was opened with a token from an earlier launch. Run /mubit-memory:dashboard again.'],
+    not_found: ['Nothing there', 'The route or entry asked for does not exist.'],
+  };
+
+  let bannerCode = '';
+  function showBanner(code, detail) {
+    if (bannerCode === code) return;
+    bannerCode = code;
+    const copy = BANNER_TEXT[code] || ['Something went wrong', ''];
+    $('banner-title').textContent = copy[0];
+    $('banner-text').textContent = copy[1];
+    $('banner-code').textContent = detail ? String(detail).slice(0, 220) : '';
+    $('banner').classList.add('show');
+  }
+  function hideBanner() {
+    bannerCode = '';
+    $('banner').classList.remove('show');
+  }
+  function setConn(ok, text) {
+    const pill = $('conn');
+    pill.classList.toggle('ok', ok === true);
+    pill.classList.toggle('bad', ok === false);
+    $('conn-text').textContent = text;
+  }
+
+  // -------------------------------------------------------------------------
+  // Rail
+  // -------------------------------------------------------------------------
+
+  function renderDirs(dirs) {
+    const sel = $('dirs');
+    if (sel.dataset.count === String(dirs.length) && sel.value === state.dir) return;
+    sel.dataset.count = String(dirs.length);
+    clear(sel);
+    dirs.forEach((d) => {
+      const o = el('option', null, d.name + '  (' + d.runCount + ' runs)');
+      o.value = d.path;
+      sel.appendChild(o);
+    });
+    sel.value = state.dir;
+  }
+
+  function renderRuns(runs) {
+    const box = $('runs');
+    clear(box);
+    if (!runs.length) {
+      box.appendChild(el('p', 'empty', 'No runs in this directory yet.'));
+      return;
+    }
+    runs.forEach((r) => {
+      const b = el('button', 'run');
+      b.setAttribute('aria-current', String(r.runId === state.run));
+      b.appendChild(el('div', 'id', r.runId));
+      b.appendChild(el('div', 'meta',
+        r.state + ' · ' + r.turnCount + ' turns · spool ' + r.spoolDepth));
+      b.addEventListener('click', () => {
+        state.run = r.runId;
+        state.selectedEntry = null;
+        state.selectedTurn = null;
+        state.searchResults = null;
+        state.lastRemoteAt = 0;
+        refreshLocal();
+        refreshAnalytics();
+        refreshRemote();
+      });
+      box.appendChild(b);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Row semantics
+  // -------------------------------------------------------------------------
+
+  // #region scope-predicate
+  /*
+   * Everything between the region markers is sliced out of this file verbatim by
+   * test/dashboard-page.test.mjs and run in a bare `node:vm` context, which is why it may not
+   * touch `state`, `$`, `document` or anything else in the page: the slice has to evaluate on
+   * its own or the truth table below is untested. Add nothing impure here.
+   *
+   * Three sources now feed the same list — the activity census, the lessons fallback and
+   * `/api/search` — and they carry rows of different fidelity. So `leaksScope` and
+   * `fromOtherRun` are *derived here* rather than read off the wire, even though the server
+   * sends both: a row that came back from search has no scope of its own to speak of, and one
+   * page that computes a fact one way is easier to trust than three that receive it.
+   */
+
+  /** Every scope a lesson can come back with. `org` arrives only by promotion, never from a client. */
+  const SCOPE_VALUES = ['run', 'session', 'global', 'org'];
+
+  /**
+   * The scope this row has *as far as the instance is concerned*.
+   *
+   * An absent scope becomes `run`, because that is what such a lesson reads as everywhere else
+   * it is asked for — a page that invented a fifth bucket for it would disagree with every other
+   * view of the same entry. That it arrived unrecorded is a separate fact, and
+   * `scopeKnown` is where it lives.
+   */
+  function scopeOf(row) {
+    const raw = row && row.scope != null ? String(row.scope) : '';
+    return raw === '' ? 'run' : raw;
+  }
+
+  /** Did anything actually record a scope, or did the default supply one? */
+  function scopeKnown(row) {
+    if (row && typeof row.scopeKnown === 'boolean') return row.scopeKnown;
+    return !!(row && row.scope != null && String(row.scope) !== '');
+  }
+
+  /** Visible to runs other than the one that wrote it — the promise the Memory tab sells. */
+  function leaksScope(row) {
+    return scopeOf(row) !== 'run';
+  }
+
+  /**
+   * Written by some run other than the one the rail is pointing at. A rendering fact only: it
+   * says where the reader is standing, and nothing about the entry's reach.
+   */
+  function fromOtherRun(row, currentRun) {
+    const src = String((row && (row.sourceRunId || row.run_id)) || '');
+    return !!(currentRun && src && src !== String(currentRun));
+  }
+
+  /**
+   * `unknown` overlaps `run` on purpose. "Nothing recorded a scope" and "this is run-scoped"
+   * are different facts about the same rows, and a person auditing what leaks needs to be able
+   * to ask which of the two they are looking at. Excluding an unrecorded row from `run` would
+   * be the page disagreeing with the instance about where that lesson is visible.
+   */
+  function matchesScope(row, filter) {
+    if (!filter) return true;
+    if (filter === 'leak') return leaksScope(row);
+    if (filter === 'unknown') return !scopeKnown(row);
+    return scopeOf(row) === filter;
+  }
+
+  /**
+   * A `repo:` slug is derived from a git remote URL, so it never contains whitespace — which
+   * makes a key with a leading space one that no real project can collide with. It has to be a
+   * distinct value rather than the empty string, because the empty string already means
+   * "every project" on the select.
+   */
+  const NO_PROJECT = ' no-project-tag';
+
+  function projectOf(row) {
+    const p = String((row && row.project) || '');
+    return p === '' ? NO_PROJECT : p;
+  }
+
+  function matchesProject(row, filter) {
+    return !filter || projectOf(row) === filter;
+  }
+
+  /**
+   * Scope is deliberately *not* in the haystack. It used to be, and the words it contributes
+   * are "run", "session" and "global" — so typing `run` matched every row on the page, which
+   * is the one query a person looking at a scope filter is most likely to type.
+   */
+  function matchesText(row, needle) {
+    if (!needle) return true;
+    const hay = [
+      (row && row.content) || '',
+      (row && (row.lessonType || row.entry_type)) || '',
+      (row && (row.sourceRunId || row.run_id)) || '',
+      (row && row.project) || '',
+    ].join(' ').toLowerCase();
+    return hay.indexOf(needle) >= 0;
+  }
+  // #endregion scope-predicate
+
+  // -------------------------------------------------------------------------
+  // Memory tab
+  // -------------------------------------------------------------------------
+
+  function currentEntries() {
+    if (state.searchResults) return state.searchResults;
+    return state.mode === 'lessons' ? state.lessons : state.activity;
+  }
+
+  /**
+   * Whether the scope and project facets can say anything true about what is loaded.
+   *
+   * The activity feed is fetched with the compact projection, and compact is not a subset —
+   * the server *overwrites* `metadata_json` with `{entry_type, created_at}`, so scope is not
+   * merely missing from those rows, it has been discarded upstream. Asking for a full
+   * projection over a feed that is overwhelmingly traces would pull megabytes to answer a
+   * question about lessons. So in activity mode the facets are switched off and say why,
+   * which is the honest version of the silent empty list they used to produce.
+   */
+  function facetsApply() {
+    return state.mode === 'lessons' || !!state.searchResults;
+  }
+
+  const activeScope = () => (facetsApply() ? state.scope : '');
+  const activeProject = () => (facetsApply() ? state.project : '');
+
+  /**
+   * Once a search has run, the text box holds the *query*, not a filter.
+   *
+   * The instance answers semantically: "how do we publish the mirror" can return a lesson that
+   * contains none of those words, which is the entire reason for asking it rather than grepping
+   * what is loaded. Re-applying the same string as a literal substring filter over the answer
+   * threw those rows away again — a search that worked, rendering as a search that found
+   * nothing. Escape clears the results and hands the box back to the instant filter.
+   */
+  const activeText = () => (state.searchResults ? '' : $('filter').value.trim().toLowerCase());
+
+  function filteredEntries() {
+    const q = activeText();
+    const scope = activeScope();
+    const project = activeProject();
+    return currentEntries().filter((e) => matchesScope(e, scope)
+      && matchesProject(e, project) && matchesText(e, q));
+  }
+
+  /** What the scope filter alone costs, so the footer can offer to give it back. */
+  function hiddenByScope() {
+    const scope = activeScope();
+    if (!scope) return 0;
+    const q = activeText();
+    const project = activeProject();
+    return currentEntries().filter((e) => matchesProject(e, project) && matchesText(e, q)
+      && !matchesScope(e, scope)).length;
+  }
+
+  function renderMemoryList() {
+    const box = $('memory-list');
+    clear(box);
+
+    // A failed fetch and an instance holding nothing used to render the same sentence, which
+    // is the single most expensive thing this page could get wrong: it tells somebody their
+    // memory is empty when their memory is fine and their network is not.
+    const err = state.mode === 'lessons' ? state.lessonsError : state.activityError;
+    if (err) {
+      const p = el('p', 'empty', state.mode === 'lessons'
+        ? 'Could not load lessons from the instance.'
+        : 'Could not load activity from the instance.');
+      box.appendChild(p);
+      box.appendChild(el('p', 'note', err));
+      return;
+    }
+
+    const rows = filteredEntries();
+    if (!rows.length) {
+      if (!state.loaded) {
+        box.appendChild(el('p', 'empty', 'Loading…'));
+        return;
+      }
+      const total = currentEntries().length;
+      box.appendChild(el('p', 'empty', total
+        ? 'No entry in the ' + total + ' loaded matches these filters.'
+        : (state.mode === 'lessons'
+          ? 'This instance returned no lessons for ' + (state.allRuns ? 'any run.' : 'this run.')
+          : 'This instance returned no activity for '
+            + (state.allRuns ? 'any run.' : 'this run.'))));
+      return;
+    }
+
+    rows.forEach((e) => {
+      const b = el('button', 'item');
+      b.setAttribute('aria-current', String(state.selectedEntry && state.selectedEntry.id === e.id));
+      b.appendChild(el('div', 'line1', e.content || '(no content)'));
+
+      const meta = el('div', 'line2');
+      if (e.lessonType || e.entry_type) meta.appendChild(tag(e.lessonType || e.entry_type));
+      meta.appendChild(scopeBadge(e));
+      if (fromOtherRun(e, state.run)) {
+        const t = tag('other run');
+        t.title = 'Written by ' + (e.sourceRunId || e.run_id) + ', not by the run selected in the '
+          + 'rail. Where it is visible is the scope badge; this only says who wrote it.';
+        meta.appendChild(t);
+      }
+      if (e.importance) meta.appendChild(tag(e.importance));
+      meta.appendChild(document.createTextNode(day(e.createdAt || e.created_at)));
+      b.appendChild(meta);
+
+      b.addEventListener('click', () => { state.selectedEntry = e; renderMemory(); });
+      box.appendChild(b);
+    });
+  }
+
+  /**
+   * Always rendered, never gated on the row carrying a scope. Gating it was how a search
+   * result and an untagged lesson both came back with no badge at all, which reads as "no
+   * scope" — a thing the vocabulary does not contain.
+   */
+  function scopeBadge(e) {
+    const known = scopeKnown(e);
+    const t = tag(known ? scopeOf(e) : 'scope ?', leaksScope(e) ? 'leak' : (known ? null : 'unknown'));
+    if (!known) {
+      t.title = 'Nothing recorded a scope for this entry. The instance defaults an untagged '
+        + 'lesson to run scope, so that is how it behaves — but "defaulted" and "recorded" are '
+        + 'different facts, and only this badge can tell you which one you are looking at.';
+    }
+    return t;
+  }
+
+  /** What the scope means for this entry, in words rather than in a bucket name. */
+  const REACH = {
+    run: 'Only the run that wrote it. It goes away with that session.',
+    session: 'Every run in the same session — so it survives a compaction, but not a new session.',
+    global: 'Every run on this instance, in every project. This is the one that follows you.',
+    org: 'Everyone on this instance’s organisation. Only promotion writes this scope.',
+  };
+
+  function reachOf(e) {
+    const s = scopeOf(e);
+    const base = REACH[s] || ('Scope "' + s + '" is not one this page knows about.');
+    return scopeKnown(e) ? base : base + ' — but that is the default, not a recorded scope.';
+  }
+
+  function renderMemoryDetail() {
+    const box = $('memory-detail');
+    clear(box);
+    const e = state.selectedEntry;
+    if (!e) {
+      box.appendChild(el('p', 'empty', 'Select an entry.'));
+      return;
+    }
+
+    box.appendChild(el('h2', null, e.lessonType || e.entry_type || 'entry'));
+    box.appendChild(el('p', 'prose', e.content || ''));
+
+    if (e.rationale) {
+      box.appendChild(el('div', 'rail-label', 'Rationale'));
+      box.appendChild(el('p', 'prose', e.rationale));
+    }
+    if (e.conditions && e.conditions.length) {
+      box.appendChild(el('div', 'rail-label', 'Conditions'));
+      box.appendChild(el('p', 'prose', e.conditions.join(', ')));
+    }
+
+    const dl = el('dl');
+    const pair = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, v)); };
+    pair('id', e.id || '—');
+    pair('scope', scopeKnown(e) ? scopeOf(e) : scopeOf(e) + ' (not recorded)');
+    // The bucket name is jargon and the question a person came here with is "who else sees
+    // this". Spelling the answer out is the whole reason the row exists.
+    pair('reach', reachOf(e));
+    pair('project', e.project || 'no project tag');
+    pair('importance', e.importance || '—');
+    pair('written by', (e.sourceRunId || e.run_id || '—')
+      + (fromOtherRun(e, state.run) ? ' (not the selected run)' : ''));
+    pair('source', e.source || '—');
+    pair('created', e.createdAt || e.created_at || 'not recorded');
+    box.appendChild(dl);
+
+    if (!e.project) {
+      box.appendChild(el('p', 'note',
+        'Only the hook capture paths write a project tag. A lesson saved through the '
+        + 'mubit_learned tool, or written by reflection, carries none — so "no project tag" '
+        + 'means unattributed, and never that this entry belongs to the project you are in.'));
+    }
+
+    if (leaksScope(e)) {
+      const p = el('p', 'note',
+        'This entry is above run scope, so it is visible to runs other than the one that wrote '
+        + 'it. That is by design for a rule meant to follow you; it is a surprise for anything '
+        + 'that was only ever about one project.');
+      box.appendChild(p);
+    }
+
+    if (state.mode !== 'lessons' || !e.id) return;
+
+    const actions = el('div', 'row');
+    actions.appendChild(actionButton('Worked', () => outcome(e, true)));
+    actions.appendChild(actionButton('Did not work', () => outcome(e, false)));
+    actions.appendChild(actionButton('Archive', () => archive(e)));
+    box.appendChild(actions);
+
+    box.appendChild(deleteConfirm(e));
+  }
+
+  function actionButton(label, fn) {
+    const b = el('button', 'btn', label);
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      const original = b.textContent;
+      try {
+        await fn();
+        b.textContent = 'done';
+      } catch (err) {
+        showBanner(err.code, err.message);
+        b.textContent = 'failed';
+      }
+      setTimeout(() => { b.textContent = original; b.disabled = false; }, 1400);
+    });
+    return b;
+  }
+
+  /**
+   * Deletion has no undo, so the gesture is typing the id rather than clicking twice. The
+   * server enforces the same match independently — a confirmation that lives only here is one
+   * that a replayed request skips.
+   */
+  function deleteConfirm(e) {
+    const box = el('div', 'confirm');
+    box.appendChild(el('div', 'rail-label', 'Delete permanently'));
+    box.appendChild(el('p', 'note',
+      'There is no undo and no dry run. For a lesson that is merely wrong rather than unwanted, '
+      + '"Did not work" above down-weights it instead. To delete, type the id exactly.'));
+
+    const input = el('input');
+    input.type = 'text';
+    input.placeholder = e.id;
+    input.setAttribute('aria-label', 'Type the lesson id to confirm deletion');
+
+    const row = el('div', 'row');
+    const btn = el('button', 'btn danger', 'Delete');
+    btn.disabled = true;
+    input.addEventListener('input', () => { btn.disabled = input.value.trim() !== e.id; });
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        await post('/api/forget', { lessonId: e.id, confirm: input.value.trim() });
+        state.lessons = state.lessons.filter((l) => l.id !== e.id);
+        state.selectedEntry = null;
+        renderMemory();
+      } catch (err) {
+        showBanner(err.code, err.message);
+        btn.disabled = false;
+      }
+    });
+
+    row.appendChild(input);
+    row.appendChild(btn);
+    box.appendChild(row);
+    return box;
+  }
+
+  function outcome(e, success) {
+    return post('/api/outcome', {
+      run: state.run,
+      referenceId: e.id,
+      success: success,
+      entryIds: [e.id],
+    });
+  }
+
+  function archive(e) {
+    return post('/api/archive', {
+      run: state.run,
+      content: e.content,
+      artifactKind: 'note',
+      metadataJson: JSON.stringify({ archived_from: e.id, via: 'dashboard' }),
+    });
+  }
+
+  /**
+   * `org` is offered only once something carries it, so the select cannot advertise a filter
+   * that is guaranteed to match nothing on an instance that has never promoted a lesson.
+   */
+  function syncScopeVocabulary() {
+    const opt = $('scope-filter').querySelector('option[value="org"]');
+    if (!opt) return;
+    const present = currentEntries().some((e) => scopeOf(e) === 'org');
+    if (present) { opt.removeAttribute('hidden'); opt.removeAttribute('disabled'); return; }
+    opt.setAttribute('hidden', '');
+    opt.setAttribute('disabled', '');
+    if (state.scope === 'org') state.scope = '';
+  }
+
+  function renderProjectFacet() {
+    const sel = $('project-filter');
+    const counts = new Map();
+    currentEntries().forEach((e) => {
+      const p = projectOf(e);
+      counts.set(p, (counts.get(p) || 0) + 1);
+    });
+    const slugs = Array.from(counts.keys()).filter((p) => p !== NO_PROJECT).sort();
+    if (counts.has(NO_PROJECT)) slugs.push(NO_PROJECT);
+
+    clear(sel);
+    const every = el('option', null, 'Every project');
+    every.value = '';
+    sel.appendChild(every);
+    slugs.forEach((p) => {
+      const o = el('option', null, (p === NO_PROJECT ? 'No project tag (unattributed)' : p)
+        + '  (' + counts.get(p) + ')');
+      o.value = p;
+      sel.appendChild(o);
+    });
+    // A facet value that has fallen out of the loaded window would otherwise leave the select
+    // showing "Every project" while still filtering by the vanished one.
+    if (state.project && !counts.has(state.project)) state.project = '';
+    sel.value = state.project;
+  }
+
+  function syncFacetAvailability() {
+    const on = facetsApply();
+    const why = 'The activity feed is fetched with the compact projection, which the instance '
+      + 'returns with the scope metadata stripped out — so no scope or project filter can say '
+      + 'anything true about these rows. Switch to Lessons to filter by scope.';
+    ['scope-filter', 'project-filter'].forEach((id) => {
+      const sel = $(id);
+      sel.disabled = !on;
+      sel.title = on ? '' : why;
+    });
+  }
+
+  /**
+   * The line that makes a filter matching nothing legible.
+   *
+   * Everything above this is a view over the loaded window; the census numbers are the
+   * server's count over the whole instance before paging. Without them, "0 results" and "your
+   * instance is empty" are the same pixels.
+   */
+  function renderMemoryFooter() {
+    const foot = $('memory-footer');
+    clear(foot);
+
+    const shown = filteredEntries().length;
+    const hidden = hiddenByScope();
+    const parts = [shown + (shown === 1 ? ' result' : ' results')];
+    if (hidden) parts.push(hidden + ' hidden by the scope filter');
+
+    const c = state.census;
+    if (state.mode === 'lessons' && !state.searchResults && c) {
+      parts.push(c.totalVisible + ' visible to this instance');
+      if (c.source) parts.push('answered by ' + c.source);
+      if (c.truncated) {
+        parts.push('the census stopped after ' + c.pages + (c.pages === 1 ? ' page' : ' pages')
+          + (c.truncatedReason ? ' (' + c.truncatedReason + ')' : ''));
+      }
+      if (c.unknownScope) parts.push(c.unknownScope + ' with no recorded scope');
+    }
+    if (state.searchResults) {
+      parts.push('search results for “' + state.searchQuery + '”');
+    }
+    foot.appendChild(document.createTextNode(parts.join(' · ')));
+
+    if (hidden) {
+      const b = el('button', 'btn link', 'Show every scope');
+      b.setAttribute('aria-label', 'Clear the scope filter and show every scope');
+      b.addEventListener('click', () => {
+        state.scope = '';
+        $('scope-filter').value = '';
+        renderMemory();
+      });
+      foot.appendChild(document.createTextNode(' · '));
+      foot.appendChild(b);
+    }
+
+    const note = $('memory-scope-note');
+    const bits = [];
+    const what = state.mode === 'lessons' ? 'lessons' : 'entries';
+    bits.push(state.allRuns
+      ? 'Showing ' + what + ' from every run this instance holds. Worked / Did not work / '
+        + 'Archive / delete still attribute to the run selected in the rail, because those '
+        + 'routes need a concrete run.'
+      : 'Showing only ' + what + ' the run selected in the rail wrote, so anything a previous '
+        + 'session saved at global scope is out of view.');
+    if (state.joinError) {
+      bits.push('Creation dates are missing: the activity join failed — ' + state.joinError);
+    }
+    note.textContent = bits.join(' ');
+  }
+
+  function renderMemory() {
+    syncScopeVocabulary();
+    syncFacetAvailability();
+    renderProjectFacet();
+    renderMemoryList();
+    renderMemoryDetail();
+    renderMemoryFooter();
+  }
+
+  // -------------------------------------------------------------------------
+  // Turns tab
+  // -------------------------------------------------------------------------
+
+  function renderTurns() {
+    const q = $('turn-filter').value.trim().toLowerCase();
+    const rows = state.turns.filter((t) => !q
+      || (t.promptPreview + ' ' + t.outcomeState).toLowerCase().indexOf(q) >= 0);
+
+    $('turn-count').textContent = String(state.turns.length);
+
+    const body = $('turn-rows');
+    clear(body);
+    if (!rows.length) {
+      const tr = el('tr');
+      const td = el('td', 'empty', 'No turns on disk for this run. They are pruned after six hours.');
+      td.colSpan = 7;
+      tr.appendChild(td);
+      body.appendChild(tr);
+      return;
+    }
+
+    rows.forEach((t) => {
+      const tr = el('tr');
+      tr.setAttribute('aria-current', String(state.selectedTurn && state.selectedTurn.promptId === t.promptId));
+
+      const prompt = el('td', 'prompt', t.promptPreview || '(empty prompt)');
+      prompt.title = t.promptPreview || '';
+      tr.appendChild(prompt);
+      // `0` is not a rung. The ladder is 1–2, and an absent rung is coerced to zero on the way
+      // in, so the falsy branch here is what renders "we have no reading" — not "rung zero".
+      tr.appendChild(el('td', 'num', t.rung || '—'));
+      tr.appendChild(el('td', 'num', t.sources));
+      tr.appendChild(el('td', 'num', t.tok));
+      tr.appendChild(el('td', 'num', t.ptr));
+
+      // Not "no": absent means the signal could not be measured, and rendering it as a count
+      // of nothing ("0/0") reads as a measured zero. A bare question mark cannot.
+      const used = el('td');
+      if (t.used && t.used.used === true) used.appendChild(tag(t.used.matched + '/' + t.used.candidates, 'ok'));
+      else if (t.used && t.used.used === false) used.appendChild(tag(t.used.matched + '/' + t.used.candidates));
+      else {
+        const q = tag('?');
+        q.title = 'Not measurable for this turn'
+          + (t.used && t.used.reason ? ' (' + t.used.reason + ')' : '') + ' — not "unused".';
+        used.appendChild(q);
+      }
+      tr.appendChild(used);
+
+      tr.appendChild(el('td', null, t.outcomeState || '—'));
+      tr.addEventListener('click', () => selectTurn(t));
+      body.appendChild(tr);
+    });
+  }
+
+  async function selectTurn(t) {
+    state.selectedTurn = t;
+    renderTurns();
+    try {
+      const body = await api('/api/turn?dir=' + encodeURIComponent(state.dir)
+        + '&run=' + encodeURIComponent(state.run)
+        + '&prompt=' + encodeURIComponent(t.promptId));
+      renderTurnDetail(body.turn);
+    } catch (err) {
+      renderTurnDetail(t);
+    }
+  }
+
+  function renderTurnDetail(t) {
+    const box = $('turn-detail');
+    clear(box);
+    if (!t) {
+      box.appendChild(el('p', 'empty', 'Select a turn.'));
+      return;
+    }
+    box.appendChild(el('h2', null, 'Prompt ' + short(t.promptId, 8)));
+    box.appendChild(el('p', 'prose', t.prompt || t.promptPreview || ''));
+
+    const dl = el('dl');
+    const pair = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, v)); };
+    pair('started', clock(t.startedAt));
+    pair('recall', t.sources + ' memories · ' + t.tok + ' tok · ' + t.chars + ' chars');
+    pair('repeats', t.ptr + ' rendered as a pointer');
+    pair('rung', t.rung || '—'); // Same as the table: zero means unrecorded, not a rung.
+    if (t.emptyReason) pair('empty because', t.emptyReason);
+    pair('outcome', t.outcomeState || '—');
+    pair('session', short(t.sessionId, 8));
+    box.appendChild(dl);
+
+    if (t.recalled && t.recalled.length) {
+      box.appendChild(el('div', 'rail-label', 'Injected memories'));
+      const ul = el('div');
+      t.recalled.forEach((id) => ul.appendChild(tag(id)));
+      box.appendChild(ul);
+    }
+
+    const u = t.used || {};
+    box.appendChild(el('div', 'rail-label', 'Used signal'));
+    box.appendChild(el('p', 'note', u.used === null || u.used === undefined
+      ? 'Not measurable for this turn' + (u.reason ? ' (' + u.reason + ')' : '')
+      + '. A blank here is not "unused".'
+      : u.label + ' — a term-echo proxy: it asks whether the reply carried vocabulary from the '
+      + 'injected block that was not already in the prompt. False negatives dominate, so treat '
+      + 'a "no" as weak evidence and a "yes" as strong.'));
+  }
+
+  // -------------------------------------------------------------------------
+  // Analytics tab
+  // -------------------------------------------------------------------------
+
+  function renderAnalytics(a, health) {
+    const box = $('tiles');
+    clear(box);
+
+    const series = a.series || [];
+    const tok = series.map((r) => num(r.tok));
+    const src = series.map((r) => num(r.sources));
+    const ptr = series.map((r) => num(r.ptr));
+
+    const over = a.points === 1 ? 'over 1 prompt' : 'over ' + a.points + ' prompts';
+    box.appendChild(tile('Recall cost', String(a.averages ? a.averages.tok : 0),
+      'tokens per prompt, mean ' + over, tok));
+    box.appendChild(tile('Memories per prompt', String(a.averages ? a.averages.sources : 0),
+      'injected, mean', src));
+    box.appendChild(tile('Pointer ratio', Math.round(num(a.pointerRatio) * 100) + '%',
+      'repeats rendered as a one-line pointer', ptr));
+    box.appendChild(tile('Characters', String(a.averages ? a.averages.chars : 0),
+      'per prompt, mean', series.map((r) => num(r.chars))));
+
+    $('analytics-note').textContent = a.points
+      ? 'The series covers ' + a.points + (a.points === 1 ? ' prompt' : ' prompts') + ' recorded since '
+        + clock(a.firstSampleAt) + '. It is the dashboard’s own rollup rather than the raw '
+        + 'turn files, which are pruned after six hours — so it accrues from the first launch '
+        + 'and cannot reconstruct anything from before that.'
+      : 'Nothing recorded yet. The rollup starts empty and grows one row per prompt while this '
+        + 'page is open, so the first session here is sparse by construction.';
+
+    if (!health) return;
+    const hb = $('health-tiles');
+    clear(hb);
+
+    const marker = health.marker || {};
+    const captured = marker.captured || {};
+    const b = health.breaker || {};
+
+    hb.appendChild(tile('Spool depth', String(num(health.spoolDepth)),
+      health.rejectedCount ? health.rejectedCount + ' rejected' : 'captures waiting to ship'));
+    hb.appendChild(tile('Ingested', String(num(captured.ingested)),
+      num(captured.pending) + ' pending · ' + num(captured.tools) + ' tools'));
+    hb.appendChild(tile('Breaker', b.phase || 'closed',
+      (b.state || 'ready') + (b.cooldownLeftMs
+        ? ' · ' + Math.ceil(b.cooldownLeftMs / 1000) + 's left' : '')));
+    hb.appendChild(tile('Run state', marker.state || 'unknown',
+      marker.mode ? marker.mode + ' · updated ' + clock(marker.updated_at) : ''));
+
+    const reflect = marker.reflect || {};
+    const recall = marker.recall || {};
+    $('health-note').textContent =
+      'Last recall on the marker: ' + num(recall.sources) + ' memories, ' + num(recall.tokens)
+      + ' tok, rung ' + num(recall.rung)
+      + (recall.empty_reason ? ', empty because ' + recall.empty_reason : '')
+      + ', dry streak ' + num(recall.dry_streak) + '. '
+      + 'Reflection: ' + (reflect.status || 'never run') + ', ' + num(reflect.lessons_stored)
+      + ' lessons stored. The marker is last-write-wins, so this row describes the most recent '
+      + 'prompt only — the table on the Turns tab is the per-prompt series.';
+  }
+
+  // -------------------------------------------------------------------------
+  // Polling
+  // -------------------------------------------------------------------------
+
+  async function refreshLocal() {
+    try {
+      const meta = await api('/api/meta?dir=' + encodeURIComponent(state.dir)
+        + '&run=' + encodeURIComponent(state.run));
+      state.meta = meta;
+      if (!state.dir) state.dir = meta.dir;
+      if (!state.run) state.run = meta.run;
+      $('endpoint').textContent = meta.configured ? meta.endpoint : 'no endpoint configured';
+      renderDirs(meta.dirs || []);
+
+      const q = 'dir=' + encodeURIComponent(state.dir) + '&run=' + encodeURIComponent(state.run);
+      const [runs, turns] = await Promise.all([
+        api('/api/runs?' + q),
+        api('/api/turns?' + q + '&limit=100'),
+      ]);
+
+      renderRuns(runs.runs || []);
+      state.turns = turns.turns || [];
+      renderTurns();
+      if (bannerCode === 'unauthorized') hideBanner();
+    } catch (err) {
+      if (err.status === 401) showBanner('unauthorized', err.message);
+    }
+  }
+
+  /**
+   * The analytics half, on a slower clock than the rest of the disk poll.
+   *
+   * The rollup is a whole file that has to be read and parsed, and it is a *trend* — nothing on
+   * it can visibly change between one second and the next, because it grows one row per prompt.
+   * Polling it at the turn cadence would parse half a megabyte a second to redraw four
+   * identical tiles.
+   */
+  async function refreshAnalytics() {
+    if (!state.dir || !state.run) return;
+    try {
+      const q = 'dir=' + encodeURIComponent(state.dir) + '&run=' + encodeURIComponent(state.run);
+      const [analytics, health] = await Promise.all([
+        api('/api/analytics?' + q),
+        api('/api/health/local?' + q),
+      ]);
+      renderAnalytics(analytics, health);
+    } catch (err) {
+      if (err.status === 401) showBanner('unauthorized', err.message);
+    }
+  }
+
+  async function refreshRemote(force) {
+    if (!state.meta) return;
+    if (!state.meta.configured) {
+      setConn(false, 'not configured');
+      showBanner('upstream_unreachable', 'No endpoint is configured for this install.');
+      state.lessons = [];
+      state.activity = [];
+      state.loaded = true;
+      renderMemory();
+      return;
+    }
+    // The poll waits for the census, rather than counting from when the last one was *issued*.
+    //
+    // An all-runs census is a scan of the whole feed. Measured against a hosted instance with
+    // seven hundred lessons it takes about nineteen seconds — longer than the fifteen-second
+    // remote cadence. Counting the gap from the request going out meant the next poll fired
+    // while the first was still in the air, superseded it, and left the page reading "Loading…"
+    // forever: every answer arrived stale, so none of them was ever rendered. A forced refresh
+    // still cuts in, because that is somebody toggling the run selector and waiting.
+    if (!force) {
+      if (state.remoteBusy) return;
+      if (Date.now() - state.lastRemoteAt < (state.meta.pollMs || {}).remote) return;
+    }
+
+    // An all-runs census is a scan and a single-run one is not, so the two race whenever
+    // somebody toggles the segment. Whoever was issued last wins; anything older lands into a
+    // stale sequence and is dropped rather than repainting the answer to the previous question.
+    const seq = ++state.reqSeq;
+    const stale = () => seq !== state.reqSeq;
+    state.remoteBusy += 1;
+    try {
+      await remoteFetch(stale);
+    } finally {
+      state.remoteBusy -= 1;
+      // From completion, not from dispatch — see above.
+      state.lastRemoteAt = Date.now();
+    }
+  }
+
+  /** The two instance calls the Memory tab is built from. @param {() => boolean} stale */
+  async function remoteFetch(stale) {
+    // The empty `run` *is* the fix: upstream reads it as "every run". `currentRun` never
+    // filters anything — it is the run `fromOtherRun` is rendered against.
+    // `limit` is the census's *page* size, not a cap on the answer, and 500 is the largest the
+    // route serves. On this route the cheapest way to finish a scan inside its budget is to ask
+    // for fewer, bigger pages: at 200 a seven-hundred-lesson instance ran out of wall clock on
+    // page three and reported itself truncated, where two pages of 500 complete.
+    const q = 'run=' + encodeURIComponent(state.allRuns ? '' : state.run)
+      + '&currentRun=' + encodeURIComponent(state.run)
+      + '&limit=500';
+
+    try {
+      const body = await api('/api/lessons?' + q);
+      if (stale()) return;
+      state.lessons = body.lessons || [];
+      state.lessonsError = '';
+      state.joinError = String(body.joinError || '');
+      // `scopeCounts` and `projectCounts` are on the wire and deliberately not kept: the page
+      // counts the rows it is actually showing, and a facet labelled with a number that does
+      // not match the list under it is worse than one with no number at all.
+      state.census = {
+        totalVisible: num(body.totalVisible) || state.lessons.length,
+        truncated: !!body.truncated,
+        truncatedReason: String(body.truncatedReason || ''),
+        pages: num(body.pages),
+        source: String(body.source || ''),
+        unknownScope: num(body.unknownScope),
+      };
+      // `joined` says the activity call worked; `dated` says it produced timestamps. They come
+      // apart on an instance that stores lessons without a creation time, and a green light
+      // over a column of dashes is the version of that a user reads as a bug in this page.
+      const dated = state.lessons.length === 0 || body.dated > 0;
+      setConn(true, dated ? 'connected' : 'connected · this instance records no lesson dates');
+      hideBanner();
+    } catch (err) {
+      if (stale()) return;
+      setConn(false, err.code === 'auth_failed' ? 'key rejected' : 'unreachable');
+      showBanner(err.code, err.message);
+      state.lessons = [];
+      state.census = null;
+      state.lessonsError = err.message || 'the request failed';
+      state.loaded = true;
+      renderMemory();
+      return;
+    }
+
+    try {
+      const body = await api('/api/activity?' + q);
+      if (stale()) return;
+      state.activity = body.entries || [];
+      state.activityError = '';
+    } catch (err) {
+      if (stale()) return;
+      state.activity = [];
+      state.activityError = err.message || 'the request failed';
+    }
+    state.loaded = true;
+    renderMemory();
+  }
+
+  async function searchInstance() {
+    const q = $('filter').value.trim();
+    if (!q) { state.searchResults = null; renderMemory(); return; }
+    const btn = $('do-search');
+    btn.disabled = true;
+    btn.textContent = 'searching…';
+    try {
+      // `/api/search` refuses an empty run, which is why this one call keeps naming the local
+      // run even when the tab is showing every run's lessons.
+      const body = await post('/api/search', { run: state.run, query: q, limit: 30 });
+      // Search evidence carries no scope of its own. Stamping a literal onto it was the bug:
+      // every result read as run-scoped, so any active scope filter emptied the list and the
+      // badge said something the instance had never claimed. Joining by id against what is
+      // already loaded recovers the real scope where it can, and everything else is left
+      // genuinely unknown — which the badge and the `unknown` filter can both express.
+      const byId = new Map();
+      state.lessons.forEach((l) => { if (l.id) byId.set(String(l.id), l); });
+      state.searchResults = (body.evidence || []).map((e) => {
+        const id = String(e.reference_id || e.id || '');
+        const hit = byId.get(id) || null;
+        return {
+          id: id,
+          content: e.content || '',
+          entry_type: e.entry_type || '',
+          lessonType: hit ? hit.lessonType : '',
+          scope: hit ? hit.scope : undefined,
+          scopeKnown: hit ? hit.scopeKnown : false,
+          importance: hit ? hit.importance : '',
+          project: hit ? hit.project : '',
+          source: e.source || '',
+          run_id: e.run_id || '',
+          sourceRunId: hit ? hit.sourceRunId : (e.run_id || ''),
+          createdAt: hit ? hit.createdAt : '',
+        };
+      });
+      state.searchQuery = q;
+      state.selectedEntry = null;
+      renderMemory();
+      hideBanner();
+    } catch (err) {
+      showBanner(err.code, err.message);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Search instance';
+  }
+
+  // -------------------------------------------------------------------------
+  // Wiring
+  // -------------------------------------------------------------------------
+
+  function selectTab(name) {
+    state.tab = name;
+    ['memory', 'turns', 'analytics'].forEach((n) => {
+      $('tab-' + n).setAttribute('aria-selected', String(n === name));
+      $('panel-' + n).classList.toggle('active', n === name);
+    });
+  }
+
+  ['memory', 'turns', 'analytics'].forEach((n) => {
+    $('tab-' + n).addEventListener('click', () => selectTab(n));
+  });
+
+  function setMode(mode) {
+    state.mode = mode;
+    state.searchResults = null;
+    state.searchQuery = '';
+    state.selectedEntry = null;
+    $('mode-lessons').setAttribute('aria-pressed', String(mode === 'lessons'));
+    $('mode-activity').setAttribute('aria-pressed', String(mode === 'activity'));
+    renderMemory();
+  }
+  $('mode-lessons').addEventListener('click', () => setMode('lessons'));
+  $('mode-activity').addEventListener('click', () => setMode('activity'));
+
+  // The run segment re-points the Memory fetch only; `state.run` is left alone so the rail,
+  // the Turns tab and every write route keep naming one concrete run.
+  function setAllRuns(all) {
+    if (state.allRuns === all) return;
+    state.allRuns = all;
+    state.searchResults = null;
+    state.selectedEntry = null;
+    $('runs-all').setAttribute('aria-pressed', String(all));
+    $('runs-this').setAttribute('aria-pressed', String(!all));
+    renderMemory();
+    refreshRemote(true);
+  }
+  $('runs-all').addEventListener('click', () => setAllRuns(true));
+  $('runs-this').addEventListener('click', () => setAllRuns(false));
+
+  // Instant, over what is already loaded. The instance is only asked when the button is
+  // pressed, because a semantic search on every keystroke is a bill.
+  // Editing the box hands it back to the instant filter. Leaving the results up while the text
+  // that produced them changes underneath would make the box a control that does nothing —
+  // it cannot filter them (they are a semantic answer) and it no longer describes them.
+  $('filter').addEventListener('input', () => {
+    if (state.searchResults) { state.searchResults = null; state.searchQuery = ''; }
+    renderMemory();
+  });
+  $('scope-filter').addEventListener('change', (e) => {
+    state.scope = e.target.value;
+    renderMemory();
+  });
+  $('project-filter').addEventListener('change', (e) => {
+    state.project = e.target.value;
+    renderMemory();
+  });
+  $('do-search').addEventListener('click', searchInstance);
+  $('filter').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') searchInstance();
+    if (e.key === 'Escape') {
+      state.searchResults = null;
+      state.searchQuery = '';
+      $('filter').value = '';
+      renderMemory();
+    }
+  });
+  $('turn-filter').addEventListener('input', renderTurns);
+
+  $('dirs').addEventListener('change', (e) => {
+    state.dir = e.target.value;
+    state.run = '';
+    state.selectedTurn = null;
+    state.lastRemoteAt = 0;
+    refreshLocal().then(() => { refreshAnalytics(); refreshRemote(true); });
+  });
+
+  const THEME_KEY = 'mubit-dashboard-theme';
+  function applyTheme(value) {
+    if (value) document.documentElement.setAttribute('data-theme', value);
+    else document.documentElement.removeAttribute('data-theme');
+  }
+  try { applyTheme(localStorage.getItem(THEME_KEY)); } catch (e) { /* private mode */ }
+  // Toggle from what the viewer is *seeing*, not from the attribute. With no stored choice
+  // there is no attribute, so a naive toggle picks a constant — and the first click on a
+  // machine already in dark mode sets dark, which reads as a dead button.
+  function effectiveTheme() {
+    const explicit = document.documentElement.getAttribute('data-theme');
+    if (explicit) return explicit;
+    try {
+      return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    } catch (e) {
+      return 'dark';
+    }
+  }
+  $('theme').addEventListener('click', () => {
+    const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* private mode */ }
+  });
+
+  // Disk is cheap and changes with every prompt; the instance is neither. The two cadences are
+  // set by the server so the page and the server cannot drift into disagreeing about them.
+  setConn(null, 'connecting');
+  // Firefox restores a `<select>`'s value across a reload, which would leave the control
+  // showing one filter while `state` held another. The state object is the authority.
+  $('scope-filter').value = state.scope;
+  renderMemory();
+  refreshLocal().then(() => {
+    refreshAnalytics();
+    refreshRemote(true);
+    const local = (state.meta && state.meta.pollMs && state.meta.pollMs.local) || 1000;
+    setInterval(refreshLocal, local);
+    setInterval(refreshAnalytics, local * 5);
+    // Cheap, and gated inside on the remote cadence the server publishes.
+    setInterval(refreshRemote, 1000);
+  });
+})();
+</script>
+</body>
+</html>

@@ -13,13 +13,16 @@ is something you read, not something you take on faith.
 > its own worktree so the primary checkout stays on `main` — poke at anything, keep nothing.
 >
 > ```
-> /Users/eldaru/Mubit/claude-plugins        main                   ← untouched
-> /Users/eldaru/Mubit/claude-plugins-labs   lab/mubit-walkthrough  ← you are here
+> ~/src/claude-plugins        main                   ← untouched
+> ~/src/claude-plugins-labs   lab/mubit-walkthrough  ← you are here
 > ```
 >
-> A worktree shares the object store but has its own working files, so `npm test` and the MCP
-> probe run here without a second `npm install` (both need only committed bundles and Node
-> built-ins — verified: 720/720 in ~6 s).
+> A worktree shares the object store but has its own working files. The labs themselves need
+> no `npm install` at all — every hook, every lib module and both MCP entry points import only
+> Node built-ins, and the bundles are committed. Two of the tests in Lab 10 do need `esbuild`,
+> so if you want a clean suite, copy `node_modules` from a checkout that has one rather than
+> installing: `package.json` names a private sibling package that is not in this repository,
+> and `npm install` fails on it.
 
 ---
 
@@ -90,14 +93,21 @@ source labs/env.sh
 ```
 
 That exports exactly what Claude Code exports for a real install (`CLAUDE_PLUGIN_ROOT`,
-`CLAUDE_PLUGIN_DATA`, `CLAUDE_PROJECT_DIR`) plus the plugin's own settings, and defines three
+`CLAUDE_PLUGIN_DATA`, `CLAUDE_PROJECT_DIR`) plus the plugin's own settings, and defines four
 helpers:
 
 | Helper | What it does |
 | --- | --- |
 | `hook <name> <payload.json> [args]` | runs `hooks/src/<name>.mjs` the way Claude Code does |
+| `mcp <tool> ['<args>'] [--routes]` | calls one MCP tool; `--routes` shows where it went |
 | `peek [section]` | prints the plugin's local state — `peek --help` lists sections |
 | `runid ['<payload json>']` | derives the run id without running a hook |
+
+It also exports `LAB_RUN_ID`. The fake instance reads it to decide which of its lessons belong
+to *your* run — it cannot work that out on its own, because the request that reads the lesson
+feed names no run at all, and the id is a hash of the project path that differs per worktree.
+Start the fake instance from a shell that has sourced `env.sh`, or Lab 11b will show you one
+row fewer than it should.
 
 Nothing touches your real `~/.claude` data. To wipe and start again:
 `node labs/setup.mjs --reset && node labs/setup.mjs`.
@@ -501,10 +511,11 @@ pre-prompt recall never reads — which is exactly what happens under
 `runStrategy: per-conversation`, because an MCP server starts once per session and is never
 handed a `session_id`. It falls back to `per-directory` and says so on stderr.
 
-Note also: **21 tools, not the curated 10.** The committed `mcp/dist/server.js` is bundled from
-a published `@mubit-ai/mcp` that predates the allowlist patch, so `MUBIT_MCP_TOOLS` is inert in
-this bundle. The probe prints that as a note. Cosmetic — but it is a good example of a shipped
-artefact disagreeing with its own README, which is only visible if you probe it.
+Note the tool count: **13**, not the 21 an older bundle served. The committed
+`mcp/dist/server.js` used to come from a published `@mubit-ai/mcp` that predated the allowlist
+patch, so `MUBIT_MCP_TOOLS` was inert and the probe printed every tool the server had. It is
+now built from the in-repo package. The lesson outlived the bug: a shipped artefact can
+disagree with its own README, and probing is the only way you find out.
 
 **Read:** `mcp/src/launch.mjs`, `.mcp.json`, `scripts/mcp-probe.mjs`.
 
@@ -627,7 +638,7 @@ item: the `DATABASE_PASSWORD=` line in `labs/payloads/transcript.jsonl` never re
 ## Lab 10 — The tests are the real spec
 
 ```bash
-cd integrations/claude-code && npm test        # ~12 s, 720 assertions, no network, no Docker
+cd integrations/claude-code && npm test        # ~32 s, 1544 assertions, no network, no Docker
 ```
 
 `test/helpers/harness.mjs` is worth reading before any of the test files: `fakeMubit()` is a
@@ -640,6 +651,161 @@ calls per prompt.
 Pick one behaviour you found surprising in Labs 1–9 and find the test that pins it. Then change
 the implementation to break it and watch which test fails. (One timing-sensitive test can flake
 under load; re-run before believing a single failure.)
+
+---
+
+## Lab 11 — Watching the wire: what an MCP tool actually dials
+
+Lab 7 asked the server what it exposes. This one asks a harder question: when the model calls
+a tool, **where does the request go?** A tool's answer tells you what came back. It does not
+tell you which route produced it — and for several of the plugin's guarantees, the route is
+the guarantee.
+
+```bash
+node labs/fake-mubit.mjs        # terminal A
+source labs/env.sh              # terminal B, from the repo root
+mcp mubit_lessons '{}' --routes
+```
+
+`mcp` is `labs/mcp-drive.mjs`. It differs from `scripts/mcp-probe.mjs` in exactly two ways,
+both of which matter here.
+
+**It never needs the key.** The probe reads `MUBIT_ENDPOINT` / `MUBIT_API_KEY` from the
+environment, so pointing it at a real instance means exporting a real credential into a shell.
+This driver sets `MUBIT_CC_DATA_DIR` and stops, and lets the launcher's own `loadConfig()`
+resolve the stored credential the way it does in a real session. Nothing reads the key,
+nothing prints it. That is what makes Drill E safe.
+
+**It shows the routes.** `--routes` diffs `labs/.work/requests.ndjson` across the call.
+
+### 11a — The catalogue does not read the lessons route
+
+```
+routes dialled by that call:
+  POST /v2/control/activity → 200
+```
+
+Not `/v2/control/lessons` — the route whose name matches the tool. The reason is paging order.
+The lessons route pages *before* it filters, so `{scope:'global', limit:5}` asks for five rows
+and then keeps whichever of those five happen to be global: on an account with any history,
+reliably none. The activity feed collects and sorts *before* it pages, so a small limit costs
+you the oldest rows and never the newest.
+
+That is a false negative rather than an error, which is the dangerous kind. Both routes answer
+`200`. Only the wire tells you which one you were on.
+
+### 11b — Where the run boundary actually falls
+
+The fake instance holds five lessons. Four come back:
+
+| id | scope | wrote it | in a default read? |
+| --- | --- | --- | --- |
+| `les_r1` | `run` | you | yes — it is yours |
+| `les_s1` | `session` | you | yes |
+| `les_g1` | `global` | another run | yes — global reaches |
+| `les_g2` | `global` | another run | yes |
+| `les_r2` | `run` | another run | **no** |
+
+`les_r2` is the whole test. A run-scoped lesson belongs to the run that wrote it, and a
+catalogue that shows you someone else's is not confined. Ask for a scope explicitly and the
+boundary moves on purpose:
+
+```bash
+mcp mubit_lessons '{"scope":"global"}' --routes    # 2 rows, both from the other run
+```
+
+Note what rides beside the rows: a `mubit_lessons_guard` object saying what was shown and what
+matched. A catalogue that cannot say what it excluded is not one you can act on.
+
+**The trap worth knowing.** Rows carry a run id in two spellings — bare on `run_id`, and
+namespaced inside the metadata's `source_run_id`. "Is this mine?" has to be the union of both.
+Compare against one and you drop half your own rows, and the failure looks like an empty
+account rather than a bug.
+
+### 11c — A partial answer that says so
+
+```bash
+pkill -f labs/fake-mubit.mjs
+node labs/fake-mubit.mjs --scenario truncate    # pages at 2, corpus padded past a census
+mcp mubit_lessons '{}'
+```
+
+```json
+"mubit_lessons_guard": {
+  "shown": 0,
+  "partial": true,
+  "note": "This catalogue is partial: the listing was cut short (max_pages) … No total is available."
+}
+```
+
+**There is no `matched` key.** That absence is deliberate. A count printed next to an
+admission of partiality is the number a reader acts on, and it would be wrong. Notice also
+that `shown` is legitimately `0` here — a partial listing can honestly show nothing, which is
+precisely why it must not also print a total that implies it found nothing.
+
+The same discipline is visible at session start:
+
+```bash
+hook session-start 01-session-start.json
+# mubit: hosted · run … · global lessons: partial listing
+```
+
+Not "0 global lessons". Zero is a claim; this is a listing that ran out.
+
+### 11d — The write path reaches the widening authority
+
+Reflect is the only call that can widen a lesson's scope past `run`, and session end decides
+whether to make it. That decision used to read the hook-side spool alone — so a session whose
+only memory activity went through the MCP looked, from session end, like a session that did
+nothing.
+
+Drive it: a session that opens, writes one lesson through the MCP, and captures nothing.
+
+```bash
+node labs/setup.mjs --reset && node labs/setup.mjs
+# restart the fake instance, then:
+hook session-start 01-session-start.json
+mcp mubit_learned '{"text":"The demo app listens on 3000, not 8080."}'
+peek marker            # captured ingested=0  ·  mcp ingested=1
+hook session-end 08-session-end.json
+```
+
+```
+  POST /v2/control/activity   ← session start read standing lessons
+  POST /v2/control/ingest     ← the MCP write
+  POST /v2/control/reflect    ← session end reflected anyway
+```
+
+Zero hook captures, and it still reflected. The link is one term in the run marker: the egress
+guard records a successful MCP ingest, and session end counts it. Delete `mcp.ingested` from
+the marker between the two commands and the reflect disappears — worth doing once, because it
+is the shortest proof that the two surfaces are joined by that one field and nothing else.
+
+**`mubit_learned` takes `text`, not `content`.** Easy hours to lose. A rejected write can also
+land a malformed lesson that renders in every later session's steer block, so check what you
+wrote rather than only whether the call returned.
+
+### 11e — The same commands against a real instance
+
+```bash
+node labs/mcp-drive.mjs --live \
+  --data-dir ~/.claude/plugins/data/mubit-memory-mubit \
+  --tool mubit_lessons --args '{}'
+```
+
+`--live` deletes the lab's endpoint and key from the child environment so the stored
+credential decides both. Deleting rather than blanking is the trick: an empty string is still
+a value, and config resolution would take it.
+
+Two things only a real instance shows. Its lessons carry promotion metadata, or — more
+usefully — visibly do not, which is a different fact from "no candidates" and is what
+`scripts/scope-audit.mjs` exists to distinguish. And the run-id spelling above is genuinely
+two-valued in stored data, where a fixture only has whatever spelling its author typed.
+
+**Why not the test harness?** `test/helpers/harness.mjs` overrides `MUBIT_API_KEY` with a
+fixture and `HOME` with a temp directory, which is correct for tests and fatal for a live
+drive: the calls go out with the wrong key and come back as a generic failure. That is the gap
+this driver fills, and the reason it is a lab tool rather than a test helper.
 
 ---
 
@@ -667,6 +833,10 @@ under load; re-run before believing a single failure.)
 | `bin/statusline.mjs` | reads two JSON files, renders one line, never dials |
 | `skills/*/SKILL.md` | the seven slash commands |
 | `test/helpers/harness.mjs` | fake Mubit, hook runner, fixtures |
+| `labs/fake-mubit.mjs` | the instance you can watch; `--scenario` picks how it misbehaves |
+| `labs/mcp-drive.mjs` | call one MCP tool, show the routes it dialled, never touch the key |
+| `labs/peek.mjs` | what the hooks left on disk |
+| `labs/runid.mjs` | the run id these settings derive, without running a hook |
 
 ---
 

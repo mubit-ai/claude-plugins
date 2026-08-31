@@ -99,6 +99,10 @@ function markers() {
     say(`    state        ${m.state ?? '-'}${m.last_error ? `   last_error: ${trim(m.last_error, 60)}` : ''}`);
     if (m.recall) say(`    recall       sources=${m.recall.sources} tokens=${m.recall.tokens} dropped=${m.recall.dropped ?? 0} ms=${m.recall.ms} rung=${m.recall.rung} empty_reason=${m.recall.empty_reason || '-'}`);
     if (m.captured) say(`    captured     ingested=${m.captured.ingested ?? 0} pending=${m.captured.pending ?? 0}`);
+    // Writes that arrived through the MCP rather than the capture hooks. Session end adds
+    // this to what the spool reports when it decides whether the run is worth reflecting on,
+    // so a run showing 0 captured and a non-zero mcp still reflects (Lab 11d).
+    if (m.mcp) say(`    mcp          ingested=${m.mcp.ingested ?? 0}`);
     if (m.lessons) say(`    lessons      global=${m.lessons.global}`);
     if (m.reflect) say(`    reflect      status=${m.reflect.status} lessons_stored=${m.reflect.lessons_stored}`);
     if (m.cold_start_until) say(`    warming until ${new Date(m.cold_start_until).toISOString()}`);

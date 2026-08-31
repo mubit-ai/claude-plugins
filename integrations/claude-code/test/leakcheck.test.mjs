@@ -320,6 +320,10 @@ const REDACTION_DEMO_FILES = [
   'test/helpers/harness.mjs',
   'README.md',
   'docs/user-guide.md',
+  // Lab 4's payload. The bash failure it replays carries a bearer token so the reader can
+  // watch the redactor take it out; a payload whose secret is unconvincing demonstrates
+  // nothing. Only present on the labs branch, where `labs/` is checked out.
+  'labs/payloads/06-bash-failure.json',
 ];
 
 const isRedactionDemo = (rel) => REDACTION_DEMO_FILES.some((suffix) => rel.endsWith(suffix));

@@ -31,6 +31,13 @@ export MUBIT_DEFAULT_SESSION_ID=""
 export HOOKS="$CLAUDE_PLUGIN_ROOT/hooks/src"
 export PAYLOADS="$LAB_ROOT/payloads"
 
+# The run id these settings derive. The fake instance reads it to decide which of its lessons
+# belong to "your" run: the activity feed is asked for the whole account and filtered by the
+# client, so that request names no run at all. The id is a hash of the project path, so it
+# differs per worktree and cannot be hardcoded anywhere.
+LAB_RUN_ID="$(node "$LAB_ROOT/runid.mjs" 2>/dev/null | awk '/^run_id/ { print $2 }')"
+export LAB_RUN_ID
+
 # ---------------------------------------------------------------------------------------
 # hook <name> <payload.json> [args...]
 #
@@ -53,6 +60,14 @@ hook() {
 # peek [section] — what the hooks left on disk. `peek --help` lists the sections.
 peek() { node "$LAB_ROOT/peek.mjs" "$@"; }
 
+# mcp <tool> ['<args json>'] [--routes] — call one MCP tool and show the routes it dialled.
+mcp() {
+  local tool="$1"; shift
+  local args="{}"
+  case "${1:-}" in --*|'') ;; *) args="$1"; shift ;; esac
+  node "$LAB_ROOT/mcp-drive.mjs" --tool "$tool" --args "$args" "$@"
+}
+
 # runid ['<payload json>'] — the run id these settings derive, without running a hook.
 runid() { node "$LAB_ROOT/runid.mjs" "$@"; }
 
@@ -60,4 +75,5 @@ echo "lab ready"
 echo "  endpoint     $MUBIT_ENDPOINT"
 echo "  project      $CLAUDE_PROJECT_DIR"
 echo "  data dir     $MUBIT_CC_DATA_DIR"
-echo "  helpers      hook <name> <payload.json> [args]   peek [section]   runid"
+echo "  run id       ${LAB_RUN_ID:-(underived)}"
+echo "  helpers      hook <name> <payload.json> [args]   peek [section]   runid   mcp <tool>"

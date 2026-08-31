@@ -173,9 +173,15 @@ function prepare(env) {
   // `pinRun: true` because this server was launched by the plugin, which already derived
   // the run — the same `runId` published on the line above, so the guard and the server
   // cannot disagree about which run this session writes into. Without it, a caller-supplied
-  // `session_id` would decide that instead.
+  // `session_id` would decide that instead. It governs the read side too: a catalogue read
+  // that named no run is filled in with this same value rather than left as the empty string
+  // that asks for every run the key can see.
+  //
+  // `cfg` is handed over so the guard can *assemble* that catalogue rather than only narrow
+  // the request for it — one read of the activity feed, filtered here. Without it the read
+  // path still narrows; it just cannot answer.
   const ceiling = resolveCeiling(cfg.mcpLessonScope);
-  installFetchGuard({ ceiling, runId, pinRun: true });
+  installFetchGuard({ ceiling, runId, pinRun: true, cfg });
 
   // And the seventh. Under tool search the host loads only tool *names* and the server's
   // `instructions` field at session start, and a subagent sees neither the SessionStart

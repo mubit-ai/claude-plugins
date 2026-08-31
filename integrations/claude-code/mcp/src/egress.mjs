@@ -5,7 +5,7 @@
  * Every other outbound call this plugin makes goes through `lib/http.mjs`, which checks the
  * run id (§4.3) and scrubs the body first (§7). The MCP server is the one exception: it is a
  * vendored bundle that dials the endpoint itself, so nothing in this repo ever saw the
- * request. Two things about a write were therefore outside this plugin's control.
+ * request. Three things about an MCP call were therefore outside this plugin's control.
  *
  *   1. **Scope.** `mubit_learned` is the only lesson-writing tool a default install exposes,
  *      and the bundled SDK stamps a fixed `lesson_scope` on it regardless of the caller. The
@@ -13,9 +13,17 @@
  *      user says otherwise, and a constant baked into a build is not a promise this repo can
  *      keep on its own.
  *
- *   2. **The run id.** Every write tool takes an optional `session_id`, so without a guard
- *      the run a write lands in is whatever the caller passed rather than the one the
+ *   2. **The run id on a write.** Every write tool takes an optional `session_id`, so without
+ *      a guard the run a write lands in is whatever the caller passed rather than the one the
  *      launcher derived — and an MCP write would stop matching the hook captures beside it.
+ *
+ *   3. **The run id on a catalogue read.** `mubit_lessons` is the one read tool that resolves
+ *      no default for the same optional argument, so with it absent the bundle sends
+ *      `run_id: ""`. The transport backfills that field only when it is `== null`, and `?? ""`
+ *      is precisely the spelling that defeats it — so the value goes out empty, which is the
+ *      request that asks for every run the key can see rather than the one the model is
+ *      working in. Filling the field is the whole of the fix; answering the question better
+ *      is the rest of it.
  *
  * **Why here and not where the constant is.** It lives inside a vendored bundle whose source
  * is not in this repo; hand-editing a build artefact would be discarded by the first real
@@ -30,7 +38,15 @@
  * **The one rule.** This code sits in the request path of every call the server makes,
  * including shapes it has never seen. It must never be able to fail a write: every branch
  * falls through to the untouched original request or response on any surprise.
+ *
+ * The read path has a second rule on top of it. **Failure there is narrow, not wide**: a
+ * catalogue this file could not assemble falls back to the *pinned* request, never to the one
+ * the bundle built. Failing open would restore the wide read at exactly the moment nobody can
+ * see that it happened.
  */
+
+import { lessonCensus } from '../../lib/activity.mjs';
+import { readMarker, updateMarker } from '../../lib/markers.mjs';
 
 /**
  * The scope lattice, widest last. Every step up this list is a step out of the run that wrote
@@ -46,6 +62,36 @@ const CEILINGS = ['run', 'session', 'global'];
 
 /** The route a lesson leaves by. Matched on the pathname only; the host is the user's. */
 const INGEST_PATH = '/v2/control/ingest';
+
+/**
+ * The route a lesson catalogue is asked for by.
+ *
+ * `mubit_forget` posts one path segment further along, and matching that would answer a
+ * deletion out of a cached listing and silently drop it. The trailing-slash strip below is
+ * what keeps the two apart under every spelling; `test/mcp-lessons.test.mjs` pins it.
+ */
+const LESSONS_PATH = '/v2/control/lessons';
+
+/** What the bundle asks for when the caller names no limit. Used only when the body omits one. */
+const LESSONS_DEFAULT_LIMIT = 20;
+
+/** The most rows a synthesized catalogue will render, whatever the body asked for. */
+const LESSONS_MAX_LIMIT = 200;
+
+/**
+ * How long one assembled catalogue answers for.
+ *
+ * Re-entrancy is structurally impossible today — the census dials a different route from the
+ * one being answered — but a model that lists twice in a row should not pay twice, and the
+ * in-flight promise beside this makes a burst cost one census rather than N.
+ */
+const CENSUS_TTL_MS = 5000;
+
+/** The key the catalogue note rides back under, beside `lessons`. */
+const LESSONS_NOTE_KEY = 'mubit_lessons_guard';
+
+/** The key the write-side clamp note rides back under. */
+const INGEST_NOTE_KEY = 'mubit_scope_guard';
 
 /** Named in the clamp note, so the tool result carries its own escape hatch. */
 const RAISE_WITH = 'mcpLessonScope (MUBIT_MCP_LESSON_SCOPE)';
@@ -210,6 +256,278 @@ export function guardIngest(body, opts) {
 }
 
 // ---------------------------------------------------------------------------
+// The catalogue read
+// ---------------------------------------------------------------------------
+
+/**
+ * Fill in the run id on a catalogue read that named none.
+ *
+ * Layer one of two, and the one that works everywhere: pure, synchronous, no network, and
+ * enough on its own to make every path narrow rather than wide.
+ *
+ * A caller that asked for a scope wider than its own run is left alone. `scope` is the only
+ * field on this frozen schema that can express "yes, I mean across runs", so pinning a request
+ * carrying one would answer a different question from the one that was asked — and answering
+ * a different question quietly is the failure this whole file is about.
+ *
+ * @param {any} body
+ * @param {{runId?: string, pinRun?: boolean}} opts
+ * @returns {GuardResult}
+ */
+export function guardLessonsRead(body, opts) {
+  const noop = { body, changed: false, note: null };
+  try {
+    const runId = typeof opts?.runId === 'string' ? opts.runId : '';
+    if (opts?.pinRun !== true || runId === '') return noop;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return noop;
+    if (readRunId(body) !== '') return noop;
+    if (isCrossRunAsk(readScope(body))) return noop;
+
+    return { body: { ...body, run_id: runId }, changed: true, note: null };
+  } catch {
+    return noop;
+  }
+}
+
+/**
+ * Is this the catalogue read? A `POST` whose pathname ends `/v2/control/lessons`.
+ *
+ * Deliberately not the delete route one segment further along: that is what `mubit_forget`
+ * posts to, and a listing answered in its place would look like a successful deletion that
+ * removed nothing.
+ *
+ * @param {any} input
+ * @param {any} init
+ * @returns {boolean}
+ */
+export function isLessonsRead(input, init) {
+  if (String(init?.method ?? 'GET').toUpperCase() !== 'POST') return false;
+  if (typeof input !== 'string' && !(input instanceof URL)) return false;
+  try {
+    const { pathname } = input instanceof URL ? input : new URL(input);
+    return pathname.replace(/\/+$/, '').endsWith(LESSONS_PATH);
+  } catch {
+    return false;
+  }
+}
+
+/** The `run_id` a request body carries, as a string. @param {any} body */
+function readRunId(body) {
+  return typeof body?.run_id === 'string' ? body.run_id.trim() : '';
+}
+
+/** The `scope` a request body carries, normalised. @param {any} body */
+function readScope(body) {
+  return typeof body?.scope === 'string' ? body.scope.trim().toLowerCase() : '';
+}
+
+/** How many rows to render. @param {any} body */
+function readLimit(body) {
+  const n = Number(body?.limit);
+  if (!Number.isFinite(n) || n <= 0) return LESSONS_DEFAULT_LIMIT;
+  return Math.min(Math.floor(n), LESSONS_MAX_LIMIT);
+}
+
+/** A scope that only means anything across runs. @param {string} scope */
+function isCrossRunAsk(scope) {
+  return scope === 'session' || scope === 'global';
+}
+
+/**
+ * Which rows a caller asked for, in the order the filters have to run.
+ *
+ * **Limit is applied last, by the caller of this function**, and that ordering is the entire
+ * point of assembling a catalogue rather than forwarding the request. Asking the catalogue
+ * route for a handful of rows at a named scope comes back empty against a real instance, and
+ * an empty answer reads exactly like a memory that has never learned anything.
+ *
+ * `mine` is a union because the run id is spelled two ways across the two routes the plugin
+ * reads lessons from: bare on one, namespaced inside the metadata on the other. Either half
+ * on its own drops rows the caller wrote itself.
+ *
+ * @param {Record<string, any>[]} rows normalised census rows
+ * @param {{runId: string, scope: string}} o
+ * @returns {Record<string, any>[]}
+ */
+function selectLessons(rows, o) {
+  const mine = (r) => (o.runId !== '' && (r.runId === o.runId || r.sourceRunId === o.runId));
+
+  // No scope named: this run, plus every lesson that was deliberately widened past its own.
+  // The second half is not a leak being tolerated — travelling is what those lessons are for.
+  if (o.scope === '') return rows.filter((r) => mine(r) || r.scope !== 'run');
+  if (o.scope === 'run') return rows.filter(mine);
+  return rows.filter((r) => r.scope === o.scope);
+}
+
+/**
+ * One census row as the ten keys a lessons answer carries on the wire.
+ *
+ * `entry_type` and `reference_id` are deliberately absent. The bundle's response handling
+ * reads those two as evidence markers and, when either is present, drops `id` and `source`
+ * back out of the row on the way to the model — so a row that named itself an entry would
+ * arrive without the id needed to pass it to `mubit_forget`.
+ *
+ * @param {Record<string, any>} r
+ */
+function wireLesson(r) {
+  return {
+    id: r.id,
+    lesson_id: r.id,
+    content: r.content,
+    lesson_type: r.lessonType,
+    scope: r.scope,
+    importance: r.importance,
+    conditions: r.conditions,
+    rationale: r.rationale,
+    source_run_id: r.sourceRunId,
+    source: r.source,
+  };
+}
+
+/** What the default read is showing, said in the answer rather than left to be inferred. */
+const SHOWING = {
+  '': 'this run, plus every lesson stored at a scope that reaches past the run that wrote it',
+  run: 'this run only',
+  session: 'lessons stored at session scope, across every run this key can see',
+  global: 'lessons stored at global scope, across every run this key can see',
+};
+
+/**
+ * The catalogue, as the body the tool result will carry.
+ *
+ * A truncated census reports **no total**. A count printed beside an admission that the
+ * listing is partial is the number someone acts on, and it is the one number this cannot
+ * stand behind.
+ *
+ * @param {Record<string, any>} data a `lessonCensus` payload
+ * @param {{runId: string, scope: string, limit: number}} o
+ */
+function catalogue(data, o) {
+  const rows = Array.isArray(data?.lessons) ? data.lessons : [];
+  const matched = selectLessons(rows, o);
+  const shown = matched.slice(0, o.limit);
+
+  /** @type {Record<string, any>} */
+  const note = {
+    run_id: o.runId,
+    showing: SHOWING[o.scope] ?? SHOWING[''],
+    shown: shown.length,
+  };
+  if (data?.truncated) {
+    note.partial = true;
+    note.note = 'This catalogue is partial: the listing was cut short '
+      + `(${String(data.truncatedReason || 'bound reached')}), so these are some of the lessons `
+      + 'that matched and not all of them. No total is available. Narrow the request with '
+      + '`scope`, or read the full listing with `/mubit-memory:remember`.';
+  } else {
+    note.matched = matched.length;
+    if (matched.length > shown.length) {
+      note.note = `${matched.length} lessons matched; the newest ${shown.length} are shown. `
+        + 'Raise `limit` to see more.';
+    }
+  }
+
+  return { lessons: shown.map(wireLesson), [LESSONS_NOTE_KEY]: note };
+}
+
+/**
+ * The note that rides back when the catalogue could not be assembled and the request went to
+ * the wire instead. Says which of the two fallbacks was taken, because they answer different
+ * questions.
+ *
+ * @param {string} scope
+ * @param {boolean} pinned
+ */
+function degradedNote(scope, pinned) {
+  return {
+    source: 'lessons-route',
+    degraded: true,
+    note: pinned
+      ? 'The full catalogue could not be assembled, so this is the narrower answer: lessons '
+        + 'stored against this run. Lessons widened by other runs are not included.'
+      : `The full catalogue could not be assembled, so the request for scope "${scope}" went `
+        + 'out as asked. These rows may come from any run this key can see, and the listing '
+        + 'may be short of what is stored.',
+  };
+}
+
+/**
+ * One census per burst.
+ *
+ * Returns `null` when there is no config to dial with, which is what leaves an unconfigured
+ * install on layer one alone rather than on nothing at all.
+ *
+ * @param {Record<string, any>|undefined} cfg
+ * @returns {(() => Promise<any>)|null}
+ */
+function censusOnce(cfg) {
+  if (!cfg || typeof cfg !== 'object') return null;
+
+  /** @type {Promise<any>|null} */
+  let inflight = null;
+  /** @type {{at: number, res: any}|null} */
+  let cached = null;
+
+  return function census() {
+    const now = Date.now();
+    if (cached && now - cached.at < CENSUS_TTL_MS) return Promise.resolve(cached.res);
+    if (inflight) return inflight;
+    inflight = (async () => {
+      try {
+        // No `run`, which is what makes this instance-wide, and no breaker bookkeeping:
+        // `lessonCensus` reads on the read-only options, so a feed that is down cannot
+        // close the circuit on the hooks running beside this process.
+        const res = await lessonCensus(cfg, {});
+        cached = { at: Date.now(), res };
+        return res;
+      } catch (err) {
+        cached = { at: Date.now(), res: { ok: false, message: String(err) } };
+        return cached.res;
+      } finally {
+        inflight = null;
+      }
+    })();
+    return inflight;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Telling the hooks what the MCP server sent
+// ---------------------------------------------------------------------------
+
+/**
+ * Record an accepted MCP write against the run, in the file the hooks already read.
+ *
+ * The two write paths do not meet anywhere else. A hook capture goes through the spool and
+ * the drain, which stamp the run marker on the way; an MCP write leaves this process and
+ * touches neither. So `session-end` — deciding whether there is anything to reflect over —
+ * could see a session whose whole memory contribution was `mubit_learned` and correctly
+ * conclude, from the only evidence it had, that nothing had been ingested. It then skipped
+ * reflect, which is the one call authorised to widen a lesson past the run that wrote it.
+ *
+ * Local, synchronous and best-effort, exactly like every other marker write: a failure here
+ * costs a reflect, never the write that just succeeded.
+ *
+ * @param {Record<string, any>|undefined} cfg
+ * @param {string} runId
+ * @param {number} items
+ */
+function recordMcpIngest(cfg, runId, items) {
+  try {
+    if (!cfg || !runId || items <= 0) return;
+    const prior = Number(readMarker(cfg, runId)?.mcp?.ingested);
+    updateMarker(cfg, runId, {
+      mcp: { ingested: (Number.isFinite(prior) ? prior : 0) + items, at: Date.now() },
+    });
+  } catch { /* a lost marker write is not a reason to fail a write that landed */ }
+}
+
+/** How many items a body carries, for the count above. @param {any} body */
+function countItems(body) {
+  return Array.isArray(body?.items) ? body.items.length : 0;
+}
+
+// ---------------------------------------------------------------------------
 // The fetch wrapper
 // ---------------------------------------------------------------------------
 
@@ -224,13 +542,18 @@ export function guardIngest(body, opts) {
  * Idempotent. Re-installing rewraps the original `fetch` rather than stacking a second
  * layer on top of the first, so a double call cannot double-annotate a response.
  *
- * @param {{ceiling: string, runId?: string, pinRun?: boolean}} opts
+ * `cfg` is what lets a catalogue read be answered from the activity feed instead of
+ * forwarded. Without it the read path degrades to the pin alone — still narrow, just less
+ * complete — which is what an install that could not resolve its configuration should get.
+ *
+ * @param {{ceiling: string, runId?: string, pinRun?: boolean, cfg?: Record<string, any>}} opts
  * @returns {void}
  */
 export function installFetchGuard(opts) {
   const ceiling = resolveCeiling(opts?.ceiling);
   const runId = typeof opts?.runId === 'string' ? opts.runId : '';
   const pinRun = opts?.pinRun === true;
+  const census = censusOnce(opts?.cfg);
 
   const current = /** @type {any} */ (globalThis.fetch);
   if (typeof current !== 'function') return;
@@ -239,14 +562,53 @@ export function installFetchGuard(opts) {
     : current;
 
   /**
+   * Decide what to do with a catalogue read, without dialling anything the caller has to
+   * undo. Either the answer is assembled here, or the request goes out — once, below.
+   *
+   * @param {any} init
+   * @returns {Promise<{answer?: any, init?: any, note?: any}>}
+   */
+  const planLessons = async (init) => {
+    const parsed = parseBody(init);
+    if (!parsed.ok) return {};
+
+    const body = parsed.value;
+    const scope = readScope(body);
+    // A caller that named a run has asked a question the route already answers correctly.
+    if (readRunId(body) !== '') return {};
+
+    const pinned = guardLessonsRead(body, { runId, pinRun });
+    const send = pinned.changed ? { ...init, body: JSON.stringify(pinned.body) } : undefined;
+
+    if (!census) return { init: send };
+
+    const res = await census();
+    if (res?.ok) {
+      return { answer: catalogue(res.data, { runId, scope, limit: readLimit(body) }) };
+    }
+
+    // Narrow, not wide. The one exception is a deliberate cross-run ask: pinning that would
+    // answer a different question, and doing so silently is the dishonest direction.
+    return isCrossRunAsk(scope)
+      ? { note: degradedNote(scope, false) }
+      : { init: send, note: degradedNote(scope, pinned.changed) };
+  };
+
+  /**
    * @param {any} input
    * @param {any} [init]
    */
   const wrapped = async function fetch(input, init) {
     /** @type {any} */
     let note = null;
+    /** @type {string} */
+    let noteKey = INGEST_NOTE_KEY;
     /** @type {any} */
     let sendInit = init;
+    // Set on an ingest, and read after the response: what to credit the run with if the
+    // write is accepted. Computed here because this is the only place the body is parsed.
+    let ingestedItems = 0;
+    let ingestedRun = '';
 
     try {
       if (isIngest(input, init)) {
@@ -259,18 +621,29 @@ export function installFetchGuard(opts) {
             sendInit = { ...init, body: JSON.stringify(out.body) };
             note = out.note;
           }
+          ingestedItems = countItems(out.body);
+          // The run the write actually goes to, which is the pinned one under `pinRun` and
+          // the caller's otherwise — the marker has to name the run the hooks will look in.
+          ingestedRun = typeof out.body?.run_id === 'string' ? out.body.run_id : '';
         }
+      } else if (isLessonsRead(input, init)) {
+        const plan = await planLessons(init);
+        if (plan.answer) return jsonResponse(plan.answer);
+        if (plan.init) sendInit = plan.init;
+        if (plan.note) { note = plan.note; noteKey = LESSONS_NOTE_KEY; }
       }
     } catch {
       // Anything unexpected about the request means it goes out exactly as the server
       // built it. A guard that could refuse a write is worse than the leak.
       note = null;
+      noteKey = INGEST_NOTE_KEY;
       sendInit = init;
     }
 
     const res = await base(input, sendInit);
+    if (res?.ok && ingestedItems > 0) recordMcpIngest(opts?.cfg, ingestedRun, ingestedItems);
     if (!note) return res;
-    return annotate(res, note);
+    return annotate(res, note, noteKey);
   };
 
   Object.defineProperty(wrapped, 'mubitEgressGuardOriginal', {
@@ -278,9 +651,23 @@ export function installFetchGuard(opts) {
   });
   // The launch tests read this off `globalThis.fetch` from inside the stub server and
   // JSON-serialise it, so it stays plain data.
-  wrapped.mubitEgressGuard = { ceiling, pinRun, runId };
+  wrapped.mubitEgressGuard = { ceiling, pinRun, runId, census: census !== null };
 
   globalThis.fetch = /** @type {any} */ (wrapped);
+}
+
+/**
+ * A synthesized answer, shaped so the bundle's own response handling reads it exactly as it
+ * would read the endpoint's.
+ * @param {any} payload
+ * @returns {Response}
+ */
+function jsonResponse(payload) {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    statusText: 'OK',
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 /**
@@ -316,7 +703,7 @@ function parseBody(init) {
 }
 
 /**
- * Attach the clamp note to an ingest response.
+ * Attach a note to a response, under `key`.
  *
  * Only an ok JSON response is touched. A failure is left strictly alone so the tool still
  * reports the server's own error rather than the guard's account of it, and a non-JSON body
@@ -331,9 +718,10 @@ function parseBody(init) {
  *
  * @param {Response} res
  * @param {any} note
+ * @param {string} key
  * @returns {Promise<Response>}
  */
-async function annotate(res, note) {
+async function annotate(res, note, key) {
   try {
     if (!res.ok) return res;
     if (!String(res.headers.get('content-type') ?? '').includes('application/json')) return res;
@@ -347,7 +735,7 @@ async function annotate(res, note) {
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         // Spread first: the note rides alongside the real response, never instead of it,
         // and must not displace the job id the caller needs to follow the ingest.
-        payload = JSON.stringify({ ...parsed, mubit_scope_guard: note });
+        payload = JSON.stringify({ ...parsed, [key]: note });
       }
     } catch { /* not an object after all — hand back exactly what arrived */ }
 

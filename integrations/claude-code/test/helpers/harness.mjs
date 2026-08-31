@@ -334,6 +334,27 @@ export function defaultRoutes() {
         ],
       },
     },
+    // The same standing lesson as the row above, in the shape the activity feed serves it:
+    // scope, type and importance nested inside `metadata_json`, which is why every caller
+    // that needs a lesson's scope has to ask for `projection: "full"`. `session-start` and
+    // the MCP catalogue read both come through here, so the two fixtures have to agree.
+    'POST /v2/control/activity': {
+      json: {
+        entries: [{
+          id: 'les_g1',
+          created_at: '2026-01-01T00:00:00Z',
+          entry_type: 'lesson',
+          run_id: 'cc-some-other-run',
+          content: 'Run the migration before starting the server.',
+          source: 'reflection:cc-some-other-run',
+          metadata_json: JSON.stringify({
+            scope: 'global', lesson_type: 'rule', importance: 'high',
+          }),
+        }],
+        next_page_token: '',
+        total_visible: 1,
+      },
+    },
     'POST /v2/control/memory_health': { json: { healthy: true } },
     'POST /v2/control/diagnose': { json: { findings: [] } },
     // The pin refresh the detached drainer makes in its tail (`lib/pins.mjs`). Answering it

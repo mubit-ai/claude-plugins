@@ -3,10 +3,10 @@
  * `hooks/src/session-start.mjs` — SessionStart (blocking, injection only).
  *
  * Guide sections under test:
- *   §5.1  flow, sub-budgets (health 400 ms / register 600 ms / lessons 900 ms), exact stdout
+ *   §5.1  flow, sub-budgets (health half the envelope / register 600 ms / lessons 900 ms)
  *   §4.3  the `source` table: startup | resume | clear | compact | fork
  *   §1.2  `GET /v2/core/health` returns the bare string `OK`, not JSON
- *   §1.3  `run_id` is optional on a lessons request — empty means all runs
+ *   §1.3  standing lessons come off the activity feed, filtered to `global` here
  *   §4.7  cold-start grace: `marker.cold_start_until = now + coldStartGraceMs`
  *   §4.9  the hook never blocks and never exits non-zero
  *
@@ -82,7 +82,7 @@ const seq = (server) => server.requests.map((r) => `${r.method} ${r.path}`);
 // ---------------------------------------------------------------------------
 
 // §5.1 steps 4-6: health, then register, then lessons — in that order, and nothing else.
-test('startup calls health -> register -> lessons, in that order', async (t) => {
+test('startup calls health -> register -> the activity feed, in that order', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -94,7 +94,7 @@ test('startup calls health -> register -> lessons, in that order', async (t) => 
   assert.deepEqual(seq(server), [
     'GET /v2/core/health',
     'POST /v2/control/agents/register',
-    'POST /v2/control/lessons',
+    'POST /v2/control/activity',
   ]);
 
   // §1.2 — health is allowlisted and returns the plain string `OK`. A hook that
@@ -126,10 +126,11 @@ test('register body carries run_id, agent_id, role, status and capabilities', as
   assert.notEqual(body.run_id, 'default');
 });
 
-// §1.3 / control.proto — `run_id` is optional on a lessons request; empty means
-// all runs, which is exactly what "global lessons" wants. Scoping it to this run
-// would return nothing on a brand-new run.
-test('lessons request is {scope:"global", limit:5} with no run_id', async (t) => {
+// The standing set comes off the activity feed, and the request shape is what makes that
+// possible: `projection: "full"` because a lesson's scope lives in metadata the compact
+// projection drops, no run id because a lesson written elsewhere is the whole point, and a
+// page big enough that the client-side scope filter has something to filter.
+test('the standing-lessons request is one full-projection page of lesson entries', async (t) => {
   const server = await fakeMubit();
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -138,12 +139,19 @@ test('lessons request is {scope:"global", limit:5} with no run_id', async (t) =>
     { env: env(dataDir, server.url) });
   assertHookContract(r);
 
-  const body = server.lastCall('POST', '/v2/control/lessons').body;
-  assert.equal(body.scope, 'global');
-  assert.equal(body.limit, 5);
+  server.assertCalled('POST', '/v2/control/activity', 1);
+  server.assertNotCalled('POST', '/v2/control/lessons');
+
+  const body = server.lastCall('POST', '/v2/control/activity').body;
+  assert.deepEqual(body.entry_types, ['lesson']);
+  assert.equal(body.projection, 'full',
+    'scope lives in metadata the compact projection drops — a compact page finds every '
+    + 'lesson and knows the scope of none of them');
+  assert.equal(body.sort, 'desc', 'the newest end is the one a standing set wants');
+  assert.equal(body.limit, 200);
   assert.ok(
     body.run_id === undefined || body.run_id === '',
-    `lessons must not be scoped to one run, got run_id=${JSON.stringify(body.run_id)}`,
+    `a lesson written by another run is the point, got run_id=${JSON.stringify(body.run_id)}`,
   );
 });
 
@@ -179,7 +187,7 @@ test('stdout is a SessionStart steer block plus a one-line systemMessage', async
   for (const tool of ['mubit_recall', 'mubit_diagnose', 'mubit_dereference']) {
     assert.ok(ctx.includes(tool), `the steer must name ${tool} as the tool for its case:\n${ctx}`);
   }
-  // The lesson section renders what /v2/control/lessons returned.
+  // The lesson section renders the global lessons the activity feed returned.
   assert.match(ctx, /standing lessons/i);
   assert.ok(ctx.includes('Run the migration'), `lesson content must render, got:\n${ctx}`);
 
@@ -493,7 +501,7 @@ test('source=fork reuses the parent run and heartbeats instead of registering', 
   assert.deepEqual(seq(server), [
     'GET /v2/core/health',
     'POST /v2/control/agents/heartbeat',
-    'POST /v2/control/lessons',
+    'POST /v2/control/activity',
   ], 'a fork continues a session that never left, so re-announcing its agent is noise the '
     + 'control plane has to reconcile');
   server.assertNotCalled('POST', '/v2/control/agents/register');
@@ -588,7 +596,7 @@ test('an unmapped fork session id still lands on the run its parent derived', as
 test('a rejected key produces the unauthenticated block, not "memory is active"', async (t) => {
   const server = await fakeMubit({
     'POST /v2/control/agents/register': { status: 401, json: { error: 'invalid api key' } },
-    'POST /v2/control/lessons': { status: 401, json: { error: 'invalid api key' } },
+    'POST /v2/control/activity': { status: 401, json: { error: 'invalid api key' } },
   });
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -639,7 +647,7 @@ test('health down skips register and lessons but still emits a steer block', asy
   assertHookContract(r);
   server.assertNotCalled('POST', '/v2/control/agents/register');
   server.assertNotCalled('POST', '/v2/control/agents/heartbeat');
-  server.assertNotCalled('POST', '/v2/control/lessons');
+  server.assertNotCalled('POST', '/v2/control/activity');
 
   const ctx = r.json.hookSpecificOutput.additionalContext;
   assert.equal(r.json.hookSpecificOutput.hookEventName, 'SessionStart');
@@ -705,7 +713,7 @@ test('a healthy instance that answers health slowly is ready, not offline', asyn
 
   // The gate opened, so the steps it gates ran.
   server.assertCalled('POST', '/v2/control/agents/register', 1);
-  server.assertCalled('POST', '/v2/control/lessons', 1);
+  server.assertCalled('POST', '/v2/control/activity', 1);
 
   const ctx = r.json.hookSpecificOutput.additionalContext;
   assert.match(ctx, /Mubit memory is active/,
@@ -720,7 +728,7 @@ test('a healthy instance that answers health slowly is ready, not offline', asyn
 test('a slow health plus a stalled lessons call still fits the harness budget', async (t) => {
   const server = await fakeMubit({
     'GET /v2/core/health': { text: 'OK', delayMs: 700 },
-    'POST /v2/control/lessons': { delayMs: 5000, json: { lessons: [] } },
+    'POST /v2/control/activity': { delayMs: 5000, json: { entries: [], next_page_token: '', total_visible: 0 } },
   });
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -741,7 +749,7 @@ test('a slow health plus a stalled lessons call still fits the harness budget', 
 // 900 ms sub-budget; the hook still steers, just without a lesson section.
 test('a lessons call past its 900ms sub-budget degrades only that section', async (t) => {
   const server = await fakeMubit({
-    'POST /v2/control/lessons': { delayMs: 1200, json: { lessons: [] } },
+    'POST /v2/control/activity': { delayMs: 1200, json: { entries: [], next_page_token: '', total_visible: 0 } },
   });
   t.after(() => server.close());
   const dataDir = makeDataDir();
@@ -751,7 +759,7 @@ test('a lessons call past its 900ms sub-budget degrades only that section', asyn
 
   assertHookContract(r);
   server.assertCalled('POST', '/v2/control/agents/register', 1);
-  server.assertCalled('POST', '/v2/control/lessons', 1);
+  server.assertCalled('POST', '/v2/control/activity', 1);
 
   const out = r.json.hookSpecificOutput;
   assert.equal(out.hookEventName, 'SessionStart');
@@ -765,4 +773,147 @@ test('a lessons call past its 900ms sub-budget degrades only that section', asyn
     'session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
     { env: env(makeDataDir(), server.url) },
   )).ms);
+});
+
+// ---------------------------------------------------------------------------
+// Standing lessons off the activity feed
+// ---------------------------------------------------------------------------
+
+/**
+ * One page of `ActivityEntry` for the feed to serve. Scope and type live inside
+ * `metadata_json`, which is the nesting that makes the projection load-bearing.
+ *
+ * @param {{id: string, run: string, content: string, scope?: string, type?: string}} o
+ */
+function feedLesson(o) {
+  return {
+    id: o.id,
+    created_at: '2026-02-02T00:00:00Z',
+    entry_type: 'lesson',
+    run_id: o.run,
+    content: o.content,
+    source: `reflection:${o.run}`,
+    metadata_json: JSON.stringify({
+      scope: o.scope ?? 'run', lesson_type: o.type ?? 'lesson', importance: 'medium',
+    }),
+  };
+}
+
+const feedPage = (entries, token = '') => ({
+  'POST /v2/control/activity': {
+    json: { entries, next_page_token: token, total_visible: entries.length },
+  },
+});
+
+/**
+ * The point of the whole workstream, stated as the thing a user would notice: a lesson
+ * another run widened past its own reaches this session's opening context. The route this
+ * replaced answered a request for a handful of global lessons with nothing at all, reliably,
+ * which is indistinguishable from an instance that has never promoted one.
+ */
+test('a global lesson written by another run reaches the steer block', async (t) => {
+  const server = await fakeMubit(feedPage([
+    feedLesson({ id: 'l1', run: 'cc-elsewhere', scope: 'global', content: 'ALWAYS drain before upgrading.' }),
+    feedLesson({ id: 'l2', run: 'cc-elsewhere', scope: 'run', content: 'run-local noise' }),
+  ]));
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /standing lessons/i);
+  assert.ok(ctx.includes('ALWAYS drain before upgrading.'),
+    `a global lesson from another run must reach the steer block:\n${ctx}`);
+  assert.ok(!ctx.includes('run-local noise'),
+    'a run-scoped lesson from another run is not a standing lesson');
+  assert.match(r.json.systemMessage, /1 global lesson$/);
+});
+
+/**
+ * The easiest half of this fix to get subtly wrong. `recordRules` reads `lesson_type` off the
+ * entry, and on the feed that field lives one level in — so rows have to be mapped back to
+ * the wire spelling before they are handed over, or the store that feeds `pre-tool` is
+ * starved by the very call that was supposed to fill it.
+ */
+test('a rule-typed global lesson lands in runs/<run>/rules.json', async (t) => {
+  const server = await fakeMubit(feedPage([
+    feedLesson({ id: 'r1', run: 'cc-elsewhere', scope: 'global', type: 'rule', content: 'Never force-push main.' }),
+    feedLesson({ id: 'l2', run: 'cc-elsewhere', scope: 'global', type: 'lesson', content: 'A suggestion, not a rule.' }),
+  ]));
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const runId = server.lastCall('POST', '/v2/control/agents/register').body.run_id;
+  const stored = readJsonFile(join(dataDir, 'runs', runId, 'rules.json'));
+  assert.deepEqual(stored.rules.map((x) => x.text), ['Never force-push main.'],
+    'only the rule-typed lesson is a rule, and it must survive the shape change');
+  assert.equal(stored.rules[0].ref, 'r1', 'the id has to come through for attribution');
+});
+
+/**
+ * One page cannot hide a *newer* global lesson, because the feed sorts before it pages. But
+ * it can hide an older one — so a short page that found fewer standing lessons than it was
+ * asked for must say the set may be incomplete rather than render a confident count.
+ */
+test('a truncated first page never renders a bare "0 standing lessons"', async (t) => {
+  const server = await fakeMubit(feedPage(
+    [feedLesson({ id: 'n1', run: 'cc-elsewhere', scope: 'run', content: 'run-local noise' })],
+    'more-pages-exist',
+  ));
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /may be incomplete|more than this page|not the whole set/i,
+    `a partial listing must say so rather than imply an empty store:\n${ctx}`);
+  assert.doesNotMatch(r.json.systemMessage, /\b0 global lessons\b/,
+    'a page that could not see the whole set must not report a total of zero');
+});
+
+/** The same page, complete: nothing to qualify, and no lesson section to render. */
+test('a complete page with no global lessons says nothing about being incomplete', async (t) => {
+  const server = await fakeMubit(feedPage([
+    feedLesson({ id: 'n1', run: 'cc-elsewhere', scope: 'run', content: 'run-local noise' }),
+  ]));
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.ok(!/standing lessons/i.test(ctx), 'no global lessons, so no section');
+  assert.doesNotMatch(ctx, /may be incomplete/i,
+    'a complete listing that found nothing is a real answer, not a degraded one');
+  assert.match(r.json.systemMessage, /0 global lessons$/);
+});
+
+/** A feed that is down degrades the lesson section and nothing else. */
+test('a failing activity feed degrades only the lesson section', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/activity': { status: 500, json: { error: 'boom' } },
+  });
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+
+  const r = await runHook('session-start', fx.sessionStart({ cwd: PROJECT_DIR }),
+    { env: env(dataDir, server.url) });
+  assertHookContract(r);
+
+  const ctx = r.json.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /Mubit memory is active/, 'the rest of the steer block survives');
+  assert.ok(!/standing lessons/i.test(ctx));
+  assert.equal(readMarker(dataDir).state, 'ready');
 });

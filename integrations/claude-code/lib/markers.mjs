@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { readJson, resolveDataDir, writeJsonAtomic } from './state.mjs';
 
 /**
- * The §4.8 Marker, with every documented sub-key present and correctly typed.
+ * The Marker, with every documented sub-key present and correctly typed.
  * `readMarker` returns this shape even when nothing has ever been written —
  * which is the normal state before the first hook of a session has run.
  * @param {string} [runId]
@@ -37,6 +37,12 @@ function defaultMarker(runId = '') {
       dry_streak: 0, last_hit_at: 0,
     },
     captured: { tools: 0, turns: 0, pending: 0 },
+    // What the MCP server sent, which the capture path never sees: an MCP write leaves its
+    // own process and touches neither the spool nor `captured` above. Kept apart from that
+    // group rather than folded into it, so the status line's capture count keeps meaning
+    // "what the hooks captured" — but read beside it at session end, where the question is
+    // the different one of whether this run put anything on the wire at all.
+    mcp: { ingested: 0, at: 0 },
     lessons: { global: 0, checked_at: 0 },
     reflect: { at: 0, lessons_stored: 0, status: '' },
     last_error: '',
@@ -44,7 +50,7 @@ function defaultMarker(runId = '') {
 }
 
 /** The sub-objects that merge key-by-key rather than being replaced wholesale. */
-const GROUPS = ['recall', 'captured', 'lessons', 'reflect'];
+const GROUPS = ['recall', 'captured', 'lessons', 'reflect', 'mcp'];
 
 /** @param {Record<string, any>} cfg @param {string} runId @returns {string} */
 function markerPath(cfg, runId) {

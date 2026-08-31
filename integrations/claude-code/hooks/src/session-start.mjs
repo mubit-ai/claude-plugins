@@ -26,9 +26,11 @@
  *      is offline. Without that the model invents recall or apologises for its absence.
  *   5. `POST /v2/control/agents/register` @600 ms — or `/heartbeat` on `resume` and `fork`,
  *      because re-registering an agent that never left is noise the control plane reconciles.
- *   6. `POST /v2/control/lessons {scope:"global", limit:5}` @900 ms. **No `run_id`**:
- *      `run_id` is optional on a lessons request and empty means all runs, which is exactly what
- *      "global lessons" wants — scoping it to this run returns nothing on a brand-new one.
+ *   6. One page of `POST /v2/control/activity` @900 ms — lesson entries, full projection,
+ *      newest first, across every run — filtered to `global` scope here. **No `run_id`**: a
+ *      lesson another run widened past its own is the entire point of the section, so scoping
+ *      the request to this run would return nothing on a brand-new one. Scope is not a field
+ *      this route accepts, which is why the filter is client-side and the page is large.
  *   7. Assemble `additionalContext`, update the marker, emit — and, on `startup` and `resume`
  *      only, spawn the detached `session-resume` that assembles the resume briefing the first
  *      substantive prompt will render. Nothing here waits on it; `spawnResume` says why.
@@ -50,7 +52,9 @@ import { join } from 'node:path';
 import { endpointHash } from '../../lib/breaker.mjs';
 import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
-import { health, heartbeat, postLessons, registerAgent } from '../../lib/http.mjs';
+import { listActivity } from '../../lib/activity.mjs';
+import { normalizeActivityLesson } from '../../lib/dashboard-api.mjs';
+import { health, heartbeat, registerAgent } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
 import { recordRules } from '../../lib/rules.mjs';
@@ -88,6 +92,16 @@ const LESSONS_MS = 900;
 /** §5.1: the register body, verbatim. */
 const CAPABILITIES = ['code', 'shell', 'edit', 'search'];
 const LESSON_LIMIT = 5;
+
+/**
+ * How many lesson entries one page of the feed asks for.
+ *
+ * Scope is not a request field on this route, so the standing set has to be filtered here —
+ * which means the page has to be big enough to contain some. 200 rather than the route's 500
+ * ceiling because these are full-projection rows, and five hundred of them do not arrive
+ * inside a 900 ms section of a blocking hook.
+ */
+const LESSON_SCAN = 200;
 
 /** U+00B7. The status line and this line share a separator; a hyphen here is a visible bug. */
 const DOT = ' · ';
@@ -234,29 +248,50 @@ await runHook('session-start', {
       }
     }
 
-    // §5.1 step 6 — global lessons. No run_id: empty means all runs (control.proto).
-    // Past its sub-budget this section is dropped, not waited for.
+    // §5.1 step 6 — the standing set: lessons stored at `global` scope, by any run.
+    //
+    // One page of the activity feed, filtered to `global` here, rather than a request for
+    // five global lessons. Asking for a handful at a named scope comes back empty against a
+    // real instance — measured, reliably, on an instance that holds hundreds of lessons —
+    // and an empty answer reads exactly like a project that has learned nothing. This section
+    // and `runs/<run_id>/rules.json` were both starved by that one call.
+    //
+    // `projection: 'full'` is not optional: a lesson's scope lives in the metadata the
+    // compact projection drops, so a compact page finds every lesson and knows the scope of
+    // none of them. Past its sub-budget the whole section is dropped, not waited for.
     const lessonBudget = budgetFor(LESSONS_MS);
-    /** @type {{type: string, content: string}[]} */
+    /** @type {{id: string, type: string, content: string}[]} */
     let lessons = [];
+    // A page that had more behind it cannot hide a NEWER standing lesson — the feed sorts
+    // before it pages — but it can hide an older one, so "none found" is a weaker claim here
+    // than it looks and the steer block says so instead of rendering a confident nothing.
+    let lessonsPartial = false;
     if (lessonBudget > 0) {
-      const lres = await postLessons(cfg, { scope: 'global', limit: LESSON_LIMIT },
-        { timeoutMs: lessonBudget });
+      const lres = await listActivity(cfg, {
+        allRuns: true,
+        entryTypes: ['lesson'],
+        projection: 'full',
+        sort: 'desc',
+        limit: LESSON_SCAN,
+      }, { record: true, timeoutMs: lessonBudget });
       if (lres.ok) {
-        lessons = readLessons(lres.body);
+        const standing = globalLessons(lres.data.entries);
+        lessons = readLessons({ lessons: standing });
+        lessonsPartial = !!lres.data.nextPageToken && lessons.length < LESSON_LIMIT;
         // The `rule`-typed ones also go to `runs/<run_id>/rules.json`, for `pre-tool.mjs`
         // to read in front of a matching tool call. That hook may not dial, so its only
         // supply is a hook that has already paid for a round trip; this is one of the two,
         // and it is a pure side effect of a call that was made anyway. `recordRules` never
         // throws and never blocks (`lib/rules.mjs`).
         //
-        // The RAW array, not `lessons` above: `readLessons` renames `lesson_type` to `type`
-        // on the way through, and the store reads the wire names so that one normaliser can
-        // serve both producers.
-        recordRules(cfg, runId, Array.isArray(lres.body?.lessons) ? lres.body.lessons : []);
+        // The WIRE-shaped array, not `lessons` above: `readLessons` renames `lesson_type` to
+        // `type` on the way through, and the store reads the wire names so that one
+        // normaliser can serve both producers. `globalLessons` exists to put those names
+        // back — on the feed they arrive one level in, inside the metadata.
+        recordRules(cfg, runId, standing);
       } else {
-        log(cfg, 'info', `session-start: global lessons unavailable (${lres.error})`, { run_id: runId });
-        if (!authError && connState(lres.state) === 'auth_failed') authError = String(lres.error ?? '');
+        log(cfg, 'info', `session-start: standing lessons unavailable (${lres.message})`, { run_id: runId });
+        if (!authError && lres.code === 'auth_failed') authError = String(lres.message ?? '');
       }
     }
 
@@ -309,13 +344,19 @@ await runHook('session-start', {
     // that was compacted away, and the offline block has just told the model not to try.
     const anchor = src === 'compact' ? latestCheckpointId(cfg, runId) : '';
 
-    const summary = `mubit: ${cfg.mode}${DOT}run ${runId}${DOT}`
-      + `${lessons.length} global lesson${lessons.length === 1 ? '' : 's'}`;
+    // The one line a user reads at a glance, so it carries a count only when there is one to
+    // stand behind. A total printed off a listing that had more behind it is the number
+    // somebody acts on, and "0" is the reading that costs the most: it says the project has
+    // learned nothing, which is the claim this page cannot make.
+    const standing = lessonsPartial
+      ? 'global lessons: partial listing'
+      : `${lessons.length} global lesson${lessons.length === 1 ? '' : 's'}`;
+    const summary = `mubit: ${cfg.mode}${DOT}run ${runId}${DOT}${standing}`;
 
     return {
       hookSpecificOutput: {
         hookEventName: 'SessionStart',
-        additionalContext: steerBlock(cfg, runId, lessons, anchor),
+        additionalContext: steerBlock(cfg, runId, lessons, anchor, lessonsPartial),
       },
       // §16.2's hint fires once, ever, per install, so on that one session it *takes* the
       // line rather than being appended to it: `systemMessage` is one line by contract, and
@@ -410,9 +451,10 @@ function spawnResume(cfg, payload, runId, agentId, src) {
  * @param {string} runId
  * @param {{id: string, type: string, content: string}[]} lessons
  * @param {string} [anchor]  §5.6 checkpoint id, or '' when there is nothing to re-anchor to
+ * @param {boolean} [partial]  the standing set was read off a page that had more behind it
  * @returns {string}
  */
-function steerBlock(cfg, runId, lessons, anchor = '') {
+function steerBlock(cfg, runId, lessons, anchor = '', partial = false) {
   // How a skill is invoked, which is the one line of this block that is not host-neutral.
   // Claude Code takes `/mubit-memory:recall` as a slash command; Codex lists the same skill as
   // `mubit-memory:recall` and has no slash form. Telling a Codex model to type a slash command
@@ -437,13 +479,19 @@ function steerBlock(cfg, runId, lessons, anchor = '') {
       `Mubit checkpoint ${anchor} holds this run's context from before the compaction that `
       + `just happened. Ask ${skill('recall')} if you need detail that was compacted away.`);
   }
-  if (lessons.length) {
+  if (lessons.length || partial) {
     lines.push('', '## Standing lessons (global)');
     // Same qualifier the per-turn injection carries. These were learned in other sessions,
     // possibly in another part of the codebase, and nothing re-checked them against this one.
     lines.push('Learned from earlier work — they may be out of date, so verify before relying '
       + 'on one.');
     for (const l of lessons) lines.push(`- [${l.type}] ${l.content}`);
+    if (partial) {
+      // Rendering "none" off a listing that had more behind it would state, as a fact, the
+      // one thing this read cannot establish.
+      lines.push(`This set may be incomplete — it was read from a listing with more than this `
+        + `page in it. Ask ${skill('recall')} if a constraint seems to be missing.`);
+    }
   }
   return `${lines.join('\n')}\n`;
 }
@@ -610,6 +658,32 @@ function safeSegment(v) {
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The standing lessons on one page of the activity feed, in the wire spelling.
+ *
+ * Two jobs, and the second is the one that is easy to get subtly wrong. Filtering to `global`
+ * has to happen here because scope is not a field this route accepts. And the rows have to go
+ * back into `{lesson_id, lesson_type, content}` before anything downstream sees them, because
+ * both consumers — `readLessons` below and `recordRules` — read the wire names, while the
+ * feed nests those fields one level in. A row handed over unmapped is a rule the pre-tool
+ * store silently never learns about.
+ *
+ * @param {any[]} entries `ActivityEntry[]`
+ * @returns {{lesson_id: string, lesson_type: string, content: string, scope: string}[]}
+ */
+function globalLessons(entries) {
+  /** @type {{lesson_id: string, lesson_type: string, content: string, scope: string}[]} */
+  const out = [];
+  for (const e of Array.isArray(entries) ? entries : []) {
+    const n = normalizeActivityLesson(e);
+    if (n.scope !== 'global') continue;
+    out.push({
+      lesson_id: n.id, lesson_type: n.lessonType, content: n.content, scope: n.scope,
+    });
+  }
+  return out;
+}
 
 /**
  * `ListLessonsResponse.lessons[]` — `{lesson_id, content, lesson_type, scope, importance}`.

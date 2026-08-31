@@ -165,25 +165,6 @@ function realToolNames() {
   return [...src.matchAll(/name:\s*"(mubit_[a-z_0-9]+)"/g)].map((m) => m[1]);
 }
 
-/**
- * `{CODING_RULE: {lesson_type, lesson_scope}, ...}` — from `lib/classify.mjs`.
- *
- * The templates are not in the server bundle (they are a client-side table), and the
- * upstream TypeScript they were pinned from is not shipped. `lib/classify.mjs` is where the
- * plugin's own copy lives and is what the `remember` skill's prose has to agree with, so
- * comparing against it catches the drift that actually breaks a user: a skill documenting a
- * type/scope pair the plugin does not send. `test/classify.test.mjs` pins that copy in turn.
- */
-async function lessonTemplates() {
-  const { LESSON_TEMPLATES } = await lib('classify.mjs');
-  /** @type {Record<string, {lesson_type: string, lesson_scope: string}>} */
-  const out = {};
-  for (const [name, t] of Object.entries(LESSON_TEMPLATES)) {
-    out[name] = { lesson_type: t.lesson_type, lesson_scope: t.lesson_scope };
-  }
-  return out;
-}
-
 /** Every skill + agent markdown file that exists, for the cross-cutting checks. */
 function allMarkdown() {
   /** @type {Array<{rel: string, text: string}>} */
@@ -318,25 +299,6 @@ test('recall/SKILL.md carries the anti-fan-out guidance', () => {
   // The injected context is the reason most invocations are unnecessary at all.
   assert.match(body, /already[\s\S]{0,20}inject/i,
     'recall must say memory was already injected this turn, so the model reads before searching (§9.1)');
-});
-
-// §9.2 — the templates set lesson_type and lesson_scope for the writer. Getting a pair
-// wrong writes a lesson at the wrong scope, which is the difference between a rule that
-// follows the user everywhere and one that dies with the session.
-test('remember/SKILL.md lists all 8 lesson templates with the exact type/scope pairs', async () => {
-  const { body } = loadSkill('remember');
-  const templates = await lessonTemplates();
-  assert.equal(Object.keys(templates).length, 8,
-    `expected 8 templates in lib/classify.mjs, got ${Object.keys(templates).length}`);
-
-  for (const [name, { lesson_type, lesson_scope }] of Object.entries(templates)) {
-    const line = body.split(/\r?\n/).find((l) => l.includes(name));
-    assert.ok(line, `remember/SKILL.md does not mention the ${name} template (§9.2)`);
-    assert.ok(line.includes(lesson_type),
-      `remember/SKILL.md: ${name} must document lesson_type "${lesson_type}" (from lib/classify.mjs). Line: ${line.trim()}`);
-    assert.ok(line.includes(lesson_scope),
-      `remember/SKILL.md: ${name} must document lesson_scope "${lesson_scope}" (from lib/classify.mjs). Line: ${line.trim()}`);
-  }
 });
 
 // §1.5/§9.2 — ingest returns when the write is QUEUED, not stored. Without this warning
@@ -580,12 +542,36 @@ test('remember/SKILL.md states the scope mubit_learned actually writes', () => {
   assert.ok(para,
     'remember/SKILL.md no longer has a paragraph saying what scope mubit_learned writes at — '
     + 'that sentence is the model\'s only account of where its lesson went (§9.2)');
-  assert.match(para, /\brun\b/,
-    `remember/SKILL.md must say mubit_learned writes at run scope. Paragraph:\n${para}`);
-  assert.doesNotMatch(para, /\bsession\b/,
-    'remember/SKILL.md still says mubit_learned writes at session scope. It does not: the '
-    + 'egress guard clamps it to run, and session is read across runs anyway, which is the '
-    + `leak that clamp exists to close. Paragraph:\n${para}`);
+
+  // The scope is a setting, not a constant, and the paragraph has to say so: naming one value
+  // as if it were fixed is how this sentence went stale the last time. It must name the
+  // setting, state the default, and say what the other values do.
+  assert.match(para, /mcpLessonScope|MUBIT_MCP_LESSON_SCOPE/,
+    `the scope is whatever the ceiling is set to, and the paragraph must say which setting '
+    + 'that is. Paragraph:\n${para}`);
+  assert.match(para, /`session`/,
+    `remember/SKILL.md must state the default the model's write will actually get. `
+    + `Paragraph:\n${para}`);
+  assert.match(para, /`run`/,
+    `remember/SKILL.md must say what a ceiling of run does — it is the setting a user who `
+    + `wants per-run isolation reaches for. Paragraph:\n${para}`);
+});
+
+/**
+ * "Lessons never reach another session" is a scope question wearing a connectivity costume:
+ * every step of the doctor's ladder comes back clean while a `run` ceiling is the whole
+ * cause. At the shipped default the tool result no longer carries a clamp note either — the
+ * write is not clamped — so this skill is the surface that has to name the setting.
+ */
+test('doctor/SKILL.md routes a cross-session lesson complaint at the scope ceiling', () => {
+  const { body } = loadSkill('doctor');
+
+  assert.match(body, /mcpLessonScope|MUBIT_MCP_LESSON_SCOPE/,
+    'doctor/SKILL.md does not name the setting that decides whether a written lesson can '
+    + 'ever leave the run that wrote it');
+  assert.match(body, /scope-audit/,
+    'doctor/SKILL.md does not point at the audit that answers "what is actually stored, by '
+    + 'scope" — without it the step is advice with no measurement behind it');
 });
 
 // A ceiling with no documented way to raise it reads as a limitation rather than a setting,

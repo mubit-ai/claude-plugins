@@ -1,356 +1,342 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * `scripts/scope-audit.mjs` — a census of stored lesson scope, by author.
+ * `scripts/scope-audit.mjs` — a census of stored lesson scope.
  *
  * `scripts/mubit-inspect.mjs` reads what a run was *given*. This reads what runs have
- * *written*: how many lessons are stored at each scope and which kind of author wrote them.
- * It is the only place the answer is a number rather than an anecdote.
+ * *written*: how many lessons are stored, at what scope, how many are visible outside the run
+ * that wrote them, and whatever the instance has stamped about promotion. It is the only place
+ * those answers are a number rather than an anecdote.
  *
- * The plugin's promise is that an agent-written lesson stays in the run that wrote it unless
- * a user widens it deliberately, and `mcp/src/egress.mjs` is what holds a write to that.
- * This script is how you check the promise against what is actually stored.
+ * ## Why this was rewritten rather than extended
  *
- * Three numbers, in the order they matter:
+ * The version this replaces asked `POST /v2/control/lessons` with a deliberately empty
+ * `run_id` — which is the same request that made `mubit_lessons` read across runs. The tool
+ * whose whole purpose was to measure that behaviour was riding on it. It also inherited that
+ * route's other property: a request for rows at a named scope comes back short against a real
+ * instance, so the audit read a confident zero on an instance holding hundreds of lessons.
  *
- *   1. **agent-authored lessons above `run` scope** — the headline. It should not grow. A
- *      reading before a change and one after is the whole measurement; without the first,
- *      the second means nothing.
- *   2. **distinct originating runs among them** — the spread. One noisy run and twenty
- *      quiet ones are different problems.
- *   3. **reflection-authored lessons at each scope** — the control. Reflection is the
- *      sanctioned path that widens a lesson beyond its run, so this row answers the question
- *      the headline cannot: did tightening the write path cost the memory anything? It
- *      should be unchanged.
+ * A zero that means "the query was wrong" and a zero that means "nothing has ever been
+ * promoted" are the same character on screen and opposite conclusions. That is the failure
+ * this file exists to remove, so it goes through `lessonCensus()` instead: the activity feed
+ * collects and sorts before it pages, and it reports when it gave up.
  *
- * **Read-only, and deliberately not via `lib/http.mjs`.** `postLessons` would be the
- * obvious reuse, but `request()` records breaker state by default — a "read-only" audit
- * that wrote into the health cache and could trip the breaker for the hooks running beside
- * it. Every other script in `scripts/` imports node builtins only; this one follows
- * `mubit-inspect.mjs` — its `creds()` precedence, and a raw `fetch`. It writes nothing and
- * never prints an API key.
+ * ## Two properties that are not negotiable
+ *
+ *   1. **A truncated census exits non-zero, and every count it prints is named a floor.** A
+ *      short answer that says it is short is usable. A short answer that looks complete is the
+ *      false artefact again, and the exit code is what stops a script believing it.
+ *
+ *   2. **"Nothing was stamped" and "stamped, and the answer is zero" are different rows.**
+ *      They have different causes and different fixes. Promotion metadata is emitted verbatim,
+ *      never summarised, for the same reason: whatever the instance stamps is the evidence,
+ *      and this script's job is to show it rather than to have an opinion about it.
+ *
+ * ## Structured as `main(argv, env, io)`
+ *
+ * Same shape as `bin/activity.src.mjs`, and for the same reason: it is testable against a fake
+ * server with no network and no terminal. A reading is only worth as much as the confidence
+ * that the tool producing it is correct.
+ *
+ * Read-only throughout. `lessonCensus` dials on the read-only options, so an audit can never
+ * record a health verdict against an endpoint the hooks are using at the same time.
  *
  * Usage:
  *   node scripts/scope-audit.mjs                    # census against the stored credential
- *   node scripts/scope-audit.mjs --data <dir>       # pin one data dir
- *   node scripts/scope-audit.mjs --user <id>        # audit one logical user's lessons
  *   node scripts/scope-audit.mjs --json             # the same data, machine-readable
+ *   node scripts/scope-audit.mjs --run <id>         # one run only
  *   MUBIT_ENDPOINT=... MUBIT_API_KEY=... node scripts/scope-audit.mjs
+ *
+ * Exit codes: 0 a complete census, 1 a failure or a truncated census, 2 a bad argument.
  */
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-/**
- * The four scopes a lesson can carry. `run` is the control: it is the narrowest, so it
- * belongs in the table as the denominator even though it is never part of the headline.
- */
+import { lessonCensus } from '../lib/activity.mjs';
+import { loadConfig } from '../lib/config.mjs';
+
+/** The scopes a lesson can carry, narrowest first. Anything else is reported as it arrived. */
 const SCOPES = ['run', 'session', 'global', 'org'];
 
-/** Everything but `run` is read by other runs, which is what "cross-run" means here. */
-const CROSS_RUN = SCOPES.filter((s) => s !== 'run');
+const USAGE = `scope-audit — what is stored, at what scope, and how much of it travels.
 
-/**
- * Author families, keyed off the part of `source` before the first `:`.
- *
- * The wire disagrees with the obvious guess in both directions, so both are pinned here
- * rather than inferred. `agent` is what the ingest item carries (`mcp/dist/server.js` sends
- * `source: "agent"`, and the service defaults an absent source to the same string) — an
- * audit filtering on `mcp-agent` would report a permanent zero and read as "the defect
- * never existed". And reflection arrives as two families, `reflection` and `auto-reflect`,
- * not one.
- */
-const AGENT_SOURCES = ['agent', 'mcp-agent'];
-const REFLECTION_SOURCES = ['reflection', 'auto-reflect'];
+  node scripts/scope-audit.mjs [options]
 
-/** Rows requested per scope. Asking for more than this is capped, so it is the ceiling. */
-const MAX_LIMIT = 200;
+  --run <id>     census one run only (default: every run this key can see)
+  --limit N      rows per page (default 500, the route's ceiling)
+  --json         machine-readable output on stdout
+  -h, --help     this
 
-/* -------------------------------------------------------------------------- */
-/* args                                                                        */
-/* -------------------------------------------------------------------------- */
+  Endpoint and key resolve through the plugin's own config: MUBIT_ENDPOINT / MUBIT_API_KEY,
+  else the stored credential in the plugin data dir. Nothing is written and no key is printed.
 
-const HELP = `scope-audit — what is stored above run scope, and who wrote it
-
-  --data <dir>       pin one data dir (default: every ~/.claude/plugins/data/mubit-memory*)
-  --user <id>        filter to one logical user (default: no filter)
-  --limit N          lessons to request per scope (default ${MAX_LIMIT}, the ceiling)
-  --json             machine-readable output
-  -h, --help         this
-
-  Endpoint and key come from MUBIT_ENDPOINT / MUBIT_API_KEY, else the pinned data dir's
-  credentials.json. Env wins, and the source is printed — a shell that still exports a
-  localhost endpoint would otherwise audit the wrong instance in silence.
+  Exits 1 when the census was cut short — a partial reading is not a measurement.
 `;
 
+// ---------------------------------------------------------------------------
+// Arguments
+// ---------------------------------------------------------------------------
+
+/** @param {string[]} argv */
 function parseArgs(argv) {
-  const out = { json: false, help: false, limit: MAX_LIMIT, user: '' };
+  const out = { json: false, help: false, run: '', limit: 0, error: '' };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--json') out.json = true;
     else if (a === '-h' || a === '--help') out.help = true;
-    else if (a === '--data') out.data = String(argv[++i] || '');
-    else if (a === '--user') out.user = String(argv[++i] || '');
-    else if (a === '--limit') out.limit = Math.min(MAX_LIMIT, Math.max(1, Number(argv[++i]) || MAX_LIMIT));
-    else fail(`unknown flag ${a} (try --help)`);
+    else if (a === '--run') {
+      out.run = String(argv[++i] ?? '');
+      if (!out.run) return { ...out, error: '--run needs a run id' };
+    } else if (a === '--limit') {
+      const n = Number(argv[++i]);
+      if (!Number.isFinite(n) || n <= 0) return { ...out, error: '--limit needs a positive number' };
+      out.limit = Math.floor(n);
+    } else return { ...out, error: `unknown flag ${a}` };
   }
   return out;
 }
 
-function fail(msg) { process.stderr.write(`scope-audit: ${msg}\n`); process.exit(2); }
-
-/* -------------------------------------------------------------------------- */
-/* credentials                                                                 */
-/* -------------------------------------------------------------------------- */
-
-function readJson(path, fallback = null) {
-  try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return fallback; }
-}
-
-function lsDir(path) {
-  try { return readdirSync(path); } catch { return []; }
-}
-
-/** Same discovery `mubit-inspect.mjs` uses: install flavour decides the directory suffix. */
-function dataDirs(pin) {
-  if (pin) return [pin];
-  const root = join(homedir(), '.claude', 'plugins', 'data');
-  return lsDir(root)
-    .filter((n) => n.startsWith('mubit-memory'))
-    .map((n) => join(root, n))
-    .filter((p) => { try { return statSync(p).isDirectory(); } catch { return false; } });
-}
-
-/** Env beats the stored credential, exactly as `lib/config.mjs` orders them. */
-function creds(pin) {
-  if (process.env.MUBIT_ENDPOINT && process.env.MUBIT_API_KEY) {
-    return { endpoint: process.env.MUBIT_ENDPOINT, apiKey: process.env.MUBIT_API_KEY, from: 'env' };
-  }
-  for (const dir of dataDirs(pin)) {
-    const stored = readJson(join(dir, 'credentials.json'), {}) || {};
-    const endpoint = process.env.MUBIT_ENDPOINT || stored.endpoint || '';
-    const apiKey = process.env.MUBIT_API_KEY || stored.apiKey || '';
-    if (endpoint && apiKey) {
-      return {
-        endpoint,
-        apiKey,
-        from: process.env.MUBIT_ENDPOINT && process.env.MUBIT_API_KEY
-          ? 'env'
-          : `${dir}/credentials.json`,
-      };
-    }
-  }
-  return { endpoint: '', apiKey: '', from: 'nowhere' };
-}
-
-/* -------------------------------------------------------------------------- */
-/* the query                                                                   */
-/* -------------------------------------------------------------------------- */
+// ---------------------------------------------------------------------------
+// Shaping
+// ---------------------------------------------------------------------------
 
 /**
- * `POST /v2/control/lessons` is the one control route with no required `run_id`; an absent
- * run means "every run", which is exactly the census this wants. An empty `user_id` means
- * no user filter — passing one narrows to lessons stored under that logical user, which on
- * a single-principal instance is usually zero.
- *
- * @param {{endpoint: string, apiKey: string}} c
- * @param {string} scope
- * @param {{limit: number, user: string}} opts
- */
-async function listLessons(c, scope, opts) {
-  const url = `${c.endpoint.replace(/\/+$/, '')}/v2/control/lessons`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${c.apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ run_id: '', user_id: opts.user, scope, limit: opts.limit }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  const raw = await res.text();
-  let parsed = null;
-  try { parsed = JSON.parse(raw); } catch { /* reported below as a non-JSON answer */ }
-  if (res.status !== 200) {
-    return { scope, error: `HTTP ${res.status} ${raw.slice(0, 200)}`, lessons: [] };
-  }
-  if (!parsed || !Array.isArray(parsed.lessons)) {
-    return { scope, error: `unexpected answer: ${raw.slice(0, 200)}`, lessons: [] };
-  }
-  return { scope, error: '', lessons: parsed.lessons };
-}
-
-/* -------------------------------------------------------------------------- */
-/* shaping                                                                     */
-/* -------------------------------------------------------------------------- */
-
-/**
- * The author family: `source` on a stored lesson is `<family>:<source_run_id>`, and the run
- * id may itself be namespaced with `::` separators, so the split has to be on the FIRST
- * colon only.
+ * The author family: `source` on a stored lesson is `<family>:<source_run_id>`, and a run id
+ * may itself be namespaced with `::`, so the split has to be on the FIRST colon only.
+ * @param {string} source
  */
 function family(source) {
   return String(source || '').split(':')[0].trim().toLowerCase() || '(none)';
 }
 
-function authorOf(source) {
-  const f = family(source);
-  if (AGENT_SOURCES.includes(f)) return 'agent';
-  if (REFLECTION_SOURCES.includes(f)) return 'reflection';
-  return 'other';
+/**
+ * The run a lesson came from.
+ *
+ * The two routes the plugin reads lessons through spell this differently — bare on one,
+ * namespaced on the other — so the trailing segment is what identifies one run across both.
+ * @param {Record<string, any>} row
+ */
+function originRun(row) {
+  const raw = String(row.sourceRunId || row.runId || '');
+  return String(raw.split('::').pop() || '').trim();
 }
 
-/** The run a lesson came from — the field when it is set, else whatever `source` names. */
-function originRun(lesson) {
-  const explicit = String(lesson.source_run_id || '').trim();
-  if (explicit) return explicit;
-  const source = String(lesson.source || '');
-  const colon = source.indexOf(':');
-  return colon >= 0 ? source.slice(colon + 1) : '';
-}
+/**
+ * Count the census into the report.
+ *
+ * @param {Record<string, any>} data a `lessonCensus` payload
+ * @returns {Record<string, any>}
+ */
+function shape(data) {
+  const lessons = Array.isArray(data.lessons) ? data.lessons : [];
 
-function audit(buckets) {
-  /** @type {Record<string, Record<string, number>>} */
-  const grid = {};
-  for (const s of SCOPES) grid[s] = { agent: 0, reflection: 0, other: 0, total: 0 };
+  // Counted into Maps: these keys come from an instance's metadata, and `obj['__proto__'] = n`
+  // on a plain object silently sets nothing at all.
+  /** @type {Map<string, number>} */ const byScope = new Map();
+  /** @type {Map<string, number>} */ const byAuthor = new Map();
+  /** @type {Set<string>} */ const origins = new Set();
+  /** @type {Set<string>} */ const escapedOrigins = new Set();
+  /** @type {Record<string, any>[]} */ const promotionRows = [];
 
-  const crossRunAgentRuns = new Set();
-  /** @type {Set<string>} */
-  const unclassified = new Set();
-  let scanned = 0;
+  let escaped = 0;
+  let unknownScope = 0;
+  let stampedCandidates = 0;
 
-  for (const b of buckets) {
-    for (const l of b.lessons) {
-      scanned += 1;
-      // Trust the row's own `scope` over the bucket it came back in: the filter and the
-      // stored value are two different reads of the same metadata, and a disagreement is
-      // worth counting where it actually is rather than where it was asked for.
-      const scope = SCOPES.includes(String(l.scope)) ? String(l.scope) : b.scope;
-      const author = authorOf(l.source);
-      grid[scope][author] += 1;
-      grid[scope].total += 1;
-      if (author === 'other') unclassified.add(family(l.source));
-      if (author === 'agent' && scope !== 'run') {
-        const run = originRun(l);
-        if (run) crossRunAgentRuns.add(run);
-      }
+  for (const row of lessons) {
+    const scope = String(row.scope || '');
+    byScope.set(scope, (byScope.get(scope) ?? 0) + 1);
+    byAuthor.set(family(row.source), (byAuthor.get(family(row.source)) ?? 0) + 1);
+    if (!row.scopeKnown) unknownScope += 1;
+
+    const origin = originRun(row);
+    if (origin) origins.add(origin);
+
+    // "Visible outside the run that wrote it" — the one number this audit exists to produce.
+    if (scope !== 'run') {
+      escaped += 1;
+      if (origin) escapedOrigins.add(origin);
+    }
+
+    if (row.promotionStamped) {
+      if (row.promotionCandidate === true) stampedCandidates += 1;
+      promotionRows.push({
+        id: row.id,
+        scope,
+        source_run_id: row.sourceRunId,
+        // Verbatim. Whatever the instance stamped is the evidence; a summary of it is this
+        // script's opinion, and an opinion is not what anybody runs an audit for.
+        promotion_candidate: row.promotionCandidate,
+        promotion_quarantined: row.promotionQuarantined,
+        promotion_shadow_stats: row.promotionShadowStats,
+      });
     }
   }
 
-  const headline = CROSS_RUN.reduce((n, s) => n + grid[s].agent, 0);
   return {
-    scanned,
-    grid,
-    headline,
-    blastRadius: crossRunAgentRuns.size,
-    originatingRuns: [...crossRunAgentRuns].sort(),
-    reflectionByScope: Object.fromEntries(SCOPES.map((s) => [s, grid[s].reflection])),
-    unclassified: [...unclassified].sort(),
-    truncated: buckets.filter((b) => b.lessons.length >= MAX_LIMIT).map((b) => b.scope),
-    errors: buckets.filter((b) => b.error).map((b) => ({ scope: b.scope, error: b.error })),
+    total: lessons.length,
+    byScope: Object.fromEntries(byScope),
+    byAuthor: Object.fromEntries(byAuthor),
+    unknownScope,
+    escaped,
+    originRuns: origins.size,
+    escapedOriginRuns: escapedOrigins.size,
+    promotion: {
+      stamped: promotionRows.length,
+      // `null`, not `0`. With nothing stamped there is no candidate count to report, and a
+      // zero here would answer a question the instance never answered.
+      candidates: promotionRows.length ? stampedCandidates : null,
+      rows: promotionRows,
+    },
+    truncated: !!data.truncated,
+    truncatedReason: String(data.truncatedReason || ''),
+    countsAreFloor: !!data.truncated,
+    pages: data.pages,
+    elapsedMs: data.elapsedMs,
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* printing                                                                    */
-/* -------------------------------------------------------------------------- */
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
 
-function table(rows, cols) {
-  const head = cols.map((c) => c.label);
-  const body = rows.map((r) => cols.map((c) => String(c.get(r))));
-  const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
-  const line = (cells) => cells
-    .map((c, i) => (cols[i].right ? c.padStart(w[i]) : c.padEnd(w[i])))
-    .join('  ')
-    .trimEnd();
-  return [line(head), ...body.map(line)];
-}
-
+/**
+ * @param {Record<string, any>} a
+ * @param {{endpoint: string, run: string, at: string}} meta
+ */
 function render(a, meta) {
   const out = [];
-  out.push('mubit scope-audit — what is stored above run scope, and who wrote it');
-  out.push(`endpoint  ${meta.endpoint}  (from ${meta.from})`);
-  out.push(`user      ${meta.user || '(no filter)'}`);
+  const floor = a.countsAreFloor ? '  (a floor)' : '';
+
+  out.push('mubit scope-audit — what is stored, at what scope, and how much of it travels');
+  out.push(`endpoint  ${meta.endpoint}`);
+  out.push(`scope     ${meta.run || 'every run this key can see'}`);
+  out.push(`read      ${a.pages} page${a.pages === 1 ? '' : 's'} in ${a.elapsedMs}ms`);
   out.push('');
 
-  out.push(`lessons scanned                        ${a.scanned}`);
-  out.push('');
-  out.push(`agent-authored at cross-run scope      ${a.headline}    <- the defect`);
-  out.push(`  distinct originating runs            ${a.blastRadius}`);
-  out.push('');
-
-  out.push('by scope x author');
-  const rows = SCOPES.map((s) => ({ scope: s, ...a.grid[s] }));
-  for (const line of table(rows, [
-    { label: 'scope', get: (r) => r.scope },
-    { label: 'agent', get: (r) => r.agent, right: true },
-    { label: 'reflection', get: (r) => r.reflection, right: true },
-    { label: 'other', get: (r) => r.other, right: true },
-    { label: 'total', get: (r) => r.total, right: true },
-  ])) out.push(`  ${line}`);
+  out.push(`lessons stored                             ${a.total}${floor}`);
+  out.push(`  visible outside the run that wrote them  ${a.escaped}${floor}`);
+  out.push(`  runs that wrote one of those             ${a.escapedOriginRuns}`);
+  out.push(`distinct origin runs                       ${a.originRuns}`);
+  if (a.unknownScope) {
+    out.push(`  metadata never stated a scope            ${a.unknownScope}`);
+  }
   out.push('');
 
-  // The control. Reflection is the sanctioned way a lesson widens beyond its run, so if
-  // this row moved, the clamp caught something it was never aimed at.
-  out.push('reflection-authored by scope (the sanctioned widening path — must be unchanged)');
-  out.push(`  ${SCOPES.map((s) => `${s} ${a.reflectionByScope[s]}`).join(' · ')}`);
+  out.push('by scope');
+  const scopes = [...SCOPES, ...Object.keys(a.byScope).filter((s) => !SCOPES.includes(s))];
+  for (const s of scopes) out.push(`  ${s.padEnd(10)} ${String(a.byScope[s] ?? 0).padStart(5)}`);
+  out.push('');
 
-  if (a.originatingRuns.length) {
+  out.push('by author');
+  for (const [k, n] of Object.entries(a.byAuthor).sort()) {
+    out.push(`  ${String(k).padEnd(20)} ${String(n).padStart(5)}`);
+  }
+  out.push('');
+
+  // The two facts that must never render as the same zero.
+  out.push('promotion');
+  if (a.promotion.stamped === 0) {
+    out.push('  This instance stamped no promotion metadata on any of these lessons. That is');
+    out.push('  not "zero candidates" — it is no answer at all, and the two have different');
+    out.push('  causes. Nothing about promotion can be concluded from this reading.');
+  } else {
+    out.push(`  lessons carrying promotion metadata      ${a.promotion.stamped}${floor}`);
+    out.push(`  of those, promotion_candidate: true      ${a.promotion.candidates}`);
     out.push('');
-    out.push('runs that wrote a cross-run agent lesson');
-    for (const r of a.originatingRuns) out.push(`  ${r}`);
-  }
-
-  if (a.unclassified.length) {
-    out.push('');
-    out.push(`unclassified source families (counted under "other"): ${a.unclassified.join(', ')}`);
-  }
-
-  // A capped bucket is the one way this can under-report, so it says so rather than
-  // printing a number that reads like a total.
-  if (a.truncated.length) {
-    out.push('');
-    out.push(`WARNING: hit the server's ${MAX_LIMIT}-row cap for scope(s) ${a.truncated.join(', ')} —`);
-    out.push('         these counts are a floor, not a total.');
-  }
-
-  for (const e of a.errors) {
-    out.push('');
-    out.push(`WARNING: scope ${e.scope} could not be read: ${e.error}`);
-  }
-
-  return out.join('\n');
-}
-
-/* -------------------------------------------------------------------------- */
-/* main                                                                        */
-/* -------------------------------------------------------------------------- */
-
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  if (args.help) { process.stdout.write(HELP); return; }
-
-  const c = creds(args.data);
-  if (!c.endpoint || !c.apiKey) {
-    fail('no endpoint/key — set MUBIT_ENDPOINT and MUBIT_API_KEY, or pass --data <dir> '
-      + 'containing a credentials.json');
-  }
-
-  const buckets = [];
-  for (const scope of SCOPES) {
-    try {
-      buckets.push(await listLessons(c, scope, { limit: args.limit, user: args.user }));
-    } catch (err) {
-      buckets.push({ scope, error: String(err && err.message ? err.message : err), lessons: [] });
+    out.push('  verbatim, as the instance stamped it:');
+    for (const r of a.promotion.rows) {
+      out.push(`    ${r.id}  scope=${r.scope}`);
+      out.push(`      promotion_candidate     ${JSON.stringify(r.promotion_candidate)}`);
+      out.push(`      promotion_quarantined   ${JSON.stringify(r.promotion_quarantined)}`);
+      out.push(`      promotion_shadow_stats  ${JSON.stringify(r.promotion_shadow_stats)}`);
     }
   }
 
-  const a = audit(buckets);
-  const meta = { endpoint: c.endpoint, from: c.from, user: args.user, at: new Date().toISOString() };
-
-  if (args.json) {
-    process.stdout.write(`${JSON.stringify({ ...meta, ...a }, null, 2)}\n`);
-    return;
+  if (a.countsAreFloor) {
+    out.push('');
+    out.push(`WARNING: the census was cut short (${a.truncatedReason}). Every count above is a`);
+    out.push('         FLOOR, not a total, and this command exits non-zero so that nothing');
+    out.push('         reading it can mistake a partial reading for a measurement.');
   }
-  process.stdout.write(`${render(a, meta)}\n`);
+
+  out.push('');
+  out.push(`read at ${meta.at}`);
+  return out.join('\n');
 }
 
-main().catch((err) => fail(String(err && err.stack ? err.stack : err)));
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {string[]} [argv]
+ * @param {Record<string, string|undefined>} [env]
+ * @param {{stdout?: (s: string) => void, stderr?: (s: string) => void}} [io]
+ * @returns {Promise<number>}
+ */
+export async function main(argv = process.argv.slice(2), env = process.env, io = {}) {
+  const stdout = io.stdout ?? ((s) => process.stdout.write(s));
+  const stderr = io.stderr ?? ((s) => process.stderr.write(s));
+
+  const args = parseArgs(argv);
+  if (args.error) { stderr(`scope-audit: ${args.error}\n\n${USAGE}`); return 2; }
+  if (args.help) { stdout(USAGE); return 0; }
+
+  /** @type {Record<string, any>} */
+  let cfg;
+  try {
+    cfg = loadConfig(env);
+  } catch (err) {
+    stderr(`scope-audit: could not resolve configuration: ${message(err)}\n`);
+    return 1;
+  }
+  if (!cfg.endpoint || !cfg.apiKey) {
+    stderr('scope-audit: no endpoint or key — set MUBIT_ENDPOINT and MUBIT_API_KEY, or run '
+      + '/mubit-memory:auth to store a credential.\n');
+    return 1;
+  }
+
+  const census = await lessonCensus(cfg, {
+    run: args.run,
+    ...(args.limit ? { limit: args.limit } : {}),
+  });
+  if (!census.ok) {
+    // No report at all. A report is a claim, and there is nothing here to stand behind.
+    stderr(`scope-audit: the activity feed could not be read (${census.code}): ${census.message}\n`);
+    return 1;
+  }
+
+  const a = shape(census.data);
+  const meta = { endpoint: String(cfg.endpoint), run: args.run, at: new Date().toISOString() };
+
+  if (args.json) stdout(`${JSON.stringify({ ...meta, ...a }, null, 2)}\n`);
+  else stdout(`${render(a, meta)}\n`);
+
+  // The exit code carries the verdict where nothing is reading the prose.
+  return a.countsAreFloor ? 1 : 0;
+}
+
+/** @param {unknown} err */
+function message(err) {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// Guarded the same way as `bin/activity.src.mjs`: the tests import this module and drive
+// `main()` with captured streams, so it must not run itself on import. `import.meta.url` is
+// symlink-resolved by the loader and `process.argv[1]` is not, so both are resolved here.
+/** @param {string} p */
+function realPath(p) {
+  try { return p ? realpathSync(p) : p; } catch { return p; }
+}
+
+const selfReal = realPath(fileURLToPath(import.meta.url));
+const entryPath = process.argv[1] ? realPath(resolve(process.argv[1])) : '';
+
+if (entryPath === selfReal) {
+  process.exitCode = await main().catch((err) => {
+    process.stderr.write(`scope-audit could not run: ${message(err)}\n`);
+    return 1;
+  });
+}

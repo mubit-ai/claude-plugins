@@ -18,23 +18,11 @@ Reach for it when:
   requires the CRD applied before the StatefulSet, or it wedges");
 - an approach fails in a way worth never repeating, and you know *why* it failed.
 
-Pick a template, which sets `lesson_type` and `lesson_scope` for you:
-
-| Template | Use for | type / scope |
-| --- | --- | --- |
-| `CODING_RULE` | lint rules, naming, style constraints | rule / global |
-| `DEBUG_SUCCESS` | a debugging approach that worked | success / session |
-| `DEBUG_FAILURE` | an approach that failed, and why | failure / session |
-| `PREFERENCE` | how this user wants things done | preference / global |
-| `ARCHITECTURE_INSIGHT` | system quirks, dependency behaviour | observation / global |
-| `BUILD_CONFIG` | build/deploy settings that work | rule / global |
-| `API_PATTERN` | SDK quirks, integration notes | observation / session |
-| `TEST_STRATEGY` | test approaches that proved effective | success / global |
-
-The pair is the whole point of choosing a template. `lesson_type` decides how retrieval
-weighs the entry; `lesson_scope` decides who ever sees it again — a `global` entry follows
-the user into every project, a `session` entry stays with related sessions, and a `run`
-entry dies with this run. Picking the wrong template is not a cosmetic error.
+One judgement is worth carrying from the type/scope table this used to show: a lesson that
+states a constraint which is always true — a lint rule, a user's standing preference, a
+system quirk — is worth more the further it travels, while a lesson about how one debugging
+session went is worth most close to the work that produced it. Write with that in mind, and
+raise `mcpLessonScope` when the constraints you are storing are the first kind.
 
 Write the lesson as an imperative with its condition attached — "When X, do Y, because Z" —
 not as a narrative of what just happened. "Fixed the flaky test" is worth nothing to a future

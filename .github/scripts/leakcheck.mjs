@@ -286,40 +286,82 @@ function commentBlocks(lines) {
  *
  * The test is not "does this file have a sourcemap". Most of the committed bundles do, and
  * theirs only carry sources that are themselves tracked here, which leaks nothing. The test is
- * whether the map carries content for a source this repository does not have.
+ * whether the map carries *text* this repository does not publish — matching the tracked
+ * file's name is not enough, because a bundle that was not rebuilt keeps embedding what the
+ * file used to say. Thirty-six stale copies passed on their basenames alone before this
+ * compared content.
  *
- * @returns {string[]} source paths whose original text is embedded but not tracked here
+ * @returns {Array<{source:string, content:string}>} every embedded source with its text
  */
-function embeddedForeignSources(path, src, tracked) {
+function inlineMapEntries(path, src) {
   if (!/\.(?:js|mjs|cjs)$/.test(path)) return [];
   const text = src.read(path);
   if (text === null) return [];
-  const at = text.lastIndexOf('sourceMappingURL=data:');
-  if (at === -1) return [];
-  const encoded = /base64,([A-Za-z0-9+/=]+)/.exec(text.slice(at));
-  if (!encoded) return [];
-
-  let map;
-  try { map = JSON.parse(Buffer.from(encoded[1], 'base64').toString('utf8')); } catch { return []; }
-  const sources = Array.isArray(map.sources) ? map.sources : [];
-  const contents = Array.isArray(map.sourcesContent) ? map.sourcesContent : [];
-  if (contents.length === 0) return [];
-
-  const basenames = new Set(tracked.map((p) => p.split('/').pop()));
-  const foreign = [];
-  for (let i = 0; i < sources.length; i += 1) {
-    if (!contents[i]) continue;
-    const src = String(sources[i]);
-    if (src.includes('node_modules/')) continue;          // third-party, published already
-    if (basenames.has(src.split('/').pop() || '')) continue; // we ship this source ourselves
-    foreign.push(src);
+  const out = [];
+  for (const m of text.matchAll(/sourceMappingURL=data:[^,\n]*;base64,([A-Za-z0-9+/=]+)/g)) {
+    let map;
+    try { map = JSON.parse(Buffer.from(m[1], 'base64').toString('utf8')); } catch { continue; }
+    const sources = Array.isArray(map.sources) ? map.sources : [];
+    const contents = Array.isArray(map.sourcesContent) ? map.sourcesContent : [];
+    for (let i = 0; i < sources.length; i += 1) {
+      if (!contents[i]) continue;
+      out.push({ source: String(sources[i]), content: String(contents[i]) });
+    }
   }
-  return foreign;
+  return out;
+}
+
+/**
+ * An embedded source is published already when a tracked file carries the same text — the
+ * map is then republishing what the tree says anyway. Compared after trimming trailing
+ * whitespace, because bundlers disagree with editors about final newlines and a stale copy
+ * differs by sentences, not by a byte at the end.
+ */
+function publishedCopy(entry, tracked, src) {
+  if (entry.source.includes('node_modules/')) return true; // third-party, published already
+  const base = entry.source.split('/').pop() || '';
+  const want = entry.content.replace(/\s+$/, '');
+  for (const p of tracked) {
+    if ((p.split('/').pop() || '') !== base) continue;
+    const text = src.read(p);
+    if (text !== null && text.replace(/\s+$/, '') === want) return true;
+  }
+  return false;
 }
 
 /* -------------------------------------------------------------------------- */
 /* scan                                                                        */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * The two-pass content match over one body of text: line by line for what a reader expects,
+ * then over joined comment runs, because prose wraps and a rule anchored to a line is
+ * defeated by a line break. `seen` dedupes by fingerprint across every body scanned under
+ * the same reported path — a bundle and the sources its map embeds are one publication.
+ */
+function matchContent(compiled, lines, path, findings, seen) {
+  const consider = (rule, re, haystack, lineNo) => {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(haystack)) !== null) {
+      if (m[0] === '') { re.lastIndex += 1; continue; }
+      if (!keepMatch(rule, m[0])) continue;
+      if (suppressed(lines, lineNo - 1, rule.id)) continue;
+      const f = record(rule, path, lineNo, m[0]);
+      if (seen.has(f.fingerprint)) continue;
+      seen.add(f.fingerprint);
+      findings.push(f);
+    }
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!lines[i]) continue;
+    for (const { rule, re } of compiled) consider(rule, re, lines[i], i + 1);
+  }
+  for (const block of commentBlocks(lines)) {
+    for (const { rule, re } of compiled) consider(rule, re, block.text, block.line);
+  }
+}
 
 function scan(paths, allTracked, src) {
   /** @type {Array<{rule:string,severity:string,path:string,line:number,match:string,why:string,fix:string,fingerprint:string}>} */
@@ -348,11 +390,25 @@ function scan(paths, allTracked, src) {
       if (rule) findings.push(record(rule, path, 1, `${(size / 1024 / 1024).toFixed(1)} MB`));
     }
 
-    const foreign = embeddedForeignSources(path, src, allTracked);
-    if (foreign.length) {
+    const embedded = inlineMapEntries(path, src).filter((e) => !publishedCopy(e, allTracked, src));
+    if (embedded.length) {
       const rule = RULES.find((r) => r.id === 'inline-sourcemap-sources');
       // One finding per embedded source, so removing some and not others is visible.
-      if (rule) for (const src of foreign) findings.push(record(rule, path, 1, src));
+      if (rule) for (const e of embedded) findings.push(record(rule, path, 1, e.source));
+
+      // What the map embeds is scanned like any other text: same rules, same suppression,
+      // the embedded file's own extension deciding text-ness. Findings land on the bundle,
+      // because the bundle is the tracked file doing the publishing.
+      const seenInMaps = new Set();
+      for (const e of embedded) {
+        const pseudo = e.source.replace(/^(?:\.\.\/|\.\/)+/, '');
+        if (!isTextPath(pseudo)) continue;
+        const heavyEntry = e.content.length > CONFIG.maxTextBytes;
+        const applicableToEntry = contentRules.filter((r) => (heavyEntry ? r.heavy : true) && ruleApplies(r, pseudo));
+        if (applicableToEntry.length === 0) continue;
+        matchContent(applicableToEntry.map((rule) => ({ rule, re: compile(rule) })),
+          e.content.split('\n'), path, findings, seenInMaps);
+      }
     }
 
     /* --- content rules --- */
@@ -366,39 +422,7 @@ function scan(paths, allTracked, src) {
     if (text === null) continue;
     const lines = text.split('\n');
 
-    /**
-     * Two passes over the same file.
-     *
-     * The first is line by line, which is what a reader expects. The second joins each run of
-     * consecutive comment lines into one string and matches against that, because prose wraps
-     * and a rule anchored to a line is defeated by a line break — "collapses every user,
-     * project and machine into one\n * run" matched nothing until this existed. Findings are
-     * deduplicated by fingerprint, so a phrase that fits on one line is reported once.
-     */
-    const seen = new Set();
-    const consider = (rule, re, haystack, lineNo) => {
-      re.lastIndex = 0;
-      let m;
-      while ((m = re.exec(haystack)) !== null) {
-        if (m[0] === '') { re.lastIndex += 1; continue; }
-        if (!keepMatch(rule, m[0])) continue;
-        if (suppressed(lines, lineNo - 1, rule.id)) continue;
-        const f = record(rule, path, lineNo, m[0]);
-        if (seen.has(f.fingerprint)) continue;
-        seen.add(f.fingerprint);
-        findings.push(f);
-      }
-    };
-
-    for (let i = 0; i < lines.length; i += 1) {
-      const line = lines[i];
-      if (!line) continue;
-      for (const { rule, re } of compiled) consider(rule, re, line, i + 1);
-    }
-
-    for (const block of commentBlocks(lines)) {
-      for (const { rule, re } of compiled) consider(rule, re, block.text, block.line);
-    }
+    matchContent(compiled, lines, path, findings, new Set());
   }
 
   findings.sort((a, b) => (a.path === b.path ? a.line - b.line : a.path.localeCompare(b.path)));

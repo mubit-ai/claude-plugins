@@ -34,6 +34,20 @@ Precedence, highest first: the plugin's `endpoint` and `apiKey` settings
 `MUBIT_API_KEY` in the environment, then `${CLAUDE_PLUGIN_DATA}/credentials.json` (what
 `/mubit-memory:auth` writes), then `${CLAUDE_PROJECT_DIR}/.mubit-cc.json`.
 
+Two things about that list are worth knowing before you use it to explain a result:
+
+- **A plugin option that is set-but-blank still wins.** The rung tests whether the setting
+  exists, not whether it is useful, because a blank `endpoint` is a meaningful answer for a
+  local install. So a user who configured `apiKey` in `/plugin` and later cleared the field
+  can see a successful `/mubit-memory:auth` change nothing at all. If the stored credentials
+  look right and the plugin still reports `auth_failed`, check `/plugin` → Mubit Memory →
+  configure for an empty field before anything else.
+- **`${CLAUDE_PLUGIN_DATA}` is not the bare `~/.claude/plugins/data/mubit-memory`.** The host
+  appends a suffix naming the install source — `-mubit` for a marketplace install, `-inline`
+  for `--plugin-dir` — so a machine can hold several, and the bare name is usually the one
+  nothing writes to. Read the interpolated `${CLAUDE_PLUGIN_DATA}` rather than reconstructing
+  the path.
+
 - **No endpoint** → there is nothing to talk to. Capture spools locally and recall returns
   nothing; nothing is lost and nothing is sent. Point the user at the console, then at
   `/plugin` → configure.

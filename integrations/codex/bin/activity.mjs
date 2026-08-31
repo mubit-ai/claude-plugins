@@ -31,6 +31,7 @@ var SEC = 1e3;
 var MIN = 60 * SEC;
 var HOUR = 60 * MIN;
 var DAY = 24 * HOUR;
+var DATA_DIR_PREFIX = "mubit-memory";
 function dataDir(cfg = {}, env = process.env) {
   const e = env ?? {};
   const override = e.MUBIT_CC_DATA_DIR;
@@ -49,30 +50,40 @@ function liveDataDir(home, env = {}) {
     if (pinned && pinned[1]) return pinned[1];
   } catch {
   }
+  const bare = join(root, DATA_DIR_PREFIX);
+  let candidates = [];
   try {
-    let best = "";
-    let bestAt = -1;
-    for (const name of readdirSync(root)) {
-      if (!name.startsWith("mubit-memory")) continue;
-      const dir = join(root, name);
-      let at = 0;
+    candidates = readdirSync(root).filter((n) => n === DATA_DIR_PREFIX || n.startsWith(`${DATA_DIR_PREFIX}-`)).map((n) => join(root, n)).filter((p) => {
       try {
-        for (const f of readdirSync(join(dir, "status"))) {
-          if (!f.endsWith(".json") || f === "health.json") continue;
-          at = Math.max(at, statSync(join(dir, "status", f)).mtimeMs);
-        }
+        return statSync(p).isDirectory();
       } catch {
+        return false;
       }
-      if (existsSync(join(dir, "credentials.json"))) at += 1e15;
-      if (at > bestAt) {
-        bestAt = at;
-        best = dir;
-      }
-    }
-    if (best && bestAt > 0) return best;
+    }).map((p) => ({
+      path: p,
+      creds: existsSync(join(p, "credentials.json")),
+      at: dirActivity(p),
+      bare: p === bare
+    }));
   } catch {
+    return bare;
   }
-  return join(root, "mubit-memory");
+  if (!candidates.length) return bare;
+  const withCreds = candidates.filter((c) => c.creds);
+  const pool = withCreds.length ? withCreds : candidates;
+  pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
+  return pool[0].path;
+}
+function dirActivity(dir) {
+  let newest = 0;
+  for (const rel of ["", "config.json", "status", "runs", "credentials.json"]) {
+    try {
+      const t = statSync(rel ? join(dir, rel) : dir).mtimeMs;
+      if (t > newest) newest = t;
+    } catch {
+    }
+  }
+  return newest;
 }
 function safeHome() {
   try {
@@ -419,7 +430,7 @@ var DEFAULT_MCP_TOOLS = [
 ];
 var CACHE_FILE = "config.json";
 var CACHE_TTL_MS = 300 * 1e3;
-var CACHE_VERSION = 2;
+var CACHE_VERSION = 3;
 function screaming(key) {
   return String(key).replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
 }
@@ -547,7 +558,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
   const mcpLessonScope = enumOf(
     pick("mcpLessonScope", "MUBIT_MCP_LESSON_SCOPE"),
     ["run", "session", "global"],
-    "run"
+    "session"
   );
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
@@ -1289,6 +1300,11 @@ function scrubKey(cfg, text) {
   if (!key || !s.includes(key)) return s;
   return s.split(key).join("[REDACTED:api-key]");
 }
+var PROMOTION_KEYS = Object.freeze([
+  "promotion_candidate",
+  "promotion_quarantined",
+  "promotion_shadow_stats"
+]);
 function parseMetadata(raw) {
   let v = raw;
   for (let i = 0; i < 2; i += 1) {
@@ -1302,7 +1318,7 @@ function parseMetadata(raw) {
   }
   return v && typeof v === "object" && !Array.isArray(v) ? v : null;
 }
-async function fetchActivity(cfg, params2 = {}) {
+async function fetchActivity(cfg, params2 = {}, opts = {}) {
   const req = {
     limit: clamp(params2.limit, 1, 500, 100),
     sort: params2.sort === "asc" ? "asc" : "desc",
@@ -1320,7 +1336,7 @@ async function fetchActivity(cfg, params2 = {}) {
   if (str2(params2.createdBefore)) req.created_before = str2(params2.createdBefore);
   if (str2(params2.userId)) req.user_id = str2(params2.userId);
   if (str2(params2.agentId)) req.agent_id = str2(params2.agentId);
-  const res = await request(cfg, "POST", EXTRA_ROUTES.activity, req, READ_ONLY);
+  const res = await request(cfg, "POST", EXTRA_ROUTES.activity, req, { ...READ_ONLY, ...opts });
   if (!res.ok) return mapError(cfg, res);
   const body = res.body && typeof res.body === "object" ? res.body : {};
   return ok({
@@ -1413,7 +1429,7 @@ async function exportActivity(cfg, params2 = {}) {
     run
   });
 }
-async function listActivity(cfg, params2 = {}) {
+async function listActivity(cfg, params2 = {}, opts = {}) {
   const p = obj(params2);
   const run = str3(p.run);
   if (!run && p.allRuns !== true) {
@@ -1435,7 +1451,7 @@ async function listActivity(cfg, params2 = {}) {
     createdBefore: str3(p.createdBefore),
     userId: str3(p.userId),
     agentId: str3(p.agentId)
-  });
+  }, opts);
   if (!res.ok) return res;
   const corrected = correct(res.data.entries, {
     excludeDerived: p.excludeDerived === true,

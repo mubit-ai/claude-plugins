@@ -45,30 +45,40 @@ function liveDataDir(home, env = {}) {
     if (pinned && pinned[1]) return pinned[1];
   } catch {
   }
+  const bare = join2(root, DATA_DIR_PREFIX2);
+  let candidates = [];
   try {
-    let best = "";
-    let bestAt = -1;
-    for (const name of readdirSync2(root)) {
-      if (!name.startsWith("mubit-memory")) continue;
-      const dir = join2(root, name);
-      let at = 0;
+    candidates = readdirSync2(root).filter((n) => n === DATA_DIR_PREFIX2 || n.startsWith(`${DATA_DIR_PREFIX2}-`)).map((n) => join2(root, n)).filter((p) => {
       try {
-        for (const f of readdirSync2(join2(dir, "status"))) {
-          if (!f.endsWith(".json") || f === "health.json") continue;
-          at = Math.max(at, statSync2(join2(dir, "status", f)).mtimeMs);
-        }
+        return statSync2(p).isDirectory();
       } catch {
+        return false;
       }
-      if (existsSync2(join2(dir, "credentials.json"))) at += 1e15;
-      if (at > bestAt) {
-        bestAt = at;
-        best = dir;
-      }
-    }
-    if (best && bestAt > 0) return best;
+    }).map((p) => ({
+      path: p,
+      creds: existsSync2(join2(p, "credentials.json")),
+      at: dirActivity(p),
+      bare: p === bare
+    }));
   } catch {
+    return bare;
   }
-  return join2(root, "mubit-memory");
+  if (!candidates.length) return bare;
+  const withCreds = candidates.filter((c) => c.creds);
+  const pool = withCreds.length ? withCreds : candidates;
+  pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
+  return pool[0].path;
+}
+function dirActivity(dir) {
+  let newest = 0;
+  for (const rel of ["", "config.json", "status", "runs", "credentials.json"]) {
+    try {
+      const t = statSync2(rel ? join2(dir, rel) : dir).mtimeMs;
+      if (t > newest) newest = t;
+    } catch {
+    }
+  }
+  return newest;
 }
 function safeHome2() {
   try {
@@ -139,13 +149,14 @@ function safeSegment(value, max = 0) {
 function runDir(cfg, runId) {
   return join2(resolveDataDir(cfg), "runs", safeSegment(runId));
 }
-var SEC, MIN, HOUR, DAY;
+var SEC, MIN, HOUR, DAY, DATA_DIR_PREFIX2;
 var init_state = __esm({
   "../claude-code/lib/state.mjs"() {
     SEC = 1e3;
     MIN = 60 * SEC;
     HOUR = 60 * MIN;
     DAY = 24 * HOUR;
+    DATA_DIR_PREFIX2 = "mubit-memory";
   }
 });
 
@@ -242,28 +253,10 @@ function classifyTurn(prompt, lastAssistantMessage, opts = {}) {
     agentType: isSubagent && typeof o.agent_type === "string" ? o.agent_type : ""
   };
 }
-var CONTENT_TYPE, LESSON_TEMPLATES;
+var CONTENT_TYPE;
 var init_classify = __esm({
   "../claude-code/lib/classify.mjs"() {
     CONTENT_TYPE = "text";
-    LESSON_TEMPLATES = Object.freeze({
-      /** Coding standards, linting rules, naming conventions. Applies across all sessions. */
-      CODING_RULE: Object.freeze({ intent: "lesson", lesson_type: "rule", lesson_scope: "global" }),
-      /** Successful debugging patterns, working solutions. */
-      DEBUG_SUCCESS: Object.freeze({ intent: "lesson", lesson_type: "success", lesson_scope: "session" }),
-      /** Failed approaches, anti-patterns discovered — prevent repeating them. */
-      DEBUG_FAILURE: Object.freeze({ intent: "lesson", lesson_type: "failure", lesson_scope: "session" }),
-      /** User/project preferences (style, tooling, workflow). Always applicable. */
-      PREFERENCE: Object.freeze({ intent: "lesson", lesson_type: "preference", lesson_scope: "global" }),
-      /** Architecture insights, dependency behaviours, system quirks. Reusable knowledge. */
-      ARCHITECTURE_INSIGHT: Object.freeze({ intent: "lesson", lesson_type: "observation", lesson_scope: "global" }),
-      /** Build/deploy configuration that works. */
-      BUILD_CONFIG: Object.freeze({ intent: "lesson", lesson_type: "rule", lesson_scope: "global" }),
-      /** API usage patterns, SDK quirks, integration notes — may evolve with API versions. */
-      API_PATTERN: Object.freeze({ intent: "lesson", lesson_type: "observation", lesson_scope: "session" }),
-      /** Test strategies that proved effective. */
-      TEST_STRATEGY: Object.freeze({ intent: "lesson", lesson_type: "success", lesson_scope: "global" })
-    });
   }
 });
 
@@ -484,7 +477,7 @@ function resolveAll(e, userFile, creds, projectDir2, dataDir2) {
   const mcpLessonScope = enumOf(
     pick("mcpLessonScope", "MUBIT_MCP_LESSON_SCOPE"),
     ["run", "session", "global"],
-    "run"
+    "session"
   );
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
@@ -698,7 +691,7 @@ var init_config = __esm({
     ];
     CACHE_FILE2 = "config.json";
     CACHE_TTL_MS = 300 * 1e3;
-    CACHE_VERSION2 = 2;
+    CACHE_VERSION2 = 3;
     MAX_ENV_TAGS = 8;
     MODE = "hosted";
     LANG_FILES = [
@@ -2727,7 +2720,8 @@ function claudeCodeDataDir(env = process.env) {
     }).map((p) => ({
       path: p,
       creds: existsSync(join(p, "credentials.json")),
-      at: mtime(p)
+      at: mtime(p),
+      bare: p === bare
     }));
   } catch {
     return bare;
@@ -2735,7 +2729,7 @@ function claudeCodeDataDir(env = process.env) {
   if (!candidates.length) return bare;
   const withCreds = candidates.filter((c) => c.creds);
   const pool = withCreds.length ? withCreds : candidates;
-  pool.sort((a, b) => b.at - a.at || a.path.localeCompare(b.path));
+  pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
   return pool[0].path;
 }
 function mtime(dir) {

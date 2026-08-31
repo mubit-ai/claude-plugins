@@ -31,6 +31,7 @@ var SEC = 1e3;
 var MIN = 60 * SEC;
 var HOUR = 60 * MIN;
 var DAY = 24 * HOUR;
+var DATA_DIR_PREFIX = "mubit-memory";
 function dataDir(cfg = {}, env = process.env) {
   const e = env ?? {};
   const override = e.MUBIT_CC_DATA_DIR;
@@ -49,30 +50,40 @@ function liveDataDir(home, env = {}) {
     if (pinned && pinned[1]) return pinned[1];
   } catch {
   }
+  const bare = join(root, DATA_DIR_PREFIX);
+  let candidates = [];
   try {
-    let best = "";
-    let bestAt = -1;
-    for (const name of readdirSync(root)) {
-      if (!name.startsWith("mubit-memory")) continue;
-      const dir = join(root, name);
-      let at = 0;
+    candidates = readdirSync(root).filter((n) => n === DATA_DIR_PREFIX || n.startsWith(`${DATA_DIR_PREFIX}-`)).map((n) => join(root, n)).filter((p) => {
       try {
-        for (const f of readdirSync(join(dir, "status"))) {
-          if (!f.endsWith(".json") || f === "health.json") continue;
-          at = Math.max(at, statSync(join(dir, "status", f)).mtimeMs);
-        }
+        return statSync(p).isDirectory();
       } catch {
+        return false;
       }
-      if (existsSync(join(dir, "credentials.json"))) at += 1e15;
-      if (at > bestAt) {
-        bestAt = at;
-        best = dir;
-      }
-    }
-    if (best && bestAt > 0) return best;
+    }).map((p) => ({
+      path: p,
+      creds: existsSync(join(p, "credentials.json")),
+      at: dirActivity(p),
+      bare: p === bare
+    }));
   } catch {
+    return bare;
   }
-  return join(root, "mubit-memory");
+  if (!candidates.length) return bare;
+  const withCreds = candidates.filter((c) => c.creds);
+  const pool = withCreds.length ? withCreds : candidates;
+  pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
+  return pool[0].path;
+}
+function dirActivity(dir) {
+  let newest = 0;
+  for (const rel of ["", "config.json", "status", "runs", "credentials.json"]) {
+    try {
+      const t = statSync(rel ? join(dir, rel) : dir).mtimeMs;
+      if (t > newest) newest = t;
+    } catch {
+    }
+  }
+  return newest;
 }
 function safeHome() {
   try {
@@ -178,7 +189,7 @@ var DEFAULT_MCP_TOOLS = [
 ];
 var CACHE_FILE = "config.json";
 var CACHE_TTL_MS = 300 * 1e3;
-var CACHE_VERSION = 2;
+var CACHE_VERSION = 3;
 function screaming(key) {
   return String(key).replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
 }
@@ -292,7 +303,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
   const mcpLessonScope = enumOf(
     pick("mcpLessonScope", "MUBIT_MCP_LESSON_SCOPE"),
     ["run", "session", "global"],
-    "run"
+    "session"
   );
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
@@ -1114,12 +1125,18 @@ function defaultMarker(runId = "") {
       last_hit_at: 0
     },
     captured: { tools: 0, turns: 0, pending: 0 },
+    // What the MCP server sent, which the capture path never sees: an MCP write leaves its
+    // own process and touches neither the spool nor `captured` above. Kept apart from that
+    // group rather than folded into it, so the status line's capture count keeps meaning
+    // "what the hooks captured" — but read beside it at session end, where the question is
+    // the different one of whether this run put anything on the wire at all.
+    mcp: { ingested: 0, at: 0 },
     lessons: { global: 0, checked_at: 0 },
     reflect: { at: 0, lessons_stored: 0, status: "" },
     last_error: ""
   };
 }
-var GROUPS = ["recall", "captured", "lessons", "reflect"];
+var GROUPS = ["recall", "captured", "lessons", "reflect", "mcp"];
 function markerPath(cfg, runId) {
   return join6(resolveDataDir(cfg), "status", `${runId}.json`);
 }

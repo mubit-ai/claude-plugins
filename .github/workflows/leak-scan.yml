@@ -23,6 +23,9 @@ on:
     branches: ['**']
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Monday, off the whole-hour rush. Weekly is enough for branches nobody is pushing.
+    - cron: '23 6 * * 1'
 
 permissions:
   contents: read
@@ -67,6 +70,40 @@ jobs:
         with:
           sarif_file: leakcheck.sarif
           category: leakcheck
+
+  all-refs:
+    name: every ref, today's rules
+    # A public repository serves every ref it has ever been pushed, not only the one a
+    # workflow just ran on. Branches go quiet, the catalogue keeps improving, and a tree
+    # that passed last year's rules can fail this year's without anyone touching it — the
+    # audit that motivated this job found real exposure only on tips no push had scanned
+    # in months. `--rev` reads trees straight from the object store: one clone, no checkouts.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: leakcheck --strict over every branch and tag
+        run: |
+          set -uo pipefail
+          dirty=0
+          for ref in $(git for-each-ref --format='%(refname)' refs/remotes/origin refs/tags \
+                       | grep -v '^refs/remotes/origin/HEAD$'); do
+            echo "::group::${ref}"
+            if ! node .github/scripts/leakcheck.mjs --strict --quiet --no-annotations --rev "$ref"; then
+              dirty=$((dirty + 1))
+              echo "::error title=leakcheck all-refs::${ref} carries blocking findings under today's rules"
+            fi
+            echo "::endgroup::"
+          done
+          echo "refs with blocking findings: ${dirty}"
+          exit $((dirty > 0 ? 1 : 0))
 
   llm-review:
     name: model review of the diff

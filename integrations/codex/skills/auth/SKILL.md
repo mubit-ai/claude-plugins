@@ -31,13 +31,45 @@ Two values, which are the whole of the plugin's setup:
 | `endpoint` | the user's Mubit instance URL, e.g. `https://api.mubit.ai` |
 | `apiKey` | a key of the form `mbt_...` |
 
-They land in `<data-dir>/credentials.json`, owner-only (mode 600), where the data directory is
-`MUBIT_CC_DATA_DIR` if set and otherwise `~/.claude/plugins/data/mubit-memory`. That is the
-same directory the Claude Code plugin uses, deliberately: the two share one memory of a
-project, so they share one credential too. It survives plugin updates, so this is a
-once-per-machine step rather than a once-per-release one.
+They land in `<data-dir>/credentials.json`, owner-only (mode 600). That is the same directory
+the Claude Code plugin uses, deliberately: the two share one memory of a project, so they share
+one credential too. It survives plugin updates, so this is a once-per-machine step rather than
+a once-per-release one.
+
+**Which directory that is, is not a fixed path.** A host suffixes the name by install source —
+`mubit-memory-<marketplace>` for a marketplace install, `mubit-memory-inline` for a
+`--plugin-dir` session — so the binary resolves it, in this order:
+
+| Rung | Source |
+| --- | --- |
+| 1 | `--data-dir` on the command line |
+| 2 | `MUBIT_CC_DATA_DIR`, else `CLAUDE_PLUGIN_DATA`, from the environment |
+| 3 | the `MUBIT_CC_DATA_DIR` that `mubit-memory:setup` pinned into `$CODEX_HOME/hooks.json` |
+| 4 | a `~/.claude/plugins/data/mubit-memory*` directory holding a `credentials.json` |
+| 5 | the liveliest such directory, else the bare `mubit-memory` |
+
+**Rung 3 is the one that carries this host.** Codex passes no plugin-root or data-directory
+variable to a shell command, so rungs 1 and 2 are both empty on the normal path: reading back
+what setup recorded is what makes this binary write where the hooks read. Rungs 4 and 5 are
+the same algorithm as `claudeCodeDataDir()` in `lib/boot.mjs` — the function the hooks
+themselves resolve with — so when there are no registrations to read, the two still agree.
+
+A key written to the wrong one of these directories is indistinguishable, from the user's
+side, from a sign-in that never happened. If `mubit-memory:setup` has not run yet, run it
+first: it is what writes the pin.
 
 ## Step 1 — run it
+
+**Say what is about to happen before you run it.** This command opens a browser and then blocks
+with no output until it finishes — the shell call does not stream, so there is nothing to print
+in the meantime. Tell the user: a browser tab is opening; sign in or create an account there; a
+first-ever workspace takes a minute or two to provision and the page waits for it; then come
+back here.
+
+The browser deadline is **600 s** (`MUBIT_CC_AUTH_TIMEOUT_MS`), because that is how long a real
+sign-up plus a first provision takes. If the host cuts the command off before then, raise its
+command timeout rather than lowering this one — a shorter deadline kills a sign-up that was
+going fine.
 
 ```bash
 node "<plugin-root>/bin/auth.mjs" --json
@@ -55,14 +87,14 @@ browser flow the key never passes through the conversation at all.
 | Exit | Meaning | What to tell the user |
 | --- | --- | --- |
 | `0` | Signed in, and the key was checked against the instance. | Report the endpoint, then go to step 3. |
-| `2` | The workspace is still provisioning. **Not a failure.** | "Your workspace is still being created — usually a minute or two. Run `mubit-memory:auth` again shortly; it picks up where it left off." Do not change anything. |
+| `2` | Still in flight — the workspace is provisioning, or the sign-up did not finish inside the deadline. **Not a failure.** | "Your workspace is still being created — usually a minute or two. Run `mubit-memory:auth` again shortly; it picks up where it left off." Do not change anything, and do not offer the paste route: nothing is broken. |
 | `1` | Something went wrong. The `state` field says which. | See the table below. |
 
 On exit `1`, `state` is one of:
 
 | `state` | What it means | What to tell the user |
 | --- | --- | --- |
-| `browser_failed` | No browser opened, or the flow timed out. | Fall through to step 2b. This is the common case over SSH and in containers. |
+| `browser_failed` | **No browser could be opened at all.** Not a timeout — a timeout after a browser opened is exit `2`. | Fall through to step 2b. This is the common case over SSH and in containers. |
 | `auth_failed` | The instance rejected the key. | The key is wrong, revoked, or issued for a different instance. Issue a new one in the console. |
 | `unreachable` | Nothing answered at the endpoint. | The endpoint is wrong, or the instance is not running. This is not a key problem — do not have them reissue one. |
 | `server_error` | The instance is up and failing. | Retry once, then check the instance in the console. The client cannot fix it. |

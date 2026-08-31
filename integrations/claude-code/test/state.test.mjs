@@ -679,3 +679,68 @@ test('liveDataDir stays in step with the codex integration copy of the same sear
   assert.equal(liveDataDir(home, {}), join(root, 'mubit-memory-mubit'));
   assert.equal(boot.claudeCodeDataDir({ HOME: home }), join(root, 'mubit-memory-mubit'));
 });
+
+// ---------------------------------------------------------------------------
+// liveDataDir on a machine nothing has written to yet
+// ---------------------------------------------------------------------------
+
+/**
+ * The first-ever sign-in, which is the only run that matters here.
+ *
+ * `/mubit-memory:auth` is what a brand-new install runs, and on that machine no hook has
+ * written a status marker anywhere — every candidate directory scores zero. The old code
+ * required a *positive* score before it would trust the search (`bestAt > 0`), so it fell
+ * through to the bare `mubit-memory`, which no host ever hands a hook. The credentials the
+ * command then wrote were invisible to the very session that asked for them.
+ *
+ * The bare name is the fallback for "no candidates at all", never a candidate that outranks
+ * a suffixed sibling. It is also the tie-break loser, because a tie is exactly the
+ * nothing-written-yet case.
+ */
+test('liveDataDir: with nothing written anywhere, a suffixed directory still beats the bare name', async () => {
+  const { liveDataDir } = await lib('state.mjs');
+  const { home, root } = fakeHome({ 'mubit-memory': {}, 'mubit-memory-mubit': {} });
+
+  assert.equal(liveDataDir(home, {}), join(root, 'mubit-memory-mubit'),
+    'a first-ever sign-in must land where the host actually points its hooks');
+});
+
+test('liveDataDir: an untouched sole candidate is still the answer', async () => {
+  const { liveDataDir } = await lib('state.mjs');
+  const { home, root } = fakeHome({ 'mubit-memory-inline': {} });
+
+  assert.equal(liveDataDir(home, {}), join(root, 'mubit-memory-inline'));
+});
+
+test('liveDataDir: nothing to choose between leaves the bare name as the fallback', async () => {
+  const { liveDataDir } = await lib('state.mjs');
+  const home = tempDir('mubit-home-none-');
+
+  assert.equal(liveDataDir(home, {}),
+    join(home, '.claude', 'plugins', 'data', 'mubit-memory'),
+    'no candidates at all is the one case the bare name answers');
+});
+
+test('liveDataDir and the codex twin agree on a machine where nothing has been written yet', async () => {
+  const { liveDataDir } = await lib('state.mjs');
+  const boot = await import(pathToFileURL(
+    join(PLUGIN_ROOT, '..', 'codex', 'lib', 'boot.mjs')).href);
+
+  // Three shapes, all of them scoring zero, which is where the two copies used to diverge:
+  // this one had a `bestAt > 0` guard and the twin had none.
+  for (const dirs of [
+    { 'mubit-memory': {}, 'mubit-memory-mubit': {} },
+    { 'mubit-memory-inline': {}, 'mubit-memory-mubit': {} },
+    { 'mubit-memory': {} },
+  ]) {
+    const { home } = fakeHome(dirs);
+    assert.equal(liveDataDir(home, {}), boot.claudeCodeDataDir({ HOME: home }),
+      `the two hand-maintained copies must agree for ${JSON.stringify(Object.keys(dirs))}`);
+  }
+});
+
+test('state.mjs exports safeHome so bin/ commands share one HOME fallback', async () => {
+  const { safeHome } = await lib('state.mjs');
+  assert.equal(typeof safeHome, 'function');
+  assert.ok(safeHome().length > 0, 'never the empty string — a path is always returned');
+});

@@ -31,6 +31,9 @@ const DAY = 24 * HOUR;
 /** §7: pruning runs at most hourly, gated by an O_EXCL marker at `prune.lock`. */
 const PRUNE_INTERVAL_MS = HOUR;
 
+/** This plugin's data directory, and the prefix every suffixed variant of it shares. */
+const DATA_DIR_PREFIX = 'mubit-memory';
+
 // ---------------------------------------------------------------------------
 // dataDir
 // ---------------------------------------------------------------------------
@@ -103,31 +106,63 @@ export function liveDataDir(home, env = {}) {
     if (pinned && pinned[1]) return pinned[1];
   } catch { /* no Codex registrations, or unreadable: fall through to the search */ }
 
-  try {
-    let best = '';
-    let bestAt = -1;
-    for (const name of readdirSync(root)) {
-      if (!name.startsWith('mubit-memory')) continue;
-      const dir = join(root, name);
-      let at = 0;
-      try {
-        for (const f of readdirSync(join(dir, 'status'))) {
-          if (!f.endsWith('.json') || f === 'health.json') continue;
-          at = Math.max(at, statSync(join(dir, 'status', f)).mtimeMs);
-        }
-      } catch { /* no status/ yet */ }
-      // A directory holding credentials outranks a livelier one that holds none: that is the
-      // install which was actually signed in.
-      if (existsSync(join(dir, 'credentials.json'))) at += 1e15;
-      if (at > bestAt) { bestAt = at; best = dir; }
-    }
-    if (best && bestAt > 0) return best;
-  } catch { /* no ~/.claude/plugins/data at all */ }
+  const bare = join(root, DATA_DIR_PREFIX);
 
-  return join(root, 'mubit-memory');
+  /** @type {Array<{path: string, creds: boolean, at: number, bare: boolean}>} */
+  let candidates = [];
+  try {
+    candidates = readdirSync(root)
+      .filter((n) => n === DATA_DIR_PREFIX || n.startsWith(`${DATA_DIR_PREFIX}-`))
+      .map((n) => join(root, n))
+      .filter((p) => { try { return statSync(p).isDirectory(); } catch { return false; } })
+      .map((p) => ({
+        path: p,
+        creds: existsSync(join(p, 'credentials.json')),
+        at: dirActivity(p),
+        bare: p === bare,
+      }));
+  } catch {
+    return bare;                       // no ~/.claude/plugins/data at all
+  }
+  if (!candidates.length) return bare;
+
+  // An explicit partition, not a score. The old code added `1e15` to a credentialed
+  // directory's mtime and then required the winner to score above zero — which on a machine
+  // where no hook had written anything yet rejected every candidate and fell through to the
+  // bare name. A sign-in is precisely that machine.
+  const withCreds = candidates.filter((c) => c.creds);
+  const pool = withCreds.length ? withCreds : candidates;
+  // Deterministic: newest first, then a suffixed directory ahead of the bare one, then by
+  // path. The middle rung decides the nothing-written-yet tie, and decides it correctly —
+  // the bare name is what this function *falls back* to, never a directory a host points a
+  // hook at.
+  pool.sort((a, b) => (b.at - a.at)
+    || (Number(a.bare) - Number(b.bare))
+    || a.path.localeCompare(b.path));
+  return pool[0].path;
 }
 
-function safeHome() {
+/** Latest mtime of a directory or of the files a live install touches. */
+function dirActivity(dir) {
+  let newest = 0;
+  for (const rel of ['', 'config.json', 'status', 'runs', 'credentials.json']) {
+    try {
+      const t = statSync(rel ? join(dir, rel) : dir).mtimeMs;
+      if (t > newest) newest = t;
+    } catch { /* absent; try the next */ }
+  }
+  return newest;
+}
+
+/**
+ * `homedir()` throws on a machine with no resolvable home (a bare container, some CI
+ * images). Exported because `bin/auth.mjs` resolves the same directory from an environment
+ * the host did not populate, and two different fallbacks for `$HOME` would put the
+ * credentials somewhere the hooks do not look.
+ *
+ * @returns {string}
+ */
+export function safeHome() {
   try { return homedir(); } catch { return '.'; }
 }
 

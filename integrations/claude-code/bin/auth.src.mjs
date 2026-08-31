@@ -281,9 +281,9 @@ async function dial(fetchImpl, url, { method = 'GET', headers = {}, body, timeou
  *
  * @returns {string}
  */
-function SANDBOX_BLOCKED() {
-  const env = (typeof process === 'object' && process) ? (process.env || {}) : {};
-  if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return '';
+function SANDBOX_BLOCKED(env) {
+  const e = env ?? ((typeof process === 'object' && process) ? (process.env || {}) : {});
+  if (!e.CODEX_SANDBOX && !e.CODEX_SANDBOX_NETWORK_DISABLED) return '';
   return 'this process has no network access — Codex ran it inside its sandbox. Approve the '
     + 'command and run it again; the endpoint is almost certainly fine';
 }
@@ -518,7 +518,15 @@ export async function runBrowserAuth(opts = {}) {
     });
     if (!res.ok) throw new Error(`token exchange failed (HTTP ${res.status})`);
 
-    const payload = await res.json();
+    // A 200 that is not JSON — a proxy's HTML error page, a half-written reply — fails
+    // like any other bad exchange. The parser's own `Unexpected token '<'…` is never the
+    // message: it names a character, not a cause, and it reads like a crash.
+    let payload;
+    try {
+      payload = await res.json();
+    } catch {
+      throw new Error('token exchange failed: the console did not answer with JSON');
+    }
     if (!payload || typeof payload.mubitApiKey !== 'string' || !payload.mubitApiKey) {
       throw new Error('token exchange failed: the console returned no API key');
     }
@@ -766,10 +774,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
       // Nothing could be opened — over SSH, in a container, on a machine with no default
       // browser. Waiting longer cannot help, and the paste route can, so the flow degrades
       // to it rather than dead-ending.
+      // The verify path already translates the sandbox's ENOTFOUND into "approve the
+      // command"; this is the same translation for the browser path, where the failure
+      // arrives as a refused console rather than a failed DNS lookup.
+      const sandboxed = SANDBOX_BLOCKED(env);
       emit({
         ok: false,
         state: 'browser_failed',
-        detail: `${err?.message ?? err}\n`
+        detail: `${sandboxed || (err?.message ?? err)}\n`
           + `You can finish by hand instead: issue a key at ${consoleUrlFrom(env)}, then run\n`
           + `  ${KEY_ENV_VAR}=mbt_… node "${'${CLAUDE_PLUGIN_ROOT}'}/bin/auth.mjs"`
           + ` --data-dir "${dataDir}" --paste`,

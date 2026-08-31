@@ -178,8 +178,12 @@ hook session-start 01-session-start.json
 ```
 
 Terminal A shows three calls in order: `GET /v2/core/health`, then
-`POST /v2/control/agents/register`, then `POST /v2/control/lessons`. Terminal B prints what
-the model will see:
+`POST /v2/control/agents/register`, then `POST /v2/control/activity` — the standing-lessons
+read goes to the activity feed, not the route named after lessons, for the reason Lab 11a
+demonstrates: the lessons route pages before it filters. A fourth call, `POST
+/v2/control/context`, lands a beat later from a **detached child** — session start prefetches
+the resume block Lab 3 will inject, so the first prompt does not pay for its assembly.
+Terminal B prints what the model will see:
 
 ```json
 {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"# Mubit memory is active\n\nRun: cc-demo-app-1ede9c0e (hosted)\nRelevant memory is injected automatically before each of your turns — do not search for it preemptively.\n…"},
@@ -196,8 +200,8 @@ Three things worth stopping on:
   lesson list costs the lesson list, not the steer block — the one thing this hook may never do
   is fail to speak.
 
-Note the lessons request carries **no `run_id`**: absent means all runs, which is exactly what
-"global lessons" wants.
+Note the standing-lessons read carries **no `run_id`**: absent means all runs, which is
+exactly what "global lessons" wants.
 
 ```bash
 peek marker
@@ -224,10 +228,18 @@ hook prompt-recall 02-prompt.json
 hook stage-prompt  02-prompt.json
 ```
 
-`prompt-recall` returns the block that gets injected in front of the prompt:
+`prompt-recall` returns the block that gets injected in front of the prompt — and on the
+**first** prompt of a session, two blocks: the `<mubit-resume>` briefing that session start
+prefetched (where earlier work on this project left off), then the recall proper:
 
 ```
+<mubit-resume run="cc-demo-app-1ede9c0e" sources="1" tokens="21">
+Assembled from memory at the start of this session …
+## Active rules
+- Poll the ingest job; "queued" is not "stored".
+</mubit-resume>
 <mubit-memory run="cc-demo-app-1ede9c0e" sources="3" tokens="60">
+Recalled from memory of earlier work — it may be incomplete or out of date, …
 ## Active rules
 - Ingest returns when queued, not when stored; poll the job id.
 ## Lessons
@@ -250,7 +262,7 @@ of every keystroke, forever. So:
 | Rung | Request | LLM calls | Entered when |
 | --- | --- | --- | --- |
 | 1 | `query{mode:"direct_bypass", evidence_only:true}` | **0** | always — the primary path |
-| 2 | `query{mode:"agent_routed"}` | 1 | rung 1 returned **403** (policy, not fault) |
+| 2 | `query{mode:"agent_routed"}` | 1 | rung 1 returned **403** (policy, not fault) **and** you opted in with `MUBIT_CC_RECALL_FALLBACK=agent_routed` — by default a denial goes dark instead, because rung 2's LLM call would run per prompt |
 | 3 | `context{mode:"sections"}` | **2** | only if you opt in with `recallAssemble: server` |
 
 Rung 1 returns raw `evidence[]`; `lib/assemble.mjs` renders it into sections client-side, in the
@@ -393,12 +405,18 @@ POST /v2/control/ingest
 
 POST /v2/control/outcome
     outcome=success  signal=0.2  reference_id=global
-    entry_ids=[ref_rule_1, ref_lesson_1, ref_fact_1]   ← the memories this turn reinforced
+    entry_ids=[les_g2, les_g1, ref_rule_1, ref_lesson_1, ref_fact_1]
     idempotency_key=cc-outcome-cc-demo-app-1ede9c0e-p_lab_0001
 ```
 
-Walk the chain backwards and the whole point of the plugin appears: those three `entry_ids`
-are the reference ids of the memories **rung 1 returned in Lab 3**, which `prompt-recall`
+Five ids, not three: the turn reinforces the **injected standing lessons** (`les_g2`,
+`les_g1` — the two session start put in front of the model) as well as what rung 1
+recalled for this prompt. A lesson the model worked under is a lesson the outcome should
+move, whether or not this particular prompt re-recalled it.
+
+Walk the chain backwards and the whole point of the plugin appears: those `entry_ids`
+are the reference ids of the memories **injected at session start and returned by rung 1
+in Lab 3**, which `prompt-recall`
 staged into the turn file, which the drain read when the turn ended. Recall feeds attribution;
 attribution improves the next recall. That loop is the product.
 
@@ -446,8 +464,11 @@ Order is the design: **drain inline → flush pending outcomes → reflect → h
   captures that were already accepted.
 - Outcomes go out *before* reflect, because `include_step_outcomes` folds those signals into
   the evidence and the negative ones produce the best lessons.
-- The drain runs **inline, not detached** — the process is going away and a detached child may
-  be reaped before it finishes.
+- The flush runs in a **detached child** — the hook process answers the host immediately and
+  the child finishes the sends on its own clock, so a host that tears the session down the
+  moment the hook returns cannot kill the flush mid-send. (Earlier builds ran it inline for
+  the opposite fear — that a detached child would be reaped — and lost reflects to impatient
+  teardowns; `test/session-end-detach.test.mjs` in the main suite pins the current answer.)
 
 Why reflect matters: Mubit extracts lessons on its own as it ingests, but those keep the scope
 they were extracted at, and a `run`-scoped lesson is invisible to your next session.
@@ -484,8 +505,8 @@ The probe speaks real stdio MCP: spawn, `initialize`, `notifications/initialized
 `tools/list`, `tools/call` — exactly what Claude Code does.
 
 ```
-server    mubit-memory 0.1.0
-tools     21
+server    mubit-memory 0.12.5
+tools     13
   · mubit_archive
   · mubit_checkpoint
   …
@@ -534,10 +555,21 @@ hook prompt-recall 02-prompt.json
 peek policy
 ```
 
-First prompt: `403` on `direct_bypass`, then a second call at `agent_routed` — one rung down,
-never two. Second prompt: **only one call**, straight to `agent_routed`. The 403 was cached to
-`policy/<endpoint_hash>.json` with a 24 h TTL, so a supported configuration costs one wasted
-round trip per day instead of one per prompt.
+First prompt: `403` on `direct_bypass` — and **nothing else**. `{"suppressOutput":true}`,
+no injection, and the verdict cached to `policy/<endpoint_hash>.json` with a 24 h TTL; the
+second prompt does not even probe. The descent the ladder table shows is **opt-in**: rung 2
+costs one LLM call per prompt, so the plugin will not walk down to it on its own. Watch it
+with the fallback enabled:
+
+```bash
+rm -f labs/.work/data/policy/*.json
+MUBIT_CC_RECALL_FALLBACK=agent_routed hook prompt-recall 02-prompt.json
+MUBIT_CC_RECALL_FALLBACK=agent_routed hook prompt-recall 02-prompt.json
+```
+
+Now the first prompt descends — `403` then `agent_routed`, one rung down, never two — and the
+second goes **straight to `agent_routed`**: the cached 403 costs one wasted round trip per
+day instead of one per prompt.
 
 A 403 must also not touch the circuit breaker or the `auth_failed` state — an operator turning
 a lane off is not a broken instance. A **401** on the same call is the opposite: give up, never
@@ -638,7 +670,16 @@ item: the `DATABASE_PASSWORD=` line in `labs/payloads/transcript.jsonl` never re
 ## Lab 10 — The tests are the real spec
 
 ```bash
-cd integrations/claude-code && npm test        # ~32 s, 1544 assertions, no network, no Docker
+cd integrations/claude-code && npm test        # ~32 s, ~1560 assertions, no network, no Docker
+```
+
+The labs have a suite of their own, which is what keeps this walkthrough honest: it drives
+the same hooks, payloads and MCP driver you just ran by hand and asserts the outcomes each
+lab documents — so when the plugin moves, the walkthrough breaks loudly here instead of
+silently on you.
+
+```bash
+node --test labs/test/*.test.mjs      # from the repo root; needs nothing but Node
 ```
 
 `test/helpers/harness.mjs` is worth reading before any of the test files: `fakeMubit()` is a

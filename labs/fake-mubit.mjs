@@ -27,13 +27,16 @@ import { fileURLToPath } from 'node:url';
 
 const LAB_ROOT = dirname(fileURLToPath(import.meta.url));
 const WORK = join(LAB_ROOT, '.work');
-const LOG = join(WORK, 'requests.ndjson');
 
 const SCENARIOS = new Set(['ok', 'deny-direct', 'reject-ingest', 'fail-ingest', 'slow', 'truncate']);
 
 const argv = process.argv.slice(2);
 const scenario = pick('--scenario') || process.env.LAB_SCENARIO || 'ok';
 const port = Number(pick('--port') || process.env.LAB_PORT || 8787);
+// The log's default home never moves; the override exists so a test can give each fake
+// instance its own file and read it back without racing a sibling. `--port 0` works for the
+// same reason - the kernel picks, the banner tells you what it picked.
+const LOG = pick('--log-file') || process.env.LAB_LOG_FILE || join(WORK, 'requests.ndjson');
 
 if (!SCENARIOS.has(scenario)) {
   process.stderr.write(`unknown scenario ${JSON.stringify(scenario)}; try: ${[...SCENARIOS].join(', ')}\n`);
@@ -85,8 +88,9 @@ const server = createServer((req, res) => {
 
 server.listen(port, '127.0.0.1', () => {
   mkdirSync(WORK, { recursive: true });
+  const bound = /** @type {import('node:net').AddressInfo} */ (server.address()).port;
   line('');
-  line(`  fake mubit   http://127.0.0.1:${port}`);
+  line(`  fake mubit   http://127.0.0.1:${bound}`);
   line(`  scenario     ${scenario}${scenario === 'ok' ? '' : '   ← not the happy path, on purpose'}`);
   line(`  request log  ${LOG}`);
   line('');

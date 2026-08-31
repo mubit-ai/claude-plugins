@@ -1597,6 +1597,7 @@ test('repoIdentity normalises both remote shapes and is blank outside a repo', a
     spawnSync('git', ['remote', 'add', 'origin', remote], { cwd: dir });
     return dir;
   };
+  // leakcheck-allow: personal-data — a git SSH remote, not an address; the shape is the fixture.
   assert.equal(repoIdentity(withRemote('git@github.com:mubit-ai/claude-plugins.git')),
     'github.com/mubit-ai/claude-plugins', 'the SSH shape');
   assert.equal(repoIdentity(withRemote('https://github.com/mubit-ai/claude-plugins.git')),

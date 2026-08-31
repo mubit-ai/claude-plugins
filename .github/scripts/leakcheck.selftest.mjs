@@ -51,6 +51,20 @@ const domesticMap = {
   sourcesContent: ['export const ours = 1;'],
   mappings: '',
 };
+/** A foreign source whose embedded text carries a blocking sentence — both must fire. */
+const leakyForeignMap = {
+  version: 3,
+  sources: ['../../../mcp/src/quiet-leak.ts'],
+  sourcesContent: ['export const q = 1; // naming it would let a client write a tenant-wide rule'],
+  mappings: '',
+};
+/** Same basename as a tracked file, different text: a stale copy, not a published one. */
+const staleCopyMap = {
+  version: 3,
+  sources: ['../lib/ours.mjs'],
+  sourcesContent: ['export const ours = 2; // anything above run scope could write a tenant-wide rule'],
+  mappings: '',
+};
 const inline = (m) => `//# sourceMappingURL=data:application/json;base64,${Buffer.from(JSON.stringify(m)).toString('base64')}`;
 
 /** @type {Array<{path:string, body:string|Buffer, expect:string[], quiet?:string[]}>} */
@@ -113,6 +127,22 @@ const CASES = [
     body: `export const ours = 1;\n${inline(domesticMap)}\n`,
     expect: [],
     quiet: ['inline-sourcemap-sources'],
+  },
+  {
+    // The bundle's own text is clean; the leak is a sentence inside the map's
+    // `sourcesContent`, where no line-oriented rule has ever looked. The content rules
+    // must run over what the map embeds, not only over what the file says.
+    path: 'a/leaky-map-bundle.js',
+    body: `export const x = 1;\n${inline(leakyForeignMap)}\n`,
+    expect: ['inline-sourcemap-sources', 'isolation-defect-disclosure'],
+  },
+  {
+    // A stale copy: the map names a file this repository tracks, but embeds text the
+    // tracked file no longer says. Matching by basename alone silenced 36 of these —
+    // the name is not the content, and only the content is what gets published.
+    path: 'a/stale-copy-bundle.js',
+    body: `export const ours = 1;\n${inline(staleCopyMap)}\n`,
+    expect: ['inline-sourcemap-sources', 'isolation-defect-disclosure'],
   },
   {
     // Suppression, placeholders, allowlisted addresses and public vendor examples must not fire.

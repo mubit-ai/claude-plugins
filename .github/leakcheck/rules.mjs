@@ -46,7 +46,7 @@ export const CONFIG = {
    * exactly the file that needed it most.
    */
   textExtensions: [
-    '.mjs', '.js', '.cjs', '.ts', '.mts', '.json', '.md', '.yml', '.yaml', '.sh',
+    '.mjs', '.js', '.cjs', '.ts', '.tsx', '.mts', '.json', '.md', '.yml', '.yaml', '.sh',
     '.txt', '.toml', '.html', '.css', '.gitignore', '.env', '.lock',
   ],
 

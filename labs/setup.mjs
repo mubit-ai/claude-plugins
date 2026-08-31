@@ -50,7 +50,7 @@ if (!existsSync(join(PROJECT, '.git'))) {
 
   const git = (...args) => spawnSync('git', args, { cwd: PROJECT, stdio: 'ignore' });
   git('init', '-q');
-  git('config', 'user.email', 'lab@example.com');
+  git('config', 'user.email', 'you@example.com');
   git('config', 'user.name', 'Lab');
   git('config', 'commit.gpgsign', 'false');
   git('add', '-A');

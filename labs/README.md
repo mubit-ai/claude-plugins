@@ -148,10 +148,10 @@ cc-1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d        ← one conversation, one run
 REFUSED: MUBIT_CC_RUN_STRATEGY=static requires MUBIT_CC_RUN_ID…
 ```
 
-That refusal is the point of the module. The MCP server defaults its session id to the literal
-`"default"`, which would pool every user, project and machine into one shared run — so
-`lib/runid.mjs` throws rather than ever emitting it, and `lib/http.mjs` refuses to put it on
-the wire even if something else produced it.
+That refusal is the point of the module. A run id the plugin did not derive is not one it will
+use: `lib/runid.mjs` throws rather than emit a fallback, and `lib/http.mjs` refuses to put one
+on the wire even if something else produced it. Two layers for one rule, because the identity
+is the join key for everything stored — Lab 7 is where the second layer earns its keep.
 
 `/clear` is the other interesting source — it must start a *new* run:
 

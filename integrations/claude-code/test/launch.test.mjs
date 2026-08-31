@@ -484,8 +484,9 @@ test('installs the egress guard BEFORE importing the server', async () => {
   assert.ok(r.guardAtImport,
     'globalThis.fetch carried no egress guard when the server was imported — every MCP write '
     + 'then leaves this machine unexamined (§8.3)');
-  assert.equal(r.guardAtImport.ceiling, 'run',
-    'the default ceiling must be the run the write was made in');
+  assert.equal(r.guardAtImport.ceiling, 'session',
+    'the default ceiling is what `mubit_learned` tells the model it writes at, and the '
+    + 'narrowest scope from which a lesson has any path out of the run that wrote it');
   assert.equal(r.guardAtImport.pinRun, true,
     'a plugin-launched server must ignore a caller-supplied session_id — the launcher '
     + 'already derived the run, and a write that follows the caller elsewhere breaks the '

@@ -605,9 +605,10 @@ test('loadConfig(): the §6.1 defaults, exactly', async () => {
   assert.equal(cfg.projectDir, projectDir);
   assert.ok(Array.isArray(cfg.mcpTools), 'mcpTools must be an array');
   assert.ok(cfg.mcpTools.length > 0, 'a blank MUBIT_MCP_TOOLS means the curated set, not none');
-  assert.equal(cfg.mcpLessonScope, 'run',
-    'the ceiling on an agent-written lesson defaults to the run it was written in — the\n'
-    + 'narrowest scope, which is what the MCP egress guard is there to hold it to');
+  assert.equal(cfg.mcpLessonScope, 'session',
+    'the ceiling on an agent-written lesson defaults to `session`, which is what the tool\n'
+    + 'that writes it tells the model it does. At `run` an agent-written lesson has no path\n'
+    + 'out of its own run at all: reflect stamps `run` too, measured against a live instance.');
   assert.ok(Array.isArray(cfg.denyGlobs), 'denyGlobs must be an array');
 });
 
@@ -727,18 +728,19 @@ test('loadConfig(): a corrupt config.json is ignored', async () => {
 // §8.2 mcpLessonScope — the ceiling on what an MCP write may claim
 // ===========================================================================
 
-// `run` is the only safe fallback. The value this setting overrides is the bundled SDK's
-// hard-coded `session`, which the control plane reads across runs — so "unparseable, keep
-// what the SDK sent" would let a typo silently reinstate the leak.
-test('loadConfig(): an unrecognised mcpLessonScope falls back to run', async () => {
+// The config layer's fallback is the DEFAULT, exactly as it is for every other enum here.
+// The guard has a second, narrower net of its own, and `mcp-egress.test.mjs` owns that one —
+// the two used to be asserted here together, which made a single test read as proof of a
+// property only one of the two layers actually has.
+test('loadConfig(): an unrecognised mcpLessonScope falls back to the default', async () => {
   const config = await lib('config.mjs');
   const projectDir = makeProjectDir();
 
   for (const bad of ['', '   ', 'banana', 'org', 'RUN?', 'session,global']) {
     const cfg = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: bad }));
-    assert.equal(cfg.mcpLessonScope, 'run',
-      `${JSON.stringify(bad)} resolved to ${JSON.stringify(cfg.mcpLessonScope)} — the fallback `
-      + 'must be the narrowest scope, never the widest and never the SDK default');
+    assert.equal(cfg.mcpLessonScope, 'session',
+      `${JSON.stringify(bad)} resolved to ${JSON.stringify(cfg.mcpLessonScope)} — an `
+      + 'unrecognised value takes the documented default, never the widest scope');
   }
 });
 
@@ -754,6 +756,7 @@ test('loadConfig(): mcpLessonScope accepts run, session and global — and nothi
   }
 
   const org = load(config, envOf(makeDataDir(), projectDir, { MUBIT_MCP_LESSON_SCOPE: 'org' }));
-  assert.equal(org.mcpLessonScope, 'run',
-    'org is promotion-only and must never be client-written (§1.6)');
+  assert.equal(org.mcpLessonScope, 'session',
+    'the widest scope is not a value a client sets for itself, so it takes the default like '
+    + 'any other unrecognised string');
 });

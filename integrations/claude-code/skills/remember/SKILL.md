@@ -51,14 +51,11 @@ returns nothing and that is not a sign that memory is broken. The same applies t
 reflecting seconds after a write reports zero lessons where reflecting a minute later
 reports them.
 
-Note the one place the tool is narrower than the table: `mubit_learned` is the low-boilerplate
-path, and every entry it writes is stored as `success` at `run` scope. The plugin clamps it
-there on purpose — anything wider is read back by unrelated projects — and `run` is not the
-memory loss it sounds like. The default `runStrategy` is `per-directory`, so the run id is
-stable for a project: a lesson written here is recalled here tomorrow. It simply stops
-following you into work it has nothing to do with. Use the table to decide what the entry
-*is* and to word it accordingly, and let scope widening happen the way it is supposed to —
-through the explicit reflect path, which is the only thing that promotes a lesson beyond its
-own run. To raise the ceiling on what any MCP write may claim, set `mcpLessonScope`
-(`MUBIT_MCP_LESSON_SCOPE`). If you need an exact type/scope pair written directly, that is
-`mubit_remember`, which is off by default and restored via the `mcpTools` setting.
+Note the one place the tool is narrower than the table: `mubit_learned` is the
+low-boilerplate path, and every entry it writes is stored as `success`, at whatever
+`mcpLessonScope` (`MUBIT_MCP_LESSON_SCOPE`) is set to — `session` by default, which is what
+lets a lesson written here reach a later session at all. Set it to `run` to keep every
+agent-written lesson inside the run that wrote it, or to `global` to have them follow the
+user between projects. Use the table to decide what the entry *is* and to word it
+accordingly. If you need an exact type/scope pair written directly, that is `mubit_remember`,
+which is off by default and restored via the `mcpTools` setting.

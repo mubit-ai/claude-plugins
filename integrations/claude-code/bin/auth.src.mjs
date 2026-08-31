@@ -38,7 +38,7 @@ import { fileURLToPath } from 'node:url';
 import {
   clearCredentials, credentialsPath, readCredentials, writeCredentials,
 } from '../lib/credentials.mjs';
-import { liveDataDir } from '../lib/state.mjs';
+import { liveDataDir, safeHome } from '../lib/state.mjs';
 
 /** Where keys are issued. `MUBIT_CONSOLE_URL` overrides it for staging. */
 export const CONSOLE_URL = 'https://console.mubit.ai';
@@ -49,11 +49,31 @@ export const DEFAULT_ENDPOINT = 'https://api.mubit.ai';
 /** Mubit API keys are `mbt_`-prefixed. */
 export const KEY_PREFIX = 'mbt_';
 
+/** What this plugin calls itself to the console. See `buildAuthUrl`. */
+export const CLIENT_ID = 'claude-code';
+
 /** The authenticated probe: a read, no side effects, and no LLM call. */
 export const PROBE_ROUTE = '/v2/control/lessons';
 export const HEALTH_ROUTE = '/v2/core/health';
 
 const DEFAULT_TIMEOUT_MS = 8000;
+
+/**
+ * How long to wait for the browser round trip.
+ *
+ * Two minutes was chosen for "sign in and pick an instance". The user this command exists
+ * for is creating an account, creating an organization, and then waiting out a workspace
+ * that takes a minute or two by itself — and the console now waits for that workspace rather
+ * than bouncing back. Two minutes failed flows that were working.
+ *
+ * Ten is a ceiling rather than a preference: a Bash tool call is killed at 600 s at the
+ * outside, so a longer deadline could never be reached. `skills/auth/SKILL.md` sets the
+ * tool's own timeout to match — without that the harness kills this at its 120 s default and
+ * this constant does nothing.
+ *
+ * `MUBIT_CC_AUTH_TIMEOUT_MS` shrinks it, the way the other `MUBIT_CC_*` windows are shrunk.
+ */
+const DEFAULT_AUTH_TIMEOUT_MS = 600000;
 
 // ---------------------------------------------------------------------------
 // Shape
@@ -113,28 +133,41 @@ export function consoleUrlFrom(env = process.env) {
  * open, and that is not an error — printing the URL is the whole fallback, and the user
  * carries on by hand. Failing here would strand somebody who was one paste away.
  *
- * @param {{url: string, openImpl?: (url: string) => any, log?: (m: string) => void}} opts
- * @returns {boolean} whether a browser was actually launched
+ * The result is a **live object**, not a boolean, because the answer is not available when
+ * this returns. `spawn` reports ENOENT on the next tick, so reading a synchronous return
+ * value said "launched" on exactly the machines that had no browser: the URL was never
+ * printed, and the caller went on to report a timeout as "still provisioning" rather than
+ * offering the paste route. The deadline reads `.launched` minutes later, by which time the
+ * answer has settled.
+ *
+ * @param {{url: string, openImpl?: (url: string, onFailure: () => void) => any,
+ *          log?: (m: string) => void}} opts
+ * @returns {{launched: boolean}}
  */
 export function openConsole({ url, openImpl = defaultOpen, log = console.error }) {
-  let launched = false;
+  const state = { launched: false };
+  // Unconditionally. A tab that opened makes this line redundant; a tab that did not opens
+  // nothing and says nothing, and one redundant line is a much smaller cost than that.
+  log(`Open this in your browser:\n  ${url}`);
   try {
-    openImpl(url);
-    launched = true;
+    openImpl(url, () => { state.launched = false; });
+    state.launched = true;
   } catch {
-    launched = false;
+    state.launched = false;
   }
-  if (!launched) log(`Open this in your browser:\n  ${url}`);
-  return launched;
+  return state;
 }
 
-/** @param {string} url */
-function defaultOpen(url) {
+/**
+ * @param {string} url
+ * @param {() => void} onFailure called when the launch fails *after* this returns
+ */
+function defaultOpen(url, onFailure) {
   const cmd = process.platform === 'darwin' ? 'open'
     : process.platform === 'win32' ? 'start'
       : 'xdg-open';
   const child = spawn(cmd, [url], { detached: true, stdio: 'ignore', shell: process.platform === 'win32' });
-  child.on('error', () => { /* no browser here; the caller already printed the URL */ });
+  child.on('error', () => onFailure?.());
   child.unref();
 }
 
@@ -352,6 +385,25 @@ export class ProvisioningPending extends Error {
   }
 }
 
+/**
+ * The browser round trip ran out of time.
+ *
+ * `launched` is the whole reason this is a class and not a bare `Error`. A deadline reached
+ * *after* a browser opened means the sign-up, the org creation or the workspace is still in
+ * flight, and running the same command again finishes it. A deadline reached with nothing
+ * opened — over SSH, in a container — means there was never anything to wait for, and the
+ * only way forward is the paste route. They used to print the same message, which sent the
+ * first user off to issue a key by hand to fix a flow that was working.
+ */
+export class BrowserTimeout extends Error {
+  /** @param {boolean} launched */
+  constructor(launched) {
+    super('timed out waiting for browser authorization');
+    this.name = 'BrowserTimeout';
+    this.launched = launched;
+  }
+}
+
 /** base64url: the URL-safe alphabet, no padding. These travel in a query string. */
 function base64url(buf) {
   return Buffer.from(buf).toString('base64')
@@ -396,7 +448,7 @@ export function makePkce() {
 export async function runBrowserAuth(opts = {}) {
   const {
     consoleUrl = CONSOLE_URL, repo = '', host = '', region = '',
-    openImpl, fetchImpl = fetch, timeoutMs = 120000, log = console.error,
+    openImpl, fetchImpl = fetch, timeoutMs = DEFAULT_AUTH_TIMEOUT_MS, log = console.error,
   } = opts;
 
   const { verifier, challenge } = makePkce();
@@ -448,14 +500,13 @@ export async function runBrowserAuth(opts = {}) {
   }
   const port = addr.port;
 
-  const timer = setTimeout(
-    () => fail(new Error('timed out waiting for browser authorization')),
-    timeoutMs,
-  );
+  /** @type {{launched: boolean}} */
+  let opened = { launched: false };
+  const timer = setTimeout(() => fail(new BrowserTimeout(opened.launched)), timeoutMs);
 
   try {
     const authUrl = buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region });
-    openConsole({ url: authUrl, openImpl, log });
+    opened = openConsole({ url: authUrl, openImpl, log });
 
     const hit = await awaited;
     if (hit.provisioning) throw new ProvisioningPending();
@@ -480,9 +531,18 @@ export async function runBrowserAuth(opts = {}) {
   }
 }
 
-/** @returns {string} */
+/**
+ * `/app/cli-auth` serves more than one CLI, and until this parameter existed it could not
+ * tell which one it was talking to — so its copy had to stay neutral about the command the
+ * user should run and the product it belongs to. `client` is additive on purpose: every
+ * already-installed copy of this plugin will keep omitting it, so the console's neutral
+ * wording is the fallback and not a legacy branch.
+ *
+ * @returns {string}
+ */
 function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }) {
   const url = new URL(`${consoleUrl}/app/cli-auth`);
+  url.searchParams.set('client', CLIENT_ID);
   url.searchParams.set('port', String(port));
   url.searchParams.set('state', state);
   url.searchParams.set('challenge', challenge);
@@ -493,20 +553,82 @@ function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }
 }
 
 /**
- * Turn the console's answer into the `endpoint` the plugin stores.
+ * The endpoints to try for the key the console just issued, most authoritative first.
+ *
+ * `mubitEndpoint` is the console's own answer — `httpEndpoint` from the platform API's
+ * `/location` route, which is the only thing that knows what a given cluster overrode
+ * `MUBIT_REGIONAL_HTTP_ENDPOINT` to. It is tried first, and the compiled-in gateway follows
+ * it, because the console's answer can be right, stale, or unreachable and only the server
+ * can say which.
+ *
+ * **A plaintext answer is upgraded, not discarded.** Measured 2026-08-28 in two clusters:
+ * both report `http://`, and only one of them means it. `api.eu.dev.mubit.ai` answers 401
+ * over TLS and 308s plain HTTP to it; `api.eu.mubit.ai` answers over plain HTTP and fails
+ * the TLS handshake. So the scheme says nothing about the host, and dropping the host over
+ * it sent a dev key to the production gateway, which rejected it and told the user their key
+ * was bad. Keeping the host and fixing the scheme is right in both clusters: dev connects,
+ * prod's TLS failure falls through to the gateway that has always served it.
+ *
+ * Loopback keeps its scheme. Plaintext to 127.0.0.1 crosses no network, and there is rarely
+ * a TLS listener there to upgrade to.
+ *
+ * No region map, either way. eu.mubit.ai and us.mubit.ai are NXDOMAIN, so turning
+ * `payload.region` into one of them stored an endpoint that could never answer, and every
+ * later command then failed with `TypeError: fetch failed (ENOTFOUND)` far from the sign-in
+ * that caused it. A region is a routing hint for the console, not a hostname this side may
+ * invent.
  *
  * @param {Record<string, any>} payload
- * @returns {string}
+ * @returns {string[]} at least one endpoint, never empty
  */
-export function endpointFor(payload = {}) {
+export function endpointCandidatesFor(payload = {}) {
   const explicit = typeof payload.mubitEndpoint === 'string' ? payload.mubitEndpoint.trim() : '';
-  if (explicit) return normalizeEndpoint(explicit);
-  // No region map. eu.mubit.ai and us.mubit.ai are NXDOMAIN, so turning `payload.region` into
-  // one of them stored an endpoint that could never answer, and every later command then
-  // failed with `TypeError: fetch failed (ENOTFOUND)` far from the sign-in that caused it.
-  // A region is a routing hint for the console, not a hostname this side may invent: trust an
-  // endpoint only when the console names one outright.
-  return DEFAULT_ENDPOINT;
+  const named = explicit ? overTls(explicit) : '';
+  return named && named !== DEFAULT_ENDPOINT ? [named, DEFAULT_ENDPOINT] : [DEFAULT_ENDPOINT];
+}
+
+/**
+ * The same endpoint, over a transport an API key may travel on: TLS, or loopback.
+ *
+ * @param {string} raw
+ * @returns {string} '' when it is not a URL at all
+ */
+function overTls(raw) {
+  let url;
+  try {
+    url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+  } catch {
+    return '';
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  if (url.protocol === 'http:' && !loopback) url.protocol = 'https:';
+  return url.toString().replace(/\/+$/, '');
+}
+
+/**
+ * Verify the key against each endpoint in turn and store it against the first that accepts.
+ *
+ * Trying more than one is not a guess: a cluster can name an endpoint it does not serve, and
+ * the gateway behind it resolves the instance from the bearer key rather than the hostname.
+ * The alternative — pick one, fail — reports "the instance rejected that key" for a key that
+ * is perfectly good, which is what a real dev-cluster run did before this existed.
+ *
+ * When none accept it, the first is reported: that is the console's own answer, and the one
+ * whose configuration someone has to go and look at.
+ *
+ * @param {{dataDir: string, endpoints: string[], apiKey: string,
+ *          fetchImpl?: typeof fetch, timeoutMs?: number}} opts
+ * @returns {Promise<{ok: boolean, state: AuthState, detail: string, endpoint: string, stored: boolean}>}
+ */
+export async function authenticateAcrossEndpoints({ endpoints, ...opts }) {
+  let first;
+  for (const endpoint of endpoints) {
+    const res = await authenticateWithKey({ ...opts, endpoint });
+    if (res.ok) return res;
+    first ??= res;
+  }
+  return first;
 }
 
 /**
@@ -561,6 +683,7 @@ export function parseArgs(argv = []) {
   return {
     mode: has('--status') ? 'status' : has('--logout') ? 'logout' : has('--paste') ? 'paste' : 'browser',
     endpoint: valueOf('--endpoint'),
+    dataDir: valueOf('--data-dir'),
     json: has('--json'),
   };
 }
@@ -568,13 +691,18 @@ export function parseArgs(argv = []) {
 /**
  * @param {string[]} argv
  * @param {Record<string, string|undefined>} env
- * @param {{fetchImpl?: typeof fetch, log?: (m: string) => void, dataDir?: string}} [deps]
+ * @param {{fetchImpl?: typeof fetch, log?: (m: string) => void,
+ *          logProgress?: (m: string) => void, dataDir?: string}} [deps]
  * @returns {Promise<number>} process exit code
  */
 export async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const log = deps.log ?? console.log;
-  const dataDir = deps.dataDir ?? resolveDataDirFrom(env);
+  // Progress goes to stderr, the verdict to stdout, so `--json` output stays parseable. The
+  // authorize URL is now printed on every run rather than only when the launch failed, and
+  // mixing it into the JSON stream would break every caller that parses it.
+  const logProgress = deps.logProgress ?? ((m) => console.error(m));
   const args = parseArgs(argv);
+  const dataDir = deps.dataDir ?? resolveDataDirFrom(env, args);
   const emit = (payload) => log(args.json ? JSON.stringify(payload) : payload.detail);
 
   if (args.mode === 'status') {
@@ -611,18 +739,22 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
         // window per test and then sit out the full deadline.
         openImpl: deps.openImpl,
         timeoutMs: authTimeoutFrom(env, deps),
-        log: (m) => log(m),
+        log: logProgress,
       });
-      const res = await authenticateWithKey({
+      const res = await authenticateAcrossEndpoints({
         dataDir,
-        endpoint: args.endpoint ?? endpointFor(payload),
+        endpoints: args.endpoint ? [args.endpoint] : endpointCandidatesFor(payload),
         apiKey: payload.mubitApiKey,
         fetchImpl,
       });
       emit({ ok: res.ok, state: res.state, endpoint: res.endpoint, detail: res.detail });
       return res.ok ? 0 : 1;
     } catch (err) {
-      if (err instanceof ProvisioningPending) {
+      // A browser opened and the deadline passed: the sign-up, the organization or the
+      // workspace is still in flight, and the same command run again picks it up. That is
+      // the same situation as the console's explicit `provisioning=1`, which older console
+      // versions still send and which therefore stays.
+      if (err instanceof ProvisioningPending || (err instanceof BrowserTimeout && err.launched)) {
         emit({
           ok: false,
           state: 'provisioning',
@@ -631,14 +763,16 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
         });
         return 2; // distinct from a real failure, so the skill can say "wait", not "fix"
       }
-      // No browser, no console, or the user closed the tab. The paste route still works,
-      // so the flow degrades to it rather than dead-ending.
+      // Nothing could be opened — over SSH, in a container, on a machine with no default
+      // browser. Waiting longer cannot help, and the paste route can, so the flow degrades
+      // to it rather than dead-ending.
       emit({
         ok: false,
         state: 'browser_failed',
         detail: `${err?.message ?? err}\n`
           + `You can finish by hand instead: issue a key at ${consoleUrlFrom(env)}, then run\n`
-          + `  ${KEY_ENV_VAR}=mbt_… node "${'${CLAUDE_PLUGIN_ROOT}'}/bin/auth.mjs" --paste`,
+          + `  ${KEY_ENV_VAR}=mbt_… node "${'${CLAUDE_PLUGIN_ROOT}'}/bin/auth.mjs"`
+          + ` --data-dir "${dataDir}" --paste`,
       });
       return 1;
     }
@@ -663,31 +797,41 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   return res.ok ? 0 : 1;
 }
 
-/**
- * How long to wait for the browser round trip. Two minutes is right for a human who has
- * to sign in, possibly create an account, and pick an instance — but no test suite can
- * afford it, so `MUBIT_CC_AUTH_TIMEOUT_MS` shrinks it the way the other `MUBIT_CC_*`
- * windows are shrunk.
- */
+/** See `DEFAULT_AUTH_TIMEOUT_MS`. */
 function authTimeoutFrom(env = {}, deps = {}) {
   if (typeof deps.timeoutMs === 'number') return deps.timeoutMs;
   const raw = Number(env?.MUBIT_CC_AUTH_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : 120000;
+  return Number.isFinite(raw) && raw > 0 ? raw : 600000;
 }
 
 /**
- * Mirrors `lib/state.mjs` `dataDir()`, minus its `cfg` rung — this command has no resolved
- * config, and asking for one before the user is signed in is the wrong way round.
+ * Where the credentials go, and the only decision in this file that can make a *successful*
+ * sign-in look like nothing happened.
  *
- * The final fallback is `liveDataDir()` itself rather than a fourth hand-copy of it: nothing
- * pins `MUBIT_CC_DATA_DIR` into a command the user typed, and looking in the bare directory
- * left `--status` reporting no credentials on a machine that had them.
+ * Mirrors `lib/state.mjs` `dataDir()`, minus its `cfg` rung — this command has no resolved
+ * config, and asking for one before the user is signed in is the wrong way round — plus one
+ * rung above it:
+ *
+ *   1. **`--data-dir`.** `${CLAUDE_PLUGIN_DATA}` is interpolated by the host into a skill's
+ *      body text, so `skills/auth/SKILL.md` can pass the exact answer down. This rung exists
+ *      because the two environment rungs below it are *empty* on the path that matters: the
+ *      skill runs this command through Bash, and a Bash tool call gets
+ *      `CLAUDE_PLUGIN_DATA=""` and `CLAUDE_PLUGIN_ROOT=""`. Measured, not assumed.
+ *   2. `MUBIT_CC_DATA_DIR`, then `CLAUDE_PLUGIN_DATA`, for a process the host launched.
+ *   3. `liveDataDir()` itself rather than a fourth hand-copy of it. Looking in the bare
+ *      directory left `--status` reporting no credentials on a machine that had them.
+ *
+ * A blank `--data-dir`, or one the host never substituted, is dropped rather than used: a
+ * literal `${CLAUDE_PLUGIN_DATA}` taken as a path would create a directory of that name under
+ * whatever the session's cwd happened to be, write the key into it, and report success.
  */
-function resolveDataDirFrom(env = process.env) {
+function resolveDataDirFrom(env = process.env, args = {}) {
   const e = env ?? {};
+  const flag = typeof args?.dataDir === 'string' ? args.dataDir.trim() : '';
+  if (flag && !/^\$\{/.test(flag)) return flag;
   if (e.MUBIT_CC_DATA_DIR) return e.MUBIT_CC_DATA_DIR;
   if (e.CLAUDE_PLUGIN_DATA) return e.CLAUDE_PLUGIN_DATA;
-  return liveDataDir(e.HOME || '.', e);
+  return liveDataDir(e.HOME || safeHome(), e);
 }
 
 // ---------------------------------------------------------------------------

@@ -9,8 +9,11 @@ Work in this order and stop at the first thing that is broken. Each step costs m
 one before it, and the cheap steps answer most questions.
 
 1. **Read the local status marker** at `status/<run_id>.json` under the plugin data dir
-   (`MUBIT_CC_DATA_DIR`, else `CLAUDE_PLUGIN_DATA`, else
-   `~/.claude/plugins/data/mubit-memory`). Free, no network. It carries the last known
+   (`MUBIT_CC_DATA_DIR`, else `CLAUDE_PLUGIN_DATA`, else the liveliest
+   `~/.claude/plugins/data/mubit-memory*` directory — the host adds a suffix naming the
+   install source, so the *bare* `mubit-memory` is usually the one directory nothing writes
+   to; prefer `${CLAUDE_PLUGIN_DATA}`, which the host substitutes into this file for you).
+   Free, no network. It carries the last known
    `state`, `updated_at`, `recall` counts, `captured` counts including `pending`, the last
    `reflect` result, and `last_error`. A marker whose `captured.pending` keeps growing is a
    drain problem, not a recall problem. A marker whose `recall.dry_streak` keeps growing is

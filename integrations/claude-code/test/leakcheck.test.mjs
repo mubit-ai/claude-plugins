@@ -186,6 +186,81 @@ test('no shipped bundle embeds source that is not a tracked file in this repo', 
 });
 
 // ---------------------------------------------------------------------------
+// 5. What a sourcemap embeds is held to the same standard as the tree
+// ---------------------------------------------------------------------------
+
+/**
+ * Check 1 asks *which files* a map embeds; this one reads what it embeds. The
+ * two failure modes are different: a map can name only tracked files and still
+ * carry a stale copy of one — text the tree used to say, kept alive base64'd in
+ * an artifact nobody diffs. Checks 2–4 all strip inline maps before scanning
+ * (deliberately — the mapping payload defeats their heuristics), so without
+ * this check the embedded text is scanned by nothing at all.
+ *
+ * The shapes asserted are exactly checks 2–4's, applied to each decoded
+ * `sourcesContent` entry, with the same redaction-demo exemption: an embedded
+ * copy of the redactor legitimately carries credential shapes, because the
+ * tracked original does.
+ */
+test('nothing an inline sourcemap embeds may carry what the tree itself may not', () => {
+  const findings = [];
+  let entriesScanned = 0;
+
+  for (const { rel, text } of corpus()) {
+    if (!/\.(mjs|js)$/.test(rel)) continue;
+
+    for (const match of text.matchAll(INLINE_MAP)) {
+      let map;
+      try {
+        map = JSON.parse(Buffer.from(match[1], 'base64').toString('utf8'));
+      } catch {
+        continue; // undecodable maps are check 1's finding, not this one's
+      }
+
+      const sources = map.sources ?? [];
+      const contents = map.sourcesContent ?? [];
+
+      sources.forEach((source, i) => {
+        const content = contents[i];
+        if (typeof content !== 'string' || content.length === 0) return;
+        entriesScanned += 1;
+
+        const where = (excerpt) => `${rel} (map: ${source}): ${excerpt}`;
+
+        for (const m of content.matchAll(HOME_PATH)) {
+          const who = m[1];
+          if (PLACEHOLDER_HOMES.has(who) || /^[$<{]/.test(who)) continue;
+          findings.push(where(m[0]));
+        }
+        for (const m of content.matchAll(WORKSPACE_CRATE_PATH)) {
+          findings.push(where(`${m[0]}…`));
+        }
+        if (!isRedactionDemo(source)) {
+          for (const [label, pattern] of SECRET_SHAPES) {
+            for (const m of content.matchAll(pattern)) {
+              findings.push(where(`${label} — ${m[0].slice(0, 48)}…`));
+            }
+          }
+        }
+      });
+    }
+  }
+
+  assert.ok(entriesScanned > 0,
+    'No embedded sources were scanned at all. Either the builds stopped inlining\n'
+    + '  sourcesContent or this scan stopped decoding them — and a scan that reads\n'
+    + '  nothing cannot fail.');
+
+  assert.equal(findings.length, 0,
+    `An inline sourcemap embeds text the tree itself would not be allowed to carry.\n\n`
+    + `${report(findings)}\n\n`
+    + '  The bundle diff never showed this — the payload is one base64 line. It is\n'
+    + '  usually a stale embedded copy: the tracked file was cleaned, the bundle was\n'
+    + '  not rebuilt, and the map keeps republishing the old text. Rebuild the bundle\n'
+    + '  (or fix the source and then rebuild); do not exempt it here.');
+});
+
+// ---------------------------------------------------------------------------
 // 2. No tracked file may carry a real home directory
 // ---------------------------------------------------------------------------
 

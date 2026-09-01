@@ -24,8 +24,8 @@ codex plugin add mubit-memory@mubit
 Then either ask a Codex session to run `mubit-memory:setup`, or do it yourself:
 
 ```bash
-node ~/.codex/plugins/cache/mubit/mubit-memory/0.12.0/scripts/setup.mjs \
-     ~/.codex/plugins/cache/mubit/mubit-memory/0.12.0
+PLUGIN=$(ls -d ~/.codex/plugins/cache/mubit/mubit-memory/*/ | tail -1)
+node "$PLUGIN/scripts/setup.mjs" "$PLUGIN"
 ```
 
 **That second step is not optional, and skipping it gives you a plugin that installs

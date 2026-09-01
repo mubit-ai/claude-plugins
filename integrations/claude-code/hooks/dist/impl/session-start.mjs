@@ -28,6 +28,7 @@ var SEC = 1e3;
 var MIN = 60 * SEC;
 var HOUR = 60 * MIN;
 var DAY = 24 * HOUR;
+var DATA_DIR_PREFIX = "mubit-memory";
 function dataDir(cfg = {}, env = process.env) {
   const e = env ?? {};
   const override = e.MUBIT_CC_DATA_DIR;
@@ -46,30 +47,40 @@ function liveDataDir(home, env = {}) {
     if (pinned && pinned[1]) return pinned[1];
   } catch {
   }
+  const bare = join(root, DATA_DIR_PREFIX);
+  let candidates = [];
   try {
-    let best = "";
-    let bestAt = -1;
-    for (const name of readdirSync(root)) {
-      if (!name.startsWith("mubit-memory")) continue;
-      const dir = join(root, name);
-      let at = 0;
+    candidates = readdirSync(root).filter((n) => n === DATA_DIR_PREFIX || n.startsWith(`${DATA_DIR_PREFIX}-`)).map((n) => join(root, n)).filter((p) => {
       try {
-        for (const f of readdirSync(join(dir, "status"))) {
-          if (!f.endsWith(".json") || f === "health.json") continue;
-          at = Math.max(at, statSync(join(dir, "status", f)).mtimeMs);
-        }
+        return statSync(p).isDirectory();
       } catch {
+        return false;
       }
-      if (existsSync(join(dir, "credentials.json"))) at += 1e15;
-      if (at > bestAt) {
-        bestAt = at;
-        best = dir;
-      }
-    }
-    if (best && bestAt > 0) return best;
+    }).map((p) => ({
+      path: p,
+      creds: existsSync(join(p, "credentials.json")),
+      at: dirActivity(p),
+      bare: p === bare
+    }));
   } catch {
+    return bare;
   }
-  return join(root, "mubit-memory");
+  if (!candidates.length) return bare;
+  const withCreds = candidates.filter((c) => c.creds);
+  const pool = withCreds.length ? withCreds : candidates;
+  pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
+  return pool[0].path;
+}
+function dirActivity(dir) {
+  let newest = 0;
+  for (const rel of ["", "config.json", "status", "runs", "credentials.json"]) {
+    try {
+      const t = statSync(rel ? join(dir, rel) : dir).mtimeMs;
+      if (t > newest) newest = t;
+    } catch {
+    }
+  }
+  return newest;
 }
 function safeHome() {
   try {
@@ -434,7 +445,7 @@ var DEFAULT_MCP_TOOLS = [
 ];
 var CACHE_FILE = "config.json";
 var CACHE_TTL_MS = 300 * 1e3;
-var CACHE_VERSION = 2;
+var CACHE_VERSION = 3;
 function screaming(key) {
   return String(key).replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
 }
@@ -562,7 +573,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
   const mcpLessonScope = enumOf(
     pick("mcpLessonScope", "MUBIT_MCP_LESSON_SCOPE"),
     ["run", "session", "global"],
-    "run"
+    "session"
   );
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
@@ -864,9 +875,9 @@ function scrub(text, count) {
 }
 function entropy(s) {
   if (s === null || s === void 0) return 0;
-  const str3 = typeof s === "string" ? s : String(s);
-  if (str3.length === 0) return 0;
-  const buf = Buffer.from(str3, "utf8");
+  const str5 = typeof s === "string" ? s : String(s);
+  if (str5.length === 0) return 0;
+  const buf = Buffer.from(str5, "utf8");
   const n = buf.length;
   if (n === 0) return 0;
   const counts = new Uint32Array(256);
@@ -1486,9 +1497,6 @@ async function health(cfg, opts = {}) {
     return { ok: false, state: classifyError(err, null), error: messageOf(err), ms: Date.now() - started };
   }
 }
-async function postLessons(cfg, req = {}, opts = {}) {
-  return request(cfg, "POST", ROUTES.lessons, req ?? {}, opts);
-}
 async function registerAgent(cfg, req, opts = {}) {
   const started = Date.now();
   const bad = firstOf(
@@ -1768,6 +1776,273 @@ function numOr(v, d) {
   return typeof v === "number" && Number.isFinite(v) ? v : d;
 }
 
+// lib/dashboard-api.mjs
+var TIMEOUT_MS = 2e4;
+var READ_ONLY = Object.freeze({ record: false, timeoutMs: TIMEOUT_MS });
+var EXTRA_ROUTES = Object.freeze({
+  activity: "/v2/control/activity",
+  memoryHealth: "/v2/control/memory_health",
+  archive: "/v2/control/archive",
+  deleteLesson: "/v2/control/lessons/delete",
+  runs: "/v2/control/runs"
+});
+var DEFAULT_SCOPE = "run";
+var REPO_TAG = "repo:";
+var ERROR_CODES = Object.freeze([
+  "unauthorized",
+  "not_found",
+  "upstream_unreachable",
+  "auth_failed",
+  "bad_request"
+]);
+var STATE_MAP = Object.freeze({
+  auth_failed: { status: 502, code: "auth_failed" },
+  invalid_request: { status: 400, code: "bad_request" },
+  unconfigured: { status: 503, code: "upstream_unreachable" },
+  unreachable: { status: 503, code: "upstream_unreachable" },
+  not_responding: { status: 503, code: "upstream_unreachable" },
+  server_error: { status: 503, code: "upstream_unreachable" }
+});
+function ok(data) {
+  return { ok: true, status: 200, data };
+}
+function fail(status, code, message) {
+  return { ok: false, status, code, message: String(message ?? "") };
+}
+function mapError(cfg, res) {
+  const message = scrubKey(cfg, String(res && res.error ? res.error : "upstream call failed"));
+  const status = Number(res && res.status);
+  if (status === 401 || status === 403) return fail(502, "auth_failed", message);
+  const hit = STATE_MAP[String(res && res.state)];
+  return hit ? fail(hit.status, hit.code, message) : fail(503, "upstream_unreachable", message);
+}
+function scrubKey(cfg, text) {
+  const s = String(text ?? "");
+  const key = cfg && typeof cfg.apiKey === "string" ? cfg.apiKey.trim() : "";
+  if (!key || !s.includes(key)) return s;
+  return s.split(key).join("[REDACTED:api-key]");
+}
+function lessonId(raw) {
+  if (!raw || typeof raw !== "object") return "";
+  const first = [raw.reference_id, raw.lesson_id, raw.id].find((v) => typeof v === "string" && v.trim());
+  return first ? String(first).trim() : "";
+}
+function normalizeActivityLesson(entry, ctx = {}) {
+  const e = entry && typeof entry === "object" ? entry : {};
+  const meta = parseMetadata(e.metadata_json) || {};
+  const stated = str2(meta.scope) || str2(meta.lesson_scope);
+  const scope = stated || DEFAULT_SCOPE;
+  const sourceRun = String(meta.source_run_id || e.run_id || "");
+  const conditions = meta.conditions || meta.lesson_conditions;
+  return {
+    id: lessonId(e),
+    content: String(e.content || ""),
+    lessonType: String(meta.lesson_type || ""),
+    scope,
+    // "The server would have called this a run lesson" and "we never saw the metadata" are the
+    // same rendered word and different facts, and only the second should make a reader doubt
+    // the count beside it.
+    scopeKnown: stated !== "",
+    importance: String(meta.importance || meta.lesson_importance || ""),
+    conditions: Array.isArray(conditions) ? conditions.map(String) : [],
+    rationale: String(meta.rationale || ""),
+    sourceRunId: sourceRun,
+    source: String(e.source || ""),
+    createdAt: String(e.created_at || ""),
+    runId: String(e.run_id || ""),
+    project: projectTag(meta.env_tags),
+    leaksScope: scope !== DEFAULT_SCOPE,
+    fromOtherRun: !!(ctx.currentRun && sourceRun && sourceRun !== ctx.currentRun),
+    promotionStamped: PROMOTION_KEYS.some((k) => meta[k] !== void 0),
+    promotionCandidate: meta.promotion_candidate ?? null,
+    promotionQuarantined: meta.promotion_quarantined ?? null,
+    promotionShadowStats: meta.promotion_shadow_stats ?? null
+  };
+}
+var PROMOTION_KEYS = Object.freeze([
+  "promotion_candidate",
+  "promotion_quarantined",
+  "promotion_shadow_stats"
+]);
+function projectTag(tags) {
+  if (!Array.isArray(tags)) return "";
+  const hit = tags.map(str2).find((t) => t.startsWith(REPO_TAG));
+  return hit ? hit.slice(REPO_TAG.length) : "";
+}
+function parseMetadata(raw) {
+  let v = raw;
+  for (let i = 0; i < 2; i += 1) {
+    if (v && typeof v === "object" && !Array.isArray(v)) return v;
+    if (typeof v !== "string" || !v.trim()) return null;
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  return v && typeof v === "object" && !Array.isArray(v) ? v : null;
+}
+async function fetchActivity(cfg, params2 = {}, opts = {}) {
+  const req = {
+    limit: clamp(params2.limit, 1, 500, 100),
+    sort: params2.sort === "asc" ? "asc" : "desc",
+    // Truncates content to 200 chars and strips verbose metadata — the right projection for a
+    // feed, and it is what keeps a page of activity off the far side of a megabyte.
+    projection: params2.projection === "full" ? "full" : "compact"
+  };
+  if (str2(params2.run)) req.run_id = str2(params2.run);
+  if (str2(params2.pageToken)) req.page_token = str2(params2.pageToken);
+  if (Array.isArray(params2.entryTypes) && params2.entryTypes.length) {
+    req.entry_types = params2.entryTypes.map(String);
+  }
+  if (params2.excludeDerived === true) req.exclude_derived = true;
+  if (str2(params2.createdAfter)) req.created_after = str2(params2.createdAfter);
+  if (str2(params2.createdBefore)) req.created_before = str2(params2.createdBefore);
+  if (str2(params2.userId)) req.user_id = str2(params2.userId);
+  if (str2(params2.agentId)) req.agent_id = str2(params2.agentId);
+  const res = await request(cfg, "POST", EXTRA_ROUTES.activity, req, { ...READ_ONLY, ...opts });
+  if (!res.ok) return mapError(cfg, res);
+  const body = res.body && typeof res.body === "object" ? res.body : {};
+  return ok({
+    entries: Array.isArray(body.entries) ? body.entries : [],
+    nextPageToken: String(body.next_page_token || ""),
+    totalVisible: Number(body.total_visible) || 0
+  });
+}
+function str2(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+function clamp(v, lo, hi, dflt) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(hi, Math.max(lo, Math.trunc(n)));
+}
+
+// lib/activity.mjs
+var ACTIVITY_ROUTES = Object.freeze({
+  activity: EXTRA_ROUTES.activity,
+  export: "/v2/control/activity/export"
+});
+var EXPORT_TIMEOUT_MS = 45e3;
+var EXPORT_OPTS = Object.freeze({ record: false, timeoutMs: EXPORT_TIMEOUT_MS });
+var COMPACT_KEYS = Object.freeze(["id", "created_at", "entry_type", "run_id", "content"]);
+var COMPACT_CONTENT_CHARS = 200;
+var PAGE_MIN = 1;
+var PAGE_MAX = 500;
+var PAGE_DEFAULT = 100;
+var DERIVED_KEYS = Object.freeze(["derived", "promotion", "promoted", "auto_promoted"]);
+async function listActivity(cfg, params2 = {}, opts = {}) {
+  const p = obj(params2);
+  const run = str3(p.run);
+  if (!run && p.allRuns !== true) {
+    return fail(
+      400,
+      "bad_request",
+      "activity requires a run id; pass allRuns to list across every run this key can see"
+    );
+  }
+  const res = await fetchActivity(cfg, {
+    run,
+    limit: clamp2(p.limit, PAGE_MIN, PAGE_MAX, PAGE_DEFAULT),
+    pageToken: str3(p.pageToken),
+    sort: str3(p.sort) === "asc" ? "asc" : "desc",
+    projection: str3(p.projection) === "full" ? "full" : "compact",
+    entryTypes: Array.isArray(p.entryTypes) ? p.entryTypes : void 0,
+    excludeDerived: p.excludeDerived === true,
+    createdAfter: str3(p.createdAfter),
+    createdBefore: str3(p.createdBefore),
+    userId: str3(p.userId),
+    agentId: str3(p.agentId)
+  }, opts);
+  if (!res.ok) return res;
+  const corrected = correct(res.data.entries, {
+    excludeDerived: p.excludeDerived === true,
+    compact: str3(p.projection) !== "full"
+  });
+  return ok({
+    ...corrected,
+    nextPageToken: res.data.nextPageToken,
+    // The server's count, over the server's filtering, before paging. It over-counts by
+    // `droppedDerived` whenever the re-filter had to do work.
+    totalVisible: res.data.totalVisible
+  });
+}
+function isDerived(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  for (const key of DERIVED_KEYS) {
+    if (truthy(
+      /** @type {any} */
+      entry[key]
+    )) return true;
+  }
+  const meta = parseMetadata(
+    /** @type {any} */
+    entry.metadata_json ?? /** @type {any} */
+    entry.metadata
+  );
+  if (!meta) return false;
+  for (const key of DERIVED_KEYS) {
+    if (truthy(meta[key])) return true;
+  }
+  return false;
+}
+function compactEntry(entry) {
+  const e = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
+  const content = e.content === void 0 || e.content === null ? "" : String(e.content);
+  return {
+    id: plain(e.id),
+    created_at: plain(e.created_at),
+    entry_type: plain(e.entry_type),
+    run_id: plain(e.run_id),
+    content: content.length > COMPACT_CONTENT_CHARS ? `${content.slice(0, COMPACT_CONTENT_CHARS)}...` : content
+  };
+}
+function correct(raw, o) {
+  let entries = Array.isArray(raw) ? raw : [];
+  let droppedDerived = 0;
+  if (o.excludeDerived) {
+    const kept = entries.filter((e) => !isDerived(e));
+    droppedDerived = entries.length - kept.length;
+    entries = kept;
+  }
+  let projectionFallbackUsed = false;
+  if (o.compact) {
+    projectionFallbackUsed = entries.some((e) => {
+      const c = e && typeof e === "object" ? e.content : "";
+      return typeof c === "string" && c.length > COMPACT_CONTENT_CHARS + 3;
+    });
+    entries = entries.map(compactEntry);
+  }
+  return {
+    entries,
+    droppedDerived,
+    excludeDerivedFallbackUsed: droppedDerived > 0,
+    projectionFallbackUsed
+  };
+}
+function truthy(v) {
+  if (v === true) return true;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    return s === "true" || s === "1" || s === "yes";
+  }
+  return false;
+}
+function str3(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+function plain(v) {
+  return v === void 0 || v === null ? "" : String(v);
+}
+function obj(v) {
+  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+}
+function clamp2(v, lo, hi, dflt) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(hi, Math.max(lo, Math.trunc(n)));
+}
+
 // lib/markers.mjs
 import { join as join8 } from "node:path";
 function defaultMarker(runId = "") {
@@ -1795,12 +2070,18 @@ function defaultMarker(runId = "") {
       last_hit_at: 0
     },
     captured: { tools: 0, turns: 0, pending: 0 },
+    // What the MCP server sent, which the capture path never sees: an MCP write leaves its
+    // own process and touches neither the spool nor `captured` above. Kept apart from that
+    // group rather than folded into it, so the status line's capture count keeps meaning
+    // "what the hooks captured" — but read beside it at session end, where the question is
+    // the different one of whether this run put anything on the wire at all.
+    mcp: { ingested: 0, at: 0 },
     lessons: { global: 0, checked_at: 0 },
     reflect: { at: 0, lessons_stored: 0, status: "" },
     last_error: ""
   };
 }
-var GROUPS = ["recall", "captured", "lessons", "reflect"];
+var GROUPS = ["recall", "captured", "lessons", "reflect", "mcp"];
 function markerPath(cfg, runId) {
   return join8(resolveDataDir(cfg), "status", `${runId}.json`);
 }
@@ -1853,12 +2134,12 @@ function recordRules(cfg, runId, entries) {
     const merged = dedupe([...incoming, ...readRules(cfg, runId)]).slice(0, MAX_RULES);
     const dir = runDir(cfg, runId);
     if (!ensureDir(dir)) return 0;
-    const ok = writeJsonAtomic(join9(dir, RULES_FILE), {
+    const ok2 = writeJsonAtomic(join9(dir, RULES_FILE), {
       version: VERSION,
       updated_at: Date.now(),
       rules: merged
     });
-    return ok ? merged.length : 0;
+    return ok2 ? merged.length : 0;
   } catch {
     return 0;
   }
@@ -1872,7 +2153,7 @@ function readRules(cfg, runId) {
     const out = [];
     for (const r of stored.rules) {
       if (!isObject2(r)) continue;
-      const text = clamp(r.text);
+      const text = clamp3(r.text);
       if (!text) continue;
       out.push({ ref: segment(r.ref), text });
       if (out.length >= MAX_RULES) break;
@@ -1885,9 +2166,9 @@ function readRules(cfg, runId) {
 function normalise(e) {
   if (!isObject2(e)) return null;
   if (e.is_stale === true) return null;
-  const type = str2(e.origin_entry_type) || str2(e.entry_type) || str2(e.lesson_type);
+  const type = str4(e.origin_entry_type) || str4(e.entry_type) || str4(e.lesson_type);
   if (type.toLowerCase() !== "rule") return null;
-  const text = clamp(e.content);
+  const text = clamp3(e.content);
   if (!text) return null;
   return { ref: segment(e.reference_id ?? e.lesson_id ?? e.id), text };
 }
@@ -1905,7 +2186,7 @@ function dedupe(rules) {
   }
   return out;
 }
-function clamp(v) {
+function clamp3(v) {
   const s = typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "";
   if (!s) return "";
   return s.length <= MAX_TEXT ? s : `${s.slice(0, MAX_TEXT - 1).trimEnd()}\u2026`;
@@ -1915,7 +2196,7 @@ function segment(v) {
   if (!s) return "";
   return s.replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, MAX_REF);
 }
-function str2(v) {
+function str4(v) {
   return typeof v === "string" ? v.trim() : "";
 }
 function isObject2(v) {
@@ -2241,6 +2522,7 @@ var REGISTER_MS = 600;
 var LESSONS_MS = 900;
 var CAPABILITIES = ["code", "shell", "edit", "search"];
 var LESSON_LIMIT = 5;
+var LESSON_SCAN = 200;
 var DOT = " \xB7 ";
 var LIVENESS_FILE = "statusline-installed.json";
 var MAX_ID_CHARS = 160;
@@ -2319,18 +2601,23 @@ await runHook("session-start", {
     }
     const lessonBudget = budgetFor(LESSONS_MS);
     let lessons = [];
+    let lessonsPartial = false;
     if (lessonBudget > 0) {
-      const lres = await postLessons(
-        cfg,
-        { scope: "global", limit: LESSON_LIMIT },
-        { timeoutMs: lessonBudget }
-      );
+      const lres = await listActivity(cfg, {
+        allRuns: true,
+        entryTypes: ["lesson"],
+        projection: "full",
+        sort: "desc",
+        limit: LESSON_SCAN
+      }, { record: true, timeoutMs: lessonBudget });
       if (lres.ok) {
-        lessons = readLessons(lres.body);
-        recordRules(cfg, runId, Array.isArray(lres.body?.lessons) ? lres.body.lessons : []);
+        const standing2 = globalLessons(lres.data.entries);
+        lessons = readLessons({ lessons: standing2 });
+        lessonsPartial = !!lres.data.nextPageToken && lessons.length < LESSON_LIMIT;
+        recordRules(cfg, runId, standing2);
       } else {
-        log(cfg, "info", `session-start: global lessons unavailable (${lres.error})`, { run_id: runId });
-        if (!authError && connState(lres.state) === "auth_failed") authError = String(lres.error ?? "");
+        log(cfg, "info", `session-start: standing lessons unavailable (${lres.message})`, { run_id: runId });
+        if (!authError && lres.code === "auth_failed") authError = String(lres.message ?? "");
       }
     }
     if (authError) {
@@ -2366,11 +2653,12 @@ await runHook("session-start", {
     });
     spawnResume(cfg, payload, runId, agentId, src);
     const anchor = src === "compact" ? latestCheckpointId(cfg, runId) : "";
-    const summary = `mubit: ${cfg.mode}${DOT}run ${runId}${DOT}${lessons.length} global lesson${lessons.length === 1 ? "" : "s"}`;
+    const standing = lessonsPartial ? "global lessons: partial listing" : `${lessons.length} global lesson${lessons.length === 1 ? "" : "s"}`;
+    const summary = `mubit: ${cfg.mode}${DOT}run ${runId}${DOT}${standing}`;
     return {
       hookSpecificOutput: {
         hookEventName: "SessionStart",
-        additionalContext: steerBlock(cfg, runId, lessons, anchor)
+        additionalContext: steerBlock(cfg, runId, lessons, anchor, lessonsPartial)
       },
       // §16.2's hint fires once, ever, per install, so on that one session it *takes* the
       // line rather than being appended to it: `systemMessage` is one line by contract, and
@@ -2399,7 +2687,7 @@ function spawnResume(cfg, payload, runId, agentId, src) {
     );
   }
 }
-function steerBlock(cfg, runId, lessons, anchor = "") {
+function steerBlock(cfg, runId, lessons, anchor = "", partial = false) {
   const skill = (name) => cfg.host === "codex" ? `mubit-memory:${name}` : `/mubit-memory:${name}`;
   const lines = [
     "# Mubit memory is active",
@@ -2416,10 +2704,13 @@ function steerBlock(cfg, runId, lessons, anchor = "") {
       `Mubit checkpoint ${anchor} holds this run's context from before the compaction that just happened. Ask ${skill("recall")} if you need detail that was compacted away.`
     );
   }
-  if (lessons.length) {
+  if (lessons.length || partial) {
     lines.push("", "## Standing lessons (global)");
     lines.push("Learned from earlier work \u2014 they may be out of date, so verify before relying on one.");
     for (const l of lessons) lines.push(`- [${l.type}] ${l.content}`);
+    if (partial) {
+      lines.push(`This set may be incomplete \u2014 it was read from a listing with more than this page in it. Ask ${skill("recall")} if a constraint seems to be missing.`);
+    }
   }
   return `${lines.join("\n")}
 `;
@@ -2486,6 +2777,20 @@ function safeSegment2(v) {
   const s = String(v ?? "").trim();
   if (!s) return "";
   return s.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_");
+}
+function globalLessons(entries) {
+  const out = [];
+  for (const e of Array.isArray(entries) ? entries : []) {
+    const n = normalizeActivityLesson(e);
+    if (n.scope !== "global") continue;
+    out.push({
+      lesson_id: n.id,
+      lesson_type: n.lessonType,
+      content: n.content,
+      scope: n.scope
+    });
+  }
+  return out;
 }
 function readLessons(body) {
   const raw = body && typeof body === "object" && Array.isArray(body.lessons) ? body.lessons : [];

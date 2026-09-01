@@ -1,7 +1,7 @@
 {
   "name": "mubit-memory",
   "displayName": "Mubit Memory",
-  "version": "0.12.4",
+  "version": "0.12.6",
   "description": "Persistent, typed, self-improving memory for Claude Code, backed by Mubit. Captures work involuntarily, recalls relevant lessons before every prompt, and attributes outcomes so memory improves with use.",
   "author": { "name": "Mubit AI", "url": "https://mubit.ai" },
   "homepage": "https://docs.mubit.ai/integrations/claude-code",
@@ -53,8 +53,8 @@
       "description": "At the start of a session, assemble a short summary of where earlier work on this project left off and put it in front of your first prompt. It is built in the background, so nothing waits for it, and it costs one round trip and two LLM calls per SESSION rather than per prompt. It is a briefing and not a task list. Only new and resumed sessions get one: /clear starts a fresh run with no history, and a compaction or a fork is already re-anchored." },
     "mcpTools": { "type": "string", "title": "MCP tool allowlist", "default": "",
       "description": "Comma-separated allowlist of Mubit MCP tools. Blank uses the curated default set." },
-    "mcpLessonScope": { "type": "string", "title": "MCP lesson scope ceiling", "default": "run",
-      "description": "The widest scope a lesson written by an MCP tool may claim: run, session, or global. Anything wider than run is read by unrelated runs, so the default keeps an agent's lesson in the run that wrote it; reflection is still the path that promotes one beyond it." },
+    "mcpLessonScope": { "type": "string", "title": "MCP lesson scope ceiling", "default": "session",
+      "description": "The widest scope a lesson written by an MCP tool may claim: run, session, or global. The default matches what mubit_learned tells the model it does, and is the narrowest scope from which a lesson can reach a later session at all. Set run to keep every agent-written lesson inside the run that wrote it; set global to have agent-written rules follow you between projects." },
     "pins": { "type": "boolean", "title": "Pinned context", "default": true,
       "description": "Put the constraints pinned with /mubit-memory:pin in front of the model on every prompt of the run \u2014 including the prompts recall skips, such as a two-word answer or a moment when the instance is unreachable. Capped at five pins, 200 characters each and 240 tokens, because a pin is unranked and paid in full on every prompt. Off makes the feature invisible: the injected block goes back to being exactly what it was without it." }
   }

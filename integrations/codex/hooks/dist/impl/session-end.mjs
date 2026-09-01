@@ -45,30 +45,40 @@ function liveDataDir(home, env = {}) {
     if (pinned && pinned[1]) return pinned[1];
   } catch {
   }
+  const bare = join2(root, DATA_DIR_PREFIX2);
+  let candidates = [];
   try {
-    let best = "";
-    let bestAt = -1;
-    for (const name of readdirSync2(root)) {
-      if (!name.startsWith("mubit-memory")) continue;
-      const dir = join2(root, name);
-      let at = 0;
+    candidates = readdirSync2(root).filter((n) => n === DATA_DIR_PREFIX2 || n.startsWith(`${DATA_DIR_PREFIX2}-`)).map((n) => join2(root, n)).filter((p) => {
       try {
-        for (const f of readdirSync2(join2(dir, "status"))) {
-          if (!f.endsWith(".json") || f === "health.json") continue;
-          at = Math.max(at, statSync2(join2(dir, "status", f)).mtimeMs);
-        }
+        return statSync2(p).isDirectory();
       } catch {
+        return false;
       }
-      if (existsSync2(join2(dir, "credentials.json"))) at += 1e15;
-      if (at > bestAt) {
-        bestAt = at;
-        best = dir;
-      }
-    }
-    if (best && bestAt > 0) return best;
+    }).map((p) => ({
+      path: p,
+      creds: existsSync2(join2(p, "credentials.json")),
+      at: dirActivity(p),
+      bare: p === bare
+    }));
   } catch {
+    return bare;
   }
-  return join2(root, "mubit-memory");
+  if (!candidates.length) return bare;
+  const withCreds = candidates.filter((c) => c.creds);
+  const pool = withCreds.length ? withCreds : candidates;
+  pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
+  return pool[0].path;
+}
+function dirActivity(dir) {
+  let newest = 0;
+  for (const rel of ["", "config.json", "status", "runs", "credentials.json"]) {
+    try {
+      const t = statSync2(rel ? join2(dir, rel) : dir).mtimeMs;
+      if (t > newest) newest = t;
+    } catch {
+    }
+  }
+  return newest;
 }
 function safeHome2() {
   try {
@@ -223,7 +233,7 @@ function safeSegment(value, max = 0) {
 function runDir(cfg, runId) {
   return join2(resolveDataDir(cfg), "runs", safeSegment(runId));
 }
-var SEC, MIN, HOUR, DAY, PRUNE_INTERVAL_MS;
+var SEC, MIN, HOUR, DAY, PRUNE_INTERVAL_MS, DATA_DIR_PREFIX2;
 var init_state = __esm({
   "../claude-code/lib/state.mjs"() {
     SEC = 1e3;
@@ -231,6 +241,7 @@ var init_state = __esm({
     HOUR = 60 * MIN;
     DAY = 24 * HOUR;
     PRUNE_INTERVAL_MS = HOUR;
+    DATA_DIR_PREFIX2 = "mubit-memory";
   }
 });
 
@@ -646,7 +657,7 @@ function resolveAll(e, userFile, creds, projectDir2, dataDir2) {
   const mcpLessonScope = enumOf(
     pick("mcpLessonScope", "MUBIT_MCP_LESSON_SCOPE"),
     ["run", "session", "global"],
-    "run"
+    "session"
   );
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
@@ -860,7 +871,7 @@ var init_config = __esm({
     ];
     CACHE_FILE = "config.json";
     CACHE_TTL_MS = 300 * 1e3;
-    CACHE_VERSION = 2;
+    CACHE_VERSION = 3;
     MODE = "hosted";
   }
 });
@@ -1857,6 +1868,12 @@ function defaultMarker(runId = "") {
       last_hit_at: 0
     },
     captured: { tools: 0, turns: 0, pending: 0 },
+    // What the MCP server sent, which the capture path never sees: an MCP write leaves its
+    // own process and touches neither the spool nor `captured` above. Kept apart from that
+    // group rather than folded into it, so the status line's capture count keeps meaning
+    // "what the hooks captured" — but read beside it at session end, where the question is
+    // the different one of whether this run put anything on the wire at all.
+    mcp: { ingested: 0, at: 0 },
     lessons: { global: 0, checked_at: 0 },
     reflect: { at: 0, lessons_stored: 0, status: "" },
     last_error: ""
@@ -1908,7 +1925,7 @@ var GROUPS;
 var init_markers = __esm({
   "../claude-code/lib/markers.mjs"() {
     init_state();
-    GROUPS = ["recall", "captured", "lessons", "reflect"];
+    GROUPS = ["recall", "captured", "lessons", "reflect", "mcp"];
   }
 });
 
@@ -3031,7 +3048,9 @@ var init_session_end = __esm({
             agentId,
             budget: () => budgetFor(OUTCOME_MS, REFLECT_MS / 2)
           });
-          const priorIngested = numOr2(readMarker(cfg, runId).captured?.ingested, 0);
+          const marker = readMarker(cfg, runId);
+          const priorIngested = numOr2(marker.captured?.ingested, 0);
+          const mcpIngested = numOr2(marker.mcp?.ingested, 0);
           const pending = spoolStats(cfg, runId).count;
           const reflect = await maybeReflect(cfg, {
             runId,
@@ -3039,7 +3058,7 @@ var init_session_end = __esm({
             // Evidence *in flight* counts. When another drainer holds the lock this hook defers to
             // it and reaches here before that drainer commits, so the marker's ingest count is stale
             // by design. The spool is the only term that sees the work that is about to land.
-            anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0 || drained.deferred && pending > 0,
+            anythingIngested: drained.sent > 0 || priorIngested > 0 || flushed > 0 || mcpIngested > 0 || drained.deferred && pending > 0,
             // ...but a non-empty spool means the opposite when *our* drain is the one that stopped:
             // budget spent, breaker open, or an ingest that failed. Then nobody is about to land
             // it, and reflecting would draw conclusions from a session the server only half has.
@@ -3153,7 +3172,8 @@ function claudeCodeDataDir(env = process.env) {
     }).map((p) => ({
       path: p,
       creds: existsSync(join(p, "credentials.json")),
-      at: mtime(p)
+      at: mtime(p),
+      bare: p === bare
     }));
   } catch {
     return bare;
@@ -3161,7 +3181,7 @@ function claudeCodeDataDir(env = process.env) {
   if (!candidates.length) return bare;
   const withCreds = candidates.filter((c) => c.creds);
   const pool = withCreds.length ? withCreds : candidates;
-  pool.sort((a, b) => b.at - a.at || a.path.localeCompare(b.path));
+  pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
   return pool[0].path;
 }
 function mtime(dir) {

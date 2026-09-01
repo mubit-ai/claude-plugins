@@ -9,12 +9,15 @@ Work in this order and stop at the first thing that is broken. Each step costs m
 one before it, and the cheap steps answer most questions.
 
 1. **Read the local status marker** at `status/<run_id>.json` under the plugin data dir
-   (`MUBIT_CC_DATA_DIR`, else `CLAUDE_PLUGIN_DATA`, else
-   `~/.claude/plugins/data/mubit-memory`). Free, no network. It carries the last known
+   (`MUBIT_CC_DATA_DIR`, else `CLAUDE_PLUGIN_DATA`, else the liveliest
+   `~/.claude/plugins/data/mubit-memory*` directory — the host adds a suffix naming the
+   install source, so the *bare* `mubit-memory` is usually the one directory nothing writes
+   to; prefer `${CLAUDE_PLUGIN_DATA}`, which the host substitutes into this file for you).
+   Free, no network. It carries the last known
    `state`, `updated_at`, `recall` counts, `captured` counts including `pending`, the last
    `reflect` result, and `last_error`. A marker whose `captured.pending` keeps growing is a
    drain problem, not a recall problem. A marker whose `recall.dry_streak` keeps growing is
-   the reverse: recall is running and returning nothing. **Check this before step 2** — it is
+   the reverse: recall is running and returning nothing. **Check this before step 3** — it is
    the one fault that leaves `state: ready` and a healthy-looking line, so every other check
    below will come back clean while the model receives no memory at all. Read
    `recall.empty_reason` for which kind:
@@ -25,9 +28,9 @@ one before it, and the cheap steps answer most questions.
    - `budget_exhausted` — recall ran out of time before the call returned. Raise
      `MUBIT_CC_RECALL_BUDGET_MS`, and note it cannot usefully exceed the hook timeout.
    - `breaker_open` — recall is not being attempted at all; the connection is the problem, so
-     continue to step 2.
+     continue to step 3.
    - `no_evidence` with a long streak — the connection and policy are fine and the store
-     genuinely has nothing for these prompts. Go to step 3.
+     genuinely has nothing for these prompts. Go to step 4.
 
    Read `reflect.status` the same way. It is written by exactly two processes, and each
    value means one thing:
@@ -60,20 +63,37 @@ one before it, and the cheap steps answer most questions.
    without reporting, and the stamp it left behind stays. Check whether a reflect for that run
    already succeeded before calling it a reaped child.
 
-2. **Check connectivity** — `mubit_status`, or `GET /v2/core/health` directly. Health is the
+2. **If the complaint is "lessons never reach another session", read the scope ceiling
+   before anything else.** This is not a connectivity fault and steps 3-5 will all come back
+   clean while it is the cause. Two local reads answer it:
+
+   - The **resolved ceiling** on what an MCP write may claim is `mcpLessonScope`
+     (`MUBIT_MCP_LESSON_SCOPE`), default `session`. It is a `userConfig` key, so it resolves
+     through the ordinary precedence — environment, then `/plugin` → Mubit Memory →
+     configure. At `run`, every lesson `mubit_learned` writes stays inside the run that wrote
+     it, and nothing later widens it: reflection stamps `run` too.
+   - **What is actually stored, by scope** — `node scripts/scope-audit.mjs`. It reports the
+     scope distribution across every run, how many lessons are visible outside the run that
+     wrote them, and whatever promotion metadata the instance stamped. Run it before and
+     after changing the setting; a single reading says nothing.
+
+   A ceiling of `run` with a user who expected cross-session lessons is the whole fault, and
+   the fix is one setting rather than anything below.
+
+3. **Check connectivity** — `mubit_status`, or `GET /v2/core/health` directly. Health is the
    one route that answers without a key, so a healthy response here alongside a failing
    control-plane call points squarely at auth. It returns the plain string `OK`, not JSON —
    parsing it as JSON is itself a way to invent a `server_error` that is not there.
-3. **Check memory health** — `mubit_memory_health`, or `POST /v2/control/memory_health
+4. **Check memory health** — `mubit_memory_health`, or `POST /v2/control/memory_health
    {run_id}` directly. This is what distinguishes "nothing was ever written" from "things were
-   written and are not coming back". It inspects the store; step 2 inspected the connection,
+   written and are not coming back". It inspects the store; step 3 inspected the connection,
    and a healthy answer there says nothing at all about this one.
    `/mubit-memory:memory-health` is the same call with the reading guide attached.
-4. **Poll the run's ingest jobs.** `runs/<run_id>/jobs.json` holds the last 20 accepted job
+5. **Poll the run's ingest jobs.** `runs/<run_id>/jobs.json` holds the last 20 accepted job
    ids; poll each with `GET /v2/control/ingest/jobs/<job_id>?run_id=<run_id>`. Accepted means
    queued, not stored. A job stuck in `queued` for minutes means the instance accepted the
    write but has not finished indexing it — report it and point the user at the console.
-5. **If there is an error in context**, `POST /v2/control/diagnose {run_id, error_text}` (or
+6. **If there is an error in context**, `POST /v2/control/diagnose {run_id, error_text}` (or
    `mubit_diagnose`) to surface failure-path lessons that match it. This is a memory lookup,
    not a health check: run it when you have a specific error to explain.
 
@@ -85,7 +105,7 @@ looking in the wrong place.
 
 | `ConnState` | What it means | The fix |
 | --- | --- | --- |
-| `ready` | 2xx, and the health route answered with its own `OK`. The connection is fine. | If memory still looks wrong, check `recall.dry_streak` first (step 1) — a dead recall path reports `ready`. If that is zero, the problem is content or scope — go to step 3. |
+| `ready` | 2xx, and the health route answered with its own `OK`. The connection is fine. | If memory still looks wrong, check `recall.dry_streak` first (step 1) — a dead recall path reports `ready`. If that is zero, the problem is content or scope — go to step 2, then step 4. |
 | `unconfigured` | No endpoint is set, so nothing was dialed. Not a fault, and not a server problem — there is no server yet. | `/mubit-memory:auth`. Say plainly that nothing is broken and nothing has been lost: capture is buffered and goes out once an endpoint exists. |
 | `unreachable` | `ECONNREFUSED` / `ENOTFOUND` / `EHOSTUNREACH` / `ECONNRESET`. Nothing is listening. | Check the endpoint is correct and the instance is running — see `/mubit-memory:setup`. |
 | `server_error` | 5xx, an unparseable body on a JSON route, or a 200 on the health route whose body was not `OK`. Something is up and answering wrongly. | Retry, then check the instance's status in the console. If it persists, check the endpoint reaches Mubit rather than a proxy or SSO portal — those answer 200 as well, and that is what this state catches. |

@@ -219,6 +219,7 @@ export function claudeCodeDataDir(env = process.env) {
         path: p,
         creds: existsSync(join(p, 'credentials.json')),
         at: mtime(p),
+        bare: p === bare,
       }));
   } catch {
     return bare;                       // no ~/.claude at all: a Codex-only machine
@@ -227,9 +228,15 @@ export function claudeCodeDataDir(env = process.env) {
 
   const withCreds = candidates.filter((c) => c.creds);
   const pool = withCreds.length ? withCreds : candidates;
-  // Deterministic: newest first, then by path, so two directories with identical timestamps
-  // cannot make this answer differently on two consecutive hooks of the same session.
-  pool.sort((a, b) => (b.at - a.at) || a.path.localeCompare(b.path));
+  // Deterministic: newest first, then a suffixed directory ahead of the bare one, then by
+  // path, so two directories with identical timestamps cannot make this answer differently on
+  // two consecutive hooks of the same session. The middle rung decides the case where nothing
+  // has been written anywhere yet — a fresh install about to sign in — and the bare name
+  // loses it, because it is the fallback for "no candidates", not a directory Claude Code
+  // points a hook at.
+  pool.sort((a, b) => (b.at - a.at)
+    || (Number(a.bare) - Number(b.bare))
+    || a.path.localeCompare(b.path));
   return pool[0].path;
 }
 

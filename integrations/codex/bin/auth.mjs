@@ -28,11 +28,13 @@ import {
   writeFileSync,
   writeSync
 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 var SEC = 1e3;
 var MIN = 60 * SEC;
 var HOUR = 60 * MIN;
 var DAY = 24 * HOUR;
+var DATA_DIR_PREFIX = "mubit-memory";
 function liveDataDir(home, env = {}) {
   const root = join(home, ".claude", "plugins", "data");
   try {
@@ -41,30 +43,47 @@ function liveDataDir(home, env = {}) {
     if (pinned && pinned[1]) return pinned[1];
   } catch {
   }
+  const bare = join(root, DATA_DIR_PREFIX);
+  let candidates = [];
   try {
-    let best = "";
-    let bestAt = -1;
-    for (const name of readdirSync(root)) {
-      if (!name.startsWith("mubit-memory")) continue;
-      const dir = join(root, name);
-      let at = 0;
+    candidates = readdirSync(root).filter((n) => n === DATA_DIR_PREFIX || n.startsWith(`${DATA_DIR_PREFIX}-`)).map((n) => join(root, n)).filter((p) => {
       try {
-        for (const f of readdirSync(join(dir, "status"))) {
-          if (!f.endsWith(".json") || f === "health.json") continue;
-          at = Math.max(at, statSync(join(dir, "status", f)).mtimeMs);
-        }
+        return statSync(p).isDirectory();
       } catch {
+        return false;
       }
-      if (existsSync(join(dir, "credentials.json"))) at += 1e15;
-      if (at > bestAt) {
-        bestAt = at;
-        best = dir;
-      }
-    }
-    if (best && bestAt > 0) return best;
+    }).map((p) => ({
+      path: p,
+      creds: existsSync(join(p, "credentials.json")),
+      at: dirActivity(p),
+      bare: p === bare
+    }));
   } catch {
+    return bare;
   }
-  return join(root, "mubit-memory");
+  if (!candidates.length) return bare;
+  const withCreds = candidates.filter((c) => c.creds);
+  const pool = withCreds.length ? withCreds : candidates;
+  pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
+  return pool[0].path;
+}
+function dirActivity(dir) {
+  let newest = 0;
+  for (const rel of ["", "config.json", "status", "runs", "credentials.json"]) {
+    try {
+      const t = statSync(rel ? join(dir, rel) : dir).mtimeMs;
+      if (t > newest) newest = t;
+    } catch {
+    }
+  }
+  return newest;
+}
+function safeHome() {
+  try {
+    return homedir();
+  } catch {
+    return ".";
+  }
 }
 function writeJsonAtomic(p, value, opts = {}) {
   const tmp = `${p}.tmp-${process.pid}`;
@@ -148,9 +167,13 @@ function isPlainObject(v) {
 var CONSOLE_URL = "https://console.mubit.ai";
 var DEFAULT_ENDPOINT = "https://api.mubit.ai";
 var KEY_PREFIX = "mbt_";
+var CLIENT_ID = "claude-code";
 var PROBE_ROUTE = "/v2/control/lessons";
 var HEALTH_ROUTE = "/v2/core/health";
 var DEFAULT_TIMEOUT_MS = 8e3;
+var DEFAULT_AUTH_TIMEOUT_MS = 6e5;
+var DEFAULT_EXCHANGE_TIMEOUT_MS = 9e4;
+var AUTH_RETRY_SCHEDULE_MS = [5e3, 1e4, 15e3];
 function looksLikeKey(v) {
   if (typeof v !== "string") return false;
   const s = v.trim();
@@ -168,22 +191,23 @@ function consoleUrlFrom(env = process.env) {
   return s ? s.replace(/\/+$/, "") : CONSOLE_URL;
 }
 function openConsole({ url, openImpl = defaultOpen, log = console.error }) {
-  let launched = false;
-  try {
-    openImpl(url);
-    launched = true;
-  } catch {
-    launched = false;
-  }
-  if (!launched) log(`Open this in your browser:
+  const state = { launched: false };
+  log(`Open this in your browser:
   ${url}`);
-  return launched;
+  try {
+    openImpl(url, () => {
+      state.launched = false;
+    });
+    state.launched = true;
+  } catch {
+    state.launched = false;
+  }
+  return state;
 }
-function defaultOpen(url) {
+function defaultOpen(url, onFailure) {
   const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
   const child = spawn(cmd, [url], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
-  child.on("error", () => {
-  });
+  child.on("error", () => onFailure?.());
   child.unref();
 }
 async function verifyCredentials(opts) {
@@ -212,12 +236,18 @@ async function verifyCredentials(opts) {
       detail: `${endpoint} is up but unhealthy (HTTP ${health.status}). This is the instance, not your key.`
     };
   }
-  const probe = await dial(fetchImpl, `${endpoint}${PROBE_ROUTE}`, {
+  const probeOnce = () => dial(fetchImpl, `${endpoint}${PROBE_ROUTE}`, {
     method: "POST",
     timeoutMs,
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
     body: "{}"
   });
+  let probe = await probeOnce();
+  const delays = Array.isArray(opts?.retry401Ms) ? opts.retry401Ms : [];
+  for (let i = 0; (probe.status === 401 || probe.status === 403) && i < delays.length; i++) {
+    await new Promise((r) => setTimeout(r, delays[i]));
+    probe = await probeOnce();
+  }
   if (probe.transportError) {
     return {
       ok: false,
@@ -248,9 +278,9 @@ async function dial(fetchImpl, url, { method = "GET", headers = {}, body, timeou
     clearTimeout(timer);
   }
 }
-function SANDBOX_BLOCKED() {
-  const env = typeof process === "object" && process ? process.env || {} : {};
-  if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
+function SANDBOX_BLOCKED(env) {
+  const e = env ?? (typeof process === "object" && process ? process.env || {} : {});
+  if (!e.CODEX_SANDBOX && !e.CODEX_SANDBOX_NETWORK_DISABLED) return "";
   return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
 }
 function transportCause(err) {
@@ -307,6 +337,14 @@ var ProvisioningPending = class extends Error {
     this.name = "ProvisioningPending";
   }
 };
+var BrowserTimeout = class extends Error {
+  /** @param {boolean} launched */
+  constructor(launched) {
+    super("timed out waiting for browser authorization");
+    this.name = "BrowserTimeout";
+    this.launched = launched;
+  }
+};
 function base64url(buf) {
   return Buffer.from(buf).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
@@ -323,7 +361,8 @@ async function runBrowserAuth(opts = {}) {
     region = "",
     openImpl,
     fetchImpl = fetch,
-    timeoutMs = 12e4,
+    timeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
+    exchangeTimeoutMs = DEFAULT_EXCHANGE_TIMEOUT_MS,
     log = console.error
   } = opts;
   const { verifier, challenge } = makePkce();
@@ -364,22 +403,39 @@ async function runBrowserAuth(opts = {}) {
     throw new Error("the local callback server did not bind a TCP port");
   }
   const port = addr.port;
-  const timer = setTimeout(
-    () => fail(new Error("timed out waiting for browser authorization")),
-    timeoutMs
-  );
+  let opened = { launched: false };
+  const timer = setTimeout(() => fail(new BrowserTimeout(opened.launched)), timeoutMs);
   try {
     const authUrl = buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region });
-    openConsole({ url: authUrl, openImpl, log });
+    opened = openConsole({ url: authUrl, openImpl, log });
     const hit = await awaited;
     if (hit.provisioning) throw new ProvisioningPending();
-    const res = await fetchImpl(`${consoleUrl}/api/cli/token`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ code: hit.code, verifier })
-    });
+    log("Finishing sign-in \u2014 exchanging the browser code for your key\u2026");
+    const exchangeAc = new AbortController();
+    const exchangeTimer = setTimeout(() => exchangeAc.abort(), exchangeTimeoutMs);
+    let res;
+    try {
+      res = await fetchImpl(`${consoleUrl}/api/cli/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: hit.code, verifier }),
+        signal: exchangeAc.signal
+      });
+    } catch (err) {
+      if (exchangeAc.signal.aborted) {
+        throw new Error(`token exchange failed: the console took the sign-in code and then did not answer within ${Math.round(exchangeTimeoutMs / 1e3)} s`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(exchangeTimer);
+    }
     if (!res.ok) throw new Error(`token exchange failed (HTTP ${res.status})`);
-    const payload = await res.json();
+    let payload;
+    try {
+      payload = await res.json();
+    } catch {
+      throw new Error("token exchange failed: the console did not answer with JSON");
+    }
     if (!payload || typeof payload.mubitApiKey !== "string" || !payload.mubitApiKey) {
       throw new Error("token exchange failed: the console returned no API key");
     }
@@ -391,6 +447,7 @@ async function runBrowserAuth(opts = {}) {
 }
 function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }) {
   const url = new URL(`${consoleUrl}/app/cli-auth`);
+  url.searchParams.set("client", CLIENT_ID);
   url.searchParams.set("port", String(port));
   url.searchParams.set("state", state);
   url.searchParams.set("challenge", challenge);
@@ -399,10 +456,31 @@ function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }
   if (region) url.searchParams.set("region", region);
   return url.toString();
 }
-function endpointFor(payload = {}) {
+function endpointCandidatesFor(payload = {}) {
   const explicit = typeof payload.mubitEndpoint === "string" ? payload.mubitEndpoint.trim() : "";
-  if (explicit) return normalizeEndpoint(explicit);
-  return DEFAULT_ENDPOINT;
+  const named = explicit ? overTls(explicit) : "";
+  return named && named !== DEFAULT_ENDPOINT ? [named, DEFAULT_ENDPOINT] : [DEFAULT_ENDPOINT];
+}
+function overTls(raw) {
+  let url;
+  try {
+    url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+  } catch {
+    return "";
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  if (url.protocol === "http:" && !loopback) url.protocol = "https:";
+  return url.toString().replace(/\/+$/, "");
+}
+async function authenticateAcrossEndpoints({ endpoints, ...opts }) {
+  let first;
+  for (const endpoint of endpoints) {
+    const res = await authenticateWithKey({ ...opts, endpoint });
+    if (res.ok) return res;
+    first ??= res;
+  }
+  return first;
 }
 function repoIdentity(cwd = process.cwd()) {
   try {
@@ -430,13 +508,16 @@ function parseArgs(argv = []) {
   return {
     mode: has("--status") ? "status" : has("--logout") ? "logout" : has("--paste") ? "paste" : "browser",
     endpoint: valueOf("--endpoint"),
+    dataDir: valueOf("--data-dir"),
     json: has("--json")
   };
 }
 async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const log = deps.log ?? console.log;
-  const dataDir = deps.dataDir ?? resolveDataDirFrom(env);
+  const logProgress = deps.logProgress ?? ((m) => console.error(m));
   const args = parseArgs(argv);
+  const dataDir = deps.dataDir ?? resolveDataDirFrom(env, args);
+  warnOnDataDirSplit(env, args, logProgress);
   const emit = (payload) => log(args.json ? JSON.stringify(payload) : payload.detail);
   if (args.mode === "status") {
     const cur = currentCredentials(dataDir);
@@ -465,18 +546,21 @@ async function main(argv = process.argv.slice(2), env = process.env, deps = {}) 
         // window per test and then sit out the full deadline.
         openImpl: deps.openImpl,
         timeoutMs: authTimeoutFrom(env, deps),
-        log: (m) => log(m)
+        exchangeTimeoutMs: exchangeTimeoutFrom(env),
+        log: logProgress
       });
-      const res2 = await authenticateWithKey({
+      const res2 = await authenticateAcrossEndpoints({
         dataDir,
-        endpoint: args.endpoint ?? endpointFor(payload),
+        endpoints: args.endpoint ? [args.endpoint] : endpointCandidatesFor(payload),
         apiKey: payload.mubitApiKey,
-        fetchImpl
+        fetchImpl,
+        // The key in hand is seconds old — the one case whose 401 deserves patience.
+        retry401Ms: retryScheduleFrom(env)
       });
       emit({ ok: res2.ok, state: res2.state, endpoint: res2.endpoint, detail: res2.detail });
       return res2.ok ? 0 : 1;
     } catch (err) {
-      if (err instanceof ProvisioningPending) {
+      if (err instanceof ProvisioningPending || err instanceof BrowserTimeout && err.launched) {
         emit({
           ok: false,
           state: "provisioning",
@@ -484,12 +568,13 @@ async function main(argv = process.argv.slice(2), env = process.env, deps = {}) 
         });
         return 2;
       }
+      const sandboxed = SANDBOX_BLOCKED(env);
       emit({
         ok: false,
         state: "browser_failed",
-        detail: `${err?.message ?? err}
+        detail: `${sandboxed || (err?.message ?? err)}
 You can finish by hand instead: issue a key at ${consoleUrlFrom(env)}, then run
-  ${KEY_ENV_VAR}=mbt_\u2026 node "${"${CLAUDE_PLUGIN_ROOT}"}/bin/auth.mjs" --paste`
+  ${KEY_ENV_VAR}=mbt_\u2026 node "${"${CLAUDE_PLUGIN_ROOT}"}/bin/auth.mjs" --data-dir "${dataDir}" --paste`
       });
       return 1;
     }
@@ -517,13 +602,32 @@ You can finish by hand instead: issue a key at ${consoleUrlFrom(env)}, then run
 function authTimeoutFrom(env = {}, deps = {}) {
   if (typeof deps.timeoutMs === "number") return deps.timeoutMs;
   const raw = Number(env?.MUBIT_CC_AUTH_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : 12e4;
+  return Number.isFinite(raw) && raw > 0 ? raw : 6e5;
 }
-function resolveDataDirFrom(env = process.env) {
+function exchangeTimeoutFrom(env = {}) {
+  const raw = Number(env?.MUBIT_CC_AUTH_EXCHANGE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_EXCHANGE_TIMEOUT_MS;
+}
+function retryScheduleFrom(env = {}) {
+  const unit = Number(env?.MUBIT_CC_AUTH_RETRY_UNIT_MS);
+  if (!(Number.isFinite(unit) && unit > 0)) return AUTH_RETRY_SCHEDULE_MS;
+  return AUTH_RETRY_SCHEDULE_MS.map((d) => Math.max(1, Math.round(d / 5e3 * unit)));
+}
+function warnOnDataDirSplit(env = {}, args = {}, logProgress = () => {
+}) {
+  const flag = typeof args?.dataDir === "string" ? args.dataDir.trim() : "";
+  const pinned = typeof env?.MUBIT_CC_DATA_DIR === "string" ? env.MUBIT_CC_DATA_DIR.trim() : "";
+  if (!flag || /^\$\{/.test(flag) || !pinned) return;
+  if (resolve(flag) === resolve(pinned)) return;
+  logProgress(`Warning: --data-dir ${flag} overrides MUBIT_CC_DATA_DIR=${pinned}. Credentials will be written to the first; anything reading the pinned directory will not see them.`);
+}
+function resolveDataDirFrom(env = process.env, args = {}) {
   const e = env ?? {};
+  const flag = typeof args?.dataDir === "string" ? args.dataDir.trim() : "";
+  if (flag && !/^\$\{/.test(flag)) return flag;
   if (e.MUBIT_CC_DATA_DIR) return e.MUBIT_CC_DATA_DIR;
   if (e.CLAUDE_PLUGIN_DATA) return e.CLAUDE_PLUGIN_DATA;
-  return liveDataDir(e.HOME || ".", e);
+  return liveDataDir(e.HOME || safeHome(), e);
 }
 function realPath(p) {
   try {
@@ -542,17 +646,22 @@ if (entryPath === selfReal) {
   });
 }
 export {
+  AUTH_RETRY_SCHEDULE_MS,
+  BrowserTimeout,
+  CLIENT_ID,
   CONSOLE_URL,
   DEFAULT_ENDPOINT,
+  DEFAULT_EXCHANGE_TIMEOUT_MS,
   HEALTH_ROUTE,
   KEY_ENV_VAR,
   KEY_PREFIX,
   PROBE_ROUTE,
   ProvisioningPending,
+  authenticateAcrossEndpoints,
   authenticateWithKey,
   consoleUrlFrom,
   currentCredentials,
-  endpointFor,
+  endpointCandidatesFor,
   looksLikeKey,
   main,
   makePkce,

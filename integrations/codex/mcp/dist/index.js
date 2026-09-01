@@ -30,6 +30,7 @@ var SEC = 1e3;
 var MIN = 60 * SEC;
 var HOUR = 60 * MIN;
 var DAY = 24 * HOUR;
+var DATA_DIR_PREFIX = "mubit-memory";
 function dataDir(cfg = {}, env = process.env) {
   const e = env ?? {};
   const override = e.MUBIT_CC_DATA_DIR;
@@ -48,30 +49,40 @@ function liveDataDir(home, env = {}) {
     if (pinned && pinned[1]) return pinned[1];
   } catch {
   }
+  const bare = join(root, DATA_DIR_PREFIX);
+  let candidates = [];
   try {
-    let best = "";
-    let bestAt = -1;
-    for (const name of readdirSync(root)) {
-      if (!name.startsWith("mubit-memory")) continue;
-      const dir = join(root, name);
-      let at = 0;
+    candidates = readdirSync(root).filter((n) => n === DATA_DIR_PREFIX || n.startsWith(`${DATA_DIR_PREFIX}-`)).map((n) => join(root, n)).filter((p) => {
       try {
-        for (const f of readdirSync(join(dir, "status"))) {
-          if (!f.endsWith(".json") || f === "health.json") continue;
-          at = Math.max(at, statSync(join(dir, "status", f)).mtimeMs);
-        }
+        return statSync(p).isDirectory();
       } catch {
+        return false;
       }
-      if (existsSync(join(dir, "credentials.json"))) at += 1e15;
-      if (at > bestAt) {
-        bestAt = at;
-        best = dir;
-      }
-    }
-    if (best && bestAt > 0) return best;
+    }).map((p) => ({
+      path: p,
+      creds: existsSync(join(p, "credentials.json")),
+      at: dirActivity(p),
+      bare: p === bare
+    }));
   } catch {
+    return bare;
   }
-  return join(root, "mubit-memory");
+  if (!candidates.length) return bare;
+  const withCreds = candidates.filter((c) => c.creds);
+  const pool = withCreds.length ? withCreds : candidates;
+  pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
+  return pool[0].path;
+}
+function dirActivity(dir) {
+  let newest = 0;
+  for (const rel of ["", "config.json", "status", "runs", "credentials.json"]) {
+    try {
+      const t = statSync(rel ? join(dir, rel) : dir).mtimeMs;
+      if (t > newest) newest = t;
+    } catch {
+    }
+  }
+  return newest;
 }
 function safeHome() {
   try {
@@ -167,7 +178,7 @@ var DEFAULT_MCP_TOOLS = [
 ];
 var CACHE_FILE = "config.json";
 var CACHE_TTL_MS = 300 * 1e3;
-var CACHE_VERSION = 2;
+var CACHE_VERSION = 3;
 function screaming(key) {
   return String(key).replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
 }
@@ -184,6 +195,20 @@ function host(env = process.env) {
   return v === "codex" ? "codex" : "claude-code";
 }
 var MODE = "hosted";
+function authHeaders(cfg) {
+  const key = typeof cfg?.apiKey === "string" ? cfg.apiKey.trim() : "";
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+function isConfigured(cfg) {
+  const ep = typeof cfg?.endpoint === "string" ? cfg.endpoint.trim() : "";
+  if (!ep) return false;
+  try {
+    const u = new URL(ep);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 function loadConfig(env = process.env) {
   const e = env ?? {};
   const projectDir = firstNonEmpty(e.CLAUDE_PROJECT_DIR, safeCwd());
@@ -281,7 +306,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
   const mcpLessonScope = enumOf(
     pick("mcpLessonScope", "MUBIT_MCP_LESSON_SCOPE"),
     ["run", "session", "global"],
-    "run"
+    "session"
   );
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
@@ -569,9 +594,9 @@ function scrub(text, count) {
 }
 function entropy(s) {
   if (s === null || s === void 0) return 0;
-  const str2 = typeof s === "string" ? s : String(s);
-  if (str2.length === 0) return 0;
-  const buf = Buffer.from(str2, "utf8");
+  const str4 = typeof s === "string" ? s : String(s);
+  if (str4.length === 0) return 0;
+  const buf = Buffer.from(str4, "utf8");
   const n = buf.length;
   if (n === 0) return 0;
   const counts = new Uint32Array(256);
@@ -997,10 +1022,1010 @@ function safeCwd2() {
   }
 }
 
+// ../claude-code/lib/breaker.mjs
+import { createHash as createHash3 } from "node:crypto";
+import { join as join6 } from "node:path";
+var CONN_STATES = (
+  /** @type {const} */
+  [
+    "ready",
+    "unreachable",
+    "server_error",
+    "auth_failed",
+    "not_responding",
+    "unconfigured"
+  ]
+);
+var TIMEOUT_ESCALATION = 3;
+var NEVER_WARMING = /* @__PURE__ */ new Set(["ready", "auth_failed", "unconfigured"]);
+var DEFAULT_THRESHOLD = 5;
+var DEFAULT_WINDOW_MS = 3e5;
+var DEFAULT_COOLDOWN_MS = 12e4;
+var UNREACHABLE_CODES = /* @__PURE__ */ new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ECONNRESET",
+  "ENETUNREACH",
+  "ENETDOWN",
+  "EHOSTDOWN",
+  "EADDRNOTAVAIL",
+  "ECONNABORTED",
+  "EAI_AGAIN",
+  "EPIPE"
+]);
+var TIMEOUT_CODES = /* @__PURE__ */ new Set([
+  "ETIMEDOUT",
+  "ESOCKETTIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT"
+]);
+var TIMEOUT_NAMES = /* @__PURE__ */ new Set(["AbortError", "TimeoutError", "HeadersTimeoutError", "BodyTimeoutError"]);
+function classifyError(err, status) {
+  try {
+    const chain = causeChain(err);
+    for (const e of chain) {
+      if (TIMEOUT_NAMES.has(nameOf(e)) || TIMEOUT_CODES.has(codeOf(e))) return "not_responding";
+    }
+    for (const e of chain) {
+      if (UNREACHABLE_CODES.has(codeOf(e))) return "unreachable";
+    }
+    const s = toStatus(status);
+    if (s !== null) {
+      if (s === 401 || s === 403) return "auth_failed";
+      if (s >= 200 && s < 300) return err ? "server_error" : "ready";
+      return "server_error";
+    }
+    if (chain.length && isFetchFailed(chain[0])) return "unreachable";
+    return "server_error";
+  } catch {
+    return "server_error";
+  }
+}
+function causeChain(e) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  let cur = e;
+  for (let i = 0; i < 8 && cur && typeof cur === "object"; i++) {
+    if (seen.has(cur)) break;
+    seen.add(cur);
+    out.push(cur);
+    cur = cur.cause;
+  }
+  return out;
+}
+function codeOf(e) {
+  const c = e && e.code;
+  return typeof c === "string" ? c.toUpperCase() : "";
+}
+function nameOf(e) {
+  const n = e && e.name;
+  return typeof n === "string" ? n : "";
+}
+function isFetchFailed(e) {
+  return typeof (e && e.message) === "string" && /fetch failed/i.test(e.message);
+}
+function toStatus(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
+  if (typeof v === "string" && /^\d+$/.test(v.trim())) return Number(v.trim());
+  return null;
+}
+function breakerPath(cfg = {}) {
+  return join6(resolveDataDir(cfg), "breaker", `${endpointHash2(cfg)}.json`);
+}
+function endpointHash2(cfg = {}) {
+  const endpoint = typeof cfg?.endpoint === "string" ? cfg.endpoint : "";
+  return createHash3("sha256").update(endpoint).digest("hex").slice(0, 12);
+}
+function fresh() {
+  return {
+    state: "ready",
+    failures: [],
+    openedAt: 0,
+    timeoutStreak: 0,
+    lastOkAt: 0,
+    lastState: "",
+    probeAt: 0
+  };
+}
+function params(cfg) {
+  const b = cfg && typeof cfg.breaker === "object" && cfg.breaker ? cfg.breaker : {};
+  return {
+    threshold: posInt(b.threshold, DEFAULT_THRESHOLD),
+    windowMs: posInt(b.windowMs, DEFAULT_WINDOW_MS),
+    cooldownMs: posInt(b.cooldownMs, DEFAULT_COOLDOWN_MS)
+  };
+}
+function load(cfg, now, windowMs) {
+  const s = fresh();
+  try {
+    const raw = readJson(breakerPath(cfg), null);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return s;
+    if (isConnState(raw.state)) s.state = raw.state;
+    if (isConnState(raw.lastState)) s.lastState = raw.lastState;
+    if (Array.isArray(raw.failures)) {
+      s.failures = raw.failures.filter(
+        (t) => typeof t === "number" && Number.isFinite(t) && Math.abs(now - t) < windowMs
+      );
+    }
+    s.openedAt = num(raw.openedAt);
+    s.lastOkAt = num(raw.lastOkAt);
+    s.probeAt = num(raw.probeAt);
+    s.timeoutStreak = Math.max(0, Math.trunc(num(raw.timeoutStreak)));
+  } catch {
+    return fresh();
+  }
+  return s;
+}
+function save(cfg, s) {
+  writeJsonAtomic(breakerPath(cfg), {
+    state: s.state,
+    failures: s.failures,
+    openedAt: s.openedAt,
+    timeoutStreak: s.timeoutStreak,
+    lastOkAt: s.lastOkAt,
+    lastState: s.lastState,
+    probeAt: s.probeAt,
+    endpoint: typeof cfg?.endpoint === "string" ? cfg.endpoint : ""
+  });
+}
+function readBreaker(cfg, opts = {}) {
+  try {
+    const { windowMs } = params(cfg);
+    const now = Date.now();
+    const s = load(cfg ?? {}, now, windowMs);
+    const until = num(opts?.coldStartUntil);
+    const warming = until > 0 && now < until && !NEVER_WARMING.has(s.state);
+    return {
+      state: s.state,
+      failures: s.failures,
+      openedAt: s.openedAt,
+      timeoutStreak: s.timeoutStreak,
+      lastOkAt: s.lastOkAt,
+      lastState: s.lastState,
+      probeAt: s.probeAt,
+      display: warming ? "warming" : s.state,
+      suppressMessage: warming
+    };
+  } catch {
+    return { ...fresh(), display: "ready", suppressMessage: false };
+  }
+}
+function recordFailure(cfg, state) {
+  try {
+    if (state === "unconfigured") return;
+    const { threshold, windowMs } = params(cfg);
+    const now = Date.now();
+    const s = load(cfg ?? {}, now, windowMs);
+    const kind = isConnState(state) && state !== "ready" ? state : "server_error";
+    const prev = s.state;
+    s.timeoutStreak = kind === "not_responding" ? s.timeoutStreak + 1 : 0;
+    if (kind === "auth_failed") {
+      s.state = "auth_failed";
+    } else {
+      s.failures.push(now);
+      const cap = Math.max(threshold * 4, 64);
+      if (s.failures.length > cap) s.failures = s.failures.slice(-cap);
+      if (kind === "not_responding") {
+        if (s.timeoutStreak >= TIMEOUT_ESCALATION && s.state !== "auth_failed") {
+          s.state = "not_responding";
+        }
+      } else if (s.state !== "auth_failed") {
+        s.state = kind;
+      }
+    }
+    if (s.failures.length >= threshold) {
+      s.openedAt = now;
+      s.probeAt = 0;
+    }
+    s.lastState = prev;
+    save(cfg ?? {}, s);
+  } catch {
+  }
+}
+function recordSuccess(cfg) {
+  try {
+    const { windowMs } = params(cfg);
+    const now = Date.now();
+    const prev = load(cfg ?? {}, now, windowMs).state;
+    save(cfg ?? {}, {
+      state: "ready",
+      failures: [],
+      openedAt: 0,
+      timeoutStreak: 0,
+      lastOkAt: now,
+      lastState: prev,
+      probeAt: 0
+    });
+  } catch {
+  }
+}
+function allowRequest(cfg) {
+  try {
+    const { windowMs, cooldownMs } = params(cfg);
+    const now = Date.now();
+    const s = load(cfg ?? {}, now, windowMs);
+    if (!(s.openedAt > 0)) return true;
+    const since = Math.max(s.openedAt, s.probeAt);
+    if (now - since < cooldownMs) return false;
+    s.probeAt = now;
+    save(cfg ?? {}, s);
+    return true;
+  } catch {
+    return true;
+  }
+}
+function isConnState(v) {
+  return typeof v === "string" && /** @type {readonly string[]} */
+  CONN_STATES.includes(v);
+}
+function num(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+function posInt(v, d) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : d;
+}
+
+// ../claude-code/lib/http.mjs
+var ROUTES = Object.freeze({
+  health: "/v2/core/health",
+  register: "/v2/control/agents/register",
+  heartbeat: "/v2/control/agents/heartbeat",
+  ingest: "/v2/control/ingest",
+  ingestJobs: "/v2/control/ingest/jobs",
+  query: "/v2/control/query",
+  context: "/v2/control/context",
+  outcome: "/v2/control/outcome",
+  checkpoint: "/v2/control/checkpoint",
+  lessons: "/v2/control/lessons",
+  reflect: "/v2/control/reflect"
+});
+var MAX_QUERY_BYTES = 256 * 1024;
+var MAX_BODY_BYTES = 64 * 1024 * 1024;
+var DEFAULT_TIMEOUT_MS = 4e3;
+var HEALTH_TTL_MS = 30 * 1e3;
+var QUERY_MODES = Object.freeze(["direct_bypass", "direct", "agent_routed"]);
+var POISONED_RUN_ID = "default";
+async function request(cfg, method, path, body, opts = {}) {
+  const started = Date.now();
+  try {
+    const verb = String(method ?? "GET").toUpperCase();
+    const route = String(path ?? "");
+    const wantsBody = body !== void 0 && body !== null && verb !== "GET" && verb !== "HEAD";
+    if (wantsBody && isPoisonedRunId(body)) {
+      return refuse(
+        cfg,
+        started,
+        `refusing to send run_id "${POISONED_RUN_ID}" to ${verb} ${route} \u2014 it is the bundled server's placeholder and identifies no project (\xA74.3)`,
+        { route, run_id: POISONED_RUN_ID }
+      );
+    }
+    let bodyText;
+    if (wantsBody) {
+      const encoded = encodeBody(body);
+      if (encoded.error) {
+        return refuse(cfg, started, `${verb} ${route}: body is not serializable as JSON (${encoded.error})`, { route });
+      }
+      bodyText = encoded.text;
+      const cap = capFor(route);
+      const size = Buffer.byteLength(bodyText, "utf8");
+      if (size > cap) {
+        return refuse(
+          cfg,
+          started,
+          `${verb} ${route}: body is ${size} bytes, over the ${cap}-byte (${Math.round(cap / 1024)} KiB) cap for this route`,
+          { route, bytes: size, cap }
+        );
+      }
+    }
+    if (!isConfigured(cfg)) return refuseUnconfigured(cfg, started, `${verb} ${route}`);
+    if (!allowRequest(cfg)) {
+      const b = readBreaker(cfg);
+      const state = (
+        /** @type {FailState} */
+        b.state && b.state !== "ready" ? b.state : "unreachable"
+      );
+      return {
+        ok: false,
+        state,
+        error: `circuit breaker open (${state}); ${verb} ${route} was not dialed`,
+        ms: Date.now() - started
+      };
+    }
+    const timeoutMs = deadline(cfg, opts);
+    const url = urlFor(cfg, route);
+    let res = await dial(cfg, { verb, url, route, bodyText, timeoutMs, parse: "json" });
+    if (!res.ok && res.state === "not_responding" && opts && opts.retry === true) {
+      res = await dial(cfg, { verb, url, route, bodyText, timeoutMs, parse: "json" });
+    }
+    settle(cfg, res, opts);
+    return withMs(res, started);
+  } catch (err) {
+    return {
+      ok: false,
+      state: classifyError(err, null),
+      error: messageOf(err),
+      ms: Date.now() - started
+    };
+  }
+}
+async function dial(cfg, o) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      controller.abort();
+    } catch {
+    }
+  }, Math.max(1, o.timeoutMs));
+  if (typeof timer.unref === "function") timer.unref();
+  try {
+    const headers = {
+      accept: o.parse === "text" ? "text/plain, */*" : "application/json",
+      // §1.2: `Authorization: Bearer <key>` on everything. With no key configured the header
+      // is ABSENT rather than empty — `Bearer undefined` is a far harder 401 to diagnose.
+      ...authHeaders(cfg)
+    };
+    if (o.bodyText !== void 0) headers["content-type"] = "application/json";
+    const res = await fetch(o.url, {
+      method: o.verb,
+      headers,
+      body: o.bodyText,
+      signal: controller.signal,
+      redirect: "follow"
+    });
+    const status = res.status;
+    const text = await res.text();
+    if (status >= 200 && status < 300) {
+      if (o.parse === "text") return { ok: true, status, body: text };
+      const parsed = decodeJson(text);
+      if (parsed.error) {
+        return {
+          ok: false,
+          state: (
+            /** @type {FailState} */
+            classifyError(parsed.error, status)
+          ),
+          status,
+          error: `${o.verb} ${o.route}: HTTP ${status} with an unparseable JSON body (${snippet(text)})`
+        };
+      }
+      return { ok: true, status, body: parsed.value };
+    }
+    return {
+      ok: false,
+      state: (
+        /** @type {FailState} */
+        classifyError(null, status)
+      ),
+      status,
+      error: `${o.verb} ${o.route}: HTTP ${status}${text ? ` ${snippet(text)}` : ""}`
+    };
+  } catch (err) {
+    const state = (
+      /** @type {FailState} */
+      timedOut ? "not_responding" : classifyError(err, null)
+    );
+    return {
+      ok: false,
+      state,
+      // A deadline the *caller* squeezed below the configured default is the caller's own
+      // budget, not evidence about the server: `session-start`'s health slice and
+      // `prompt-recall`'s budget both dial on a fraction of it. An abort at the full default
+      // is evidence and still records — which is what keeps `drain.mjs`, the only caller that
+      // dials on the whole budget and retries, able to open the breaker on a dead instance.
+      ...timedOut && o.timeoutMs < deadline(cfg, null) ? { abortedEarly: (
+        /** @type {const} */
+        true
+      ) } : {},
+      error: timedOut ? `${o.verb} ${o.route}: aborted after ${o.timeoutMs}ms` : `${o.verb} ${o.route}: ${messageOf(err)}`
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function settle(cfg, res, opts) {
+  if (opts && opts.record === false) return;
+  if (res.ok) {
+    recordSuccess(cfg);
+    return;
+  }
+  if (res.status === 403) return;
+  if (res.abortedEarly) return;
+  recordFailure(
+    cfg,
+    /** @type {any} */
+    res.state
+  );
+}
+function refuse(cfg, started, error, fields = {}) {
+  log(cfg, "error", error, fields);
+  return { ok: false, state: "invalid_request", error, ms: Date.now() - started };
+}
+function refuseUnconfigured(cfg, started, what) {
+  const error = `${what}: no Mubit endpoint is configured; nothing was dialed`;
+  log(cfg, "debug", error);
+  return { ok: false, state: "unconfigured", error, ms: Date.now() - started };
+}
+function isPoisonedRunId(body) {
+  return !!body && typeof body === "object" && !Array.isArray(body) && body.run_id === POISONED_RUN_ID;
+}
+function capFor(route) {
+  return pathOf(route) === ROUTES.query ? MAX_QUERY_BYTES : MAX_BODY_BYTES;
+}
+function encodeBody(body) {
+  try {
+    const text = JSON.stringify(body);
+    if (typeof text !== "string") return { text: "", error: "value is not JSON-representable" };
+    return { text, error: "" };
+  } catch (err) {
+    return { text: "", error: messageOf(err) };
+  }
+}
+function decodeJson(text) {
+  if (!text || !text.trim()) return { value: {}, error: null };
+  try {
+    return { value: JSON.parse(text), error: null };
+  } catch (err) {
+    return { value: null, error: err };
+  }
+}
+function deadline(cfg, opts) {
+  const o = Number(opts && opts.timeoutMs);
+  if (Number.isFinite(o) && o > 0) return Math.trunc(o);
+  const c = Number(cfg && cfg.timeoutMs);
+  if (Number.isFinite(c) && c > 0) return Math.trunc(c);
+  return DEFAULT_TIMEOUT_MS;
+}
+function endpointOf(cfg) {
+  const ep = typeof cfg?.endpoint === "string" ? cfg.endpoint.trim() : "";
+  return ep.replace(/\/+$/, "");
+}
+function urlFor(cfg, route) {
+  const path = route.startsWith("/") ? route : `/${route}`;
+  return `${endpointOf(cfg)}${path}`;
+}
+function pathOf(route) {
+  const i = route.indexOf("?");
+  return i === -1 ? route : route.slice(0, i);
+}
+function withMs(res, started) {
+  return { ...res, ms: Date.now() - started };
+}
+function NETWORK_HINT(err) {
+  const HINTS = {
+    ENOTFOUND: "no such host \u2014 the endpoint name does not resolve; check it for a typo",
+    EAI_AGAIN: "the DNS lookup failed \u2014 check the network, or the endpoint for a typo",
+    ECONNREFUSED: "nothing is listening there \u2014 check the port, and that the instance is running",
+    EHOSTUNREACH: "the host is unreachable from this network",
+    ENETUNREACH: "the network is unreachable",
+    ENETDOWN: "the network is down",
+    ECONNRESET: "the connection was reset in flight",
+    ETIMEDOUT: "the connection timed out",
+    UND_ERR_CONNECT_TIMEOUT: "the connection timed out",
+    UND_ERR_HEADERS_TIMEOUT: "the instance accepted the connection but sent no headers in time",
+    CERT_HAS_EXPIRED: "the instance's TLS certificate has expired",
+    DEPTH_ZERO_SELF_SIGNED_CERT: "the instance's TLS certificate is self-signed and not trusted",
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: "the instance's TLS certificate could not be verified"
+  };
+  let cur = err;
+  for (let i = 0; i < 8 && cur && typeof cur === "object"; i++) {
+    const code = typeof cur.code === "string" ? cur.code.toUpperCase() : "";
+    if (HINTS[code]) return SANDBOX_BLOCKED() || `${HINTS[code]} (${code})`;
+    cur = cur.cause;
+  }
+  return "";
+}
+function SANDBOX_BLOCKED() {
+  const env = typeof process === "object" && process ? process.env || {} : {};
+  if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
+  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+}
+function messageOf(err) {
+  try {
+    if (!err) return "unknown error";
+    if (typeof err === "string") return err;
+    const hint = NETWORK_HINT(err);
+    if (hint) return hint;
+    const parts = [];
+    if (err.name) parts.push(String(err.name));
+    if (err.message) parts.push(String(err.message));
+    const cause = err.cause;
+    if (cause && (cause.code || cause.message)) parts.push(`(${String(cause.code || cause.message)})`);
+    return parts.join(": ") || String(err);
+  } catch {
+    return "unknown error";
+  }
+}
+function snippet(text) {
+  const s = String(text ?? "").replace(/\s+/g, " ").trim();
+  return s.length > 160 ? `${s.slice(0, 160)}\u2026` : s;
+}
+
+// ../claude-code/lib/dashboard-api.mjs
+var TIMEOUT_MS = 2e4;
+var READ_ONLY = Object.freeze({ record: false, timeoutMs: TIMEOUT_MS });
+var EXTRA_ROUTES = Object.freeze({
+  activity: "/v2/control/activity",
+  memoryHealth: "/v2/control/memory_health",
+  archive: "/v2/control/archive",
+  deleteLesson: "/v2/control/lessons/delete",
+  runs: "/v2/control/runs"
+});
+var DEFAULT_SCOPE = "run";
+var REPO_TAG = "repo:";
+var ERROR_CODES = Object.freeze([
+  "unauthorized",
+  "not_found",
+  "upstream_unreachable",
+  "auth_failed",
+  "bad_request"
+]);
+var STATE_MAP = Object.freeze({
+  auth_failed: { status: 502, code: "auth_failed" },
+  invalid_request: { status: 400, code: "bad_request" },
+  unconfigured: { status: 503, code: "upstream_unreachable" },
+  unreachable: { status: 503, code: "upstream_unreachable" },
+  not_responding: { status: 503, code: "upstream_unreachable" },
+  server_error: { status: 503, code: "upstream_unreachable" }
+});
+function ok(data) {
+  return { ok: true, status: 200, data };
+}
+function fail(status, code, message) {
+  return { ok: false, status, code, message: String(message ?? "") };
+}
+function mapError(cfg, res) {
+  const message = scrubKey(cfg, String(res && res.error ? res.error : "upstream call failed"));
+  const status = Number(res && res.status);
+  if (status === 401 || status === 403) return fail(502, "auth_failed", message);
+  const hit = STATE_MAP[String(res && res.state)];
+  return hit ? fail(hit.status, hit.code, message) : fail(503, "upstream_unreachable", message);
+}
+function scrubKey(cfg, text) {
+  const s = String(text ?? "");
+  const key = cfg && typeof cfg.apiKey === "string" ? cfg.apiKey.trim() : "";
+  if (!key || !s.includes(key)) return s;
+  return s.split(key).join("[REDACTED:api-key]");
+}
+function lessonId(raw) {
+  if (!raw || typeof raw !== "object") return "";
+  const first = [raw.reference_id, raw.lesson_id, raw.id].find((v) => typeof v === "string" && v.trim());
+  return first ? String(first).trim() : "";
+}
+function normalizeActivityLesson(entry, ctx = {}) {
+  const e = entry && typeof entry === "object" ? entry : {};
+  const meta = parseMetadata(e.metadata_json) || {};
+  const stated = str2(meta.scope) || str2(meta.lesson_scope);
+  const scope = stated || DEFAULT_SCOPE;
+  const sourceRun = String(meta.source_run_id || e.run_id || "");
+  const conditions = meta.conditions || meta.lesson_conditions;
+  return {
+    id: lessonId(e),
+    content: String(e.content || ""),
+    lessonType: String(meta.lesson_type || ""),
+    scope,
+    // "The server would have called this a run lesson" and "we never saw the metadata" are the
+    // same rendered word and different facts, and only the second should make a reader doubt
+    // the count beside it.
+    scopeKnown: stated !== "",
+    importance: String(meta.importance || meta.lesson_importance || ""),
+    conditions: Array.isArray(conditions) ? conditions.map(String) : [],
+    rationale: String(meta.rationale || ""),
+    sourceRunId: sourceRun,
+    source: String(e.source || ""),
+    createdAt: String(e.created_at || ""),
+    runId: String(e.run_id || ""),
+    project: projectTag(meta.env_tags),
+    leaksScope: scope !== DEFAULT_SCOPE,
+    fromOtherRun: !!(ctx.currentRun && sourceRun && sourceRun !== ctx.currentRun),
+    promotionStamped: PROMOTION_KEYS.some((k) => meta[k] !== void 0),
+    promotionCandidate: meta.promotion_candidate ?? null,
+    promotionQuarantined: meta.promotion_quarantined ?? null,
+    promotionShadowStats: meta.promotion_shadow_stats ?? null
+  };
+}
+var PROMOTION_KEYS = Object.freeze([
+  "promotion_candidate",
+  "promotion_quarantined",
+  "promotion_shadow_stats"
+]);
+function projectTag(tags) {
+  if (!Array.isArray(tags)) return "";
+  const hit = tags.map(str2).find((t) => t.startsWith(REPO_TAG));
+  return hit ? hit.slice(REPO_TAG.length) : "";
+}
+function parseMetadata(raw) {
+  let v = raw;
+  for (let i = 0; i < 2; i += 1) {
+    if (v && typeof v === "object" && !Array.isArray(v)) return v;
+    if (typeof v !== "string" || !v.trim()) return null;
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  return v && typeof v === "object" && !Array.isArray(v) ? v : null;
+}
+async function fetchActivity(cfg, params2 = {}, opts = {}) {
+  const req = {
+    limit: clamp(params2.limit, 1, 500, 100),
+    sort: params2.sort === "asc" ? "asc" : "desc",
+    // Truncates content to 200 chars and strips verbose metadata — the right projection for a
+    // feed, and it is what keeps a page of activity off the far side of a megabyte.
+    projection: params2.projection === "full" ? "full" : "compact"
+  };
+  if (str2(params2.run)) req.run_id = str2(params2.run);
+  if (str2(params2.pageToken)) req.page_token = str2(params2.pageToken);
+  if (Array.isArray(params2.entryTypes) && params2.entryTypes.length) {
+    req.entry_types = params2.entryTypes.map(String);
+  }
+  if (params2.excludeDerived === true) req.exclude_derived = true;
+  if (str2(params2.createdAfter)) req.created_after = str2(params2.createdAfter);
+  if (str2(params2.createdBefore)) req.created_before = str2(params2.createdBefore);
+  if (str2(params2.userId)) req.user_id = str2(params2.userId);
+  if (str2(params2.agentId)) req.agent_id = str2(params2.agentId);
+  const res = await request(cfg, "POST", EXTRA_ROUTES.activity, req, { ...READ_ONLY, ...opts });
+  if (!res.ok) return mapError(cfg, res);
+  const body = res.body && typeof res.body === "object" ? res.body : {};
+  return ok({
+    entries: Array.isArray(body.entries) ? body.entries : [],
+    nextPageToken: String(body.next_page_token || ""),
+    totalVisible: Number(body.total_visible) || 0
+  });
+}
+function str2(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+function clamp(v, lo, hi, dflt) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(hi, Math.max(lo, Math.trunc(n)));
+}
+
+// ../claude-code/lib/activity.mjs
+var ACTIVITY_ROUTES = Object.freeze({
+  activity: EXTRA_ROUTES.activity,
+  export: "/v2/control/activity/export"
+});
+var EXPORT_TIMEOUT_MS = 45e3;
+var EXPORT_OPTS = Object.freeze({ record: false, timeoutMs: EXPORT_TIMEOUT_MS });
+var COMPACT_KEYS = Object.freeze(["id", "created_at", "entry_type", "run_id", "content"]);
+var COMPACT_CONTENT_CHARS = 200;
+var PAGE_MIN = 1;
+var PAGE_MAX = 500;
+var PAGE_DEFAULT = 100;
+var SCAN_MAX_ENTRIES = 5e3;
+var SCAN_MAX_PAGES = 200;
+var SCAN_BUDGET_MS = 6e4;
+var CENSUS_MAX_PAGES = 6;
+var CENSUS_PAGE_LIMIT = 500;
+var CENSUS_MAX_ENTRIES = 3e3;
+var CENSUS_BUDGET_MS = 15e3;
+var DERIVED_KEYS = Object.freeze(["derived", "promotion", "promoted", "auto_promoted"]);
+async function listActivity(cfg, params2 = {}, opts = {}) {
+  const p = obj(params2);
+  const run = str3(p.run);
+  if (!run && p.allRuns !== true) {
+    return fail(
+      400,
+      "bad_request",
+      "activity requires a run id; pass allRuns to list across every run this key can see"
+    );
+  }
+  const res = await fetchActivity(cfg, {
+    run,
+    limit: clamp2(p.limit, PAGE_MIN, PAGE_MAX, PAGE_DEFAULT),
+    pageToken: str3(p.pageToken),
+    sort: str3(p.sort) === "asc" ? "asc" : "desc",
+    projection: str3(p.projection) === "full" ? "full" : "compact",
+    entryTypes: Array.isArray(p.entryTypes) ? p.entryTypes : void 0,
+    excludeDerived: p.excludeDerived === true,
+    createdAfter: str3(p.createdAfter),
+    createdBefore: str3(p.createdBefore),
+    userId: str3(p.userId),
+    agentId: str3(p.agentId)
+  }, opts);
+  if (!res.ok) return res;
+  const corrected = correct(res.data.entries, {
+    excludeDerived: p.excludeDerived === true,
+    compact: str3(p.projection) !== "full"
+  });
+  return ok({
+    ...corrected,
+    nextPageToken: res.data.nextPageToken,
+    // The server's count, over the server's filtering, before paging. It over-counts by
+    // `droppedDerived` whenever the re-filter had to do work.
+    totalVisible: res.data.totalVisible
+  });
+}
+async function scanActivity(cfg, params2 = {}) {
+  const p = obj(params2);
+  const maxEntries = clamp2(p.maxEntries, 1, 1e6, SCAN_MAX_ENTRIES);
+  const maxPages = clamp2(p.maxPages, 1, 1e4, SCAN_MAX_PAGES);
+  const budgetMs = clamp2(p.budgetMs, 1, 36e5, SCAN_BUDGET_MS);
+  const started = Date.now();
+  const entries = [];
+  const seen = /* @__PURE__ */ new Set();
+  let token = str3(p.pageToken);
+  let pages = 0;
+  let totalVisible = 0;
+  let droppedDerived = 0;
+  let excludeDerivedFallbackUsed = false;
+  let projectionFallbackUsed = false;
+  let truncated = false;
+  let truncatedReason = "";
+  for (; ; ) {
+    if (seen.has(token)) {
+      truncated = true;
+      truncatedReason = "page_token_repeated";
+      break;
+    }
+    seen.add(token);
+    const page = await listActivity(cfg, { ...p, pageToken: token, sort: "asc" });
+    if (!page.ok) return page;
+    pages += 1;
+    entries.push(...page.data.entries);
+    totalVisible = page.data.totalVisible;
+    droppedDerived += page.data.droppedDerived;
+    excludeDerivedFallbackUsed = excludeDerivedFallbackUsed || page.data.excludeDerivedFallbackUsed;
+    projectionFallbackUsed = projectionFallbackUsed || page.data.projectionFallbackUsed;
+    token = page.data.nextPageToken;
+    if (!token) break;
+    if (entries.length >= maxEntries) {
+      truncated = true;
+      truncatedReason = "max_entries";
+      break;
+    }
+    if (Date.now() - started >= budgetMs) {
+      truncated = true;
+      truncatedReason = "budget";
+      break;
+    }
+    if (pages >= maxPages) {
+      truncated = true;
+      truncatedReason = "max_pages";
+      break;
+    }
+  }
+  return ok({
+    entries,
+    pages,
+    totalVisible,
+    droppedDerived,
+    excludeDerivedFallbackUsed,
+    projectionFallbackUsed,
+    truncated,
+    truncatedReason,
+    elapsedMs: Date.now() - started,
+    nextPageToken: truncated ? token : ""
+  });
+}
+async function lessonCensus(cfg, params2 = {}) {
+  const p = obj(params2);
+  const run = str3(p.run);
+  const currentRun = str3(p.currentRun);
+  const scan = await scanActivity(cfg, {
+    run,
+    allRuns: !run,
+    entryTypes: ["lesson"],
+    projection: "full",
+    limit: clamp2(p.limit, PAGE_MIN, PAGE_MAX, CENSUS_PAGE_LIMIT),
+    maxPages: clamp2(p.maxPages, 1, 1e4, CENSUS_MAX_PAGES),
+    maxEntries: clamp2(p.maxEntries, 1, 1e6, CENSUS_MAX_ENTRIES),
+    budgetMs: clamp2(p.budgetMs, 1, 36e5, CENSUS_BUDGET_MS)
+  });
+  if (!scan.ok) return scan;
+  const seen = /* @__PURE__ */ new Set();
+  const rows = [];
+  for (const entry of scan.data.entries) {
+    const row = normalizeActivityLesson(entry, { currentRun });
+    if (row.id) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+    }
+    rows.push(row);
+  }
+  const lessons = rows.map((row) => ({ row, at: Date.parse(row.createdAt) })).sort((a, b) => {
+    if (Number.isNaN(a.at)) return Number.isNaN(b.at) ? 0 : 1;
+    if (Number.isNaN(b.at)) return -1;
+    return b.at - a.at;
+  }).map((held) => held.row);
+  const scopeCounts = /* @__PURE__ */ new Map();
+  const projectCounts = /* @__PURE__ */ new Map();
+  let unknownScope = 0;
+  for (const row of lessons) {
+    if (!row.scopeKnown) unknownScope += 1;
+    scopeCounts.set(row.scope, (scopeCounts.get(row.scope) ?? 0) + 1);
+    projectCounts.set(row.project, (projectCounts.get(row.project) ?? 0) + 1);
+  }
+  return ok({
+    lessons,
+    source: "activity",
+    pages: scan.data.pages,
+    totalVisible: scan.data.totalVisible,
+    // A census that gave up is still worth rendering; a census that gave up and says it didn't
+    // turns "you have four global lessons" into a number somebody will act on.
+    truncated: scan.data.truncated,
+    truncatedReason: scan.data.truncatedReason,
+    unknownScope,
+    scopeCounts: Object.fromEntries(scopeCounts),
+    projectCounts: Object.fromEntries(projectCounts),
+    elapsedMs: scan.data.elapsedMs
+  });
+}
+function isDerived(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  for (const key of DERIVED_KEYS) {
+    if (truthy(
+      /** @type {any} */
+      entry[key]
+    )) return true;
+  }
+  const meta = parseMetadata(
+    /** @type {any} */
+    entry.metadata_json ?? /** @type {any} */
+    entry.metadata
+  );
+  if (!meta) return false;
+  for (const key of DERIVED_KEYS) {
+    if (truthy(meta[key])) return true;
+  }
+  return false;
+}
+function compactEntry(entry) {
+  const e = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
+  const content = e.content === void 0 || e.content === null ? "" : String(e.content);
+  return {
+    id: plain(e.id),
+    created_at: plain(e.created_at),
+    entry_type: plain(e.entry_type),
+    run_id: plain(e.run_id),
+    content: content.length > COMPACT_CONTENT_CHARS ? `${content.slice(0, COMPACT_CONTENT_CHARS)}...` : content
+  };
+}
+function correct(raw, o) {
+  let entries = Array.isArray(raw) ? raw : [];
+  let droppedDerived = 0;
+  if (o.excludeDerived) {
+    const kept = entries.filter((e) => !isDerived(e));
+    droppedDerived = entries.length - kept.length;
+    entries = kept;
+  }
+  let projectionFallbackUsed = false;
+  if (o.compact) {
+    projectionFallbackUsed = entries.some((e) => {
+      const c = e && typeof e === "object" ? e.content : "";
+      return typeof c === "string" && c.length > COMPACT_CONTENT_CHARS + 3;
+    });
+    entries = entries.map(compactEntry);
+  }
+  return {
+    entries,
+    droppedDerived,
+    excludeDerivedFallbackUsed: droppedDerived > 0,
+    projectionFallbackUsed
+  };
+}
+function truthy(v) {
+  if (v === true) return true;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    return s === "true" || s === "1" || s === "yes";
+  }
+  return false;
+}
+function str3(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+function plain(v) {
+  return v === void 0 || v === null ? "" : String(v);
+}
+function obj(v) {
+  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+}
+function clamp2(v, lo, hi, dflt) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(hi, Math.max(lo, Math.trunc(n)));
+}
+
+// ../claude-code/lib/markers.mjs
+import { join as join7 } from "node:path";
+function defaultMarker(runId = "") {
+  return {
+    run_id: runId,
+    mode: "hosted",
+    state: "unknown",
+    updated_at: 0,
+    cold_start_until: 0,
+    // `dry_streak` and `last_hit_at` are what make a permanently dead recall path visible.
+    // Everything else here describes the *last* recall, which is exactly the wrong shape for
+    // "recall has returned nothing for the last forty prompts": a run of total failures and a
+    // healthy run that happened to draw a blank write identical rows. The streak is the only
+    // field that distinguishes them, and `recall` is the right home for it — the status line
+    // and the doctor already read this group, and it is per-run, which is the scope recall
+    // quality actually has. (Endpoint-scoped health is the breaker's job, not this file's.)
+    recall: {
+      sources: 0,
+      tokens: 0,
+      ms: 0,
+      empty_reason: "",
+      rung: 0,
+      dropped: 0,
+      dry_streak: 0,
+      last_hit_at: 0
+    },
+    captured: { tools: 0, turns: 0, pending: 0 },
+    // What the MCP server sent, which the capture path never sees: an MCP write leaves its
+    // own process and touches neither the spool nor `captured` above. Kept apart from that
+    // group rather than folded into it, so the status line's capture count keeps meaning
+    // "what the hooks captured" — but read beside it at session end, where the question is
+    // the different one of whether this run put anything on the wire at all.
+    mcp: { ingested: 0, at: 0 },
+    lessons: { global: 0, checked_at: 0 },
+    reflect: { at: 0, lessons_stored: 0, status: "" },
+    last_error: ""
+  };
+}
+var GROUPS = ["recall", "captured", "lessons", "reflect", "mcp"];
+function markerPath(cfg, runId) {
+  return join7(resolveDataDir(cfg), "status", `${runId}.json`);
+}
+function isPlainObject2(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function merge(base, patch) {
+  const out = { ...base };
+  if (!isPlainObject2(patch)) return out;
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === void 0) continue;
+    if (GROUPS.includes(k) && isPlainObject2(v)) {
+      out[k] = { ...isPlainObject2(out[k]) ? out[k] : {}, ...v };
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+function readMarker(cfg, runId) {
+  const base = defaultMarker(runId);
+  try {
+    const stored = readJson(markerPath(cfg, runId), null);
+    if (!isPlainObject2(stored)) return base;
+    return merge(base, stored);
+  } catch {
+    return base;
+  }
+}
+function updateMarker(cfg, runId, patch = {}) {
+  try {
+    if (!runId) return;
+    const p = markerPath(cfg, runId);
+    const stored = readJson(p, null);
+    const base = isPlainObject2(stored) ? merge(defaultMarker(runId), stored) : defaultMarker(runId);
+    const next = merge(base, patch);
+    next.run_id = next.run_id || runId;
+    next.updated_at = Date.now();
+    writeJsonAtomic(p, next);
+  } catch {
+  }
+}
+
 // ../claude-code/mcp/src/egress.mjs
 var LATTICE = ["run", "session", "global", "org"];
 var CEILINGS = ["run", "session", "global"];
 var INGEST_PATH = "/v2/control/ingest";
+var LESSONS_PATH = "/v2/control/lessons";
+var LESSONS_DEFAULT_LIMIT = 20;
+var LESSONS_MAX_LIMIT = 200;
+var CENSUS_TTL_MS = 5e3;
+var LESSONS_NOTE_KEY = "mubit_lessons_guard";
+var INGEST_NOTE_KEY = "mubit_scope_guard";
 var RAISE_WITH = "mcpLessonScope (MUBIT_MCP_LESSON_SCOPE)";
 var SDK_DEFAULT_SCOPE = "session";
 var RESHAPED_HEADERS = ["content-length", "content-encoding"];
@@ -1063,19 +2088,164 @@ function guardIngest(body, opts) {
     return noop;
   }
 }
+function guardLessonsRead(body, opts) {
+  const noop = { body, changed: false, note: null };
+  try {
+    const runId = typeof opts?.runId === "string" ? opts.runId : "";
+    if (opts?.pinRun !== true || runId === "") return noop;
+    if (!body || typeof body !== "object" || Array.isArray(body)) return noop;
+    if (readRunId(body) !== "") return noop;
+    if (isCrossRunAsk(readScope(body))) return noop;
+    return { body: { ...body, run_id: runId }, changed: true, note: null };
+  } catch {
+    return noop;
+  }
+}
+function isLessonsRead(input, init) {
+  if (String(init?.method ?? "GET").toUpperCase() !== "POST") return false;
+  if (typeof input !== "string" && !(input instanceof URL)) return false;
+  try {
+    const { pathname } = input instanceof URL ? input : new URL(input);
+    return pathname.replace(/\/+$/, "").endsWith(LESSONS_PATH);
+  } catch {
+    return false;
+  }
+}
+function readRunId(body) {
+  return typeof body?.run_id === "string" ? body.run_id.trim() : "";
+}
+function readScope(body) {
+  return typeof body?.scope === "string" ? body.scope.trim().toLowerCase() : "";
+}
+function readLimit(body) {
+  const n = Number(body?.limit);
+  if (!Number.isFinite(n) || n <= 0) return LESSONS_DEFAULT_LIMIT;
+  return Math.min(Math.floor(n), LESSONS_MAX_LIMIT);
+}
+function isCrossRunAsk(scope) {
+  return scope === "session" || scope === "global";
+}
+function selectLessons(rows, o) {
+  const mine = (r) => o.runId !== "" && (r.runId === o.runId || r.sourceRunId === o.runId);
+  if (o.scope === "") return rows.filter((r) => mine(r) || r.scope !== "run");
+  if (o.scope === "run") return rows.filter(mine);
+  return rows.filter((r) => r.scope === o.scope);
+}
+function wireLesson(r) {
+  return {
+    id: r.id,
+    lesson_id: r.id,
+    content: r.content,
+    lesson_type: r.lessonType,
+    scope: r.scope,
+    importance: r.importance,
+    conditions: r.conditions,
+    rationale: r.rationale,
+    source_run_id: r.sourceRunId,
+    source: r.source
+  };
+}
+var SHOWING = {
+  "": "this run, plus every lesson stored at a scope that reaches past the run that wrote it",
+  run: "this run only",
+  session: "lessons stored at session scope, across every run this key can see",
+  global: "lessons stored at global scope, across every run this key can see"
+};
+function catalogue(data, o) {
+  const rows = Array.isArray(data?.lessons) ? data.lessons : [];
+  const matched = selectLessons(rows, o);
+  const shown = matched.slice(0, o.limit);
+  const note2 = {
+    run_id: o.runId,
+    showing: SHOWING[o.scope] ?? SHOWING[""],
+    shown: shown.length
+  };
+  if (data?.truncated) {
+    note2.partial = true;
+    note2.note = `This catalogue is partial: the listing was cut short (${String(data.truncatedReason || "bound reached")}), so these are some of the lessons that matched and not all of them. No total is available. Narrow the request with \`scope\`, or read the full listing with \`/mubit-memory:remember\`.`;
+  } else {
+    note2.matched = matched.length;
+    if (matched.length > shown.length) {
+      note2.note = `${matched.length} lessons matched; the newest ${shown.length} are shown. Raise \`limit\` to see more.`;
+    }
+  }
+  return { lessons: shown.map(wireLesson), [LESSONS_NOTE_KEY]: note2 };
+}
+function degradedNote(scope, pinned) {
+  return {
+    source: "lessons-route",
+    degraded: true,
+    note: pinned ? "The full catalogue could not be assembled, so this is the narrower answer: lessons stored against this run. Lessons widened by other runs are not included." : `The full catalogue could not be assembled, so the request for scope "${scope}" went out as asked. These rows may come from any run this key can see, and the listing may be short of what is stored.`
+  };
+}
+function censusOnce(cfg) {
+  if (!cfg || typeof cfg !== "object") return null;
+  let inflight = null;
+  let cached = null;
+  return function census() {
+    const now = Date.now();
+    if (cached && now - cached.at < CENSUS_TTL_MS) return Promise.resolve(cached.res);
+    if (inflight) return inflight;
+    inflight = (async () => {
+      try {
+        const res = await lessonCensus(cfg, {});
+        cached = { at: Date.now(), res };
+        return res;
+      } catch (err) {
+        cached = { at: Date.now(), res: { ok: false, message: String(err) } };
+        return cached.res;
+      } finally {
+        inflight = null;
+      }
+    })();
+    return inflight;
+  };
+}
+function recordMcpIngest(cfg, runId, items) {
+  try {
+    if (!cfg || !runId || items <= 0) return;
+    const prior = Number(readMarker(cfg, runId)?.mcp?.ingested);
+    updateMarker(cfg, runId, {
+      mcp: { ingested: (Number.isFinite(prior) ? prior : 0) + items, at: Date.now() }
+    });
+  } catch {
+  }
+}
+function countItems(body) {
+  return Array.isArray(body?.items) ? body.items.length : 0;
+}
 function installFetchGuard(opts) {
   const ceiling = resolveCeiling(opts?.ceiling);
   const runId = typeof opts?.runId === "string" ? opts.runId : "";
   const pinRun = opts?.pinRun === true;
+  const census = censusOnce(opts?.cfg);
   const current = (
     /** @type {any} */
     globalThis.fetch
   );
   if (typeof current !== "function") return;
   const base = typeof current.mubitEgressGuardOriginal === "function" ? current.mubitEgressGuardOriginal : current;
-  const wrapped = async function fetch(input, init) {
+  const planLessons = async (init) => {
+    const parsed = parseBody(init);
+    if (!parsed.ok) return {};
+    const body = parsed.value;
+    const scope = readScope(body);
+    if (readRunId(body) !== "") return {};
+    const pinned = guardLessonsRead(body, { runId, pinRun });
+    const send = pinned.changed ? { ...init, body: JSON.stringify(pinned.body) } : void 0;
+    if (!census) return { init: send };
+    const res = await census();
+    if (res?.ok) {
+      return { answer: catalogue(res.data, { runId, scope, limit: readLimit(body) }) };
+    }
+    return isCrossRunAsk(scope) ? { note: degradedNote(scope, false) } : { init: send, note: degradedNote(scope, pinned.changed) };
+  };
+  const wrapped = async function fetch2(input, init) {
     let note2 = null;
+    let noteKey = INGEST_NOTE_KEY;
     let sendInit = init;
+    let ingestedItems = 0;
+    let ingestedRun = "";
     try {
       if (isIngest(input, init)) {
         const parsed = parseBody(init);
@@ -1090,15 +2260,27 @@ function installFetchGuard(opts) {
             sendInit = { ...init, body: JSON.stringify(out.body) };
             note2 = out.note;
           }
+          ingestedItems = countItems(out.body);
+          ingestedRun = typeof out.body?.run_id === "string" ? out.body.run_id : "";
+        }
+      } else if (isLessonsRead(input, init)) {
+        const plan = await planLessons(init);
+        if (plan.answer) return jsonResponse(plan.answer);
+        if (plan.init) sendInit = plan.init;
+        if (plan.note) {
+          note2 = plan.note;
+          noteKey = LESSONS_NOTE_KEY;
         }
       }
     } catch {
       note2 = null;
+      noteKey = INGEST_NOTE_KEY;
       sendInit = init;
     }
     const res = await base(input, sendInit);
+    if (res?.ok && ingestedItems > 0) recordMcpIngest(opts?.cfg, ingestedRun, ingestedItems);
     if (!note2) return res;
-    return annotate(res, note2);
+    return annotate(res, note2, noteKey);
   };
   Object.defineProperty(wrapped, "mubitEgressGuardOriginal", {
     value: base,
@@ -1106,9 +2288,16 @@ function installFetchGuard(opts) {
     configurable: true,
     enumerable: false
   });
-  wrapped.mubitEgressGuard = { ceiling, pinRun, runId };
+  wrapped.mubitEgressGuard = { ceiling, pinRun, runId, census: census !== null };
   globalThis.fetch = /** @type {any} */
   wrapped;
+}
+function jsonResponse(payload) {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    statusText: "OK",
+    headers: { "content-type": "application/json" }
+  });
 }
 function isIngest(input, init) {
   if (String(init?.method ?? "GET").toUpperCase() !== "POST") return false;
@@ -1128,7 +2317,7 @@ function parseBody(init) {
     return { ok: false };
   }
 }
-async function annotate(res, note2) {
+async function annotate(res, note2, key) {
   try {
     if (!res.ok) return res;
     if (!String(res.headers.get("content-type") ?? "").includes("application/json")) return res;
@@ -1142,13 +2331,13 @@ async function annotate(res, note2) {
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        payload = JSON.stringify({ ...parsed, mubit_scope_guard: note2 });
+        payload = JSON.stringify({ ...parsed, [key]: note2 });
       }
     } catch {
     }
     const headers = new Headers();
-    res.headers.forEach((value, key) => {
-      if (!RESHAPED_HEADERS.includes(key.toLowerCase())) headers.set(key, value);
+    res.headers.forEach((value, key2) => {
+      if (!RESHAPED_HEADERS.includes(key2.toLowerCase())) headers.set(key2, value);
     });
     return new Response(payload, { status: res.status, statusText: res.statusText, headers });
   } catch {
@@ -1258,7 +2447,7 @@ var BRIDGED = [
   ["MUBIT_CC_DATA_DIR", "CLAUDE_PLUGIN_DATA"]
 ];
 var UNEXPANDED = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
-var SERVER_VERSION = true ? "0.12.4" : "";
+var SERVER_VERSION = true ? "0.12.6" : "";
 if (prepare(process.env)) {
   await import("./server.js");
 }
@@ -1269,14 +2458,14 @@ function prepare(env) {
     bridgeHostVars(env);
     cfg = loadConfig(env);
   } catch (err) {
-    refuse(`could not resolve configuration: ${describe(err)}`);
+    refuse2(`could not resolve configuration: ${describe(err)}`);
     return false;
   }
   let runId;
   try {
     runId = deriveRunId(runConfig(cfg), hostPayload(env), { persist: false });
   } catch (err) {
-    refuse(`could not derive a run id: ${describe(err)}`);
+    refuse2(`could not derive a run id: ${describe(err)}`);
     return false;
   }
   const tools = allowlist(cfg);
@@ -1287,7 +2476,7 @@ function prepare(env) {
   env.MUBIT_MCP_TOOLS = tools.join(",");
   if (SERVER_VERSION) env.MUBIT_MCP_VERSION = SERVER_VERSION;
   const ceiling = resolveCeiling(cfg.mcpLessonScope);
-  installFetchGuard({ ceiling, runId, pinRun: true });
+  installFetchGuard({ ceiling, runId, pinRun: true, cfg });
   installInstructionsGuard({ instructions: INSTRUCTIONS });
   log(cfg, "info", "mcp: starting server", {
     run_id: runId,
@@ -1333,7 +2522,7 @@ function note(msg) {
   } catch {
   }
 }
-function refuse(why) {
+function refuse2(why) {
   note(`mubit: MCP server not started \u2014 ${why}`);
   process.exitCode = 1;
 }

@@ -46913,7 +46913,13 @@ var TransportEngine = class {
     try {
       response = await fetch(url, init);
     } catch (error2) {
-      throw new TransportError("IO", `${op.key} HTTP request failed: ${String(error2)}`);
+      // Chain the original. `String(error2)` for a transport failure is always the same two
+      // words, "fetch failed"; the code saying which failure it was sits one `cause` down.
+      // Flattening it to a string here is what made a dead hostname, a refused port and an
+      // expired certificate all arrive upstream as the same unactionable sentence.
+      const wrapped = new TransportError("IO", `${op.key} HTTP request failed: ${String(error2)}`);
+      wrapped.cause = error2;
+      throw wrapped;
     }
     if (!response.ok) {
       const body = await response.text();
@@ -48525,7 +48531,7 @@ function buildToolDefinitions(config2) {
           const health = await client.health();
           return asText({
             status: "connected",
-            endpoint: process.env.MUBIT_ENDPOINT || "http://127.0.0.1:3000",
+            endpoint: process.env.MUBIT_ENDPOINT || DEFAULT_SHARED_HTTP_ENDPOINT,
             default_session: defaultSessionId,
             default_user: defaultUserId || "(none)",
             health
@@ -48533,8 +48539,8 @@ function buildToolDefinitions(config2) {
         } catch (error2) {
           return asText({
             status: "disconnected",
-            endpoint: process.env.MUBIT_ENDPOINT || "http://127.0.0.1:3000",
-            error: error2 instanceof Error ? error2.message : String(error2)
+            endpoint: process.env.MUBIT_ENDPOINT || DEFAULT_SHARED_HTTP_ENDPOINT,
+            error: networkDetail(error2) || (error2 instanceof Error ? error2.message : String(error2))
           });
         }
       }
@@ -48555,11 +48561,68 @@ function readVersion() {
   }
 }
 var pkg = { version: readVersion() };
-var MUBIT_ENDPOINT = process.env.MUBIT_ENDPOINT || "http://127.0.0.1:3000";
+var MUBIT_ENDPOINT = process.env.MUBIT_ENDPOINT || DEFAULT_SHARED_HTTP_ENDPOINT;
 var MUBIT_API_KEY = process.env.MUBIT_API_KEY || "";
 var DEFAULT_SESSION_ID = process.env.MUBIT_DEFAULT_SESSION_ID || "default";
 var DEFAULT_USER_ID = process.env.MUBIT_DEFAULT_USER_ID || "";
 var TOOL_ALLOWLIST = (process.env.MUBIT_MCP_TOOLS || "").split(",").map((s) => s.trim()).filter(Boolean);
+var NETWORK_HINTS = {
+  ENOTFOUND: "that hostname does not resolve \u2014 check the endpoint for a typo (ENOTFOUND)",
+  EAI_AGAIN: "the DNS lookup failed \u2014 check the network, or the endpoint for a typo (EAI_AGAIN)",
+  ECONNREFUSED: "nothing is listening on that port (ECONNREFUSED)",
+  EHOSTUNREACH: "the host is unreachable from this network (EHOSTUNREACH)",
+  ENETUNREACH: "the network is unreachable (ENETUNREACH)",
+  ECONNRESET: "the connection was reset in flight (ECONNRESET)",
+  CERT_HAS_EXPIRED: "its TLS certificate has expired (CERT_HAS_EXPIRED)",
+  DEPTH_ZERO_SELF_SIGNED_CERT: "its TLS certificate is self-signed and not trusted (DEPTH_ZERO_SELF_SIGNED_CERT)",
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: "its TLS certificate could not be verified (UNABLE_TO_VERIFY_LEAF_SIGNATURE)"
+};
+function SANDBOX_BLOCKED() {
+  // Codex runs an unapproved command inside seatbelt with the network switched off, and DNS is
+  // what fails first there \u2014 so a perfectly healthy endpoint reports ENOTFOUND. Reading that
+  // as a bad endpoint sends the reader off to fix a URL that was never wrong; the fix is to
+  // approve the command. No network error carries information about the endpoint in here.
+  const env = typeof process === "object" && process ? process.env || {} : {};
+  if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
+  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+}
+/**
+ * Walk the `cause` chain for the code that says which transport failure this was.
+ * @param {unknown} err
+ * @returns {string} the hint, or "" when this is not a network failure
+ */
+function networkDetail(err) {
+  let cur = err;
+  for (let i = 0; i < 8 && cur && typeof cur === "object"; i++) {
+    const code = typeof cur.code === "string" ? cur.code.toUpperCase() : "";
+    if (NETWORK_HINTS[code]) return SANDBOX_BLOCKED() || NETWORK_HINTS[code];
+    cur = cur.cause;
+  }
+  return "";
+}
+/**
+ * The MCP SDK reports a thrown handler error as `error.message` alone, and undici's message for
+ * every transport failure is the same two words: "fetch failed". Which failure it actually was
+ * lives in the `cause` chain, which the SDK does not walk \u2014 so a dead endpoint, a refused
+ * port and an expired certificate all reached the model identically, and none of them
+ * distinguishably from a rejected key. Restate the cause before it is flattened.
+ * @param {string} name
+ * @param {Function} handler
+ */
+function withNetworkDetail(name, handler) {
+  return async (...args) => {
+    try {
+      return await handler(...args);
+    } catch (err) {
+      const hint = networkDetail(err);
+      if (!hint) throw err;
+      throw new Error(
+        `${name}: could not reach the Mubit instance at ${MUBIT_ENDPOINT}: ${hint}. Memory is unavailable until this is fixed; the request was not stored.`,
+        { cause: err }
+      );
+    }
+  };
+}
 function createServer() {
   const server = new McpServer({
     name: "mubit-memory",
@@ -48577,7 +48640,7 @@ function createServer() {
   })) {
     if (allow && !allow.has(tool.name))
       continue;
-    server.tool(tool.name, tool.description, tool.schema, tool.handler);
+    server.tool(tool.name, tool.description, tool.schema, withNetworkDetail(tool.name, tool.handler));
   }
   return server;
 }

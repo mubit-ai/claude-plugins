@@ -1,0 +1,10 @@
+{
+  "hook_event_name": "Stop",
+  "session_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "prompt_id": "p_lab_0001",
+  "last_assistant_message": "Not a bug in enqueue(): ingest answers \"queued\" when the batch is accepted, and the status only moves once indexing finishes. Poll the job id instead of retrying the batch.",
+  "turn_number": 1,
+  "transcript_path": "labs/payloads/transcript.jsonl",
+  "cwd": "labs/.work/demo-app",
+  "permission_mode": "default"
+}

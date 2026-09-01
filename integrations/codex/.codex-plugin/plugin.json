@@ -1,6 +1,6 @@
 {
   "name": "mubit-memory",
-  "version": "0.12.5",
+  "version": "0.12.6",
   "description": "Persistent, typed, self-improving memory for OpenAI Codex, backed by Mubit. Captures work involuntarily, recalls relevant lessons before every prompt, and attributes outcomes so memory improves with use. Shares one memory with the Claude Code plugin when both run in the same directory.",
   "author": {
     "name": "Mubit AI",

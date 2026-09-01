@@ -453,6 +453,33 @@ test('auth/SKILL.md prefers the browser flow and says why', () => {
     'the skill must say why the browser route is preferred, or the model will pick either');
 });
 
+/**
+ * The command line has to fall back the way the runtime does: env pin first, host
+ * interpolation second.
+ *
+ * Every hook, the MCP launcher and the auth binary's own resolver all read
+ * `MUBIT_CC_DATA_DIR` before `CLAUDE_PLUGIN_DATA` — and the `--data-dir` flag outranks
+ * both. So a skill that hard-passes `--data-dir "${CLAUDE_PLUGIN_DATA}"` defeats an
+ * env-pinned data dir on exactly the machines that pin one: the sign-in reports success
+ * and writes the key where no hook will ever read it. Observed live as the launcher
+ * split-brain — the harness pinned `MUBIT_CC_DATA_DIR`, auth wrote elsewhere, and every
+ * later session was unauthenticated.
+ *
+ * `${CLAUDE_PLUGIN_DATA}` is interpolated by the host *inside* the shell default, so the
+ * fixed spelling degrades exactly as before on machines with nothing pinned.
+ */
+test('auth/SKILL.md lets an env-pinned MUBIT_CC_DATA_DIR outrank the host interpolation', () => {
+  const { body } = loadSkill('auth');
+  const flags = [...body.matchAll(/--data-dir\s+("[^"]*")/g)].map((m) => m[1]);
+  assert.ok(flags.length >= 3,
+    `every auth command in the skill carries --data-dir; found only ${flags.length}`);
+  for (const flag of flags) {
+    assert.equal(flag, '"${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"',
+      `--data-dir ${flag} hard-pins the host interpolation; a set MUBIT_CC_DATA_DIR must win, `
+      + 'the way it does for every hook and the MCP launcher');
+  }
+});
+
 // ---------------------------------------------------------------------------
 // §9 — dashboard
 // ---------------------------------------------------------------------------

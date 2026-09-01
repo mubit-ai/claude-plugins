@@ -21,13 +21,16 @@ Two values, which are the whole of the plugin's setup:
 They land in `${CLAUDE_PLUGIN_DATA}/credentials.json`, owner-only (mode 600). That path
 survives plugin updates, so this is a once-per-machine step, not a once-per-release one.
 
-**`--data-dir "${CLAUDE_PLUGIN_DATA}"` is not optional, on any of the commands below.** A Bash
-tool call does not inherit `CLAUDE_PLUGIN_DATA` — it arrives empty — so without the flag the
-command has to guess which of several `mubit-memory*` directories the host is using, and a key
-written to the wrong one is indistinguishable, from the user's side, from a sign-in that never
-happened. The host substitutes the value into this file before you read it; pass it straight
-through. Do not turn it into an `ENV=… node …` prefix: that is no longer a `node` command and
-will stop for a permission prompt.
+**`--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"` is not optional, on any of the
+commands below.** A Bash tool call does not inherit `CLAUDE_PLUGIN_DATA` — it arrives empty —
+so without the flag the command has to guess which of several `mubit-memory*` directories the
+host is using, and a key written to the wrong one is indistinguishable, from the user's side,
+from a sign-in that never happened. The host substitutes `${CLAUDE_PLUGIN_DATA}` into this file
+before you read it, and the shell default around it lets a session that pins
+`MUBIT_CC_DATA_DIR` keep its pin — the same order every hook and the MCP launcher resolve in,
+so the sign-in lands where they read. Pass the whole expression straight through. Do not turn
+it into an `ENV=… node …` prefix: that is no longer a `node` command and will stop for a
+permission prompt.
 
 ## Step 1 — run it
 
@@ -41,7 +44,7 @@ waits for it; then come back here.
 command at that point — in the middle of a sign-up that was going fine.
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --data-dir "${CLAUDE_PLUGIN_DATA}" --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --json
 ```
 
 This opens the Mubit console in a browser. The user signs in (or signs up — the same page does
@@ -75,7 +78,7 @@ Ask the user to issue a key at <https://console.mubit.ai>, then run it with the 
 environment for that one command:
 
 ```bash
-MUBIT_AUTH_KEY='mbt_…' node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --data-dir "${CLAUDE_PLUGIN_DATA}" --paste --json
+MUBIT_AUTH_KEY='mbt_…' node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --paste --json
 ```
 
 The key goes in the environment rather than in `--key` because a process's arguments are
@@ -93,9 +96,9 @@ it is not a fault. Say it explicitly.
 
 - `/mubit-memory:setup` — reads what is configured and confirms the instance answers. Run it
   after this to see `ready`.
-- `node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --data-dir "${CLAUDE_PLUGIN_DATA}" --status` — what is stored right now. Reports
+- `node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --status` — what is stored right now. Reports
   whether a key is present, never the key itself. Exits non-zero when nothing is configured.
-- `node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --data-dir "${CLAUDE_PLUGIN_DATA}" --logout` — removes the stored credentials.
+- `node "${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs" --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --logout` — removes the stored credentials.
 
 If the user already has `apiKey` set through `/plugin` → Mubit Memory → configure, or exports
 `MUBIT_API_KEY`, both of those win over what this skill writes. That is deliberate: a deliberate

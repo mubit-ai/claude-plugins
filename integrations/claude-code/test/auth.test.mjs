@@ -28,6 +28,7 @@ import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { fakeMubit, lib, makeDataDir, mod, tempDir } from './helpers/harness.mjs';
+import { fakeConsole } from './helpers/fake-console.mjs';
 
 const IS_ROOT = process.getuid?.() === 0;
 const KEY = 'mbt_a_realistic_looking_test_key';
@@ -535,111 +536,6 @@ test('parseArgs defaults to the browser flow', async () => {
 // The browser flow — loopback + PKCE
 // ===========================================================================
 
-/**
- * A stand-in for the Mubit console.
- *
- * It does the one thing the real console must do and that the client cannot check for
- * itself: it **recomputes the S256 challenge from the verifier** and refuses the
- * exchange when they disagree. That is the entire security property of PKCE, so the
- * fake enforces it rather than rubber-stamping whatever arrives.
- */
-async function fakeConsole({ key = 'mbt_issued_by_console', provisioning = false,
-  mubitEndpoint = '', tokenStatus = 200, rawBody = undefined, omitKey = false } = {}) {
-  const { createServer } = await import('node:http');
-  const { createHash } = await import('node:crypto');
-
-  /** code -> challenge, as the real console would keep it. */
-  const issued = new Map();
-  const exchanges = [];
-
-  const server = createServer((req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    if (url.pathname !== '/api/cli/token') {
-      res.writeHead(404, { 'content-type': 'application/json' });
-      return res.end('{}');
-    }
-    const chunks = [];
-    req.on('data', (c) => chunks.push(c));
-    req.on('end', () => {
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-      exchanges.push(body);
-
-      // The forced-failure modes, for the exchange-failure matrix. They short-circuit
-      // before PKCE on purpose: a console answering 500 or an HTML error page never got
-      // as far as checking anything.
-      if (rawBody !== undefined) {
-        res.writeHead(tokenStatus, { 'content-type': 'text/html' });
-        return res.end(rawBody);
-      }
-      if (tokenStatus !== 200) {
-        res.writeHead(tokenStatus, { 'content-type': 'application/json' });
-        return res.end(JSON.stringify({ error: `forced_${tokenStatus}` }));
-      }
-
-      const expected = issued.get(body.code);
-      const actual = createHash('sha256').update(String(body.verifier ?? '')).digest('base64')
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-      if (!expected || expected !== actual) {
-        res.writeHead(400, { 'content-type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'pkce_mismatch' }));
-      }
-      res.writeHead(200, { 'content-type': 'application/json' });
-      // Exactly the field set `server/api/cli/token.post.ts` returns, and nothing else.
-      // The old fake was *generous* — it invented a richer payload than the real server —
-      // and that is precisely what hid the missing `mubitEndpoint` from 1487 tests: the
-      // console shipped no endpoint, the plugin fell back to its compiled-in default, and
-      // every test passed. The console asserts the same list from its side, so a change to
-      // either reddens one of them.
-      const payload = {
-        mubitApiKey: key,
-        mubitEndpoint,
-        minimaUrl: 'https://harness.example.invalid',
-        instanceId: 'instance-under-test',
-        projectId: 'proj_1',
-        namespace: 'proj_1',
-        region: 'eu',
-      };
-      // A console broken enough to answer without the one field that matters.
-      if (omitKey) delete payload.mubitApiKey;
-      res.end(JSON.stringify(payload));
-    });
-  });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  server.unref();
-  const port = server.address().port;
-
-  return {
-    url: `http://127.0.0.1:${port}`,
-    exchanges,
-    /**
-     * Play the part of the browser: read the URL the CLI wanted to open, register the
-     * challenge against a fresh code, and call the loopback back.
-     */
-    async browse(authUrl, {
-      code = 'code_ok', tamperState, sendProvisioning = provisioning, delayMs = 0,
-      omitCode = false,
-    } = {}) {
-      // `delayMs` stands in for a user who has to create an account, an org and wait out a
-      // workspace coming up. It is the only way to exercise a ten-minute deadline in a suite
-      // that must finish in seconds — the wait is faked, the deadline arithmetic is not.
-      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs).unref?.());
-      const u = new URL(authUrl);
-      issued.set(code, u.searchParams.get('challenge'));
-      const cbPort = u.searchParams.get('port');
-      const state = tamperState ?? u.searchParams.get('state');
-      const q = sendProvisioning
-        ? `provisioning=1&state=${encodeURIComponent(state)}`
-        : omitCode
-          ? `state=${encodeURIComponent(state)}`
-          : `code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
-      return fetch(`http://127.0.0.1:${cbPort}/callback?${q}`, { redirect: 'manual' });
-    },
-    /** Register a code whose challenge does not match any verifier we will send. */
-    poison(code) { issued.set(code, 'a-challenge-that-matches-nothing'); },
-    close: () => new Promise((r) => server.close(r)),
-  };
-}
 
 test('makePkce produces an S256 pair, base64url encoded', async () => {
   const { makePkce } = await mod('bin/auth.src.mjs');
@@ -1766,4 +1662,211 @@ test('inside the codex sandbox a refused console blames the network, not the bro
     'the fix is approving the command, and the message must say so');
   assert.doesNotMatch(out.detail, /fetch failed/i,
     'the raw transport wrapper is not an explanation');
+});
+
+// ===========================================================================
+// The data-dir split-brain warning
+// ===========================================================================
+
+/**
+ * The flag wins — that ordering is load-bearing and tested above — but a flag that
+ * *disagrees* with a pinned `MUBIT_CC_DATA_DIR` is exactly the shape of the observed
+ * split-brain: the skill interpolated one directory, the environment pinned another,
+ * and the sign-in reported success into a store no hook reads. The resolver cannot
+ * know which side is right, so it says, on the progress channel, that they differ.
+ */
+test('a --data-dir that disagrees with a set MUBIT_CC_DATA_DIR is warned about', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const fromFlag = makeDataDir();
+  const pinned = makeDataDir();
+  const progress = [];
+
+  await main(['--status', '--json', '--data-dir', fromFlag], { MUBIT_CC_DATA_DIR: pinned },
+    { log: () => {}, logProgress: (m) => progress.push(m) });
+
+  const text = progress.join('\n');
+  assert.match(text, /MUBIT_CC_DATA_DIR/,
+    'the warning must name the setting being overridden, or nobody can act on it');
+  assert.ok(text.includes(fromFlag) && text.includes(pinned),
+    `both directories are named, so the split is visible. Got:\n${text || '(silent)'}`);
+});
+
+test('no warning when the flag and the pin agree, or when nothing is pinned', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const dir = makeDataDir();
+
+  for (const env of [{ MUBIT_CC_DATA_DIR: dir }, {}]) {
+    const progress = [];
+    await main(['--status', '--json', '--data-dir', dir], env,
+      { log: () => {}, logProgress: (m) => progress.push(m) });
+    assert.doesNotMatch(progress.join('\n'), /MUBIT_CC_DATA_DIR/,
+      'a warning that fires on the healthy path trains everyone to ignore it');
+  }
+});
+
+// ===========================================================================
+// A fresh key that 401s is retried before auth_failed
+// ===========================================================================
+
+/**
+ * Observed live: a key the console minted seconds earlier answered 401 at the
+ * gateway for over a minute — edge ACLs propagate on their own clock. Declaring
+ * `auth_failed` there sends the user to reissue a key that was never bad, and the
+ * *second* authorize flow then supersedes the first key entirely.
+ *
+ * The exemption is scoped to keys this flow just minted. A stored or pasted key that
+ * 401s is genuinely bad, and waiting 30 seconds to say so would be pure friction.
+ */
+test('the browser flow retries a fresh key through ACL lag instead of failing it', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const { readCredentials } = await lib('credentials.mjs');
+  const server = await fakeMubit({
+    'POST /v2/control/lessons': [
+      { status: 401, json: { error: 'unknown key' } },
+      { status: 401, json: { error: 'unknown key' } },
+      { json: { lessons: [] } },
+    ],
+  });
+  const console_ = await fakeConsole({ key: 'mbt_just_minted', mubitEndpoint: server.url });
+  const dataDir = makeDataDir();
+  const lines = [];
+
+  const started = Date.now();
+  const code = await main(['--json'],
+    { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_RETRY_UNIT_MS: '10' },
+    {
+      dataDir, fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 5000,
+      openImpl: (url) => { console_.browse(url); },
+    });
+
+  assert.equal(code, 0, `a lagging ACL is not a bad key:\n${lines.join('\n')}`);
+  assert.equal(server.countOf('POST', '/v2/control/lessons'), 3,
+    'two refusals, then the answer — the retry is what turned this into a sign-in');
+  assert.equal(readCredentials(dataDir).apiKey, 'mbt_just_minted');
+  assert.ok(Date.now() - started < 4000, 'no real sleeping in this suite');
+  await console_.close();
+  await server.close();
+});
+
+test('a pasted key still fails fast on 401 — the lag exemption is for fresh mints only', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const server = await fakeMubit({
+    'POST /v2/control/lessons': { status: 401, json: { error: 'revoked' } },
+  });
+  const lines = [];
+
+  const code = await main(['--paste', '--json'],
+    { MUBIT_AUTH_KEY: 'mbt_stored_and_revoked', MUBIT_ENDPOINT: server.url,
+      MUBIT_CC_AUTH_RETRY_UNIT_MS: '10' },
+    { dataDir: makeDataDir(), fetchImpl: fetch, log: (m) => lines.push(m) });
+
+  assert.equal(code, 1);
+  assert.equal(JSON.parse(lines.join('')).state, 'auth_failed');
+  assert.equal(server.countOf('POST', '/v2/control/lessons'), 1,
+    'a key that existed before this command ran earns no retry');
+  await server.close();
+});
+
+/**
+ * The schedule is a contract, not an implementation detail: the skill tells the user
+ * how long the command can appear to hang, and the live-run analysis sized it
+ * against a measured ~70 s worst-case propagation. Pinned by export so a future edit
+ * has to look this reasoning in the eye.
+ */
+test('the retry schedule covers ~30 s and the env unit shrinks it for tests', async () => {
+  const { AUTH_RETRY_SCHEDULE_MS } = await mod('bin/auth.src.mjs');
+
+  assert.ok(Array.isArray(AUTH_RETRY_SCHEDULE_MS) && AUTH_RETRY_SCHEDULE_MS.length >= 2,
+    'at least two retries — one is a coin toss against a propagation delay');
+  const total = AUTH_RETRY_SCHEDULE_MS.reduce((a, b) => a + b, 0);
+  assert.ok(total >= 25_000 && total <= 45_000,
+    `the schedule totals ${total} ms; the measured ACL lag needs ~30 s of patience`);
+});
+
+// ===========================================================================
+// The token exchange has its own deadline
+// ===========================================================================
+
+/**
+ * Observed live: the `POST /api/cli/token` fetch after the callback has no
+ * timeout of its own, and a wedged console held the command in a >100 s silent hang —
+ * inside a Bash tool call, indistinguishable from a dead process. The outer ten-minute
+ * deadline technically fires, but it reports `provisioning` (exit 2, "run it again"),
+ * which is the wrong verdict for a console that already took the code.
+ */
+test('a hung token exchange hits its own deadline, not the ten-minute one', async () => {
+  const { runBrowserAuth, BrowserTimeout } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole({ tokenHang: true });
+
+  const started = Date.now();
+  await assert.rejects(
+    runBrowserAuth({
+      consoleUrl: console_.url,
+      openImpl: (url) => { console_.browse(url); },
+      timeoutMs: 3000,
+      exchangeTimeoutMs: 200,
+      log: () => {},
+    }),
+    (err) => {
+      assert.ok(!(err instanceof BrowserTimeout),
+        'a console that took the code and hung is not a browser that never came back');
+      assert.match(String(err?.message ?? err), /exchange|console/i,
+        'the message must say which side went quiet');
+      return true;
+    });
+  assert.ok(Date.now() - started < 5000,
+    'the exchange deadline, not the outer browser deadline, is what fired');
+  await console_.close();
+});
+
+test('main() reports a hung exchange as browser_failed with the paste route, not provisioning', async () => {
+  const { main, KEY_ENV_VAR } = await mod('bin/auth.src.mjs');
+  const console_ = await fakeConsole({ tokenHang: true });
+  const lines = [];
+
+  const code = await main(['--json'],
+    { MUBIT_CONSOLE_URL: console_.url, MUBIT_CC_AUTH_EXCHANGE_TIMEOUT_MS: '200' },
+    {
+      dataDir: makeDataDir(), fetchImpl: fetch, log: (m) => lines.push(m), timeoutMs: 3000,
+      openImpl: (url) => { console_.browse(url); },
+    });
+
+  assert.equal(code, 1,
+    'exit 2 would tell the user to wait for a workspace; nothing is provisioning here');
+  const out = JSON.parse(lines.join(''));
+  assert.equal(out.state, 'browser_failed');
+  assert.match(out.detail, new RegExp(KEY_ENV_VAR),
+    'the paste route is the way forward when the console will not finish the exchange');
+  await console_.close();
+});
+
+/**
+ * The progress line is half the fix: the exchange runs after the user has already done
+ * their part in the browser, so a silence here reads as "it ignored me". One line on
+ * stderr says the flow is alive and what it is doing.
+ */
+test('the exchange announces itself on the progress channel', async () => {
+  const { main } = await mod('bin/auth.src.mjs');
+  const instance = await fakeMubit({ 'POST /v2/control/lessons': { json: { lessons: [] } } });
+  const console_ = await fakeConsole({ key: 'mbt_k', mubitEndpoint: instance.url });
+  const progress = [];
+
+  const code = await main(['--json'], { MUBIT_CONSOLE_URL: console_.url }, {
+    dataDir: makeDataDir(), fetchImpl: fetch, timeoutMs: 5000,
+    log: () => {}, logProgress: (m) => progress.push(m),
+    openImpl: (url) => { console_.browse(url); },
+  });
+
+  assert.equal(code, 0);
+  assert.match(progress.join('\n'), /finishing sign-in/i,
+    'the one moment the flow is silently busy must say so');
+  await console_.close();
+  await instance.close();
+});
+
+/** The shipped deadline: long enough for a slow console, far short of the Bash kill. */
+test('the exchange deadline ships at 90 s and the environment can shrink it', async () => {
+  const { DEFAULT_EXCHANGE_TIMEOUT_MS } = await mod('bin/auth.src.mjs');
+  assert.equal(DEFAULT_EXCHANGE_TIMEOUT_MS, 90_000,
+    'sized against the observed 100+ s hang: fail before the harness kills the command');
 });

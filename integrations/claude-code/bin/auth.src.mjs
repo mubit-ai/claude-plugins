@@ -75,6 +75,35 @@ const DEFAULT_TIMEOUT_MS = 8000;
  */
 const DEFAULT_AUTH_TIMEOUT_MS = 600000;
 
+/**
+ * How long the token exchange itself may take, once the browser has called back.
+ *
+ * This is a different wait from the one above. The ten-minute deadline covers a human —
+ * signing up, creating an org, waiting out a workspace. By the time the exchange runs the
+ * human's part is over, and the only thing left is one POST to the console. A console that
+ * takes the code and then never answers held this command in a silent hang measured at
+ * 100+ s in a live run — and because the browser deadline's promise has already settled by then,
+ * it could not fire: the hang had no ceiling at all.
+ *
+ * Ninety seconds is generous for one request and still fails well inside the 600 s the
+ * harness allows the whole command. `MUBIT_CC_AUTH_EXCHANGE_TIMEOUT_MS` shrinks it, the way
+ * the other windows are shrunk.
+ */
+export const DEFAULT_EXCHANGE_TIMEOUT_MS = 90000;
+
+/**
+ * The waits between re-probes of a key this flow just minted, when the instance answers
+ * 401/403. Edge ACLs propagate on their own clock: a key the console issued seconds ago
+ * was observed, live, refusing at the gateway for over a minute, and declaring
+ * `auth_failed` there sends the user to reissue a key that was never bad — and the second
+ * authorize flow then supersedes the first key entirely. ~30 s of patience, spent only on
+ * the browser path: a stored or pasted key that 401s is genuinely bad and fails fast.
+ *
+ * `MUBIT_CC_AUTH_RETRY_UNIT_MS` rescales the schedule (5000 is the shipped unit), so the
+ * tests exercise the loop without sleeping through it.
+ */
+export const AUTH_RETRY_SCHEDULE_MS = [5000, 10000, 15000];
+
 // ---------------------------------------------------------------------------
 // Shape
 // ---------------------------------------------------------------------------
@@ -189,7 +218,8 @@ function defaultOpen(url, onFailure) {
  *   2. `POST /v2/control/lessons` with the bearer token — is this key good? This is the
  *      only question health cannot answer.
  *
- * @param {{endpoint: string, apiKey: string, fetchImpl?: typeof fetch, timeoutMs?: number}} opts
+ * @param {{endpoint: string, apiKey: string, fetchImpl?: typeof fetch, timeoutMs?: number,
+ *          retry401Ms?: number[]}} opts
  * @returns {Promise<VerifyResult>}
  */
 export async function verifyCredentials(opts) {
@@ -222,13 +252,21 @@ export async function verifyCredentials(opts) {
     };
   }
 
-  // 2 — the key itself.
-  const probe = await dial(fetchImpl, `${endpoint}${PROBE_ROUTE}`, {
+  // 2 — the key itself. A 401/403 is re-asked through `retry401Ms` before it is believed:
+  // the browser path passes the ACL-lag schedule for the key it just minted, and every
+  // other caller passes nothing and keeps the single-shot answer.
+  const probeOnce = () => dial(fetchImpl, `${endpoint}${PROBE_ROUTE}`, {
     method: 'POST',
     timeoutMs,
     headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
     body: '{}',
   });
+  let probe = await probeOnce();
+  const delays = Array.isArray(opts?.retry401Ms) ? opts.retry401Ms : [];
+  for (let i = 0; (probe.status === 401 || probe.status === 403) && i < delays.length; i++) {
+    await new Promise((r) => setTimeout(r, delays[i]));
+    probe = await probeOnce();
+  }
   if (probe.transportError) {
     return {
       ok: false,
@@ -442,13 +480,14 @@ export function makePkce() {
  *
  * @param {{consoleUrl?: string, repo?: string, host?: string, region?: string,
  *          openImpl?: (url: string) => any, fetchImpl?: typeof fetch,
- *          timeoutMs?: number, log?: (m: string) => void}} [opts]
+ *          timeoutMs?: number, exchangeTimeoutMs?: number, log?: (m: string) => void}} [opts]
  * @returns {Promise<Record<string, any>>}
  */
 export async function runBrowserAuth(opts = {}) {
   const {
     consoleUrl = CONSOLE_URL, repo = '', host = '', region = '',
-    openImpl, fetchImpl = fetch, timeoutMs = DEFAULT_AUTH_TIMEOUT_MS, log = console.error,
+    openImpl, fetchImpl = fetch, timeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
+    exchangeTimeoutMs = DEFAULT_EXCHANGE_TIMEOUT_MS, log = console.error,
   } = opts;
 
   const { verifier, challenge } = makePkce();
@@ -511,11 +550,32 @@ export async function runBrowserAuth(opts = {}) {
     const hit = await awaited;
     if (hit.provisioning) throw new ProvisioningPending();
 
-    const res = await fetchImpl(`${consoleUrl}/api/cli/token`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code: hit.code, verifier }),
-    });
+    // The user's part is done; this is the one moment the flow is busy with nothing to
+    // show for it. Say so, or a slow console reads as a dead command.
+    log('Finishing sign-in — exchanging the browser code for your key…');
+
+    // The exchange gets a deadline of its own. The browser timer above cannot back it up:
+    // its promise settled the moment the callback arrived, so a console that takes the
+    // code and then goes quiet used to hang this command with no ceiling at all.
+    const exchangeAc = new AbortController();
+    const exchangeTimer = setTimeout(() => exchangeAc.abort(), exchangeTimeoutMs);
+    let res;
+    try {
+      res = await fetchImpl(`${consoleUrl}/api/cli/token`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code: hit.code, verifier }),
+        signal: exchangeAc.signal,
+      });
+    } catch (err) {
+      if (exchangeAc.signal.aborted) {
+        throw new Error('token exchange failed: the console took the sign-in code and then '
+          + `did not answer within ${Math.round(exchangeTimeoutMs / 1000)} s`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(exchangeTimer);
+    }
     if (!res.ok) throw new Error(`token exchange failed (HTTP ${res.status})`);
 
     // A 200 that is not JSON — a proxy's HTML error page, a half-written reply — fails
@@ -570,9 +630,9 @@ function buildAuthUrl({ consoleUrl, port, state, challenge, repo, host, region }
  * can say which.
  *
  * **A plaintext answer is upgraded, not discarded.** Measured 2026-08-28 in two clusters:
- * both report `http://`, and only one of them means it. `api.eu.dev.mubit.ai` answers 401
- * over TLS and 308s plain HTTP to it; `api.eu.mubit.ai` answers over plain HTTP and fails
- * the TLS handshake. So the scheme says nothing about the host, and dropping the host over
+ * both report `http://`, and only one of them means it. The dev cluster's EU host answers
+ * 401 over TLS and 308s plain HTTP to it; `api.eu.mubit.ai` answers over plain HTTP and
+ * fails the TLS handshake. So the scheme says nothing about the host, and dropping the host over
  * it sent a dev key to the production gateway, which rejected it and told the user their key
  * was bad. Keeping the host and fixing the scheme is right in both clusters: dev connects,
  * prod's TLS failure falls through to the gateway that has always served it.
@@ -711,6 +771,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   const logProgress = deps.logProgress ?? ((m) => console.error(m));
   const args = parseArgs(argv);
   const dataDir = deps.dataDir ?? resolveDataDirFrom(env, args);
+  warnOnDataDirSplit(env, args, logProgress);
   const emit = (payload) => log(args.json ? JSON.stringify(payload) : payload.detail);
 
   if (args.mode === 'status') {
@@ -747,6 +808,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
         // window per test and then sit out the full deadline.
         openImpl: deps.openImpl,
         timeoutMs: authTimeoutFrom(env, deps),
+        exchangeTimeoutMs: exchangeTimeoutFrom(env),
         log: logProgress,
       });
       const res = await authenticateAcrossEndpoints({
@@ -754,6 +816,8 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
         endpoints: args.endpoint ? [args.endpoint] : endpointCandidatesFor(payload),
         apiKey: payload.mubitApiKey,
         fetchImpl,
+        // The key in hand is seconds old — the one case whose 401 deserves patience.
+        retry401Ms: retryScheduleFrom(env),
       });
       emit({ ok: res.ok, state: res.state, endpoint: res.endpoint, detail: res.detail });
       return res.ok ? 0 : 1;
@@ -814,6 +878,37 @@ function authTimeoutFrom(env = {}, deps = {}) {
   if (typeof deps.timeoutMs === 'number') return deps.timeoutMs;
   const raw = Number(env?.MUBIT_CC_AUTH_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 600000;
+}
+
+/** See `DEFAULT_EXCHANGE_TIMEOUT_MS`. */
+function exchangeTimeoutFrom(env = {}) {
+  const raw = Number(env?.MUBIT_CC_AUTH_EXCHANGE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_EXCHANGE_TIMEOUT_MS;
+}
+
+/** See `AUTH_RETRY_SCHEDULE_MS`. The env var rescales; 5000 is the shipped unit. */
+function retryScheduleFrom(env = {}) {
+  const unit = Number(env?.MUBIT_CC_AUTH_RETRY_UNIT_MS);
+  if (!(Number.isFinite(unit) && unit > 0)) return AUTH_RETRY_SCHEDULE_MS;
+  return AUTH_RETRY_SCHEDULE_MS.map((d) => Math.max(1, Math.round((d / 5000) * unit)));
+}
+
+/**
+ * The flag wins — `resolveDataDirFrom` is deliberate about that — but a flag that
+ * disagrees with a pinned `MUBIT_CC_DATA_DIR` is the exact shape of the observed
+ * split-brain: the skill interpolated one directory, the environment pinned another,
+ * and a *successful* sign-in landed where no hook reads. The resolver cannot know
+ * which side is right, so the disagreement goes on the progress channel, where the
+ * skill (and a user reading stderr) can see it before trusting the verdict.
+ */
+function warnOnDataDirSplit(env = {}, args = {}, logProgress = () => {}) {
+  const flag = typeof args?.dataDir === 'string' ? args.dataDir.trim() : '';
+  const pinned = typeof env?.MUBIT_CC_DATA_DIR === 'string' ? env.MUBIT_CC_DATA_DIR.trim() : '';
+  if (!flag || /^\$\{/.test(flag) || !pinned) return;
+  if (resolve(flag) === resolve(pinned)) return;
+  logProgress(`Warning: --data-dir ${flag} overrides MUBIT_CC_DATA_DIR=${pinned}. `
+    + 'Credentials will be written to the first; anything reading the pinned directory '
+    + 'will not see them.');
 }
 
 /**

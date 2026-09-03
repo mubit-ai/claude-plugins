@@ -1,6 +1,6 @@
 {
   "name": "@mubit-ai/claude-code-plugin",
-  "version": "0.12.6",
+  "version": "0.13.0",
   "type": "module",
   "description": "Mubit memory plugin for Claude Code — involuntary capture, pre-prompt recall, and outcome attribution.",
   "license": "Apache-2.0",

@@ -7,7 +7,7 @@
  * go looking. So `instructions` carries the whole "when is Mubit worth reaching for" argument
  * for two populations at once:
  *
- *   - every session with tool search on, where the thirteen descriptions are deferred;
+ *   - every session with tool search on, where the seven descriptions are deferred;
  *   - every **subagent**. `hooks.json` registers `SessionStart` and `UserPromptSubmit` in the
  *     parent conversation only, so a subagent is handed no steer block and no per-turn
  *     injection. A subagent that does not search has no memory of this project at all.
@@ -52,14 +52,14 @@ const handshake = () => (_init ??= mcpDrive());
 // The shipped frame
 // ---------------------------------------------------------------------------
 
-// The headline. Without this field a model under tool search is offered thirteen bare tool names
+// The headline. Without this field a model under tool search is offered seven bare tool names
 // and no statement of when any of them is worth reaching for.
 test('initialize carries a non-empty instructions string', async () => {
   const { init, stderr } = await handshake();
 
   assert.equal(typeof init?.instructions, 'string',
     'the initialize result carried no `instructions` field, so under tool search the model '
-    + 'meets thirteen bare tool names with nothing saying when to use one — and a subagent, which '
+    + 'meets seven bare tool names with nothing saying when to use one — and a subagent, which '
     + `sees no SessionStart preamble, meets nothing at all.${REMEDY}\n  server stderr:\n${stderr || '(silent)'}`);
   assert.ok(String(init.instructions).trim().length > 0,
     `\`instructions\` was present but blank, which the host renders as no guidance.${REMEDY}`);
@@ -294,20 +294,17 @@ const ANSWERS_A_QUESTION = {
   mubit_recall: 'a topic or question stated in words',
   mubit_diagnose: 'an error from a command that just failed',
   mubit_dereference: 'a reference_id the model already holds',
-  mubit_lessons: 'what has been learned, rather than an answer',
-  mubit_strategies: 'the pattern across many lessons rather than any one of them',
 };
-
 const ANSWERS_NO_QUESTION = {
   mubit_learned: 'a write — the paragraph after it is entirely about this one',
   mubit_outcome: 'a write; named beside mubit_learned as what credits the entries that helped',
-  mubit_reflect: 'a write, and one the SessionEnd hook already performs on the model\'s behalf',
-  mubit_archive: 'a write; reached with a reference_id in hand, not with a question',
-  mubit_forget: 'a write, and a destructive one — not something to steer a model toward',
-  mubit_checkpoint: 'not a question but a moment, and the moment is the user\'s to name',
   mubit_status: 'diagnostics — reached when memory is failing, not when it is being used',
   mubit_memory_health: 'diagnostics, for the same reason',
 };
+// The catalogue, the pattern across lessons, a checkpoint, a delete and an explicit reflect
+// left the default surface for `bin/admin.mjs`. The instructions still have to say where they
+// went: a model that wants the catalogue and finds no tool for it would otherwise search.
+const LEFT_FOR_SKILLS = ['strategies', 'checkpoint', 'forget', 'reflect'];
 
 test('the instructions name every curated verb that answers a question', async () => {
   const { init } = await handshake();
@@ -326,4 +323,8 @@ test('the instructions name every curated verb that answers a question', async (
     + '  This string is the whole tool surface for a subagent and for any session under tool '
     + 'search, so a retrieval verb it does not name is one they will not reach for.'
     + REMEDY);
+  const unrouted = LEFT_FOR_SKILLS.filter((s) => !text.includes(`:${s}`));
+  assert.deepEqual(unrouted, [], `the instructions do not route ${unrouted.join(', ')} at the skill `
+    + 'that now reaches it. A verb that left the tool surface without a forwarding address is one '
+    + `the model will search the tool list for and not find.${REMEDY}`);
 });

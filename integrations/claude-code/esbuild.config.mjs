@@ -196,6 +196,10 @@ const targets = [
   // It is a binary rather than an MCP tool because the vendored server registers twenty-one
   // tools and none of them touches variables, and `mcp/dist/server.js` cannot be rebuilt here.
   { entryPoints: ['bin/pin.src.mjs'], outfile: out('bin/pin.mjs'), ...shared },
+  // The admin binary: the catalogue, a delete, a named checkpoint, the pattern across lessons
+  // and an explicit reflect, which left the MCP surface so that a session pays nothing to
+  // list them. No launcher, for the same reason `pin` has none.
+  { entryPoints: ['bin/admin.src.mjs'], outfile: out('bin/admin.mjs'), ...shared },
   // No launcher, for the same reason `bin/auth.mjs` has none: launchers exist for the entries
   // the *host* execs on its own (`hooks.json`, `settings.json`), where a parse error on an old
   // Node would be silent. A skill-invoked script is run by a person who is watching, and the

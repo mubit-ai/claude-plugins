@@ -79,11 +79,14 @@ function feed(entries, over = {}) {
 async function ask(t, args, routes) {
   const server = await fakeMubit(routes);
   t.after(() => server.close());
-  // These tests read the catalogue as the server answers it. The results guard
-  // (`mcp/src/results.mjs`) would render it one line per lesson on the way out, so it is
-  // switched off here; `mcp-results.test.mjs` covers that rendering.
+  // `mubit_lessons` left the default surface for `bin/admin.mjs`, so it is restored by name:
+  // the guard on its route still has to hold for a user who does the same. The results guard
+  // (`mcp/src/results.mjs`) would render the catalogue one line per lesson on the way out, so
+  // it is switched off; these tests read the catalogue as the server answers it, and
+  // `mcp-results.test.mjs` covers that rendering.
   const out = await mcpCallTool('mubit_lessons', args, {
-    endpoint: server.url, runId: RUN, extra: { MUBIT_CC_MCP_RESULT_TOKENS: '0' },
+    endpoint: server.url, runId: RUN,
+    extra: { MUBIT_CC_MCP_RESULT_TOKENS: '0', MUBIT_MCP_TOOLS: 'mubit_lessons' },
   });
   return { server, out };
 }

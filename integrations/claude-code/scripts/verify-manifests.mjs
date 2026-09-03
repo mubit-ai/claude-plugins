@@ -30,11 +30,10 @@ const CONN_STATES = [
   'ready', 'unreachable', 'server_error', 'auth_failed', 'not_responding', 'unconfigured',
 ];
 
-/** §8.2 — thirteen of the twenty-one tools; the last three were promoted once each had a skill to reach it. */
+/** §8.2 — seven of the twenty-one tools; the administrative verbs are reached through `bin/admin.mjs`. */
 const DEFAULT_ALLOWLIST = [
-  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
-  'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
-  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
+  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_diagnose',
+  'mubit_dereference', 'mubit_status', 'mubit_memory_health',
 ];
 
 const P = {

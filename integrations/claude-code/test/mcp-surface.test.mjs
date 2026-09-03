@@ -26,31 +26,28 @@ import { join } from 'node:path';
 import { mcpListTools, PLUGIN_ROOT } from './helpers/harness.mjs';
 
 /**
- * §8.2 — the curated set, in the guide's order, with the three promoted verbs after it.
- *
- * The first ten are the original curation. `mubit_strategies`, `mubit_checkpoint` and
- * `mubit_memory_health` were excluded on the theory that a hook already covered them, and
- * for the first two that was never quite true: nothing in the plugin reads the pattern
- * *across* lessons, and the only checkpoint anyone gets is the involuntary one at
- * `PreCompact` — a user cannot name a marker before doing something risky. The third was
- * excluded while `skills/doctor/SKILL.md` was telling its reader to POST the same route by
- * hand. Each now ships with a skill that makes it reachable.
+ * §8.2 — the curated set, in the guide's order: the retrieval verbs, the two writes that make
+ * memory improve with use, and the two diagnostics. Everything a person asks for — the
+ * catalogue, a delete, a named checkpoint, the pattern across lessons, an explicit reflect —
+ * is reached through a skill that runs `bin/admin.mjs`, at no listing cost on either host.
  */
 const DEFAULT_ALLOWLIST = [
-  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
-  'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
-  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
+  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_diagnose',
+  'mubit_dereference', 'mubit_status', 'mubit_memory_health',
 ];
 
 /**
- * The eight §8.2 excludes: a hook already does the job better, or there is no Claude Code
- * surface for it at all. Named rather than derived, so this file states the contract
- * outright instead of restating whatever the server happens to register.
+ * The fourteen §8.2 excludes: a hook already does the job better, there is no Claude Code
+ * surface for it at all, or a skill reaches it through `bin/admin.mjs` without a listing.
+ * Named rather than derived, so this file states the contract outright instead of restating
+ * whatever the server happens to register.
  */
 const EXCLUDED = [
   'mubit_remember', 'mubit_context',
   'mubit_register_agent', 'mubit_list_agents', 'mubit_step_outcome', 'mubit_ingest_status',
   'mubit_handoff', 'mubit_feedback',
+  'mubit_reflect', 'mubit_lessons', 'mubit_archive', 'mubit_forget', 'mubit_strategies',
+  'mubit_checkpoint',
 ];
 
 /** The remedy every failure in this file shares. Stated once. */
@@ -176,8 +173,12 @@ test('every advertised tool description says which tool to prefer, or when not t
 // The sharpest case of the above, asserted by name rather than by regex: mubit_recall,
 // mubit_lessons, mubit_diagnose and mubit_dereference are four restatements of "gets things
 // out of memory". Unless each names one of the others, the choice between them is a coin toss.
+//
+// `mubit_lessons` has since left the default surface for `bin/admin.mjs`, so the four are
+// listed by name here: the descriptions are the vendored server's, a user who restores the
+// tool by name gets them, and the bar they clear stays asserted whatever the default ships.
 test('the four retrieval tools disambiguate against each other by name', async () => {
-  const { tools } = await defaultSurface();
+  const { tools } = await mcpListTools({ extra: { MUBIT_MCP_TOOLS: RETRIEVAL.join(',') } });
   const byName = new Map(tools.map((t) => [t.name, String(t.description ?? '')]));
   const undisambiguated = RETRIEVAL.filter((name) => {
     const description = byName.get(name) ?? '';
@@ -206,10 +207,14 @@ test('serverInfo reports the bundled server\'s real version', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// §8.2 — the three verbs promoted into the allowlist
+// §8.2 — three verbs whose descriptions stay gated
 // ---------------------------------------------------------------------------
 
-/** The promoted three: excluded until a skill existed to reach each of them. */
+/**
+ * Once the promoted three. `mubit_memory_health` is still in the default set; the other two
+ * have since left it for `bin/admin.mjs`, but a user who restores them by name gets these
+ * descriptions, so the bar they cleared stays asserted.
+ */
 const PROMOTED = ['mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health'];
 
 /**

@@ -194,6 +194,9 @@ const targets = [
   // is the second skill that calls no MCP tool — the vendored server has no variables tool to
   // call — so without this the skill on this host names a binary that does not exist.
   { entryPoints: [resolve(SHARED, 'bin', 'pin.src.mjs')], outfile: out('bin/pin.mjs'), ...shared },
+  // The admin binary, from the same shared source. The four skills that call it ship under
+  // both hosts, so without this target the Codex copies name a path that does not exist.
+  { entryPoints: [resolve(SHARED, 'bin', 'admin.src.mjs')], outfile: out('bin/admin.mjs'), ...shared },
   // The dashboard binary, built from the same shared source as the Claude Code copy. Two
   // installable plugins cannot share a path — the same reason this tree carries its own
   // `mcp/dist/server.js` — so the bundle is emitted here rather than referenced across.

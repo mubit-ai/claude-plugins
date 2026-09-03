@@ -97,6 +97,7 @@ export const ROUTES = Object.freeze({
   checkpoint: '/v2/control/checkpoint',
   lessons: '/v2/control/lessons',
   reflect: '/v2/control/reflect',
+  strategies: '/v2/control/strategies',
 });
 
 /** §1.1: `POST /v2/control/query` has its own body limit. */

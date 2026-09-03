@@ -3,18 +3,31 @@ name: forget
 description: Delete a lesson from Mubit memory, or down-weight one that is merely wrong. Use when an entry should never have existed — a secret, another project's fact — and remember that deletion cannot be undone.
 ---
 
-Call `mcp__mubit__mubit_forget` with `lesson_id` — the `reference_id` cited in recalled
-context, or the `lesson_id` reported by `mubit-memory:reflect`. Confirm the id and the text
-with the user before you call it; there is no dry run.
+## Step 0 — resolve the binary
 
-Pass `lesson_id` and nothing else. The same tool accepts `session_id`, and that argument
-deletes **the entire run** — every capture, trace, and lesson in it — not one entry. Never
-send it unless the user has asked for exactly that, in those words.
+No environment variable carries this plugin's path under Codex. Codex lists each skill with the
+absolute path of its `SKILL.md`; **this file** is at `<plugin-root>/skills/forget/SKILL.md`, so
+the binary is two directories above it:
 
-Under Codex that warning is worth one extra sentence, because the run is not only yours. A
-Codex session and a Claude Code session in the same directory share one run by design, so
-deleting by `session_id` here takes the other harness's memory of this project with it. The
-user will not have been thinking about that when they said "clear it".
+```
+<plugin-root>/bin/admin.mjs
+```
+
+Resolve that to an absolute path from this file's own location and use it in every command
+below. Do not write `${CLAUDE_PLUGIN_ROOT}`: Codex sets no plugin-root variable of any
+spelling, so the shell expands it to nothing and `node /bin/admin.mjs` fails with ENOENT.
+
+Delete with the bundled script, naming the lesson — the `reference_id` cited in recalled
+context, or the id on a line of `mubit-memory:reflect` or `mubit-memory:strategies`:
+
+```bash
+node <plugin-root>/bin/admin.mjs forget <lesson_id>
+```
+
+Confirm the id and the text with the user before you run it; there is no dry run. The script
+deletes one lesson by `POST /v2/control/lessons/delete` and nothing else: it has no way to
+delete a whole run, on purpose, because that operation removed every capture, trace and
+lesson in the run and was one argument away from a single-lesson delete.
 
 There is also no "mark superseded" operation: nothing flags an entry as replaced. Superseding
 is done the way described below — write the corrected lesson, and down-weight the old one so
@@ -26,12 +39,12 @@ Deletion is **not undoable**. There is no tombstone to restore from, no recycle 
 entry's accumulated reinforcement history — every outcome that ever credited or blamed it —
 goes with it.
 
-A lesson that is merely *wrong* is usually better handled with `mcp__mubit__mubit_outcome`
-and a negative signal:
+A lesson that is merely *wrong* is usually better handled with `mcp__mubit__mubit_outcome` and a negative
+signal:
 
 ```
 mcp__mubit__mubit_outcome  reference_id=<the lesson>  outcome=failure  signal=-1
-                           rationale="<why it was wrong, in one sentence>"
+               rationale="<why it was wrong, in one sentence>"
 ```
 
 The promotion pipeline acts on that. The lesson's confidence drops, it stops surfacing near

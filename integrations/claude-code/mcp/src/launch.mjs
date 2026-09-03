@@ -42,13 +42,14 @@ import { INSTRUCTIONS, installInstructionsGuard } from './instructions.mjs';
 import { installResultsGuard } from './results.mjs';
 
 /**
- * §8.2 — thirteen of the server's twenty-one tools, in the guide's order.
+ * §8.2 — seven of the server's twenty-one tools, in the guide's order.
  *
- * A blank `mcpTools` means this curated set, never "none" and never all 21: the eight
- * excluded verbs are ones a hook already does better (`mubit_remember`, `mubit_context`)
- * or that have no Claude Code surface at all (`mubit_register_agent`, `mubit_list_agents`
- * and the rest of the multi-agent orchestration group). Nothing is removed — users restore
- * any of them through `mcpTools` / `MUBIT_MCP_TOOLS`.
+ * A blank `mcpTools` means this curated set, never "none" and never all 21. The fourteen
+ * left out are ones a hook already does better (`mubit_remember`, `mubit_context`), ones
+ * with no Claude Code surface at all (the multi-agent orchestration group), and the five
+ * administrative verbs that a skill now reaches through `bin/admin.mjs` at no listing cost
+ * (`lib/config.mjs` states the line). Nothing is removed — users restore any of them
+ * through `mcpTools` / `MUBIT_MCP_TOOLS`.
  *
  * The last three arrived later, and each was excluded for a reason that turned out not to
  * hold.
@@ -74,9 +75,8 @@ import { installResultsGuard } from './results.mjs';
  * where config resolution hands back an empty list.
  */
 export const DEFAULT_ALLOWLIST = [
-  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
-  'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
-  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
+  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_diagnose',
+  'mubit_dereference', 'mubit_status', 'mubit_memory_health',
 ];
 
 /**
@@ -260,7 +260,7 @@ function hostPayload(env) {
 }
 
 /**
- * §8.2 — `cfg.mcpTools`, or the curated thirteen. A user-supplied list passes through verbatim
+ * §8.2 — `cfg.mcpTools`, or the curated seven. A user-supplied list passes through verbatim
  * rather than being unioned with the default: "restore `mubit_handoff`" and "give me only
  * `mubit_recall`" are both legitimate, and only a verbatim list expresses the second.
  *

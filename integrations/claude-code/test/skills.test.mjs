@@ -629,8 +629,8 @@ test('strategies/SKILL.md separates the pattern from the lessons it is a pattern
   const { body } = loadSkill('strategies');
   assert.match(body, /across/i,
     'strategies must say the answer is a pattern *across* lessons, not one of them (§9)');
-  assert.match(body, /mubit_lessons/,
-    'strategies must name mubit_lessons as the tool that reads the individual lessons — '
+  assert.match(body, /admin\.mjs lessons/,
+    'strategies must name `admin.mjs lessons` as the command that reads the individual lessons — '
     + 'the two are near-synonyms until one of them says so');
 });
 
@@ -917,4 +917,54 @@ test('setup/SKILL.md offers the /dashboard alias without a pre-executed command'
     + 'the friction the shim exists to remove');
   assert.match(body, /exclamation mark/i,
     'the body must say why the pre-execution form is absent, or the next edit puts it back');
+});
+
+// ---------------------------------------------------------------------------
+// §9 — the four skills that run bin/admin.mjs
+// ---------------------------------------------------------------------------
+
+/**
+ * `mubit_reflect`, `mubit_lessons`, `mubit_forget`, `mubit_strategies` and `mubit_checkpoint`
+ * left the default MCP surface: each was paid for on every session and each already had a
+ * skill as its only real entry point. The skill now runs `bin/admin.mjs` instead, and the
+ * grant has to say so exactly — a `tools:` entry naming a tool the launcher no longer
+ * registers would grant nothing, and a bare `Bash` would hand the skill a shell.
+ */
+const ADMIN_SKILLS = {
+  checkpoint: ['checkpoint'],
+  forget: ['forget'],
+  reflect: ['reflect', 'lessons'],
+  strategies: ['strategies', 'lessons'],
+};
+
+for (const [name, subs] of Object.entries(ADMIN_SKILLS)) {
+  test(`${name}/SKILL.md grants exactly its bin/admin.mjs subcommands, and no departed MCP tool`, () => {
+    const { fm, body } = loadSkill(name);
+    const allowed = fm['allowed-tools'];
+    assert.ok(allowed, `${name} must declare allowed-tools so the host does not prompt on every run`);
+    const list = Array.isArray(allowed) ? allowed : [String(allowed)];
+    for (const sub of subs) {
+      assert.ok(list.some((a) => a.includes(`bin/admin.mjs ${sub}:*`)),
+        `${name} must grant Bash(node \${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs ${sub}:*); got ${JSON.stringify(list)}`);
+    }
+    for (const a of list) {
+      if (!a.startsWith('Bash(')) continue;
+      assert.match(a, /\$\{CLAUDE_PLUGIN_ROOT\}/,
+        'the plugin is installed at a path nobody can predict — a relative path resolves elsewhere');
+      assert.match(a, /bin\/admin\.mjs [a-z]+:\*\)$/, 'the rule must name one subcommand, not hand the skill a shell');
+    }
+    const tools = toolsOf(fm) ?? [];
+    for (const departed of ['mubit_reflect', 'mubit_lessons', 'mubit_forget', 'mubit_strategies', 'mubit_checkpoint', 'mubit_archive']) {
+      assert.ok(!tools.some((t) => t.endsWith(departed)) && !list.some((t) => t.endsWith(departed)),
+        `${name} still grants ${departed}, which the launcher no longer registers by default`);
+    }
+    assert.match(body, /bin\/admin\.mjs/, `${name}'s body must show the command it runs`);
+  });
+}
+
+test('forget/SKILL.md keeps mubit_outcome as a qualified grant beside the script', () => {
+  const { fm } = loadSkill('forget');
+  const list = Array.isArray(fm['allowed-tools']) ? fm['allowed-tools'] : [String(fm['allowed-tools'])];
+  assert.ok(list.includes(`${QUALIFIED_PREFIX}mubit_outcome`),
+    'forget must still be able to down-weight a lesson instead of deleting it, and the grant must be qualified');
 });

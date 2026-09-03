@@ -1,6 +1,6 @@
 ---
 name: reflect
-description: Ask Mubit to extract lessons from this session's activity and report what it learned. Use when the user wants lessons banked now rather than at session end, or asks what memory holds for this project.
+description: Extract lessons from this session's activity now; use when the user wants them banked before session end or asks what memory holds.
 disable-model-invocation: false
 allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs reflect:*)", "Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons:*)"]
 ---

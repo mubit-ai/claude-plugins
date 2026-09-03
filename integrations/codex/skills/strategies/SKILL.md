@@ -1,6 +1,6 @@
 ---
 name: strategies
-description: Surface the pattern across many stored lessons rather than any single one. Use when the user asks what memory has learned in general, why the same class of mistake keeps recurring, or how this project tends to work — not when they have one specific question.
+description: Surface the pattern across many stored lessons; use when the user asks what memory has learned in general or why a mistake keeps recurring.
 ---
 
 ## Step 0 — resolve the binary

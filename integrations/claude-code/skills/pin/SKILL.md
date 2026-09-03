@@ -1,6 +1,6 @@
 ---
 name: pin
-description: "Pin a standing constraint for the rest of this run, so it is put in front of the model on every prompt — 'don't touch the vendored server', 'stay on the 0.10 branch', 'no new dependencies'. Use when the user states a rule that holds for this task and stops being true when the task ends. A pin is for THIS run and is cleared when it no longer applies; a durable, cross-session lesson is /mubit-memory:remember instead. Also use to list or clear what is pinned."
+description: Pin a constraint for the rest of this run, shown on every prompt; use when a rule ends with the task, and remember for anything durable.
 disable-model-invocation: false
 allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs:*)"]
 ---

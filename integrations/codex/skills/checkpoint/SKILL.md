@@ -1,6 +1,6 @@
 ---
 name: checkpoint
-description: Save a named snapshot of where this run has got to, stored verbatim. Use when the user is about to do something risky or destructive, when a compaction is coming that they want to survive on their own terms, or when they ask to mark a point they may need to come back to.
+description: Save a named verbatim snapshot of this run; use when the user is about to do something risky.
 ---
 
 ## Step 0 — resolve the binary

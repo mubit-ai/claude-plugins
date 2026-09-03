@@ -1,6 +1,6 @@
 ---
 name: recall
-description: Search Mubit memory for lessons, rules, facts, or past work relevant to a specific question. Use when you need detail beyond the memory already injected into this turn.
+description: Search Mubit memory for lessons, rules, facts or past work; use when the injected memory is not enough.
 ---
 
 Relevant memory was **already injected** at the top of this turn by the Mubit recall hook.

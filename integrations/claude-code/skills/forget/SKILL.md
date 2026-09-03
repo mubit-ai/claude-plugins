@@ -1,6 +1,6 @@
 ---
 name: forget
-description: Delete a lesson from Mubit memory, or down-weight one that is merely wrong. Use when an entry should never have existed — a secret, another project's fact — and remember that deletion cannot be undone.
+description: Delete a lesson, or down-weight one that is merely wrong; use when asked, after saying it cannot be undone.
 disable-model-invocation: false
 allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs forget:*)", "mcp__plugin_mubit-memory_mubit__mubit_outcome"]
 ---

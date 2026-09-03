@@ -1,6 +1,6 @@
 ---
 name: setup
-description: First-run setup for Codex — merge Mubit's hook registrations into $CODEX_HOME/hooks.json, register the MCP server, and confirm the endpoint and key. Use when the plugin is freshly installed, after an upgrade, or when it appears installed but nothing is being captured.
+description: "First-run setup: check the endpoint, the key and that the instance answers; use when freshly installed or reporting auth_failed."
 ---
 
 **This skill never installs anything.** It writes two configuration files the user already

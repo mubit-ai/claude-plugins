@@ -1,8 +1,8 @@
 {
-  "measuredAt": "2026-09-03T20:20:06.723Z",
-  "value": 3391,
+  "measuredAt": "2026-09-03T20:25:36.641Z",
+  "value": 3009,
   "cached": 0,
-  "curatedValue": 3391,
+  "curatedValue": 3009,
   "allowlistHonoured": true,
   "method": "word/number/symbol segmentation; see the header of scripts/measure-context-cost.mjs",
   "surface": {
@@ -60,8 +60,8 @@
       "count": 7
     },
     "skillFrontmatter": {
-      "tokens": 877,
-      "chars": 2977,
+      "tokens": 495,
+      "chars": 1668,
       "count": 13
     },
     "agentFrontmatter": {

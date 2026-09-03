@@ -1,6 +1,6 @@
 ---
 name: reflect
-description: Ask Mubit to extract lessons from this session's activity and report what it learned. Use when the user wants lessons banked now rather than at session end, or asks what memory holds for this project.
+description: Extract lessons from this session's activity now; use when the user wants them banked before session end or asks what memory holds.
 ---
 
 ## Step 0 — resolve the binary

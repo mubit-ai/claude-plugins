@@ -467,13 +467,22 @@ function steerBlock(cfg, runId, lessons, anchor = '', partial = false) {
     '# Mubit memory is active',
     '',
     `Run: ${runId} (${cfg.mode})`,
-    'Relevant memory is injected automatically before each of your turns — no need to open a '
-      + 'turn by searching for it.',
-    'Do search when the injected memory falls short: mubit_recall for a topic, mubit_diagnose '
-      + 'when a command has failed, mubit_dereference for a reference_id you already hold.',
-    'Save what you learn with mubit_learned, and credit what helped with mubit_outcome. '
-      + `${skill('remember')} and ${skill('recall')} are the explicit forms.`,
   ];
+  // The three lines of guidance are the MCP server's `instructions` restated
+  // (`mcp/src/instructions.mjs`). Claude Code puts those in the system prompt of every session,
+  // so here they were paid twice — and this block fires on every startup, resume, clear and
+  // compaction, which made it the most frequent injection the plugin makes. Codex has no such
+  // frame: the instructions do not reach the model there, so this block stays the only steer.
+  if (cfg.host === 'codex') {
+    lines.push(
+      'Relevant memory is injected automatically before each of your turns — no need to open a '
+        + 'turn by searching for it.',
+      'Do search when the injected memory falls short: mubit_recall for a topic, mubit_diagnose '
+        + 'when a command has failed, mubit_dereference for a reference_id you already hold.',
+      'Save what you learn with mubit_learned, and credit what helped with mubit_outcome. '
+        + `${skill('remember')} and ${skill('recall')} are the explicit forms.`,
+    );
+  }
   if (anchor) {
     lines.push('', '## Compacted context',
       `Mubit checkpoint ${anchor} holds this run's context from before the compaction that `

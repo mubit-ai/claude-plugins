@@ -372,7 +372,7 @@ export function isPointerLine(line) {
  * @param {string} text  already collapsed to one line by `oneLine`
  * @returns {string}
  */
-function firstClause(text) {
+export function firstClause(text) {
   const s = typeof text === 'string' ? text.trim() : '';
   if (!s) return '';
   const stop = s.search(/[.;!?]/);

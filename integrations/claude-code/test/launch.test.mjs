@@ -62,6 +62,7 @@ writeFileSync(process.env.MUBIT_TEST_ENV_SNAPSHOT, JSON.stringify({
   env: { ...process.env },
   guard: globalThis.fetch?.mubitEgressGuard ?? null,
   instructions: process.stdout.write?.mubitInstructionsGuard ?? null,
+  results: process.stdout.write?.mubitResultsGuard ?? null,
 }));
 export function createServer() { return { tool() {}, connect: async () => {} }; }
 export default { createServer };
@@ -99,7 +100,7 @@ setTimeout(() => process.exit(0), 1500).unref();
  * @param {{extra?: Record<string,string>, projectDir?: string, dataDir?: string}} [o]
  * @returns {Promise<{code:number|null, stdout:string, stderr:string,
  *                    importedServer:boolean, envAtImport:Record<string,string>,
- *                    guardAtImport:any, instructionsAtImport:any}>}
+ *                    guardAtImport:any, instructionsAtImport:any, resultsAtImport:any}>}
  */
 async function runLauncher(o = {}) {
   const launch = launcherScript();
@@ -144,9 +145,10 @@ async function runLauncher(o = {}) {
   const envAtImport = snap.env ?? {};
   const guardAtImport = snap.guard ?? null;
   const instructionsAtImport = snap.instructions ?? null;
+  const resultsAtImport = snap.results ?? null;
   return {
     code, stdout: out, stderr: err, importedServer,
-    envAtImport, guardAtImport, instructionsAtImport, env, projectDir, dataDir,
+    envAtImport, guardAtImport, instructionsAtImport, resultsAtImport, env, projectDir, dataDir,
   };
 }
 
@@ -541,6 +543,28 @@ test('installs the instructions guard BEFORE importing the server', async () => 
   assert.ok(Number(r.instructionsAtImport.chars) > 0,
     'the instructions guard was installed with nothing to say, which is indistinguishable '
     + 'from not installing it');
+});
+
+// The results guard sits on the same handle and obeys the same ordering rule. Installed after
+// the import, it would shape nothing: the transport already holds the unwrapped `write`.
+test('installs the results guard BEFORE importing the server, at the configured ceiling', async () => {
+  const r = await runLauncher();
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+
+  assert.ok(r.resultsAtImport,
+    'process.stdout.write carried no results guard when the server was imported, so every tool '
+    + 'result goes out as the bundle pretty-printed it — a lesson list at up to ~12k tokens');
+  assert.equal(Number(r.resultsAtImport.budget), 2000,
+    'the results guard was installed at a ceiling other than the documented default of 2000');
+});
+
+// `0` is the operator asking for the raw result back, and the launcher must honour it by
+// not installing the guard at all rather than by installing one that shapes nothing.
+test('mcpResultTokenBudget=0 leaves the results guard uninstalled', async () => {
+  const r = await runLauncher({ extra: { MUBIT_CC_MCP_RESULT_TOKENS: '0' } });
+  assert.ok(r.importedServer, `the launcher never imported ./server.js. stderr:\n${r.stderr}`);
+  assert.equal(r.resultsAtImport, null,
+    'a results guard was installed with the ceiling set to 0, which the manifest documents as off');
 });
 
 // The guard is handed a constant that lives in source and is edited there. If the launcher

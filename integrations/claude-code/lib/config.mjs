@@ -539,6 +539,11 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
   // still only ever narrows a caller that asked for less.
   const mcpLessonScope = enumOf(pick('mcpLessonScope', 'MUBIT_MCP_LESSON_SCOPE'),
     ['run', 'session', 'global'], 'session');
+  // What one MCP tool result may put in front of the model (`mcp/src/results.mjs`). The raw
+  // reply behind a lesson list was measured at up to ~12k tokens, every one of them re-sent on
+  // every later turn until the next compaction. This is the ceiling; `0` asks for the raw
+  // result back.
+  const mcpResultTokenBudget = int(pick('mcpResultTokenBudget', 'MUBIT_CC_MCP_RESULT_TOKENS'), 2000);
   // Pinned context. On (the default), a constraint the user pins for this run with
   // `/mubit-memory:pin` is rendered above the recalled block on every prompt, including the
   // prompts recall itself skips: an open breaker, `recall: false`, a two-word answer.
@@ -622,6 +627,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,

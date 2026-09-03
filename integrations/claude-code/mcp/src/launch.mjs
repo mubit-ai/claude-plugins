@@ -39,6 +39,7 @@ import { redactText } from '../../lib/redact.mjs';
 import { deriveRunId } from '../../lib/runid.mjs';
 import { installFetchGuard, resolveCeiling } from './egress.mjs';
 import { INSTRUCTIONS, installInstructionsGuard } from './instructions.mjs';
+import { installResultsGuard } from './results.mjs';
 
 /**
  * §8.2 — thirteen of the server's twenty-one tools, in the guide's order.
@@ -192,10 +193,12 @@ function prepare(env) {
   // rule as the guard above, and for the same reason: `StdioServerTransport` takes
   // `process.stdout` as a constructor default and holds it from then on.
   installInstructionsGuard({ instructions: INSTRUCTIONS });
+  installResultsGuard({ cfg, runId, budget: cfg.mcpResultTokenBudget });
 
   log(cfg, 'info', 'mcp: starting server', {
     run_id: runId, endpoint: cfg.endpoint, mode: cfg.mode, tools: tools.length,
     lesson_scope: ceiling, pin_run: true, instruction_chars: INSTRUCTIONS.length,
+    result_tokens: cfg.mcpResultTokenBudget,
   });
   return true;
 }

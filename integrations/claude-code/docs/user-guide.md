@@ -489,6 +489,13 @@ indistinguishable from memory that does not work.
 `recallTokenBudget`, default `1500`. Raise it if recall keeps getting trimmed; lower it if you
 want the context back.
 
+`mcpResultTokenBudget`, default `2000`. The most one Mubit MCP tool result may put in front of
+the model. A lesson list or a recall always comes back one line per item with the id kept, and a
+memory already shown in this run is repeated as a one-line pointer; anything over the ceiling is
+cut. The untouched result is saved under the plugin's data directory, and the note at the foot
+of the result names the file, so the rest costs nothing unless the model reads it. `0` returns
+the raw result.
+
 ### Keep this on
 
 `reflectOnEnd`, default `true`. It is the only path that promotes a lesson beyond its own run.

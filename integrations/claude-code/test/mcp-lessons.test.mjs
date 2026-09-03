@@ -79,7 +79,12 @@ function feed(entries, over = {}) {
 async function ask(t, args, routes) {
   const server = await fakeMubit(routes);
   t.after(() => server.close());
-  const out = await mcpCallTool('mubit_lessons', args, { endpoint: server.url, runId: RUN });
+  // These tests read the catalogue as the server answers it. The results guard
+  // (`mcp/src/results.mjs`) would render it one line per lesson on the way out, so it is
+  // switched off here; `mcp-results.test.mjs` covers that rendering.
+  const out = await mcpCallTool('mubit_lessons', args, {
+    endpoint: server.url, runId: RUN, extra: { MUBIT_CC_MCP_RESULT_TOKENS: '0' },
+  });
   return { server, out };
 }
 

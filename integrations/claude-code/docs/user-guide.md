@@ -496,6 +496,11 @@ cut. The untouched result is saved under the plugin's data directory, and the no
 of the result names the file, so the rest costs nothing unless the model reads it. `0` returns
 the raw result.
 
+To see what memory actually cost on this machine — every hook injection and every tool result,
+per event and per session, read off the transcripts Claude Code keeps — run
+`node scripts/measure-context-usage.mjs` from the plugin directory. It prints counts and
+sizes only, never content.
+
 ### Keep this on
 
 `reflectOnEnd`, default `true`. It is the only path that promotes a lesson beyond its own run.

@@ -13,7 +13,7 @@ no `npm install` — the bundles ship committed.
 
 | Plugin | Version | Built for |
 | --- | --- | --- |
-| [`mubit-memory`](integrations/claude-code/) | 0.12.6 | [Claude Code](integrations/claude-code/) · [Codex CLI](integrations/codex/) |
+| [`mubit-memory`](integrations/claude-code/) | 0.13.0 | [Claude Code](integrations/claude-code/) · [Codex CLI](integrations/codex/) |
 
 You need two values before you start:
 

@@ -312,6 +312,12 @@ export function pruneStale(cfg = {}) {
       for (const name of jsonFiles(join(rd, 'turns'))) {
         expire(join(rd, 'turns', name), 6 * HOUR);
       }
+      // runs/<run_id>/spill/* — 24 h. The untouched original of a tool result the model was
+      // shown a compact or cut form of (`mcp/src/results.mjs`). Its path is quoted in the
+      // transcript, and a day outlives any session that would still follow it.
+      for (const e of dirEntries(join(rd, 'spill'))) {
+        if (e.isFile()) expire(join(rd, 'spill', e.name), 24 * HOUR);
+      }
       // runs/<run_id>/seen.json — 6 h, the same window as the turns it aggregates
       // (`lib/seen.mjs`). It also expires entry by entry on every read; this is the sweep
       // for a run nobody comes back to, whose whole file would otherwise outlive its turns.

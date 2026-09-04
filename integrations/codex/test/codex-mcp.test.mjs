@@ -32,15 +32,16 @@ import {
  * §8.2 — the curated set. A blank allowlist means these, never "none" and never all 21.
  *
  * The Claude Code plugin's `mcp/src/launch.mjs` is the single source of this list and both
- * plugins bundle it, so a promotion there reaches Codex without anyone editing this tree.
- * `mubit_strategies`, `mubit_checkpoint` and `mubit_memory_health` arrived that way, each with
- * a skill of its own — which is the part that does not travel for free, since Codex has no
- * `tools:` grant and the prose is the only place the qualified name appears.
+ * plugins bundle it, so a change there reaches Codex without anyone editing this tree. The cut
+ * to seven arrived that way: under Codex every registered schema is loaded in full on every
+ * session, so the six administrative verbs that left — now the `reflect`, `forget`,
+ * `checkpoint` and `strategies` skills running `bin/admin.mjs` — were half of that bill. The
+ * skills are the part that does not travel for free, since Codex has no `tools:` grant and the
+ * prose is the only place a name appears.
  */
 const DEFAULT_ALLOWLIST = [
-  'mubit_archive', 'mubit_dereference', 'mubit_diagnose', 'mubit_forget', 'mubit_learned',
-  'mubit_lessons', 'mubit_outcome', 'mubit_recall', 'mubit_reflect', 'mubit_status',
-  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
+  'mubit_dereference', 'mubit_diagnose', 'mubit_learned', 'mubit_outcome', 'mubit_recall',
+  'mubit_status', 'mubit_memory_health',
 ].sort();
 
 const CODEX_README = join(CODEX_ROOT, 'README.md');

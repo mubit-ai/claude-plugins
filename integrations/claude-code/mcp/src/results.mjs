@@ -198,6 +198,47 @@ function render(text, budget, seen, spill) {
  * @returns {Rendered}
  */
 function renderList(original, parsed, shape, budget, seen, spill) {
+  const compact = renderCompact(parsed, shape.key, { budget, seen });
+  if (!compact) return holdJson(original, parsed, budget, spill);
+  const { shown, pointed, dropped, total } = compact;
+  const spilled = spill(original, shape.key);
+
+  const parts = [compact.text];
+  const foot = [];
+  if (dropped > 0) foot.push(`Showing ${total - dropped} of ${total}.`);
+  if (spilled) foot.push(`Raw result: ${spilled}`);
+  if (foot.length) parts.push(foot.join(' '));
+  if (pointed.length) {
+    parts.push(`A line marked "${POINTER_MARK}" was shown in full earlier in this conversation; `
+      + 'mubit_dereference returns its text.');
+  }
+  return { text: parts.join('\n'), shape: shape.key, shown, pointed, dropped, spilled };
+}
+
+/**
+ * @typedef {object} Compact
+ * @property {string} text        the head lines, the count line and one line per item
+ * @property {string[]} shown
+ * @property {string[]} pointed
+ * @property {number} dropped
+ * @property {number} total
+ */
+
+/**
+ * The compact form of a known shape, without the frame around it: what a tool result and
+ * `bin/admin.mjs` both print, so the model meets one rendering of a lesson list whichever
+ * way it asked for one.
+ *
+ * @param {Record<string, any>} parsed
+ * @param {string} listKey  `lessons` or `evidence`
+ * @param {{budget?: number, seen?: Set<string>|null}} [opts]
+ * @returns {Compact|null}  `null` when `listKey` is not a known shape on this object
+ */
+export function renderCompact(parsed, listKey, opts = {}) {
+  const shape = SHAPES.find((s) => s.key === listKey);
+  if (!shape || !isObject(parsed) || !isItemList(parsed[shape.key])) return null;
+  const budget = Math.max(MIN_RESULT_TOKENS, positiveInt(opts?.budget, DEFAULT_RESULT_TOKENS));
+  const seen = opts?.seen instanceof Set ? opts.seen : null;
   /** @type {any[]} */
   const items = parsed[shape.key];
   const head = headLines(parsed, shape.key);
@@ -226,22 +267,10 @@ function renderList(original, parsed, shape, budget, seen, spill) {
   }
 
   const total = items.length;
-  const rendered = lines.length;
-  const dropped = total - rendered;
-  const spilled = spill(original, shape.key);
-
   const parts = [...head];
   parts.push(`${cap(shape.noun)} (${total}${pointed.length ? `, ${pointed.length} seen earlier` : ''}):`);
   parts.push(...lines);
-  const foot = [];
-  if (dropped > 0) foot.push(`Showing ${rendered} of ${total}.`);
-  if (spilled) foot.push(`Raw result: ${spilled}`);
-  if (foot.length) parts.push(foot.join(' '));
-  if (pointed.length) {
-    parts.push(`A line marked "${POINTER_MARK}" was shown in full earlier in this conversation; `
-      + 'mubit_dereference returns its text.');
-  }
-  return { text: parts.join('\n'), shape: shape.key, shown, pointed, dropped, spilled };
+  return { text: parts.join('\n'), shown, pointed, dropped: total - lines.length, total };
 }
 
 /**

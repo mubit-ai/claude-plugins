@@ -349,7 +349,7 @@ function isCrossRunAsk(scope) {
  * @param {{runId: string, scope: string}} o
  * @returns {Record<string, any>[]}
  */
-function selectLessons(rows, o) {
+export function selectLessons(rows, o) {
   const mine = (r) => (o.runId !== '' && (r.runId === o.runId || r.sourceRunId === o.runId));
 
   // No scope named: this run, plus every lesson that was deliberately widened past its own.
@@ -369,7 +369,7 @@ function selectLessons(rows, o) {
  *
  * @param {Record<string, any>} r
  */
-function wireLesson(r) {
+export function wireLesson(r) {
   return {
     id: r.id,
     lesson_id: r.id,
@@ -385,7 +385,7 @@ function wireLesson(r) {
 }
 
 /** What the default read is showing, said in the answer rather than left to be inferred. */
-const SHOWING = {
+export const SHOWING = {
   '': 'this run, plus every lesson stored at a scope that reaches past the run that wrote it',
   run: 'this run only',
   session: 'lessons stored at session scope, across every run this key can see',

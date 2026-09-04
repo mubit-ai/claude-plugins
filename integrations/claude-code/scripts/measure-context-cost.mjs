@@ -80,9 +80,8 @@ const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
 /** §8.2 — the curated set a blank `mcpTools` resolves to. Kept in sync by verify-manifests. */
 const DEFAULT_ALLOWLIST = [
-  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
-  'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
-  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
+  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_diagnose',
+  'mubit_dereference', 'mubit_status', 'mubit_memory_health',
 ];
 
 const HANDSHAKE_MS = 20_000;

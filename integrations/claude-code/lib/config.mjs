@@ -40,25 +40,25 @@ import { dataDir as resolveDataRoot, readJson, writeJsonAtomic } from './state.m
 // ---------------------------------------------------------------------------
 
 /**
- * §8.2 — thirteen of the MCP server's twenty-one tools. A blank `mcpTools` /
- * `MUBIT_MCP_TOOLS` means this curated set, never "none": the excluded eight
- * are excluded because a hook already does the job better, not because tools
- * are off by default.
+ * §8.2 — seven of the MCP server's twenty-one tools. A blank `mcpTools` /
+ * `MUBIT_MCP_TOOLS` means this curated set, never "none".
  *
- * The last three were promoted out of that exclusion. `mubit_checkpoint` is the
- * voluntary half of what `PreCompact` does involuntarily — a marker a user names
- * before risky work, which a hook firing on the host's schedule cannot be asked
- * for. `mubit_strategies` reads the pattern across many lessons where every other
- * retrieval verb reads individual ones. `mubit_memory_health` answers the route
- * the doctor skill used to tell its reader to POST by hand.
+ * The line is whether a tool answers a question the model is holding mid-task,
+ * or writes something only it can write: the retrieval verbs, the two writes
+ * that make memory improve with use, and the two diagnostics. Everything
+ * administrative — listing the catalogue, deleting a lesson, a named
+ * checkpoint, the pattern across lessons, an explicit reflect — is reached
+ * through a skill that runs `bin/admin.mjs`, which costs no listing at all on
+ * either host. On Claude Code a deferred tool costs its name; on Codex every
+ * registered schema is loaded in full on every session, and the six that left
+ * were half of that bill. Nothing is removed: `mcpTools` restores any by name.
  *
  * `mcp/src/launch.mjs` carries the same list, and the two must move together:
  * this one is what a resolved config reports, that one is the launcher's floor.
  */
 const DEFAULT_MCP_TOOLS = [
-  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
-  'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
-  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
+  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_diagnose',
+  'mubit_dereference', 'mubit_status', 'mubit_memory_health',
 ];
 
 /** §7: `config.json` — cached resolved config, keyed by an input hash. */

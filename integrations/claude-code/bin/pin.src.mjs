@@ -67,14 +67,12 @@ import { fileURLToPath } from 'node:url';
 
 import { loadConfig } from '../lib/config.mjs';
 import { MAX_PIN_CHARS, MAX_PINS, writePinsLocal } from '../lib/pins.mjs';
-import { scanRunMarkers } from '../lib/runid.mjs';
+import { pickRun } from '../lib/runpick.mjs';
 import { deleteVariable, listVariables, PIN_NAMESPACE, setVariable } from '../lib/variables.mjs';
 
 /** The run id that must never be written to, from any surface. */
-const POISONED_RUN_ID = 'default';
 
 /** How far back a marker may have been touched and still name "the run I am in". */
-const MARKER_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * How close behind the newest marker another session's marker may sit and still be a live
@@ -85,7 +83,6 @@ const MARKER_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * to cover a session that is mid-answer and writing no markers of its own, and narrow enough
  * that yesterday's project is not a rival.
  */
-const MARKER_AMBIGUOUS_MS = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // argv
@@ -343,109 +340,6 @@ async function doClear(cfg, runId, args) {
     pins: next.map(publicPin),
     detail: `Cleared ${targets.length} pin(s) from ${runId}. ${next.length} left.`,
   };
-}
-
-// ---------------------------------------------------------------------------
-// pickRun — ~20 lines, and deliberately local
-// ---------------------------------------------------------------------------
-
-/**
- * Which run this command is pinning to. See the header for why it observes rather than
- * derives.
- *
- * @param {Record<string, any>} cfg
- * @param {string} explicit  `--run`
- * @returns {{ok: true, runId: string}|{ok: false, state: string, detail: string}}
- */
-export function pickRun(cfg, explicit = '') {
-  const named = str(explicit) || (str(cfg?.runStrategy) === 'static' ? str(cfg?.runId) : '');
-  if (named) {
-    if (named === POISONED_RUN_ID) {
-      return { ok: false, state: 'poisoned_run', detail: `"${POISONED_RUN_ID}" is the fallback a run id takes when nothing configured one, not a run of yours. A pin is a standing constraint, so it needs a real run to belong to.` };
-    }
-    return { ok: true, runId: named };
-  }
-
-  const { runId, rivals } = newestMarker(cfg);
-  if (runId && rivals.length) {
-    return {
-      ok: false,
-      state: 'ambiguous_run',
-      detail: `More than one Mubit run is live in this data directory — ${[runId, ...rivals].join(', ')}`
-        + ' — so the most recently touched marker is not reliably the session that typed this. '
-        + 'Name the run this session is using: pin --run <run_id> "…". The SessionStart block at '
-        + 'the top of the conversation prints it, and so does /mubit-memory:doctor.',
-    };
-  }
-  if (runId) return { ok: true, runId };
-
-  // Naming the directory is the whole point. "Send one prompt first" is useless advice to
-  // someone who already has, and the commonest cause of an empty scan is not a session that
-  // has written nothing but a command that inherited no `MUBIT_CC_DATA_DIR` and is looking
-  // somewhere the hooks never write.
-  return {
-    ok: false,
-    state: 'no_run',
-    detail: `Could not tell which Mubit run this session is using — no run marker in `
-      + `${str(cfg?.dataDir) || '(no data directory resolved)'}. If the session has been `
-      + 'sending prompts, that is not the directory its hooks are writing to: '
-      + '/mubit-memory:doctor prints the one they use, and MUBIT_CC_DATA_DIR overrides it. '
-      + 'Otherwise send one prompt first, or name the run: pin --run <run_id> "…".',
-  };
-}
-
-/**
- * The most recently updated `status/<run_id>.json`, and any rival close enough behind it to be
- * a second live session.
- *
- * `health.json` shares the directory and is not a run. A marker older than a day is not this
- * session either — answering with one would silently pin to a project the user left last week,
- * and "no run found, pass --run" is a far better failure than a pin nobody sees.
- *
- * The rivals are the same judgement applied to the case this directory actually sees: every
- * session on one machine shares one plugin data dir, so "newest marker" is only "this session"
- * while this session is the only one running. A second session's hook firing in the seconds
- * before the command is typed silently moves the pin to that session's run.
- *
- * A run and its own successors are not rivals. A `/clear` leaves the pre-clear marker on disk
- * beside `-c1`, and a subagent writes `-sub-<short>`; both name the session that is already
- * the answer, so they are folded together by `markerBase` before anything is compared.
- *
- * @param {Record<string, any>} cfg
- * @returns {{runId: string, rivals: string[]}}
- */
-function newestMarker(cfg) {
-  const now = Date.now();
-  const fresh = scanRunMarkers(str(cfg?.dataDir))
-    // The fallback a run id takes when nothing configured one is never this session's.
-    .filter((m) => m.runId !== POISONED_RUN_ID && m.at > 0 && now - m.at < MARKER_MAX_AGE_MS)
-    .sort((a, b) => b.at - a.at);
-
-  const [best, ...rest] = fresh;
-  if (!best) return { runId: '', rivals: [] };
-
-  const bestBase = markerBase(best.runId);
-  const rivals = [];
-  for (const m of rest) {
-    if (best.at - m.at >= MARKER_AMBIGUOUS_MS) break;
-    if (markerBase(m.runId) === bestBase) continue;
-    if (!rivals.includes(m.runId)) rivals.push(m.runId);
-  }
-  return { runId: best.runId, rivals };
-}
-
-/**
- * The run id with the suffixes that mark a *continuation* of one session stripped off, so two
- * markers that are one session compare equal.
- *
- * `-sub-<short>` comes off before `-c<n>`, because the sub-run form appends to a parent that
- * may already carry the clear counter (§4.3).
- *
- * @param {string} runId
- * @returns {string}
- */
-function markerBase(runId) {
-  return str(runId).replace(/-sub-[^-]+$/, '').replace(/-c\d+$/, '');
 }
 
 // ---------------------------------------------------------------------------

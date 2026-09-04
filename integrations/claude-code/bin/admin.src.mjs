@@ -202,16 +202,28 @@ async function doLessons(c) {
   let rows = selectLessons(res.data.lessons, { runId, scope });
   if (args.importance) rows = rows.filter((r) => r.importance === args.importance);
   const shown = rows.slice(0, args.limit);
+  // A truncated census reports no total, the same rule the tool form keeps: a count printed
+  // beside an admission that the listing is partial is the number someone acts on, and it is
+  // the one number this cannot stand behind. That holds when nothing came back, too — an
+  // empty partial listing is not "no lessons matched", it is a listing that ran out.
   const payload = {
     run_id: runId,
     showing: SHOWING[scope] ?? SHOWING[''],
-    matched: rows.length,
-    ...(res.data.truncated ? { partial: true, note: 'The listing was cut short, so these are some of the lessons that matched and not all of them.' } : {}),
+    ...(res.data.truncated
+      ? {
+        partial: true,
+        note: 'This catalogue is partial: the listing was cut short '
+          + `(${String(res.data.truncatedReason || 'bound reached')}), so these are some of the `
+          + 'lessons that matched and not all of them. No total is available; --scope narrows the request.',
+      }
+      : { matched: rows.length }),
     lessons: shown.map(wireLesson),
   };
   if (args.json) { c.stdout(`${JSON.stringify(payload, null, 2)}\n`); return 0; }
   if (!shown.length) {
-    c.stdout(`run_id: ${runId}\nshowing: ${payload.showing}\nNo lessons matched.\n`);
+    const head = [`run_id: ${runId}`, `showing: ${payload.showing}`];
+    head.push(...(payload.partial ? ['partial: true', `note: ${payload.note}`] : ['No lessons matched.']));
+    c.stdout(`${head.join('\n')}\n`);
     return 0;
   }
   const compact = renderCompact(payload, 'lessons', { budget: budgetOf(cfg), seen: readSeen(cfg, runId).ids });

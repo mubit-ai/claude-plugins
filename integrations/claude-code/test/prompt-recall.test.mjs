@@ -22,12 +22,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { basename, join } from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import {
   fakeMubit, queryResponse, evidence, runHook, assertHookContract,
   baseEnv, makeDataDir, makeProjectDir, readJsonFile, readJsonDir,
 } from './helpers/harness.mjs';
-import { userPromptSubmit, PROMPT_ID, SECRETS } from './helpers/fixtures.mjs';
+import { userPromptSubmit, PROMPT_ID, SECRETS, SESSION_ID } from './helpers/fixtures.mjs';
 
 const RUN_ID = 'cc-test-run-1';
 const PROMPT = 'why is the ingest job stuck in queued?';
@@ -1056,8 +1056,11 @@ test('a secret inside recalled evidence never reaches the staged terms', async (
  * the task at hand on the next prompt, so before this the same six were re-sent — and
  * re-paid for — twenty times in a row.
  *
- * `hooks/src/prompt-recall.mjs` now reads `runs/<run_id>/seen.json` before assembling and
- * marks it after, next to the ids it stages for attribution.
+ * `hooks/src/prompt-recall.mjs` now reads `runs/<run_id>/seen/<session_id>.json` before
+ * assembling and marks it after, next to the ids it stages for attribution. The file is one
+ * conversation's: keyed by the payload's `session_id` beside the run, because under the
+ * default `per-directory` strategy the run alone is the *path*, and every session opened in
+ * a directory would otherwise share one set.
  */
 
 /** ~200 tokens each: the per-memory size a 1500-token budget over six memories implies. */
@@ -1069,7 +1072,7 @@ const STICKY_EVIDENCE = () => [
   evidence({ id: 'e3', reference_id: 'ref_fact_1', entry_type: 'fact', score: 0.55, content: bulky('FACT', 'f') }),
 ];
 
-const seenPath = (d) => join(d, 'runs', RUN_ID, 'seen.json');
+const seenPath = (d) => join(d, 'runs', RUN_ID, 'seen', `${SESSION_ID}.json`);
 
 /** A distinct `prompt_id` per turn, because the turn file is keyed on it. */
 const nthPrompt = (n) => userPromptSubmit({
@@ -1146,6 +1149,35 @@ test('a prompt marks what it injected into the run seen-set', async (t) => {
     ['ref_rule_1', 'ref_lesson_1', 'ref_fact_1'],
     'a degraded entry is still attributed — dropping it would stop reinforcing exactly the '
     + 'memories that stayed relevant longest');
+});
+
+/*
+ * A payload with no usable `session_id` is not a conversation the set can be kept for — a
+ * hand-built payload, or a host placeholder like `default`. It renders in full on every turn
+ * and marks nothing, which is the fail-safe side: paying twice costs tokens, while a pointer
+ * with no text behind it is a memory the model is told about and cannot read.
+ */
+test('a payload with no session id renders in full on every turn and marks nothing', async (t) => {
+  const server = await fakeMubit({
+    'POST /v2/control/query': { json: queryResponse({ evidence: STICKY_EVIDENCE() }) },
+  });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  const e = env(dir, server);
+  const anonymous = (n, session_id) => ({ ...nthPrompt(n), session_id });
+
+  assertHookContract(await runHook('prompt-recall', anonymous(1, undefined), { env: e }));
+  assert.equal(existsSync(join(dir, 'runs', RUN_ID, 'seen')), false,
+    'a process that names no conversation must not create a seen-set for anyone');
+
+  const second = await runHook('prompt-recall', anonymous(2, 'default'), { env: e });
+  assertHookContract(second);
+  const block = second.json.hookSpecificOutput.additionalContext;
+  assert.ok(block.includes('TAIL_RULE'),
+    'with no conversation to key on, the second turn pays full price rather than pointing');
+  assert.ok(!block.includes('(seen earlier)'), block);
+  assert.equal(existsSync(join(dir, 'runs', RUN_ID, 'seen')), false,
+    'a placeholder session id is not an identity either');
 });
 
 // The block is written for a model, not for a log. A line that names a memory without

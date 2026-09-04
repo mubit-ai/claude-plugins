@@ -60,7 +60,7 @@ import { CONN_STATES } from '../../lib/breaker.mjs';
 import { writeCarry } from '../../lib/carry.mjs';
 import { updateMarker } from '../../lib/markers.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
-import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, hostSessionId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import { readSeen } from '../../lib/seen.mjs';
 import { safeSegment } from '../../lib/state.mjs';
 
@@ -114,7 +114,9 @@ await runHook('recall-refresh', {
     // What the run has already put in front of the model — *including* the turn that spawned
     // this process, because `prompt-recall` marks before it spawns. Reading a seen-set that
     // is one turn behind would re-render at full price the entry the user is looking at.
-    const seen = readSeen(cfg, runId).ids;
+    // Keyed by the conversation: the whole hook input was restaged, so `session_id` survived
+    // the file hop and this reads the same file the parent marked.
+    const seen = readSeen(cfg, runId, hostSessionId(payload)).ids;
 
     const query = prompt.slice(0, MAX_QUERY_CHARS);
 

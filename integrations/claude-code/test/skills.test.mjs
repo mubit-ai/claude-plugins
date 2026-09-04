@@ -480,6 +480,31 @@ test('auth/SKILL.md lets an env-pinned MUBIT_CC_DATA_DIR outrank the host interp
   }
 });
 
+/**
+ * The same rule for the four admin skills and `pin`. Each runs a script through Bash, where
+ * `CLAUDE_PLUGIN_DATA` arrives empty; without the flag `bin/admin.mjs` searched
+ * `~/.claude/plugins/data/` and picked a sibling install's store — one whose markers named
+ * a run the session's hooks never wrote to. Every command line in the body has to carry the
+ * flag, in the one spelling that lets an env-pinned `MUBIT_CC_DATA_DIR` win.
+ */
+const DATA_DIR_FLAG = '--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"';
+for (const [name, script] of [
+  ['checkpoint', 'admin'], ['forget', 'admin'], ['reflect', 'admin'], ['strategies', 'admin'], ['pin', 'pin'],
+]) {
+  test(`${name}/SKILL.md passes --data-dir on every bin/${script}.mjs command, spelled so an env pin wins`, () => {
+    const { body } = loadSkill(name);
+    const re = new RegExp(`\\bnode\\b.*bin/${script}\\.mjs`);
+    const lines = body.split('\n').filter((l) => re.test(l));
+    assert.ok(lines.length >= 1, `${name} must show at least one bin/${script}.mjs command`);
+    for (const line of lines) {
+      assert.ok(line.includes(DATA_DIR_FLAG),
+        `${name}: a command without the data dir has to guess which install's store to read:\n${line}`);
+    }
+    assert.match(body, /does not inherit `CLAUDE_PLUGIN_DATA`/,
+      `${name} must say why the flag is there, or the next edit drops it as noise`);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // §9 — dashboard
 // ---------------------------------------------------------------------------

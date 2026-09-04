@@ -23,10 +23,13 @@
  * were re-rendered, and re-paid for, on every prompt of a session — up to 1500 tokens each
  * time, against 356 tokens *once* for the entire MCP tool surface.
  *
- * This hook now reads `runs/<run_id>/seen.json` (`lib/seen.mjs`) before assembling and marks
- * it after, beside the ids it stages on the turn. A repeat is **degraded, not dropped**: it
- * renders as a pointer and keeps its `reference_id` in `recalled[]`, because dropping it
- * would break attribution for exactly the memories that are helping most.
+ * This hook now reads `runs/<run_id>/seen/<session_id>.json` (`lib/seen.mjs`) before
+ * assembling and marks it after, beside the ids it stages on the turn. A repeat is
+ * **degraded, not dropped**: it renders as a pointer and keeps its `reference_id` in
+ * `recalled[]`, because dropping it would break attribution for exactly the memories that
+ * are helping most. The set is one conversation's, keyed by the host `session_id` beside the
+ * run: a second session in the same directory has seen none of it, and a payload with no
+ * session id reads an empty set and marks nothing.
  *
  * Two consequences that are easy to get wrong, both pinned by tests:
  *
@@ -121,7 +124,7 @@ import { takeResume } from '../../lib/resume.mjs';
 import { rankForRecall } from '../../lib/rank.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
 import { redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, hostSessionId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
 import { markSeen, readSeen } from '../../lib/seen.mjs';
 import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../lib/state.mjs';
 
@@ -240,6 +243,9 @@ await runHook('prompt-recall', {
       log(cfg, 'warn', `prompt-recall: no usable run id (${messageOf(err)})`);
       return SUPPRESS;
     }
+    // The conversation this prompt belongs to. The seen-set is keyed by it beside the run,
+    // and a payload without one reads an empty set and marks nothing (`lib/seen.mjs`).
+    const sessionId = hostSessionId(payload);
 
     // The run's pinned context. One `readJson`, before the branch, so both the carry-forward
     // path and the blocking one render from the same read.
@@ -251,11 +257,11 @@ await runHook('prompt-recall', {
     // neither a slash command nor "ok" may spend a session's briefing on a message that injects
     // no memory anywhere — a pin is not memory, which is why those two gates still answer with
     // `pinsGate` rather than with this.
-    const resume = claimResume(cfg, runId);
+    const resume = claimResume(cfg, runId, sessionId);
 
     // §5.2 — the carry-forward path. Everything below this line dials; nothing beyond this
     // point in `carryForward` does. See the header for why the order inside it is fixed.
-    if (cfg.recallAsync) return carryForward(cfg, payload, runId, started, pins, resume);
+    if (cfg.recallAsync) return carryForward(cfg, payload, runId, sessionId, started, pins, resume);
 
     // §4.7: a blocking hook in front of every prompt must not pay a connect timeout to a
     // server already known to be down. Read-only — `allowRequest` would spend the single
@@ -308,7 +314,7 @@ await runHook('prompt-recall', {
     // What this run has already put in front of the model. Read before the call so the
     // assembler can degrade a repeat into a pointer; `lib/seen.mjs` is total, so a data dir
     // that cannot be read costs the saving and nothing else.
-    const seen = readSeen(cfg, runId).ids;
+    const seen = readSeen(cfg, runId, sessionId).ids;
 
     const outcome = await recallBlock(cfg, {
       runId, agentId, query, deadline, seen, projectDir, rankBy,
@@ -336,7 +342,7 @@ await runHook('prompt-recall', {
     // load-bearing write and must not be behind an optimisation's bookkeeping. Only the ids
     // that actually rendered are marked — `outcome.refIds` is empty on every failed and
     // every empty recall, so nothing that never reached the model is recorded as shown.
-    markSeen(cfg, runId, outcome.refIds);
+    markSeen(cfg, runId, outcome.refIds, sessionId);
 
     updateMarker(cfg, runId, {
       state: 'ready',
@@ -392,12 +398,13 @@ await runHook('prompt-recall', {
  * @param {Record<string, any>} cfg
  * @param {Record<string, any>} payload
  * @param {string} runId
+ * @param {string} sessionId  keys the seen-set; `''` marks nothing
  * @param {number} started
  * @param {import('../../lib/pins.mjs').PinBlock} pins
  * @param {import('../../lib/resume.mjs').Resumed|null} [resume]
  * @returns {Record<string, any>}
  */
-function carryForward(cfg, payload, runId, started, pins, resume = null) {
+function carryForward(cfg, payload, runId, sessionId, started, pins, resume = null) {
   const promptId = safeId(turnKey(payload));
   const carry = takeCarry(cfg, runId);
   const rendered = !!(carry && carry.block);
@@ -405,7 +412,7 @@ function carryForward(cfg, payload, runId, started, pins, resume = null) {
   if (rendered || resume) {
     persistRecalled(cfg, runId, promptId, payload, rendered ? carry : NO_RECALL, resume);
   }
-  if (rendered) markSeen(cfg, runId, carry.refIds);
+  if (rendered) markSeen(cfg, runId, carry.refIds, sessionId);
 
   const open = breakerOpen(cfg);
   const b = open ? readBreaker(cfg) : null;
@@ -484,14 +491,15 @@ function carryForward(cfg, payload, runId, started, pins, resume = null) {
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
+ * @param {string} sessionId  keys the seen-set; `''` marks nothing
  * @returns {import('../../lib/resume.mjs').Resumed|null}
  */
-function claimResume(cfg, runId) {
+function claimResume(cfg, runId, sessionId) {
   try {
     if (!cfg.resumeBlock) return null;
     const resume = takeResume(cfg, runId);
     if (!resume) return null;
-    markSeen(cfg, runId, resume.refIds);
+    markSeen(cfg, runId, resume.refIds, sessionId);
     log(cfg, 'debug', `prompt-recall: rendering the session briefing (${resume.refIds.length} sources)`,
       { run_id: runId });
     return resume;

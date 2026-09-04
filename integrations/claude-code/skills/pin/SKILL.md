@@ -37,7 +37,7 @@ wrong to say next week, it is a pin.
 ## Pin something
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" add "don't touch the vendored server" --run <run_id> --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" add "don't touch the vendored server" --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --run <run_id> --json
 ```
 
 It renders on the very next prompt — the command writes through to the local cache the recall
@@ -60,12 +60,23 @@ The command now refuses rather than guessing when two runs are live (`ambiguous_
 but do not rely on that: it can only see the sessions whose hooks happen to have fired inside
 its window, and passing `--run` is what makes the question not arise.
 
+### And always pass `--data-dir`
+
+**`--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"` is not optional.** A Bash tool
+call does not inherit `CLAUDE_PLUGIN_DATA` — it arrives empty — so without the flag the command
+has to guess which of several `mubit-memory*` directories the host is using, and either
+refuses with `no_run` or writes the pin through a store this session's hooks never read. The
+host substitutes `${CLAUDE_PLUGIN_DATA}` into this file before you read it, and the shell
+default around it lets a session that pins `MUBIT_CC_DATA_DIR` keep its pin — the same order
+every hook resolves in. Pass the whole expression straight through. Do not turn it into an
+`ENV=… node …` prefix: that is no longer a `node` command and will stop for a permission prompt.
+
 ## See what is pinned, and clear one
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" list --run <run_id> --json
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear <slug> --run <run_id> --json
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear --all --run <run_id> --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" list --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --run <run_id> --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear <slug> --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --run <run_id> --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear --all --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --run <run_id> --json
 ```
 
 `list` prints a slug beside each pin; `clear` takes that slug. `--all` clears only this

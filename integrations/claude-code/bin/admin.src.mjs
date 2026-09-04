@@ -10,7 +10,7 @@
  *   node bin/admin.mjs strategies [--max N] [--types a,b]
  *   node bin/admin.mjs reflect
  *
- * Every command takes `--run <id>` and `--json`.
+ * Every command takes `--run <id>`, `--data-dir <path>` and `--json`.
  *
  * **Why a script and not five MCP tools.** Each of these was an MCP tool until the surface
  * was cut to seven. A registered tool is paid for on every session before the model does
@@ -21,10 +21,23 @@
  * `mcpTools` restores any of them by name.
  *
  * **What it prints.** The same compact form a tool result takes (`mcp/src/results.mjs`): one
- * line per lesson, the id on the line, a lesson this run has already been shown degraded to
- * the injection's own pointer, and the whole thing held under `mcpResultTokenBudget`. What the
- * model reads here and what it reads from `mubit_recall` are one rendering. `--json` is the
- * raw reply, for a person or a script, and is never capped.
+ * line per lesson, the id on the line, and the whole thing held under `mcpResultTokenBudget`.
+ * `--json` is the raw reply, for a person or a script, and is never capped.
+ *
+ * **Always in full, and never in the seen-set.** A tool result degrades a lesson the
+ * conversation has already been shown to a one-line pointer (`lib/seen.mjs`); this script
+ * does not, in either direction. A shell command cannot know whether its stdout reached a
+ * model — a verification run from a plain terminal marked a run's whole catalogue as shown,
+ * and the next conversation in that directory was handed fragments with nothing to
+ * dereference them against. So this file does not import the module at all: nothing it
+ * prints is a pointer, and nothing it prints is recorded as seen.
+ *
+ * **`--data-dir`.** A skill runs this through Bash, and a Bash tool call inherits neither
+ * `MUBIT_CC_DATA_DIR` nor `CLAUDE_PLUGIN_DATA`; without the flag the script has to search
+ * `~/.claude/plugins/data/` and can pick a sibling install's store — one the session's hooks
+ * never write to. The skills pass `--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"`,
+ * the same expression `skills/auth` uses, and it takes the first rung of `lib/state.mjs
+ * dataDir()`. A blank or unsubstituted value is dropped (`dataDirFlag`).
  *
  * **What it dials.** Only routes the plugin already speaks: the activity feed for the
  * catalogue (the same census the dashboard uses, because the lessons route filters after its
@@ -44,7 +57,7 @@ import { loadConfig } from '../lib/config.mjs';
 import { deleteLesson } from '../lib/dashboard-api.mjs';
 import { postCheckpoint, request, ROUTES } from '../lib/http.mjs';
 import { pickRun } from '../lib/runpick.mjs';
-import { markSeen, readSeen } from '../lib/seen.mjs';
+import { dataDirFlag } from '../lib/state.mjs';
 import { selectLessons, SHOWING, wireLesson } from '../mcp/src/egress.mjs';
 import { DEFAULT_RESULT_TOKENS, renderCompact } from '../mcp/src/results.mjs';
 
@@ -70,16 +83,17 @@ const USAGE = `usage: admin <command> [options]
   strategies  [--max N] [--types type,type]
   reflect
 
-  --run <id>   the run to act on; the default is the run this session's hooks are writing to
-  --json       the raw reply, uncapped
+  --run <id>          the run to act on; the default is the run this session's hooks are writing to
+  --data-dir <path>   the plugin data directory the hooks write to; a blank value is ignored
+  --json              the raw reply, uncapped
 `;
 
 // ---------------------------------------------------------------------------
 // argv
 // ---------------------------------------------------------------------------
 
-const VALUED = new Set(['--run', '--scope', '--importance', '--limit', '--label', '--file',
-  '--snapshot', '--max', '--types']);
+const VALUED = new Set(['--run', '--data-dir', '--scope', '--importance', '--limit', '--label',
+  '--file', '--snapshot', '--max', '--types']);
 const FLAGS = new Set(['--json', '--help', '-h']);
 
 /**
@@ -90,7 +104,7 @@ export function parseArgs(argv = []) {
   const args = Array.isArray(argv) ? argv.map((a) => String(a ?? '')) : [];
   /** @type {Record<string, any>} */
   const out = {
-    command: '', run: '', json: false, help: false, scope: '', importance: '',
+    command: '', run: '', dataDir: '', json: false, help: false, scope: '', importance: '',
     limit: DEFAULT_LIMIT, id: '', label: '', file: '', snapshot: '', max: DEFAULT_MAX_STRATEGIES,
     types: [], error: '',
   };
@@ -107,6 +121,7 @@ export function parseArgs(argv = []) {
       if (v === undefined) { out.error = `${a} needs a value`; return out; }
       i += 1;
       if (a === '--run') out.run = v.trim();
+      else if (a === '--data-dir') out.dataDir = dataDirFlag(v);
       else if (a === '--scope') out.scope = v.trim();
       else if (a === '--importance') out.importance = v.trim();
       else if (a === '--limit') out.limit = Number(v);
@@ -162,7 +177,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   if (args.help) { stdout(USAGE); return 0; }
 
   let cfg;
-  try { cfg = loadConfig(env); } catch (err) { stderr(`could not resolve configuration: ${messageOf(err)}\n`); return 1; }
+  // `--data-dir` rides the first rung of `dataDir()`, so `pickRun` scans the store the
+  // session's hooks write to rather than whichever sibling install the search would find.
+  try {
+    cfg = loadConfig(args.dataDir ? { ...env, MUBIT_CC_DATA_DIR: args.dataDir } : env);
+  } catch (err) {
+    stderr(`could not resolve configuration: ${messageOf(err)}\n`);
+    return 1;
+  }
 
   const pick = pickRun(cfg, args.run, { command: `admin ${args.command}` });
   if (!pick.ok) { stderr(`${pick.detail}\n`); return 1; }
@@ -214,13 +236,11 @@ async function doLessons(c) {
     c.stdout(`run_id: ${runId}\nshowing: ${payload.showing}\nNo lessons matched.\n`);
     return 0;
   }
-  const compact = renderCompact(payload, 'lessons', { budget: budgetOf(cfg), seen: readSeen(cfg, runId).ids });
+  const compact = renderCompact(payload, 'lessons', { budget: budgetOf(cfg) });
   if (!compact) { c.stdout(`${JSON.stringify(payload, null, 2)}\n`); return 0; }
   const lines = [compact.text];
   if (compact.dropped > 0) lines.push(`Showing ${compact.total - compact.dropped} of ${compact.total}; --limit and --scope narrow it, --json is the whole listing.`);
-  if (compact.pointed.length) lines.push(pointerNote());
   c.stdout(`${lines.join('\n')}\n`);
-  markSeen(cfg, runId, [...compact.shown, ...compact.pointed]);
   return 0;
 }
 
@@ -325,7 +345,7 @@ async function doReflect(c) {
   if (!res.ok) return failed(c, 'reflect failed', res);
   const reply = isObject(res.body) ? res.body : {};
   if (args.json) { c.stdout(`${JSON.stringify(reply, null, 2)}\n`); return 0; }
-  const compact = renderCompact(reply, 'lessons', { budget: budgetOf(cfg), seen: readSeen(cfg, runId).ids });
+  const compact = renderCompact(reply, 'lessons', { budget: budgetOf(cfg) });
   if (!compact) {
     const head = [`run_id: ${runId}`];
     for (const k of ['summary', 'lessons_stored', 'confidence', 'degraded']) {
@@ -337,9 +357,7 @@ async function doReflect(c) {
   }
   const lines = [`run_id: ${runId}`, compact.text];
   if (compact.dropped > 0) lines.push(`Showing ${compact.total - compact.dropped} of ${compact.total}; --json is the whole reply.`);
-  if (compact.pointed.length) lines.push(pointerNote());
   c.stdout(`${lines.join('\n')}\n`);
-  markSeen(cfg, runId, [...compact.shown, ...compact.pointed]);
   return 0;
 }
 
@@ -353,10 +371,6 @@ function budgetOf(cfg) {
   if (!Number.isFinite(n) || n < 0) return DEFAULT_RESULT_TOKENS;
   // `0` is the operator asking for the raw result back; here that means uncapped.
   return n === 0 ? Number.MAX_SAFE_INTEGER : n;
-}
-
-function pointerNote() {
-  return 'A line marked "(seen earlier)" was shown in full earlier in this conversation; mubit_dereference returns its text.';
 }
 
 /**

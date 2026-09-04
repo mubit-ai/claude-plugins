@@ -380,7 +380,7 @@ test('--pre with an unreadable transcript_path exits 0 without crashing', async 
  * Compaction resets the model's window, not the file.
  *
  * `hooks/src/prompt-recall.mjs` degrades a memory it has already injected into a one-line
- * pointer, on the strength of `runs/<run_id>/seen.json` saying the model has it. After a
+ * pointer, on the strength of `runs/<run_id>/seen/<session_id>.json` saying the model has it. After a
  * compaction that is no longer true of anything: the transcript the entries were injected
  * into is gone. A pointer surviving a compaction names a memory that exists nowhere in the
  * conversation — strictly worse than paying full price, because the model is told a memory
@@ -390,15 +390,18 @@ test('--pre with an unreadable transcript_path exits 0 without crashing', async 
  * where the reset belongs.
  */
 
-const seenPath = (dataDir) => join(runDir(dataDir), 'seen.json');
+const seenPath = (dataDir, session = fx.SESSION_ID) => join(runDir(dataDir), 'seen', `${session}.json`);
 
-function seedSeen(dataDir, refs = ['ref_rule_1', 'ref_lesson_1']) {
-  mkdirSync(runDir(dataDir), { recursive: true });
+function seedSeen(dataDir, refs = ['ref_rule_1', 'ref_lesson_1'], session = fx.SESSION_ID) {
+  mkdirSync(join(runDir(dataDir), 'seen'), { recursive: true });
   const now = Date.now();
   const entries = {};
   for (const id of refs) entries[id] = { first: now, last: now, count: 3 };
-  writeFileSync(seenPath(dataDir), JSON.stringify({ run_id: RUN_ID, updated_at: now, refs: entries }));
+  writeFileSync(seenPath(dataDir, session),
+    JSON.stringify({ run_id: RUN_ID, session_id: session, updated_at: now, refs: entries }));
 }
+
+const OTHER_SESSION = '7a0b3c2d-9e8f-4a1b-8c2d-3e4f5a6b7c8d';
 
 test('--post clears the seen-set, so the next prompt re-expands every memory in full', async (t) => {
   const server = await fakeMubit();
@@ -415,6 +418,33 @@ test('--post clears the seen-set, so the next prompt re-expands every memory in 
   assert.equal(existsSync(seenPath(dataDir)), false,
     'a pointer that outlives the transcript it points into names a memory the model cannot read');
   assert.equal(server.requests.length, 0, '--post still dials nothing (§5.6)');
+});
+
+// The set is one conversation's. Another session in the same run still has its transcript,
+// so its pointers are still true and its file must survive this session's compaction; and a
+// payload that names no conversation cannot know whose window was reset, so it clears nobody's.
+test('--post clears only the compacted session\'s file, and nothing without a session id', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dataDir = makeDataDir();
+  seedSeen(dataDir);
+  seedSeen(dataDir, ['ref_fact_1'], OTHER_SESSION);
+
+  const anonymous = await runHook('checkpoint', { ...fx.postCompact(), session_id: undefined }, {
+    env: env(dataDir, server.url), args: ['--post'],
+  });
+  assertHookContract(anonymous);
+  assert.equal(existsSync(seenPath(dataDir)), true,
+    'a payload with no session id names no conversation, so it must not clear one');
+  assert.equal(existsSync(seenPath(dataDir, OTHER_SESSION)), true);
+
+  const r = await runHook('checkpoint', fx.postCompact(), {
+    env: env(dataDir, server.url), args: ['--post'],
+  });
+  assertHookContract(r);
+  assert.equal(existsSync(seenPath(dataDir)), false, 'the compacted session\'s file goes');
+  assert.equal(existsSync(seenPath(dataDir, OTHER_SESSION)), true,
+    'the other session\'s transcript is intact, so its record of what it has seen must be too');
 });
 
 // The clear cannot be gated on the checkpoint call having worked. A compaction with no

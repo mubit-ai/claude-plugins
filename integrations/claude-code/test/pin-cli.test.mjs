@@ -501,6 +501,13 @@ test('pin parseArgs: an unknown --token is text, and the known flags are not', (
     [b.action, b.text, b.runId, b.slug, b.json],
     ['add', 'hello there', 'cc-x', 'greeting', true]);
 
+  // `--data-dir` is consumed like `--run`. The skill passes the host's interpolation of
+  // `CLAUDE_PLUGIN_DATA`, and a value the host never substituted is dropped, not taken as a path.
+  const c = CLI.parseArgs(['add', 'hello', '--data-dir', '/store/ours', '--run', 'cc-x']);
+  assert.deepEqual([c.text, c.dataDir, c.runId], ['hello', '/store/ours', 'cc-x']);
+  assert.equal(CLI.parseArgs(['list', '--data-dir', '${CLAUDE_PLUGIN_DATA}']).dataDir, '');
+  assert.equal(CLI.parseArgs(['list', '--data-dir', '']).dataDir, '');
+
   // A bare invocation lists rather than writes: a model guessing at the interface should not
   // be able to pin something by accident.
   assert.equal(CLI.parseArgs([]).action, 'list');

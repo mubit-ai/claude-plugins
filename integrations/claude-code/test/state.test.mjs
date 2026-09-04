@@ -291,6 +291,11 @@ const TTL_ROWS = [
   // this row is the sweep for the one nobody came back to read: a session started and
   // abandoned before its first prompt leaves a file that would otherwise outlive the run.
   { what: 'resume briefing', rel: 'runs/cc-x/resume.json', ttl: 1 * HOUR },
+  // The seen-set: one file per conversation under the run, at the same 6 h as the turns it
+  // aggregates (`lib/seen.mjs`); and the run-keyed file releases up to 0.13.0 wrote, which
+  // nothing reads any more and this sweep drains.
+  { what: 'seen-set', rel: `runs/cc-x/seen/${fx.SESSION_ID}.json`, ttl: 6 * HOUR },
+  { what: 'legacy seen roll-up', rel: 'runs/cc-x/seen.json', ttl: 6 * HOUR },
 ];
 
 for (const row of TTL_ROWS) {
@@ -737,6 +742,21 @@ test('liveDataDir and the codex twin agree on a machine where nothing has been w
     assert.equal(liveDataDir(home, {}), boot.claudeCodeDataDir({ HOME: home }),
       `the two hand-maintained copies must agree for ${JSON.stringify(Object.keys(dirs))}`);
   }
+});
+
+// The `--data-dir` rung above `MUBIT_CC_DATA_DIR`, shared by auth, pin and admin. A literal
+// `${CLAUDE_PLUGIN_DATA}` taken as a path would create a directory of that name under the
+// cwd, write into it and report success — which is how a sign-in once landed nowhere.
+test('dataDirFlag: a path is taken as given; blank and unsubstituted values are dropped', async () => {
+  const { dataDirFlag } = await lib('state.mjs');
+  assert.equal(dataDirFlag('/pinned/by/the/skill'), '/pinned/by/the/skill');
+  assert.equal(dataDirFlag('  /trimmed  '), '/trimmed');
+  assert.equal(dataDirFlag(''), '');
+  assert.equal(dataDirFlag('   '), '');
+  assert.equal(dataDirFlag('${CLAUDE_PLUGIN_DATA}'), '');
+  assert.equal(dataDirFlag('${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}'), '');
+  assert.equal(dataDirFlag(undefined), '');
+  assert.equal(dataDirFlag(42), '');
 });
 
 test('state.mjs exports safeHome so bin/ commands share one HOME fallback', async () => {

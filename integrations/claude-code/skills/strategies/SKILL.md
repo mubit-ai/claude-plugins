@@ -11,9 +11,18 @@ a small number and report all of them; a wall of generalisations is less useful 
 good ones.
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs strategies --max 5
-node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs strategies --max 8 --types failure,rule
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs strategies --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --max 5
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs strategies --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --max 8 --types failure,rule
 ```
+
+**`--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"` is not optional.** A Bash tool
+call does not inherit `CLAUDE_PLUGIN_DATA` — it arrives empty — so without the flag the script
+has to guess which of several `mubit-memory*` directories the host is using, and either
+refuses with `no_run` or acts on a run this session's hooks never touch. The host substitutes
+`${CLAUDE_PLUGIN_DATA}` into this file before you read it, and the shell default around it
+lets a session that pins `MUBIT_CC_DATA_DIR` keep its pin — the same order every hook resolves
+in. Pass the whole expression straight through. Do not turn it into an `ENV=… node …` prefix:
+that is no longer a `node` command and will stop for a permission prompt.
 
 Neither command here is an MCP tool: `mubit_strategies` and `mubit_lessons` left the default
 tool surface so that a session pays nothing to list them, and this script reaches the same
@@ -39,7 +48,7 @@ faster and quotes it. Do not reach for this for a single lesson; it will hand ba
 of a cluster the lesson happens to sit in. For the lessons themselves:
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons [--scope run|session|global] [--limit N]
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" [--scope run|session|global] [--limit N]
 ```
 
 ## Arguments

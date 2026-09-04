@@ -193,12 +193,19 @@ function prepare(env) {
   // rule as the guard above, and for the same reason: `StdioServerTransport` takes
   // `process.stdout` as a constructor default and holds it from then on.
   installInstructionsGuard({ instructions: INSTRUCTIONS });
-  installResultsGuard({ cfg, runId, budget: cfg.mcpResultTokenBudget });
+  // The seen-set the guard reads is one conversation's (`lib/seen.mjs`), so it is keyed by
+  // the host session id this process was started with. Without one — the startup race, or a
+  // host that exposes none — every result renders in full and nothing is marked.
+  const sessionId = hostPayload(env).session_id ?? '';
+  installResultsGuard({
+    cfg, runId, sessionId, repeatMode: cfg.recallRepeatMode, budget: cfg.mcpResultTokenBudget,
+  });
 
   log(cfg, 'info', 'mcp: starting server', {
     run_id: runId, endpoint: cfg.endpoint, mode: cfg.mode, tools: tools.length,
     lesson_scope: ceiling, pin_run: true, instruction_chars: INSTRUCTIONS.length,
     result_tokens: cfg.mcpResultTokenBudget,
+    seen: sessionId ? 'session' : 'off', repeat_mode: cfg.recallRepeatMode,
   });
   return true;
 }

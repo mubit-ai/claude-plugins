@@ -232,10 +232,14 @@ step 4 by calling `GET /v2/control/ingest/jobs/<job_id>` directly, and `mubit_ar
 which no skill reached. None is removed: name it in `MUBIT_MCP_TOOLS` and it is back.
 
 Every tool result is shaped on its way to the model: a lesson list or a recall comes back one
-line per item with the id kept, a memory already shown this run is repeated as a pointer, and
-nothing exceeds `MUBIT_CC_MCP_RESULT_TOKENS` (default 2000, `0` for the raw reply). The
-untouched original is saved under the plugin data directory, where the foot of the result
-names it.
+line per item with the id kept, and nothing exceeds `MUBIT_CC_MCP_RESULT_TOKENS` (default
+2000, `0` for the raw reply). The untouched original is saved under the plugin data directory,
+where the foot of the result names it. The record of what a conversation has already been
+shown is keyed by the host session id (`lib/seen.mjs`), and Codex hands its MCP servers no
+session id — setup registers the server with only `MUBIT_CC_DATA_DIR` and
+`MUBIT_CC_PLUGIN_ROOT` — so under Codex a tool result always renders in full and marks
+nothing. The hooks carry `session_id` natively, so the per-prompt injection still degrades a
+repeat to a pointer, and `bin/admin.mjs` renders in full on every host.
 
 ## Development
 

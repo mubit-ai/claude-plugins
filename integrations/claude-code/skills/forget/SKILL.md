@@ -9,8 +9,17 @@ Delete with the bundled script, naming the lesson — the `reference_id` cited i
 context, or the id on a line of `/mubit-memory:reflect` or `/mubit-memory:strategies`:
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs forget <lesson_id>
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs forget --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" <lesson_id>
 ```
+
+**`--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"` is not optional.** A Bash tool
+call does not inherit `CLAUDE_PLUGIN_DATA` — it arrives empty — so without the flag the script
+has to guess which of several `mubit-memory*` directories the host is using, and either
+refuses with `no_run` or acts on a run this session's hooks never touch. The host substitutes
+`${CLAUDE_PLUGIN_DATA}` into this file before you read it, and the shell default around it
+lets a session that pins `MUBIT_CC_DATA_DIR` keep its pin — the same order every hook resolves
+in. Pass the whole expression straight through. Do not turn it into an `ENV=… node …` prefix:
+that is no longer a `node` command and will stop for a permission prompt.
 
 Confirm the id and the text with the user before you run it; there is no dry run. The script
 deletes one lesson by `POST /v2/control/lessons/delete` and nothing else: it has no way to

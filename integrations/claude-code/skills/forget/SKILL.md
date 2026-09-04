@@ -1,17 +1,21 @@
 ---
 name: forget
-description: Delete a lesson from Mubit memory, or mark an entry superseded. Prefer a negative outcome for a lesson that is merely wrong — deletion cannot be undone.
+description: Delete a lesson, or down-weight one that is merely wrong; use when asked, after saying it cannot be undone.
 disable-model-invocation: false
-tools: ["mcp__plugin_mubit-memory_mubit__mubit_forget", "mcp__plugin_mubit-memory_mubit__mubit_outcome"]
+allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs forget:*)", "mcp__plugin_mubit-memory_mubit__mubit_outcome"]
 ---
 
-Call `mubit_forget` with `lesson_id` — the `reference_id` cited in recalled context, or the
-`lesson_id` reported by `/mubit-memory:reflect`. Confirm the id and the text with the user
-before you call it; there is no dry run.
+Delete with the bundled script, naming the lesson — the `reference_id` cited in recalled
+context, or the id on a line of `/mubit-memory:reflect` or `/mubit-memory:strategies`:
 
-Pass `lesson_id` and nothing else. The same tool accepts `session_id`, and that argument
-deletes **the entire run** — every capture, trace, and lesson in it — not one entry. Never
-send it unless the user has asked for exactly that, in those words.
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs forget <lesson_id>
+```
+
+Confirm the id and the text with the user before you run it; there is no dry run. The script
+deletes one lesson by `POST /v2/control/lessons/delete` and nothing else: it has no way to
+delete a whole run, on purpose, because that operation removed every capture, trace and
+lesson in the run and was one argument away from a single-lesson delete.
 
 There is also no "mark superseded" operation: nothing flags an entry as replaced. Superseding
 is done the way described below — write the corrected lesson, and down-weight the old one so

@@ -173,19 +173,16 @@ test('stdout is a SessionStart steer block plus a one-line systemMessage', async
   const ctx = out.additionalContext;
   assert.ok(ctx.includes(runId), `additionalContext must name the run, got:\n${ctx}`);
   assert.match(ctx, /hosted/, 'additionalContext must name the mode');
-  // §5.1 — the steer must carry BOTH halves, and the pair is the contract. This test used to
-  // assert only `/do not search/i`, which is how the plugin shipped a steer that told the
-  // model memory existed and never to reach for it: a negative with no positive beside it,
-  // against tool descriptions that said nothing about when to use them either. Between them
-  // the trained behaviour was to call no memory tool at all — so every measurement of those
-  // tools was really a measurement of this paragraph.
-  assert.match(ctx, /injected automatically/i);
-  assert.match(ctx, /no need to open a turn by searching/i,
-    `the steer must say recall is already injected, so turn one need not search:\n${ctx}`);
-  assert.match(ctx, /do search when the injected memory falls short/i,
-    `the steer must also say when searching IS right, or the negative stands alone:\n${ctx}`);
+  // §5.1 — the "when to search" guidance is the MCP server's `instructions`, which Claude
+  // Code loads into the system prompt of every session (`mcp/src/instructions.mjs`, asserted
+  // by mcp-instructions.test.mjs). This block fires on every startup, resume, clear and
+  // compaction — the most frequent injection the plugin makes — so on this host it carries the
+  // run and the mode and nothing the instructions already said. Under Codex, which has no
+  // instructions frame, the guidance stays in this block (asserted below).
+  assert.ok(!/injected automatically/i.test(ctx),
+    `on Claude Code the steer must not restate the MCP instructions:\n${ctx}`);
   for (const tool of ['mubit_recall', 'mubit_diagnose', 'mubit_dereference']) {
-    assert.ok(ctx.includes(tool), `the steer must name ${tool} as the tool for its case:\n${ctx}`);
+    assert.ok(!ctx.includes(tool), `the steer names ${tool}, which the instructions already route:\n${ctx}`);
   }
   // The lesson section renders the global lessons the activity feed returned.
   assert.match(ctx, /standing lessons/i);

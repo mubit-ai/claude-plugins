@@ -1,6 +1,6 @@
 ---
 name: dashboard
-description: "Open the local Mubit dashboard: browse and search lessons, see what recall cost per prompt, and check ingest health. Use when the user asks to look at what memory holds or what it costs — and only then, never on your own initiative. Loopback only."
+description: Open the local Mubit dashboard for lessons, recall cost and ingest health; use when the user wants to look, not ask.
 ---
 
 **This skill never installs anything.** It starts one Node process from the plugin directory,

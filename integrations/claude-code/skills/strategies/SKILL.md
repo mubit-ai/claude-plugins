@@ -1,42 +1,54 @@
 ---
 name: strategies
-description: Surface the pattern across many stored lessons rather than any single one. Use when the user asks what memory has learned in general, why the same class of mistake keeps recurring, or how this project tends to work — not when they have one specific question.
+description: Surface the pattern across many stored lessons; use when the user asks what memory has learned in general or why a mistake keeps recurring.
 disable-model-invocation: false
-tools: ["mcp__plugin_mubit-memory_mubit__mubit_strategies", "mcp__plugin_mubit-memory_mubit__mubit_lessons"]
+allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs strategies:*)", "Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons:*)"]
 ---
 
-Call `mubit_strategies` — `POST /v2/control/strategies` — and report the strategies it returns
-in the user's own terms: what the pattern is, and what it was inferred from. Ask for a small
-number and report all of them; a wall of generalisations is less useful than three good ones.
+Run the bundled script — `POST /v2/control/strategies` behind it — and report the strategies
+it prints in the user's own terms: what the pattern is, and what it was inferred from. Ask for
+a small number and report all of them; a wall of generalisations is less useful than three
+good ones.
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs strategies --max 5
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs strategies --max 8 --types failure,rule
+```
+
+Neither command here is an MCP tool: `mubit_strategies` and `mubit_lessons` left the default
+tool surface so that a session pays nothing to list them, and this script reaches the same
+two routes.
 
 ## The one thing to be clear about
 
-**`mubit_strategies` is the pattern *across* lessons. `mubit_lessons` reads the individual
-lessons themselves.**
+**`strategies` is the pattern *across* lessons. `lessons` reads the individual lessons
+themselves.**
 
-Every other retrieval tool here answers with entries. `mubit_recall` finds the lessons that
-match a question, `mubit_lessons` lists the catalogue, `mubit_diagnose` matches an error's
-shape, `mubit_dereference` fetches the one whose `reference_id` you already hold. This is the
-only one that answers with a *shape over* many of them: it clusters stored lessons into
-emergent strategies, so what comes back is a generalisation the server derived, not a record
-anybody wrote.
+Every other retrieval verb answers with entries. `mubit_recall` finds the lessons that match a
+question, `admin.mjs lessons` lists the catalogue, `mubit_diagnose` matches an error's shape,
+`mubit_dereference` fetches the one whose `reference_id` you already hold. This is the only
+one that answers with a *shape over* many of them: it clusters stored lessons into emergent
+strategies, so what comes back is a generalisation the server derived, not a record anybody
+wrote. Each line names the lesson ids the strategy was inferred from; `mubit_dereference`
+reads any of them.
 
 That makes the choice easy in both directions. "Why do we keep breaking the build the same
 way?" and "what has this project learned about testing?" are strategy questions. "What did we
 decide about the recall budget?" is not — that has one answer, and `mubit_recall` finds it
-faster and quotes it. Do not reach for this tool to locate a single lesson; it will hand back
-a summary of a cluster the lesson happens to sit in.
+faster and quotes it. Do not reach for this for a single lesson; it will hand back a summary
+of a cluster the lesson happens to sit in. For the lessons themselves:
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons [--scope run|session|global] [--limit N]
+```
 
 ## Arguments
 
-- `max_strategies` — 1 to 50. Ask for five to ten. The value of the answer is that it is
-  short; fifty clusters over a few dozen lessons is the same information with the pattern
-  taken back out.
-- `lesson_types` — narrows which lessons get clustered, when the user is asking about one
-  kind of thing ("what have we learned about failures?").
-- `session_id` and `user_id` — leave both out. The launcher already passes this run's id, and
-  `user_id` is a retrieval *filter* rather than a label: a value nothing was captured under
-  matches nothing, so inventing one is how you get an empty answer from a full store.
+- `--max` — 1 to 50. Ask for five to ten. The value of the answer is that it is short; fifty
+  clusters over a few dozen lessons is the same information with the pattern taken back out.
+- `--types` — narrows which lessons get clustered, when the user is asking about one kind of
+  thing ("what have we learned about failures?").
+- `--run` — leave it out. The script acts on the run this session's hooks are writing to.
 
 ## Reporting it
 

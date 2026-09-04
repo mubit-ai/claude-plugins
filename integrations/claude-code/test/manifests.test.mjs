@@ -43,11 +43,10 @@ const P = {
 /** The plugin's own MCP server prefix. `.mcp.json` names the server `mubit` (§3.3). */
 const QUALIFIED_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
-/** §8.2 — thirteen of the twenty-one tools; the last three were promoted once each had a skill to reach it. */
+/** §8.2 — seven of the twenty-one tools; the administrative verbs are reached through `bin/admin.mjs`. */
 const DEFAULT_ALLOWLIST = [
-  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
-  'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
-  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
+  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_diagnose',
+  'mubit_dereference', 'mubit_status', 'mubit_memory_health',
 ];
 
 /** §6.2 — every key the plugin promises to honour at enable time. */
@@ -633,7 +632,7 @@ test('every tool in the default allowlist exists in the bundled MCP server', () 
     assert.ok(real.includes(name),
       `default allowlist names "${name}", which the bundled server does not register. Real tools: ${real.join(', ')}`);
   }
-  assert.equal(DEFAULT_ALLOWLIST.length, 13, 'the curated default allowlist is thirteen of twenty-one (§8.2)');
+  assert.equal(DEFAULT_ALLOWLIST.length, 7, 'the curated default allowlist is seven of twenty-one (§8.2)');
 });
 
 // §12.7 — same check, one level down: a tool named in a skill must exist in the server.

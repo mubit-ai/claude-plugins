@@ -1,6 +1,6 @@
 ---
 name: auth
-description: Sign in to Mubit and store an API key for this machine. Use when the plugin is freshly installed, when it reports auth_failed, or when a key has been rotated or revoked.
+description: Sign in to Mubit and store an API key; use when the plugin reports auth_failed or a key was rotated.
 ---
 
 **This skill never installs anything.** It opens a browser, receives a key, checks it against

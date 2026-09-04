@@ -1,15 +1,26 @@
 ---
 name: checkpoint
-description: Save a named snapshot of where this run has got to, stored verbatim. Use when the user is about to do something risky or destructive, when a compaction is coming that they want to survive on their own terms, or when they ask to mark a point they may need to come back to.
+description: Save a named verbatim snapshot of this run; use when the user is about to do something risky.
 disable-model-invocation: false
-tools: ["mcp__plugin_mubit-memory_mubit__mubit_checkpoint"]
+allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs checkpoint:*)"]
 ---
 
-Call `mubit_checkpoint` — `POST /v2/control/checkpoint` — with the state you are holding.
-`snapshot` is the only required argument; `label` is a short name the user can ask for later
-and is worth passing every time.
+Run the bundled script with the snapshot on stdin. It posts `POST /v2/control/checkpoint`
+under this session's run, and nothing else:
 
-## What goes in `snapshot`
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs checkpoint --label "<short name>" <<'SNAPSHOT'
+<the snapshot>
+SNAPSHOT
+```
+
+`--label` is required: a short name the user can ask for later. The snapshot is whatever is on
+stdin (`--file <path>` reads it from a file instead). The script prints the checkpoint id it
+was given back; relay it. It does not call an MCP tool — `mubit_checkpoint` left the default
+tool surface so that a session pays nothing to list it, and this script is how the skill
+reaches the same route.
+
+## What goes in the snapshot
 
 It is stored **verbatim and unsummarised**. Nothing rewrites it, shortens it or extracts
 anything from it, which cuts both ways: whatever you write is exactly what a future reader
@@ -42,8 +53,8 @@ memory into a session log, and every later recall pays for it.
 
 The `PreCompact` hook already checkpoints on the way into a compaction. That is the automatic
 one, and it fires on the host's schedule — when the window fills — which is exactly the moment
-nobody can ask for. This tool is the half a person asks for: before a destructive migration, a
-history rewrite, a long refactor, or a deliberate `/clear` the user wants to walk back from.
+nobody can ask for. This skill is the half a person asks for: before a destructive migration,
+a history rewrite, a long refactor, or a deliberate `/clear` the user wants to walk back from.
 
 Do not checkpoint reflexively or on a timer. Each call is a durable write, and a run littered
 with near-identical snapshots is harder to recover from than one with three good ones.

@@ -22,10 +22,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { basename, join } from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import {
   fakeMubit, queryResponse, evidence, runHook, assertHookContract,
-  baseEnv, makeDataDir, makeProjectDir, readJsonFile, readJsonDir,
+  baseEnv, makeDataDir, makeProjectDir, readJsonFile, readJsonDir, waitFor,
 } from './helpers/harness.mjs';
 import { userPromptSubmit, PROMPT_ID, SECRETS } from './helpers/fixtures.mjs';
 
@@ -1653,8 +1653,13 @@ test('pins: render under recallAsync, with and without a carried block', async (
   assert.ok(first.json?.hookSpecificOutput?.additionalContext?.includes(PIN_ONE),
     'the first prompt of an async session has no recalled memory; the pin is all there is');
 
+  // The first prompt spawned a detached refresh that writes its own carry.json. Let it land
+  // before this one is written, or on a slow runner it lands afterwards and wins.
+  const carryPath = join(dir, 'runs', RUN_ID, 'carry.json');
+  await waitFor(() => existsSync(carryPath));
+
   // A block the previous turn's refresh left behind.
-  writeFileSync(join(dir, 'runs', RUN_ID, 'carry.json'), JSON.stringify({
+  writeFileSync(carryPath, JSON.stringify({
     run_id: RUN_ID, written_at: Date.now(), for_prompt_id: 'p_c1', fetch_ms: 12,
     rung: 1, block: '## Lessons\n- CARRIED_LESSON\n', tokens: 9, sources: 1,
     dropped: 0, pointers: 0, empty_reason: '', ref_ids: ['ref_carried'],

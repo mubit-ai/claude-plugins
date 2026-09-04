@@ -1,13 +1,38 @@
 ---
 name: checkpoint
-description: Save a named snapshot of where this run has got to, stored verbatim. Use when the user is about to do something risky or destructive, when a compaction is coming that they want to survive on their own terms, or when they ask to mark a point they may need to come back to.
+description: Save a named verbatim snapshot of this run; use when the user is about to do something risky.
 ---
 
-Call `mcp__mubit__mubit_checkpoint` — `POST /v2/control/checkpoint` — with the state you are
-holding. `snapshot` is the only required argument; `label` is a short name the user can ask
-for later and is worth passing every time.
+## Step 0 — resolve the binary
 
-## What goes in `snapshot`
+No environment variable carries this plugin's path under Codex. Codex lists each skill with the
+absolute path of its `SKILL.md`; **this file** is at `<plugin-root>/skills/checkpoint/SKILL.md`, so
+the binary is two directories above it:
+
+```
+<plugin-root>/bin/admin.mjs
+```
+
+Resolve that to an absolute path from this file's own location and use it in every command
+below. Do not write `${CLAUDE_PLUGIN_ROOT}`: Codex sets no plugin-root variable of any
+spelling, so the shell expands it to nothing and `node /bin/admin.mjs` fails with ENOENT.
+
+Run the bundled script with the snapshot on stdin. It posts `POST /v2/control/checkpoint`
+under this session's run, and nothing else:
+
+```bash
+node <plugin-root>/bin/admin.mjs checkpoint --label "<short name>" <<'SNAPSHOT'
+<the snapshot>
+SNAPSHOT
+```
+
+`--label` is required: a short name the user can ask for later. The snapshot is whatever is on
+stdin (`--file <path>` reads it from a file instead). The script prints the checkpoint id it
+was given back; relay it. It does not call an MCP tool — `mubit_checkpoint` left the default
+tool surface so that a session pays nothing to list it, and this script is how the skill
+reaches the same route.
+
+## What goes in the snapshot
 
 It is stored **verbatim and unsummarised**. Nothing rewrites it, shortens it or extracts
 anything from it, which cuts both ways: whatever you write is exactly what a future reader
@@ -24,13 +49,13 @@ mistake.
 This is the distinction that decides whether to use this skill at all.
 
 **Run state** is true now and false tomorrow: "mid-migration on `feat/x`, three files edited,
-two tests still red". It is worthless in six months and nobody wants it surfacing in an
-unrelated session. That is a checkpoint.
+the codex suite still red on two dist tests". It is worthless in six months and nobody wants
+it surfacing in an unrelated session. That is a checkpoint.
 
-**Knowledge** is true regardless of which run learned it: "a plugin-bundled `hooks.json` is
-inert under Codex", "this team wants small PRs". That is a lesson — save it with
-`mubit-memory:remember`, which classifies it and gives it a scope so it reaches later sessions
-on purpose.
+**Knowledge** is true regardless of which run learned it: "`npm run verify` deletes the
+vendored server bundle", "this team wants small PRs". That is a lesson — save it with
+`mubit-memory:remember`, which classifies it and gives it a scope so it reaches later
+sessions on purpose.
 
 Getting this backwards costs something in both directions. A checkpoint used for knowledge
 buries a durable fact in a snapshot nobody will search for. A lesson used for run state turns
@@ -38,20 +63,10 @@ memory into a session log, and every later recall pays for it.
 
 ## When to call it
 
-The plugin registers a `PreCompact` hook that checkpoints on the way into a compaction. That
-is the automatic one, and it fires on the host's schedule — when the window fills — which is
-exactly the moment nobody can ask for. This tool is the half a person asks for: before a
-destructive migration, a history rewrite, a long refactor, or a point the user says they might
-want to walk back to.
-
-There is a Codex-specific reason not to rely on the automatic half. A plugin-bundled
-`hooks.json` is inert here: the registrations only take effect once they have been merged into
-`$CODEX_HOME/hooks.json` and trusted, which `mubit-memory:setup` walks through. On an install
-where that never happened, the `PreCompact` checkpoint has never fired and nothing says so.
-This tool reaches the instance over MCP rather than through a hook, so it works either way —
-and if the user is surprised there was no automatic checkpoint, that is the thing to check.
+The `PreCompact` hook already checkpoints on the way into a compaction. That is the automatic
+one, and it fires on the host's schedule — when the window fills — which is exactly the moment
+nobody can ask for. This skill is the half a person asks for: before a destructive migration,
+a history rewrite, a long refactor, or a deliberate `/clear` the user wants to walk back from.
 
 Do not checkpoint reflexively or on a timer. Each call is a durable write, and a run littered
-with near-identical snapshots is harder to recover from than one with three good ones. The run
-is also shared with any Claude Code session in the same directory, so what you store here is
-what that session's reader finds too.
+with near-identical snapshots is harder to recover from than one with three good ones.

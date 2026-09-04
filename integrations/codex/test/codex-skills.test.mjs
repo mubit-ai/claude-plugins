@@ -63,11 +63,10 @@ const PREFIX = 'mcp__mubit__';
 /** The prefix the Claude Code plugin uses. Present here is a copy-paste that was never adjusted. */
 const CC_PREFIX = 'mcp__plugin_mubit-memory_mubit__';
 
-/** The thirteen tools the plugin allowlists by default. */
+/** The seven tools the plugin allowlists by default; the administrative verbs run `bin/admin.mjs`. */
 const TOOLS = [
-  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
-  'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
-  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
+  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_diagnose',
+  'mubit_dereference', 'mubit_status', 'mubit_memory_health',
 ];
 
 // ---------------------------------------------------------------------------
@@ -347,8 +346,8 @@ test('strategies: separates the pattern from the lessons it is a pattern over', 
   //   lesson sits in, which reads like an answer and is not one.
   assert.match(body, /across/i,
     'strategies must say the answer is a pattern *across* lessons, not one of them.');
-  assert.match(body, new RegExp(`${PREFIX}mubit_lessons`),
-    'strategies must name mcp__mubit__mubit_lessons as the tool that reads the individual '
+  assert.match(body, /admin\.mjs lessons/,
+    'strategies must name `admin.mjs lessons` as the command that reads the individual '
     + 'lessons. The two are near-synonyms until one of them says so.');
 });
 

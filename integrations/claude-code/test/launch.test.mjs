@@ -26,11 +26,10 @@ import { join } from 'node:path';
 
 import { PLUGIN_ROOT, REPO_ROOT, makeDataDir, makeProjectDir, tempDir, baseEnv, lib, mod } from './helpers/harness.mjs';
 
-/** §8.2 — the curated set, in the guide's order, with the three promoted tools last. */
+/** §8.2 — the curated set, in the guide's order. */
 const DEFAULT_ALLOWLIST = [
-  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_reflect', 'mubit_lessons',
-  'mubit_diagnose', 'mubit_archive', 'mubit_dereference', 'mubit_forget', 'mubit_status',
-  'mubit_strategies', 'mubit_checkpoint', 'mubit_memory_health',
+  'mubit_learned', 'mubit_recall', 'mubit_outcome', 'mubit_diagnose',
+  'mubit_dereference', 'mubit_status', 'mubit_memory_health',
 ];
 
 // ---------------------------------------------------------------------------
@@ -411,7 +410,7 @@ test('[mirror of @mubit-ai/mcp tools suite] a two-name allowlist registers exact
 });
 
 // §8.2 — and the curated set must select exactly itself out of the twenty-one.
-test('[mirror of @mubit-ai/mcp tools suite] the curated default allowlist selects thirteen of twenty-one', () => {
+test('[mirror of @mubit-ai/mcp tools suite] the curated default allowlist selects seven of twenty-one', () => {
   const names = realToolNames();
   const got = applyAllowlist(names, DEFAULT_ALLOWLIST.join(','));
   assert.equal(got.length, DEFAULT_ALLOWLIST.length,

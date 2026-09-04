@@ -130,28 +130,29 @@ an unwritable data dir, or a corrupt state file costs you a memory, never a turn
 | `/mubit-memory:pin` | Pin a standing constraint for the rest of this run — "don't touch the vendored server" — so it is put in front of the model on every prompt, including the ones recall skips. Cleared when it stops being true; a durable, cross-session rule is `remember` instead. |
 | `@mubit-memory:mubit-recall` | Subagent: multi-angle memory search in an isolated context, returns a synthesis instead of raw evidence. |
 
-### Thirteen MCP tools
+### Seven MCP tools
 
-The bundled MCP server carries 21 tools and registers thirteen of them by default — the other
-eight cost you nothing until you ask for them:
+The bundled MCP server carries 21 tools and registers seven of them by default — the rest cost
+you nothing until you ask for them:
 
 ```
-mubit_learned   mubit_recall   mubit_outcome   mubit_reflect   mubit_lessons
-mubit_diagnose  mubit_archive  mubit_dereference  mubit_forget  mubit_status
-mubit_strategies  mubit_checkpoint  mubit_memory_health
+mubit_learned   mubit_recall   mubit_outcome   mubit_diagnose
+mubit_dereference   mubit_status   mubit_memory_health
 ```
 
-The other eight are excluded because a hook already does the job better (`mubit_remember`,
-`mubit_context`) or because they have no Claude Code surface (`mubit_register_agent`,
-`mubit_list_agents` and the rest of the multi-agent orchestration group). Nothing is removed:
-restore any of them by name with `mcpTools`.
+The line is whether a tool answers a question the model is holding mid-task, or writes
+something only it can write: the retrieval verbs, the two writes that make memory improve
+with use, and the two diagnostics. Everything a person asks for — the lesson catalogue, a
+delete, a named checkpoint, the pattern across lessons, an explicit reflect — is reached
+through its skill, which runs `bin/admin.mjs` and costs no listing at all. On Claude Code a
+registered tool costs its name on every session; on Codex it costs its whole schema, and the
+six that left were half of that bill. Nothing is removed: restore any of them by name with
+`mcpTools`.
 
-The last three on that list were excluded until each had a skill to reach it. A checkpoint is
-not what `PreCompact` does — the hook fires when the window fills, which is the one moment you
-cannot ask for, and `mubit_checkpoint` is the marker you name yourself. `mubit_strategies`
-reads the pattern across many lessons where every other retrieval verb reads individual ones.
-`mubit_memory_health` answers the route `/mubit-memory:doctor` used to tell you to `POST` by
-hand.
+Every tool result is shaped on its way to the model (`mcp/src/results.mjs`): a lesson list or
+a recall comes back one line per item with the id kept, a memory already shown this run is
+repeated as a pointer, and nothing exceeds `mcpResultTokenBudget`. The untouched original is
+saved under the plugin data directory, where the foot of the result names it.
 
 ### A status line
 
@@ -300,7 +301,7 @@ that cache, and writing credentials invalidates it immediately rather than after
 | `statusLine` | `true` | `MUBIT_CC_STATUSLINE` | Render the status line. When false it prints an empty line and exits 0 rather than erroring per frame. |
 | `preToolWarnings` | `false` | `MUBIT_CC_PRE_TOOL_WARNINGS` | Show the model a matching stored `rule` just before an `rm` or `git push` runs. Warnings only — it never blocks, rewrites or asks about a tool call, and the filter that decides when it runs at all is best-effort, so treat it as a reminder and use Claude Code's permission system for anything that has to hold. Off by default: this is the one setting that can put text in front of a tool call. |
 | `resumeBlock` | `true` | `MUBIT_CC_RESUME_BLOCK` | Open a session with a briefing on where earlier work left off. `SessionStart` spawns a detached child that asks `/v2/control/context` for a sections block about this run, and the first substantive prompt of the session renders it above the ordinary recall block. **The one opt-in feature here that ships on**, because its cost is per *session* and not per prompt: one background process and **2 LLM calls once**, against the prompt where the model knows least about what it is walking into — nothing waits for it, and no prompt after the first pays anything. Only `startup` and `resume` sessions get one: `/clear` starts a fresh run with no history, and a compaction or a fork is already re-anchored. It renders as `<mubit-resume>` and says, in the block, that it is a briefing and not a task list. **How much it can describe depends on `runStrategy`.** `/v2/control/context` is *mostly* run-scoped — activity, working memory, rules and archived blocks all come from the run id you give it — but lessons also reach across runs, through linked runs and a session/global lesson lane. So under the default `per-directory` the block summarises everything this project has ever done; under `per-conversation`, where every session is its own run, a new session's own run is empty and the block falls back to whatever cross-run lessons apply — thinner, but not nothing. Set `MUBIT_CC_RESUME_TOKENS` to change its 1000-token ceiling. |
-| `mcpTools` | `""` (the curated thirteen) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
+| `mcpTools` | `""` (the curated seven) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
 | `mcpLessonScope` | `session` | `MUBIT_MCP_LESSON_SCOPE` | The widest scope a lesson written by an MCP tool may claim: `run`, `session` or `global`. The default is what `mubit_learned`'s own description tells the model it does, and it is the narrowest scope from which a lesson can reach a later session at all — at `run` it cannot, because reflection stamps `run` as well and there is then no path out of the run that wrote it. Set `run` to keep every agent-written lesson inside the run that wrote it — with `runStrategy: per-directory`, that is the project it was written in. Set `global` if you want agent-written rules to follow you between projects. The ceiling only ever narrows a caller that asked for more; a write that asked for less keeps the narrower scope. |
 | `mcpResultTokenBudget` | `2000` | `MUBIT_CC_MCP_RESULT_TOKENS` | The most one Mubit MCP tool result may put in front of the model. A lesson list or a recall always comes back one line per item with the id kept, and a memory already shown in this run is repeated as its reference id plus its first clause; anything over the ceiling is cut, and the untouched result is saved under the plugin data directory, where the note at the foot of the result names it. `0` returns the raw result. |
 | `pins` | `true` | `MUBIT_CC_PINS` | Put the constraints pinned with `/mubit-memory:pin` in front of the model on every prompt of the run. A pin is a sentence that is true for *this task* — "don't touch the vendored server", "no new dependencies until this PR lands" — and before this existed the only place to put one was memory, where it became a durable lesson and was recalled into every later session of a project where it had stopped being true. Pins render above the recalled block and, unlike recall, on the prompts recall skips: a two-word answer, an open circuit breaker, a recall that failed or found nothing. Capped at five pins, 200 characters each and 240 rendered tokens — tight, because a pin is unranked and never degrades to a pointer, so it is the most expensive context the plugin injects per unit of information. It costs **0 extra requests on the prompt path**: the hook reads one file, and the refresh rides in the detached drainer. Counted separately as `recall.pin_tokens`, so `recall.tokens` keeps meaning what recall cost. Off makes the feature invisible — the injected block is byte-for-byte what it was without it. |

@@ -245,6 +245,10 @@ test('PostToolUse spools one item and dials nothing', async (t) => {
     `capture dialled ${server.requests.map((q) => q.path).join(', ')} on a PostToolUse. It runs `
     + 'once per tool call; a request here is a round trip per tool call.');
   assert.equal(spoolFiles(dataDir, RUN_ID).length, 1, 'one tool call, one spool file.');
+  const item = readJsonDir(join(dataDir, 'runs', RUN_ID, 'spool'))[0]?.json;
+  assert.equal(item?.env_tags?.[0], 'tool:codex',
+    'a live Codex capture must say tool:codex, as an imported Codex rollout does. Tagged '
+    + 'tool:claude-code, the two hosts\' histories are indistinguishable on the wire.');
 });
 
 test('PostToolUse survives a string tool_response, which is what Codex sends', async (t) => {

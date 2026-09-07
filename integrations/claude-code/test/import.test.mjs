@@ -190,6 +190,32 @@ describe('the tool_use / tool_result join', () => {
       'the call gives the params and the result gives the tail; neither line has both');
   });
 
+  // The `tool:` tag names the host that wrote the transcript, not the one running the import.
+  // Under Codex `envTags` leads with `tool:codex`; a Claude Code session read there is still a
+  // Claude Code session, so its items must not be filed under the other host.
+  it('tags a Claude Code transcript tool:claude-code even when the plugin runs under Codex', async () => {
+    const { importItems } = await I();
+    const { cfg } = await setup({ projectDir: '/r/app', extra: { MUBIT_CC_HOST: 'codex' } });
+    assert.equal(cfg.host, 'codex');
+    const root = transcriptRoot({
+      '/r/app': {
+        records: [
+          promptLine('list the tree', '/r/app'),
+          callLine('toolu_01A', 'Bash', { command: 'ls -la' }, '/r/app'),
+          resultLine('toolu_01A', 'total 8\ndrwxr-xr-x', '/r/app'),
+          answerLine('Eight entries.', '/r/app'),
+        ],
+      },
+    });
+
+    const r = importItems(cfg, join(root, '-r-app', `${SESSION}.jsonl`), { roots: ['/r/app'] });
+    assert.equal(r.items.length, 2, 'one tool item and one turn');
+    for (const i of r.items) {
+      assert.equal(i.item.env_tags[0], 'tool:claude-code', `${i.item.item_id}: [${i.item.env_tags.join(', ')}]`);
+      assert.ok(!i.item.env_tags.includes('tool:codex'), i.item.item_id);
+    }
+  });
+
   /**
    * **The assertion this whole module was designed around.**
    *

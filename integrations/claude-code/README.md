@@ -352,7 +352,7 @@ camelCase name in parentheses.
 | `MUBIT_CC_BREAKER_WINDOW_MS` (`breakerWindowMs`) | `300000` (5 min) | The rolling failure window. |
 | `MUBIT_CC_BREAKER_COOLDOWN_MS` (`breakerCooldownMs`) | `120000` (2 min) | Cooldown before a single half-open probe is allowed. |
 | `MUBIT_CC_LOG_LEVEL` (`logLevel`) | `warn` | `error`, `warn`, `info`, or `debug`. |
-| `MUBIT_CC_ENV_TAGS` (`envTags`) | `""` | Extra `TYPE:NAME` tags on every ingested item, appended to the derived `tool:claude-code`, `repo:`, `branch:`, `lang:` set (8 total). |
+| `MUBIT_CC_ENV_TAGS` (`envTags`) | `""` | Extra `TYPE:NAME` tags on every ingested item, appended to the derived `tool:<host>`, `repo:`, `branch:`, `lang:` set (8 total). |
 
 ### When recall returns nothing
 

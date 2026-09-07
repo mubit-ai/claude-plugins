@@ -45,7 +45,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 
 import {
   assertHookContract, assertWithinBudget, baseEnv, evidence, fakeMubit, makeDataDir,
@@ -568,4 +568,171 @@ test('the sub-run record carries everything a later link_run would need', async 
     + 'because there is no route that can');
   assert.ok(statSync(join(subRunDir(dir), `${rec.sub_run_id}.json`)).isFile(),
     'the file is named by the sub-run id, so a sibling cannot overwrite it');
+});
+
+// ---------------------------------------------------------------------------
+// The parent's pins
+// ---------------------------------------------------------------------------
+
+/**
+ * A subagent inherited none of the parent's standing constraints, and the reason was
+ * structural rather than deliberate: pins render inside `prompt-recall`, and
+ * `UserPromptSubmit` does not fire for a subagent.
+ *
+ * That is the *worst* place for a constraint to go missing. "Don't touch the vendored
+ * server" is a rule about work, and a fan-out of ten is ten agents doing work — none of
+ * which can be told, none of which has a user watching, and every one of which the parent
+ * will accept the output of.
+ *
+ * `readPins` costs one `readJson` and a string join, so this needs no route, no request and
+ * no budget beyond what the hook already has. What it needed was the token cap: see
+ * `test/pins.test.mjs` for the measurement `MAX_SUBAGENT_PIN_TOKENS` comes from.
+ */
+
+/** Write the pin cache `refreshPins` would have left behind. */
+function seedPins(dir, endpoint, texts) {
+  mkdirSync(join(dir, 'runs', RUN_ID), { recursive: true });
+  writeFileSync(join(dir, 'runs', RUN_ID, 'pins.json'), JSON.stringify({
+    v: 1,
+    run_id: RUN_ID,
+    endpoint: String(endpoint).replace(/\/+$/, ''),
+    at: Date.now(),
+    pins: texts.map((text, i) => ({ slug: `p${i}`, text, at: Date.now() + i })),
+  }));
+}
+
+test('a subagent inherits the parent run\'s pins', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir);
+  seedPins(dir, server.url, ['do not touch the vendored server']);
+
+  const r = await runHook('subagent-start', subagentStart(), { env: env(dir, server) });
+  assertHookContract(r);
+
+  const block = injected(r.json);
+  assert.ok(block.includes('## Pinned for this run'), `no pinned section:\n${block}`);
+  assert.ok(block.includes('do not touch the vendored server'), `the pin did not render:\n${block}`);
+  assert.match(block, /<mubit-memory[^>]*pins="1"/,
+    'the envelope counts the pins, the same way the parent\'s does');
+});
+
+// The pin is a standing constraint and the recall is an answer to a question. A block that
+// carried both without saying which was which would read as one list of equally-retrieved
+// facts — and the constraint is the half that is not negotiable.
+test('the block says which half is pinned and which was retrieved', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir);
+  seedPins(dir, server.url, ['do not touch the vendored server']);
+
+  const block = injected((await runHook('subagent-start', subagentStart(),
+    { env: env(dir, server) })).json);
+
+  const pinAt = block.indexOf('do not touch the vendored server');
+  const recallAt = block.indexOf('Recalled from memory');
+  assert.ok(pinAt !== -1 && recallAt !== -1, `expected both halves:\n${block}`);
+  assert.ok(pinAt < recallAt, 'the constraint comes before the material it constrains');
+  assert.match(block, /pinned for this run and hold until they are cleared/,
+    'and the subagent is told the difference, because nothing else in its window will');
+});
+
+/**
+ * The `pinsOnly` rule, ported: a pin renders where recall does not.
+ *
+ * Every one of these is a case where the hook used to return `{suppressOutput: true}` and a
+ * standing constraint the user set would have been silently withheld from an agent about to
+ * act on the codebase.
+ */
+for (const [label, setup] of [
+  ['recall is switched off', (dir, server) => env(dir, server, { MUBIT_CC_RECALL: '0' })],
+  ['there is no staged parent turn to query against', (dir, server) => env(dir, server)],
+]) {
+  test(`the pins still render when ${label}`, async (t) => {
+    const server = await fakeMubit();
+    t.after(() => server.close());
+    const dir = makeDataDir();
+    if (label !== 'there is no staged parent turn to query against') stageParentTurn(dir);
+    seedPins(dir, server.url, ['do not touch the vendored server']);
+
+    const r = await runHook('subagent-start', subagentStart(), { env: setup(dir, server) });
+    assertHookContract(r);
+
+    const block = injected(r.json);
+    assert.ok(block.includes('do not touch the vendored server'),
+      `a pin must survive this gate:\n${JSON.stringify(r.json)}`);
+    assert.ok(!block.includes('Recalled from memory'),
+      'and must not claim anything was retrieved when nothing was');
+  });
+}
+
+test('the pins still render when the recall itself fails', async (t) => {
+  const server = await fakeMubit({ 'POST /v2/control/query': { status: 500, json: { error: 'boom' } } });
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir);
+  seedPins(dir, server.url, ['do not touch the vendored server']);
+
+  const r = await runHook('subagent-start', subagentStart(), { env: env(dir, server) });
+  assertHookContract(r);
+  assert.ok(injected(r.json).includes('do not touch the vendored server'),
+    'a failed recall is not a reason to withhold a constraint that came off local disk');
+});
+
+// The plugin's own recall agent is excluded from recall because its whole job is to go and
+// fetch it. That reasoning does not extend to pins — they are not something it fetches — but
+// the exclusion is about not injecting into it at all, and splitting it would leave two rules
+// where the manifest can express neither.
+test('the plugin\'s own recall agent still gets nothing at all', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir);
+  seedPins(dir, server.url, ['do not touch the vendored server']);
+
+  const r = await runHook('subagent-start', subagentStart({ agent_type: RECALL_AGENT }),
+    { env: env(dir, server) });
+  assertHookContract(r);
+  assert.deepEqual(r.json, { suppressOutput: true });
+});
+
+test('a run with no pins injects exactly what it always did', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir);
+
+  const block = injected((await runHook('subagent-start', subagentStart(),
+    { env: env(dir, server) })).json);
+  assert.ok(!block.includes('Pinned for this run'), `an empty pin set must render nothing:\n${block}`);
+  assert.doesNotMatch(block, /pins="/, 'and must not add the attribute either');
+});
+
+/**
+ * The marker stays untouched, which is the one rule this hook has that `prompt-recall` does
+ * not: `status/<run_id>.json` is last-write-wins per run and belongs to the *parent's* turn.
+ * `prompt-recall`'s `pinsOnly` stamps `pin_tokens` there; doing the same here would attribute
+ * a subagent's spend to the turn that spawned it, and a fan-out of ten would leave whichever
+ * finished last. The per-subagent record is the read-out instead.
+ */
+test('the pin spend is recorded on the sub-run, never on the parent\'s marker', async (t) => {
+  const server = await fakeMubit();
+  t.after(() => server.close());
+  const dir = makeDataDir();
+  stageParentTurn(dir);
+  seedPins(dir, server.url, ['do not touch the vendored server']);
+
+  await runHook('subagent-start', subagentStart(), { env: env(dir, server) });
+
+  const rec = subRunRecords(dir)[0];
+  assert.ok(rec, 'no sub-run record was written');
+  assert.equal(rec.recall.pins, 1, 'how many pins this subagent was given');
+  assert.ok(rec.recall.pin_tokens > 0, 'and what they cost, countable separately from recall');
+
+  const marker = join(dir, 'status', `${RUN_ID}.json`);
+  const m = existsSync(marker) ? readJsonFile(marker) : {};
+  assert.ok(!('pin_tokens' in (m.recall ?? {})),
+    'a subagent writing the parent\'s marker is how a fan-out of ten reports one number');
 });

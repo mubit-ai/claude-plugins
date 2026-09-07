@@ -362,6 +362,13 @@ export function pruneStale(cfg = {}) {
       // prompts between it and that drain. Kept in the table rather than left out so a run
       // nobody returns to does not leave a file behind for ever.
       expire(join(rd, 'pins.json'), 7 * DAY);
+      // runs/<run_id>/files.json — 7 d, the same window as `pins.json` and for the same
+      // reason: it is scoped to a *run*, and under the default `per-directory` strategy a run
+      // is a project someone comes back to for weeks. It is also a cache — capture rebuilds
+      // it from the next tool call — so an early sweep costs nothing but the calls between it
+      // and that one. In the table rather than left out so a run nobody returns to does not
+      // leave a file behind for ever.
+      expire(join(rd, 'files.json'), 7 * DAY);
       // runs/<run_id>/drain.lock — 60 s, stolen after
       expire(join(rd, 'drain.lock'), 60 * SEC);
       // runs/<run_id>/checkpoints.json — 30 d; jobs.json — 24 h

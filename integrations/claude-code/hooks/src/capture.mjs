@@ -40,6 +40,7 @@ import { envTags, host } from '../../lib/config.mjs';
 import { firstUserText, toolCallRecord } from '../../lib/codex-rollout.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { classifyTool, classifyTurn } from '../../lib/classify.mjs';
+import { fileChanges, recordFileChanges } from '../../lib/filechange.mjs';
 import { isDeniedPath, isSelfReference, redactParams, redactText } from '../../lib/redact.mjs';
 import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey, turnNumber } from '../../lib/runid.mjs';
 import { appendItem, spoolStats } from '../../lib/spool.mjs';
@@ -51,7 +52,13 @@ import { readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../../li
  */
 const BUDGET_MS = 1500;
 
-/** `tool_input` keys that name a file on disk, for the §4.4 stage-2 denylist check. */
+/**
+ * `tool_input` keys that name a file on disk, for the §4.4 stage-2 denylist check.
+ *
+ * These are the keys a path is written under. They are no longer the only place a path is
+ * *found*: `lib/filechange.mjs` also reads Codex's `apply_patch` bodies, where the subjects
+ * are inside the blob and under no key at all, and `hasDeniedSubject` asks it for those.
+ */
 const PATH_KEYS = [
   'file_path', 'filePath', 'path', 'notebook_path', 'notebookPath', 'target_file',
 ];
@@ -267,7 +274,7 @@ function capture(rawPayload, cfg, mode) {
       if (mode === 'permission') return buildPermissionItem(payload, cfg);
       return mode === 'stop' || mode === 'subagent'
         ? buildTurnItem(payload, cfg, runId, mode)
-        : buildToolItem(payload, cfg, mode);
+        : buildToolItem(payload, cfg, mode, runId);
     },
     null,
   );
@@ -339,9 +346,11 @@ function apiErrorOf(payload) {
  * @param {Record<string, any>} payload
  * @param {Record<string, any>} cfg
  * @param {'tool'|'failure'} mode
+ * @param {string} runId  for the per-run file index; see the `changes` block below for why
+ *   the write happens here rather than beside `appendItem`.
  * @returns {Record<string, any>|null}
  */
-function buildToolItem(payload, cfg, mode) {
+function buildToolItem(payload, cfg, mode, runId) {
   // Codex has no `PostToolUseFailure`, so `mode` is `'tool'` for every call this host ever
   // makes and `failed` would be permanently false — every failed command stored as a success,
   // which empties the half of memory `mubit_diagnose` matches against.
@@ -356,6 +365,24 @@ function buildToolItem(payload, cfg, mode) {
     : null;
   const failed = mode === 'failure' || !!recorded?.failed;
   const toolName = clamp(str(payload.tool_name) || 'Tool', 128);
+
+  // The structured file-change lane. Two places it lands, and both are here rather than
+  // beside `appendItem` because this is where `failed` is known: on Codex the verdict comes
+  // from the rollout record read a few lines up, and recomputing it at the call site would
+  // mean reading that transcript twice per tool call.
+  //
+  // **Nothing is recorded for a failed call.** The edit did not land, so crediting its
+  // subject would put a file on the retrieval axis on the strength of a change that never
+  // happened — confidently wrong, which is the one thing a "what changed in auth?" answer
+  // cannot survive.
+  // The response goes along because it is where Claude Code's `Write` says whether it created
+  // or overwrote — the input alone cannot tell the two apart.
+  const changes = failed
+    ? []
+    : attempt(() => fileChanges(payload.tool_name, payload.tool_input, payload.tool_response), []);
+  // The per-run index (`runs/<run_id>/files.json`), so recall can filter by the files in play
+  // without a round trip. Written here and read by nothing on a blocking path yet.
+  if (changes.length) attempt(() => recordFileChanges(cfg, runId, changes));
 
   // 4. §4.5. `classifyTool` is a function of the tool name and the outcome alone, so a
   //    hostile `tool_input` cannot change the intent — or throw on the way through.
@@ -425,6 +452,11 @@ function buildToolItem(payload, cfg, mode) {
       // failure from every other.
       ...(typeof recorded?.exitCode === 'number' ? { exit_code: recorded.exitCode } : {}),
       outcome: failed ? 'failure' : 'ok',
+      // The retrieval axis. Omitted entirely when the call changed nothing, on the same rule
+      // `withModel` and `withActor` follow below: a field that is always present and never
+      // says anything is worse than an absent one — here it would say "this call changed no
+      // files" on every `Read` in the store.
+      ...(changes.length ? { files: changes } : {}),
       truncated: !!(params.truncated || tail.truncated),
       redactions: num(scrubbed.redactions) + num(params.redactions) + num(tail.redactions),
       ...(isObject(cls.metadata) ? cls.metadata : {}),
@@ -1005,6 +1037,14 @@ function hasDeniedSubject(payload, cfg) {
       const v = e[key];
       if (typeof v === 'string' && v && isDeniedPath(v, cfg, projectDir)) return true;
     }
+  }
+  // And the paths that are under no key at all. Codex's `apply_patch` carries its subjects
+  // inside the patch body, so the two loops above see nothing and a patch writing `.env` was
+  // captured in full on that host — while the same file read through `Read(file_path=…)` was
+  // dropped. One extractor now knows where a path is on both hosts, and the denylist asks it
+  // rather than keeping a second, shorter answer of its own.
+  for (const c of attempt(() => fileChanges(payload.tool_name, input), [])) {
+    if (isDeniedPath(c.path, cfg, projectDir)) return true;
   }
   return false;
 }

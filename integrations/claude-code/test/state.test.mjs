@@ -296,6 +296,11 @@ const TTL_ROWS = [
   // nothing reads any more and this sweep drains.
   { what: 'seen-set', rel: `runs/cc-x/seen/${fx.SESSION_ID}.json`, ttl: 6 * HOUR },
   { what: 'legacy seen roll-up', rel: 'runs/cc-x/seen.json', ttl: 6 * HOUR },
+  // The per-run file-change index. Seven days, matching `pins.json`: both are run-scoped, and
+  // a run under the default `per-directory` strategy is a project someone comes back to. Both
+  // are caches the next tool call rebuilds, so the row is here to stop a run nobody returns
+  // to leaving a file behind for ever, not to bound staleness.
+  { what: 'file-change index', rel: 'runs/cc-x/files.json', ttl: 7 * DAY },
 ];
 
 for (const row of TTL_ROWS) {

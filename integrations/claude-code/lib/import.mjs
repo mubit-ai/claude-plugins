@@ -59,6 +59,18 @@
  * the id and the metadata shape, and says outright that it does not pin the text.
  *
  * ---------------------------------------------------------------------------
+ * Two sources, one loop
+ * ---------------------------------------------------------------------------
+ * A source is `{name, host, root, discover, readItems}`: where its transcripts live, how to
+ * list them, and how to turn one file from a byte offset into items. This module holds the
+ * Claude Code source and everything the sources share — cursors, the item builders, the
+ * denylist and redaction gates, batching, pacing and the ingest loop. `lib/codex-import.mjs`
+ * is the Codex source and holds only what is Codex-shaped. `runImport` walks whichever
+ * sources it is handed, in order, against one item budget, and reports per source as well as
+ * in total — a backfill that says "1,200 items" without saying how many were Codex is one
+ * nobody can check against either directory.
+ *
+ * ---------------------------------------------------------------------------
  * Why it does not use the ordinary spool
  * ---------------------------------------------------------------------------
  * `runs/<run_id>/spool/*.json` expires at 24 h. An import that spooled more than one drain
@@ -181,6 +193,28 @@ export function transcriptRoot(env = process.env) {
   const override = typeof env?.[TRANSCRIPT_ROOT_ENV] === 'string' ? env[TRANSCRIPT_ROOT_ENV].trim() : '';
   return override || join(homedir(), '.claude', 'projects');
 }
+
+/**
+ * @typedef {object} ImportSource
+ * @property {string} name   `claude-code` or `codex`; the key the report counts under
+ * @property {string} host   the `tool:` tag an item from this source carries
+ * @property {(env?: Record<string, any>) => string} root   where the transcripts live
+ * @property {(opts: {root?: string, dirFilter?: (dirName: string) => boolean, maxFiles?: number})
+ *   => {files: Transcript[], dirs: number, truncatedReason: string}} discover
+ * @property {(cfg: Record<string, any>, path: string, opts: {from?: number, roots?: string[],
+ *   maxItems?: number, projectDir?: string}) => ReadResult} readItems
+ */
+
+/**
+ * @typedef {object} ReadResult
+ * @property {ImportedItem[]} items
+ * @property {number} offset      the byte offset to store as the cursor
+ * @property {number} lines
+ * @property {number} skipped
+ * @property {number} denied
+ * @property {number} oversize
+ * @property {string} truncatedReason
+ */
 
 /**
  * @typedef {object} Transcript
@@ -450,7 +484,7 @@ export function importItems(cfg, path, opts = {}) {
       // call whose line was over the reader's cap. Storing it would be a result with no idea
       // what produced it.
       if (!call) { skipped += 1; continue; }
-      const built = toolItem(cfg, call, r, opts);
+      const built = buildToolItem(cfg, call, r, opts);
       if (built === 'denied') { denied += 1; continue; }
       if (built) items.push(built);
     }
@@ -464,7 +498,7 @@ export function importItems(cfg, path, opts = {}) {
     // an answer accumulates until the next prompt closes it.
     const said = spoken(entry);
     if (said.role === 'user' && said.text) {
-      const done = closeTurn(cfg, turn, opts);
+      const done = buildTurnItem(cfg, turn, opts);
       if (done) items.push(done);
       turn = { prompt: said.text, answer: [], cwd, root, sessionId };
     } else if (said.role === 'assistant' && said.text && turn) {
@@ -478,7 +512,7 @@ export function importItems(cfg, path, opts = {}) {
   }
 
   // The last turn in the file has no following prompt to close it, so it is closed here.
-  const last = closeTurn(cfg, turn, opts);
+  const last = buildTurnItem(cfg, turn, opts);
   if (last) items.push(last);
 
   // Calls with no result are dropped, deliberately and countably: half an episode stored as a
@@ -499,13 +533,20 @@ export function importItems(cfg, path, opts = {}) {
  * The denylist gets both halves. That is the whole point of the join: the path is on the call
  * and the body is on the result, so a reader with only one of them cannot apply this rule.
  *
+ * Shared by every source. A source that already knows the file changes — Codex's `FileChange`
+ * item names its paths and kinds outright, with no patch body to parse — passes them as
+ * `call.files`, and the denylist asks about those too. `call.host` names the `tool:` tag;
+ * `call.exitCode` is recorded when the host stated one.
+ *
  * @param {Record<string, any>} cfg
- * @param {{id: string, name: string, input: Record<string, any>, cwd: string, root: string, sessionId: string}} call
- * @param {{id: string, content: any, isError: boolean}} result
+ * @param {{id: string, name: string, input: Record<string, any>, cwd: string, root: string,
+ *          sessionId: string, host?: string, files?: Array<{path: string, kind: string}>,
+ *          exitCode?: number|null}} call
+ * @param {{content: any, isError: boolean}} result
  * @param {{projectDir?: string}} opts
  * @returns {ImportedItem|null|'denied'}
  */
-function toolItem(cfg, call, result, opts) {
+export function buildToolItem(cfg, call, result, opts = {}) {
   try {
     const projectDir = call.root || call.cwd || str(opts?.projectDir) || str(cfg?.projectDir);
     if (isSelfReference(call.name, call.input, { ...cfg, projectDir })) return null;
@@ -534,7 +575,9 @@ function toolItem(cfg, call, result, opts) {
       ? `${toolName}(${params.text}) FAILED: ${tail.text}`
       : `${toolName}(${params.text}) -> ${tail.text}`;
 
-    const changes = failed ? [] : attempt(() => fileChanges(call.name, call.input), []);
+    const changes = failed
+      ? []
+      : (Array.isArray(call.files) ? call.files : attempt(() => fileChanges(call.name, call.input), []));
     const runId = runIdFor(cfg, projectDir);
     if (!runId) return null;
 
@@ -549,12 +592,14 @@ function toolItem(cfg, call, result, opts) {
         intent: cls.intent,
         importance: cls.importance,
         projectDir,
+        host: call.host,
         metadata: {
           tool: toolName,
           tool_use_id: str(call.id),
           hook_event: failed ? 'PostToolUseFailure' : 'PostToolUse',
           session_id: call.sessionId,
           outcome: failed ? 'failure' : 'ok',
+          ...(typeof call.exitCode === 'number' ? { exit_code: call.exitCode } : {}),
           truncated: !!(params.truncated || tail.truncated),
           redactions: num(scrubbed.redactions) + num(params.redactions) + num(tail.redactions),
           ...(changes.length ? { files: changes } : {}),
@@ -591,6 +636,9 @@ function deniedSubject(call, cfg, projectDir) {
   }
   for (const c of attempt(() => fileChanges(call.name, input), [])) {
     if (isDeniedPath(c.path, cfg, projectDir)) return true;
+  }
+  for (const c of Array.isArray(call.files) ? call.files : []) {
+    if (isObject(c) && typeof c.path === 'string' && c.path && isDeniedPath(c.path, cfg, projectDir)) return true;
   }
   return false;
 }
@@ -640,12 +688,15 @@ function spoken(entry) {
  * exists for — the same turn twice is one item — and gives up matching the live path, which
  * `test/import.test.mjs` states rather than leaves to be discovered.
  *
+ * Shared by every source; `turn.host` names the `tool:` tag.
+ *
  * @param {Record<string, any>} cfg
- * @param {{prompt: string, answer: string[], cwd: string, root: string, sessionId: string}|null} turn
- * @param {{projectDir?: string}} opts
+ * @param {{prompt: string, answer: string[], cwd: string, root: string, sessionId: string,
+ *          host?: string}|null} turn
+ * @param {{projectDir?: string}} [opts]
  * @returns {ImportedItem|null}
  */
-function closeTurn(cfg, turn, opts) {
+export function buildTurnItem(cfg, turn, opts = {}) {
   try {
     if (!turn || !turn.prompt) return null;
     const answer = turn.answer.join('\n').trim();
@@ -674,6 +725,7 @@ function closeTurn(cfg, turn, opts) {
         intent: cls.intent,
         importance: cls.importance,
         projectDir,
+        host: turn.host,
         metadata: {
           hook_event: 'Stop',
           session_id: turn.sessionId,
@@ -688,8 +740,21 @@ function closeTurn(cfg, turn, opts) {
   }
 }
 
-/** The ingest item shape, as `hooks/src/capture.mjs` builds one. */
+/**
+ * The ingest item shape, as `hooks/src/capture.mjs` builds one.
+ *
+ * `envTags` always leads with `tool:claude-code`. An item from another source replaces that
+ * one tag and keeps the rest — the repo, branch and language tags describe the project, which
+ * is the same project whichever harness was driving it.
+ */
 function item(cfg, o) {
+  const tags = attempt(() => envTags(cfg, o.projectDir), ['tool:claude-code']);
+  const host = str(o.host);
+  if (host && host !== 'claude-code') {
+    const i = tags.findIndex((t) => typeof t === 'string' && t.startsWith('tool:'));
+    if (i === -1) tags.unshift(`tool:${host}`);
+    else tags[i] = `tool:${host}`;
+  }
   return {
     item_id: clamp(o.id, MAX_ID_CHARS),
     content_type: 'text',
@@ -699,7 +764,7 @@ function item(cfg, o) {
     source: 'agent',
     // Unix SECONDS. Milliseconds here date every memory to the year 57000.
     occurrence_time: Math.floor(Date.now() / 1000),
-    env_tags: attempt(() => envTags(cfg, o.projectDir), ['tool:claude-code']),
+    env_tags: tags,
     metadata_json: safeJson(o.metadata),
   };
 }
@@ -735,8 +800,39 @@ function runIdFor(cfg, projectDir) {
 }
 
 // ---------------------------------------------------------------------------
+// The Claude Code source
+// ---------------------------------------------------------------------------
+
+/**
+ * `~/.claude/projects`, as a source. The Codex one is in `lib/codex-import.mjs`; this one
+ * lives here because the discovery and the reader above are already its two halves.
+ * @type {ImportSource}
+ */
+export const claudeCodeSource = Object.freeze({
+  name: 'claude-code',
+  host: 'claude-code',
+  root: (env = process.env) => transcriptRoot(env),
+  discover: (opts = {}) => discoverTranscripts(opts),
+  readItems: (cfg, path, opts = {}) => importItems(cfg, path, opts),
+});
+
+// ---------------------------------------------------------------------------
 // The import itself
 // ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} SourceCounts
+ * @property {number} files       transcripts opened
+ * @property {number} lines       lines consumed
+ * @property {number} items       items posted
+ * @property {number} batches     ingest requests made
+ * @property {number} denied      items dropped by the path denylist
+ * @property {number} skipped     lines that produced nothing
+ * @property {number} oversize    lines over the reader's cap
+ * @property {number} failed      batches the server refused
+ * @property {string} root        the directory this source read
+ * @property {string} truncatedReason  `''` when nothing was bounded away
+ */
 
 /**
  * @typedef {object} ImportReport
@@ -752,15 +848,22 @@ function runIdFor(cfg, projectDir) {
  * @property {boolean} dryRun
  * @property {string} truncatedReason  `''` when nothing was bounded away
  * @property {string[]} runs      run ids written to
+ * @property {Record<string, SourceCounts>} sources  the same counts, per source
  */
 
 /**
  * Walk the transcripts and ingest what they hold.
  *
+ * `opts.sources` is the list of sources to walk, in order, against one shared item budget;
+ * the default is the Claude Code source alone. `opts.sourceRoots` overrides where each looks
+ * (`{'claude-code': …, codex: …}`), and `opts.root` is the older spelling of the Claude Code
+ * entry, kept because every caller of the first release used it.
+ *
  * @param {Record<string, any>} cfg
  * @param {{roots?: string[], all?: boolean, dryRun?: boolean, maxItems?: number,
  *          maxFiles?: number, batchSize?: number, paceMs?: number, timeoutMs?: number,
- *          root?: string, sleep?: (ms: number) => Promise<void>}} [opts]
+ *          root?: string, sources?: ImportSource[], sourceRoots?: Record<string, string>,
+ *          sleep?: (ms: number) => Promise<void>}} [opts]
  * @returns {Promise<ImportReport>}
  */
 export async function runImport(cfg, opts = {}) {
@@ -770,7 +873,11 @@ export async function runImport(cfg, opts = {}) {
   const paceMs = Math.max(0, Math.trunc(numOr(opts?.paceMs, DEFAULT_PACE_MS)));
   const timeoutMs = posInt(opts?.timeoutMs, DEFAULT_TIMEOUT_MS);
   const maxItems = posInt(opts?.maxItems, DEFAULT_MAX_ITEMS);
+  const maxFiles = posInt(opts?.maxFiles, 0);
   const sleep = typeof opts?.sleep === 'function' ? opts.sleep : defaultSleep;
+  const sources = Array.isArray(opts?.sources) && opts.sources.length
+    ? opts.sources.filter((s) => isObject(s) && typeof s.discover === 'function' && typeof s.readItems === 'function')
+    : [claudeCodeSource];
 
   const roots = opts?.all === true
     ? []
@@ -780,97 +887,121 @@ export async function runImport(cfg, opts = {}) {
 
   // The encoded names are a filter and nothing more — two directories can encode alike and a
   // name cannot be decoded, so a candidate that passes here is still decided by its records.
+  // Only the Claude Code source lays its files out by project; the Codex source ignores it.
   const prefixes = roots.map(encodeProjectDir);
   const dirFilter = prefixes.length
     ? (name) => prefixes.some((p) => name === p || name.startsWith(p))
     : undefined;
 
-  const found = discoverTranscripts({ root: opts?.root, dirFilter, maxFiles: posInt(opts?.maxFiles, 0) });
-
   /** @type {ImportReport} */
   const report = {
     files: 0, lines: 0, items: 0, batches: 0, denied: 0, skipped: 0, oversize: 0, failed: 0,
-    ms: 0, dryRun, truncatedReason: found.truncatedReason, runs: [],
+    ms: 0, dryRun, truncatedReason: '', runs: [], sources: {},
   };
   const runs = new Set();
   let budget = maxItems;
 
-  for (const t of found.files) {
-    if (budget <= 0) {
-      report.truncatedReason = report.truncatedReason
-        || `stopped at ${maxItems} item(s); ${found.files.length - report.files} transcript(s) not read`;
-      break;
-    }
+  for (const source of sources) {
+    const name = str(source.name) || 'source';
+    const rootOverride = str(opts?.sourceRoots?.[name]) || (name === 'claude-code' ? str(opts?.root) : '');
+    const root = rootOverride || attempt(() => str(source.root?.(process.env)), '');
+    const found = attempt(() => source.discover({ root: root || undefined, dirFilter, maxFiles }),
+      { files: [], dirs: 0, truncatedReason: '' });
 
-    const cursor = readCursor(cfg, t.path);
-    const before = statOf(t.path);
-    if (before.size <= cursor.offset) continue; // nothing new — the re-run no-op
+    /** @type {SourceCounts} */
+    const counts = {
+      files: 0, lines: 0, items: 0, batches: 0, denied: 0, skipped: 0, oversize: 0, failed: 0,
+      root, truncatedReason: str(found.truncatedReason),
+    };
+    report.sources[name] = counts;
+    if (counts.truncatedReason && !report.truncatedReason) report.truncatedReason = counts.truncatedReason;
 
-    report.files += 1;
-    const read = importItems(cfg, t.path, {
-      from: cursor.offset, roots, maxItems: budget, projectDir: roots[0],
-    });
-    report.lines += read.lines;
-    report.skipped += read.skipped;
-    report.denied += read.denied;
-    report.oversize += read.oversize;
-    if (read.truncatedReason && !report.truncatedReason) report.truncatedReason = read.truncatedReason;
-
-    // One `git check-ignore` for the whole file's worth of paths, before anything asks about
-    // one. Without this the import is dominated by `git` forks — see `warmIgnoreCache`.
-    if (roots.length) {
-      attempt(() => warmIgnoreCache(read.items.flatMap((i) => filesOf(i)), roots[0]), 0);
-    }
-
-    let sequence = cursor.sequence;
-    let posted = 0;
-    let ok = true;
-
-    for (const [runId, batch] of batches(read.items, batchSize)) {
-      runs.add(runId);
-      report.batches += 1;
-      if (dryRun) { posted += batch.length; continue; }
-
-      if (paceMs > 0 && report.batches > 1) await sleep(paceMs);
-      const res = await postIngest(cfg, {
-        run_id: runId,
-        idempotency_key: `cc-import-${sha16(`${runId}|${batch.map((i) => i.item_id).join('|')}`)}`,
-        parallel: true,
-        items: batch,
-      }, { timeoutMs, record: false });
-
-      sequence += 1;
-      if (!res.ok) {
-        report.failed += 1;
-        ok = false;
-        log(cfg, 'warn', `import: ingest failed (${str(res.state) || 'unknown'})`,
-          { run_id: runId, error: str(res.error).slice(0, 300) });
+    let stopped = false;
+    for (const t of found.files) {
+      if (budget <= 0) {
+        counts.truncatedReason = counts.truncatedReason
+          || `stopped at ${maxItems} item(s); ${found.files.length - counts.files} transcript(s) not read`;
         break;
       }
-      posted += batch.length;
+
+      const cursor = readCursor(cfg, t.path);
+      const before = statOf(t.path);
+      if (before.size <= cursor.offset) continue; // nothing new — the re-run no-op
+
+      counts.files += 1;
+      const read = attempt(() => source.readItems(cfg, t.path, {
+        from: cursor.offset, roots, maxItems: budget, projectDir: roots[0],
+      }), { items: [], offset: cursor.offset, lines: 0, skipped: 0, denied: 0, oversize: 0, truncatedReason: '' });
+      counts.lines += num(read.lines);
+      counts.skipped += num(read.skipped);
+      counts.denied += num(read.denied);
+      counts.oversize += num(read.oversize);
+      if (read.truncatedReason && !counts.truncatedReason) counts.truncatedReason = read.truncatedReason;
+
+      // One `git check-ignore` for the whole file's worth of paths, before anything asks about
+      // one. Without this the import is dominated by `git` forks — see `warmIgnoreCache`.
+      if (roots.length) {
+        attempt(() => warmIgnoreCache(read.items.flatMap((i) => filesOf(i)), roots[0]), 0);
+      }
+
+      let sequence = cursor.sequence;
+      let posted = 0;
+      let ok = true;
+
+      for (const [runId, batch] of batches(read.items, batchSize)) {
+        runs.add(runId);
+        counts.batches += 1;
+        report.batches += 1;
+        if (dryRun) { posted += batch.length; continue; }
+
+        if (paceMs > 0 && report.batches > 1) await sleep(paceMs);
+        const res = await postIngest(cfg, {
+          run_id: runId,
+          idempotency_key: `cc-import-${sha16(`${runId}|${batch.map((i) => i.item_id).join('|')}`)}`,
+          parallel: true,
+          items: batch,
+        }, { timeoutMs, record: false });
+
+        sequence += 1;
+        if (!res.ok) {
+          counts.failed += 1;
+          ok = false;
+          log(cfg, 'warn', `import: ingest failed (${str(res.state) || 'unknown'})`,
+            { run_id: runId, source: name, error: str(res.error).slice(0, 300) });
+          break;
+        }
+        posted += batch.length;
+      }
+
+      counts.items += posted;
+      budget -= posted;
+
+      // The cursor advances only on a clean pass. A partial one leaves it where it was, so the
+      // next run re-reads the file from the last known-good point: re-sending an item is free —
+      // it carries the same `item_id` — and losing one is not.
+      if (ok && !dryRun) {
+        writeCursor(cfg, t.path, {
+          offset: read.offset,
+          lineCount: cursor.lineCount + num(read.lines),
+          sequence,
+          sizeBytes: before.size,
+          mtimeMs: before.mtimeMs,
+          at: Date.now(),
+        });
+      }
+      if (!ok) {
+        counts.truncatedReason = counts.truncatedReason
+          || 'stopped after an ingest failure; the cursor was not advanced, so a re-run resumes here';
+        stopped = true;
+        break;
+      }
     }
 
-    report.items += posted;
-    budget -= posted;
-
-    // The cursor advances only on a clean pass. A partial one leaves it where it was, so the
-    // next run re-reads the file from the last known-good point: re-sending an item is free —
-    // it carries the same `item_id` — and losing one is not.
-    if (ok && !dryRun) {
-      writeCursor(cfg, t.path, {
-        offset: read.offset,
-        lineCount: cursor.lineCount + read.lines,
-        sequence,
-        sizeBytes: before.size,
-        mtimeMs: before.mtimeMs,
-        at: Date.now(),
-      });
-    }
-    if (!ok) {
-      report.truncatedReason = report.truncatedReason
-        || 'stopped after an ingest failure; the cursor was not advanced, so a re-run resumes here';
-      break;
-    }
+    for (const k of ['files', 'lines', 'items', 'denied', 'skipped', 'oversize', 'failed']) report[k] += counts[k];
+    if (counts.truncatedReason && !report.truncatedReason) report.truncatedReason = counts.truncatedReason;
+    // An ingest failure stops the whole import, not just the source: the server that refused
+    // this batch is the one the next source would post to.
+    if (stopped) break;
   }
 
   report.runs = [...runs].sort();

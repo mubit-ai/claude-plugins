@@ -1,13 +1,14 @@
 ---
 name: import
-description: "Backfill Mubit memory from the Claude Code transcripts already on this machine, so a fresh install knows what happened before it. Sends nothing without an explicit --send."
+description: "Backfill Mubit memory from the Claude Code and Codex transcripts already on this machine, so a fresh install knows what happened before it. Sends nothing without an explicit --send."
 disable-model-invocation: true
 allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/import.mjs:*)"]
 ---
 
 **This skill uploads work history to the configured Mubit instance.** It runs one Node process
-from the plugin directory, reads `~/.claude/projects`, and ingests what it finds. Nothing is
-sent unless `--send` is on the command line.
+from the plugin directory, reads `~/.claude/projects` — and, when asked, Codex's
+`~/.codex/sessions` — and ingests what it finds. Nothing is sent unless `--send` is on the
+command line.
 
 `disable-model-invocation: true` is not a formality here, and it is stricter than the reason
 `activity` and `dashboard` carry the same line. Those read. This one takes months of somebody's
@@ -46,6 +47,22 @@ personal projects, client work, and anything else that was ever opened in this C
 
 `--project <dir>` imports a different project instead of the current one.
 
+## Two sources
+
+`--source claude-code` (the default under this host) reads Claude Code's transcripts.
+`--source codex` reads Codex's rollouts from `~/.codex/sessions` (or `$CODEX_HOME/sessions`),
+and `--source all` reads both. The scope, the item cap, the cursors and the redaction pipeline
+are the same whichever is chosen, and the report counts each source on its own line — so
+"1,200 items" can be checked against the directory it came from.
+
+Offer `--source all` when the user has both tools on the machine and asks to import their
+history rather than *this* tool's history. A Codex item carries `tool:codex` in its env tags,
+so the two histories stay tellable apart once stored.
+
+Two things the Codex side skips, and says so: the reviewer threads Codex runs to approve its
+own actions (their prompts are other threads' transcripts), and the preamble Codex writes in
+the user's voice at the top of every thread since 0.149.
+
 ## What it does not send
 
 Three things are dropped rather than scrubbed, and it says how many of each:
@@ -77,8 +94,9 @@ unchanged files reads nothing and sends nothing. An interrupted import resumes r
 duplicates.
 
 That is a claim about **this client's bookkeeping**. Separately, every imported tool call
-carries the same `item_id` live capture would have written for it — `cc-<tool_use_id>` — so the
-import and the live path address the same entries. Whether the *server* collapses two sends of
+carries the same `item_id` live capture would have written for it — `cc-<tool_use_id>` on
+Claude Code, `cc-<item id>` on Codex 0.149 and later — so the import and the live path address
+the same entries. Whether the *server* collapses two sends of
 one id is the server's behaviour and this skill does not assert it. Do not tell a user "the
 server will deduplicate"; tell them "a re-run reads nothing new", which is the part that is
 verified here.

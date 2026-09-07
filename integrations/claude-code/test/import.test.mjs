@@ -688,6 +688,65 @@ describe('bin/import', () => {
     assert.equal(parseArgs(['--send']).send, true);
   });
 
+  /**
+   * `--source` names a host's transcripts. The default is the host this copy runs under,
+   * which is the history the person in front of it most plausibly means; `all` is typed.
+   */
+  it('--source names claude-code, codex or all, and refuses anything else', async () => {
+    const { parseArgs } = await B();
+    assert.equal(parseArgs([]).source, '', 'unset means "this host", decided at run time');
+    assert.equal(parseArgs(['--source', 'codex']).source, 'codex');
+    assert.equal(parseArgs(['--source', 'Claude-Code']).source, 'claude-code');
+    assert.equal(parseArgs(['--source', 'all']).source, 'all');
+    assert.match(parseArgs(['--source', 'gemini']).error, /--source must be/);
+    assert.match(parseArgs(['--source']).error, /needs a value/);
+  });
+
+  it('reads the host\'s own transcripts by default and both with --source all', async (t) => {
+    const server = await fakeMubit();
+    t.after(() => server.close());
+    const projectDir = makeProjectDir({ git: true });
+    const { main } = await B();
+    const ccRoot = transcriptRoot({
+      [projectDir]: { records: [callLine('toolu_01A', 'Bash', { command: 'ls' }, projectDir), resultLine('toolu_01A', 'out', projectDir)] },
+    });
+    const codexRoot = join(makeDataDir(), 'sessions');
+    mkdirSync(join(codexRoot, '2026/09/07'), { recursive: true });
+    writeFileSync(join(codexRoot, '2026/09/07/rollout-2026-09-07T12-00-00-x.jsonl'), jsonl([
+      { type: 'session_meta', payload: { id: 'x', cwd: projectDir, cli_version: '0.153.4', thread_source: 'user' } },
+      { type: 'turn_context', payload: { turn_id: 't1', cwd: projectDir } },
+      { type: 'event_msg', payload: { type: 'item_completed', item: {
+        type: 'CommandExecution', id: 'exec-1', command: ['/bin/zsh', '-lc', 'pwd'], status: 'completed',
+        aggregated_output: projectDir, exit_code: 0, duration: { secs: 0, nanos: 1 },
+      } } },
+    ]));
+
+    const run = async (argv, extra = {}) => {
+      let out = '', err = '';
+      const code = await main(['--project', projectDir, '--pace', '0', '--json', ...argv], {
+        stdout: (s) => { out += s; },
+        stderr: (s) => { err += s; },
+        env: baseEnv({
+          dataDir: makeDataDir(), endpoint: server.url, projectDir,
+          extra: {
+            MUBIT_CC_TRANSCRIPT_ROOT: ccRoot, MUBIT_CC_CODEX_SESSIONS_ROOT: codexRoot,
+            MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: 'cc-import-test', ...extra,
+          },
+        }),
+      });
+      assert.equal(code, 0, err);
+      return JSON.parse(out);
+    };
+
+    assert.deepEqual(Object.keys((await run([])).sources), ['claude-code'], 'under Claude Code, its own transcripts');
+    assert.deepEqual(Object.keys((await run([], { MUBIT_CC_HOST: 'codex' })).sources), ['codex'], 'under Codex, its rollouts');
+    const both = await run(['--source', 'all']);
+    assert.deepEqual(Object.keys(both.sources), ['claude-code', 'codex']);
+    assert.equal(both.sources['claude-code'].items, 1);
+    assert.equal(both.sources.codex.items, 1);
+    assert.equal(both.items, 2);
+  });
+
   it('prints the scope before it reads anything, and dials nothing on a dry run', async (t) => {
     const server = await fakeMubit();
     t.after(() => server.close());

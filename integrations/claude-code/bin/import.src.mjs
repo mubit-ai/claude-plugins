@@ -4,8 +4,9 @@
  *
  * ## What it does, said plainly
  *
- * It reads the Claude Code transcripts already on this machine and sends what they hold to
- * the configured Mubit instance. That is a bulk upload of months of somebody's work, so the
+ * It reads the agent transcripts already on this machine — Claude Code's under
+ * `~/.claude/projects`, Codex's under `~/.codex/sessions` — and sends what they hold to the
+ * configured Mubit instance. That is a bulk upload of months of somebody's work, so the
  * command is built around three properties and every one of them is a refusal rather than a
  * warning:
  *
@@ -25,6 +26,14 @@
  * minute, and the cost of a surprise send is a copy of a year of work on an instance the user
  * had not decided to put it on yet.
  *
+ * ## Two sources
+ *
+ * `--source claude-code|codex|all` picks which host's transcripts are read. The default is the
+ * host this copy of the plugin is running under, because that is the history the person in
+ * front of it most plausibly means; `all` is typed. Both sources share one scope, one item
+ * budget, one set of cursors and one redaction pipeline, and the report counts each one
+ * separately so the number can be checked against the directory it came from.
+ *
  * ## Resuming
  *
  * `lib/import.mjs` holds one cursor per transcript file, so a second run over unchanged files
@@ -36,8 +45,9 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfig, isConfigured } from '../lib/config.mjs';
-import { discoverTranscripts, encodeProjectDir, linkedRoots, runImport, transcriptRoot } from '../lib/import.mjs';
+import { codexSource, rolloutRoot } from '../lib/codex-import.mjs';
+import { host, loadConfig, isConfigured } from '../lib/config.mjs';
+import { claudeCodeSource, discoverTranscripts, encodeProjectDir, linkedRoots, runImport, transcriptRoot } from '../lib/import.mjs';
 
 const USAGE = `mubit-memory: backfill memory from the transcripts already on this machine.
 
@@ -48,8 +58,9 @@ Nothing is sent without --send. The default is a dry run.
 Scope
   --project <dir>      the project to import; the default is the working directory
   --all                every project on this machine, not just this one and its worktrees
+  --source <which>     claude-code, codex, or all (default: the host this plugin runs under)
   --max <n>            stop after n items (default 5000)
-  --max-files <n>      stop after n transcript files
+  --max-files <n>      stop after n transcript files per source
 
 Action
   --dry-run            count what would be sent and send nothing (the default)
@@ -64,8 +75,11 @@ Output
   -h, --help
 `;
 
-const VALUED = new Set(['--project', '--max', '--max-files', '--batch', '--pace']);
+const VALUED = new Set(['--project', '--source', '--max', '--max-files', '--batch', '--pace']);
 const BARE = new Set(['--all', '--dry-run', '--send', '--json', '--help', '-h']);
+
+/** The sources `--source` may name, by name. */
+const SOURCES = Object.freeze({ 'claude-code': claudeCodeSource, codex: codexSource });
 
 /**
  * Parse argv into an intent, or into an error.
@@ -79,7 +93,7 @@ const BARE = new Set(['--all', '--dry-run', '--send', '--json', '--help', '-h'])
 export function parseArgs(argv = []) {
   /** @type {Record<string, any>} */
   const out = {
-    project: '', all: false, send: false, json: false, help: false,
+    project: '', source: '', all: false, send: false, json: false, help: false,
     max: 0, maxFiles: 0, batch: 0, pace: -1, error: '',
   };
 
@@ -90,6 +104,15 @@ export function parseArgs(argv = []) {
       if (v === undefined || String(v).startsWith('--')) { out.error = `${a} needs a value`; return out; }
       i += 1;
       if (a === '--project') { out.project = String(v).trim(); continue; }
+      if (a === '--source') {
+        const which = String(v).trim().toLowerCase();
+        if (which !== 'all' && !Object.prototype.hasOwnProperty.call(SOURCES, which)) {
+          out.error = `--source must be claude-code, codex, or all (got ${which || 'nothing'})`;
+          return out;
+        }
+        out.source = which;
+        continue;
+      }
 
       // Validated here rather than after the loop, because "not given" and "given as 0" are
       // different intents and only the second is an error. A `--max 0` treated as "unset"
@@ -140,13 +163,15 @@ export async function main(argv = process.argv.slice(2), io = {}) {
 
   const projectDir = args.project ? resolve(args.project) : (cfg.projectDir || process.cwd());
   const roots = args.all ? [] : linkedRoots(projectDir);
-  const root = transcriptRoot(env);
+  const which = args.source || host(env);
+  const sources = which === 'all' ? Object.values(SOURCES) : [SOURCES[which]];
+  const sourceRoots = { 'claude-code': transcriptRoot(env), codex: rolloutRoot(env) };
 
   // The scope is stated before anything is read, because "which projects" is the one thing a
   // person needs to check before a bulk upload and the one thing a summary printed afterwards
   // cannot help with.
   if (!args.json) {
-    err(`transcripts: ${root}\n`);
+    for (const s of sources) err(`${s.name.padEnd(12)} ${sourceRoots[s.name]}\n`);
     err(args.all
       ? 'scope:       EVERY project on this machine\n'
       : `scope:       ${roots.join('\n             ')}\n`);
@@ -156,7 +181,8 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     roots: args.all ? [] : roots,
     all: args.all,
     dryRun: !args.send,
-    root,
+    sources,
+    sourceRoots,
     ...(args.max ? { maxItems: args.max } : {}),
     ...(args.maxFiles ? { maxFiles: args.maxFiles } : {}),
     ...(args.batch ? { batchSize: args.batch } : {}),
@@ -169,6 +195,11 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     const verb = report.dryRun ? 'would send' : 'sent';
     out(`${verb} ${report.items} item(s) from ${report.files} transcript(s) `
       + `across ${report.runs.length} run(s) in ${Math.round(report.ms / 1000)}s\n`);
+    // One line per source, so the number can be checked against the directory it came from.
+    for (const [name, c] of Object.entries(report.sources ?? {})) {
+      out(`  ${name.padEnd(12)} ${c.items} item(s) from ${c.files} transcript(s)`
+        + ` · denied ${c.denied} · skipped ${c.skipped}\n`);
+    }
     if (report.runs.length) out(`runs: ${report.runs.join(', ')}\n`);
     err(`lines ${report.lines} · batches ${report.batches} · skipped ${report.skipped}`
       + ` · denied ${report.denied} · oversize ${report.oversize} · failed ${report.failed}\n`);

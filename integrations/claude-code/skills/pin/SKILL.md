@@ -125,5 +125,5 @@ Two failures worth recognising by name:
 - **It is not stored offline.** A pin that the instance did not accept is not written locally
   at all, because a pin that exists only on one machine is one the user believes is shared and
   is not.
-- **It does not reach subagents.** `SubagentStart` injects its own recalled block and does not
-  read pins yet.
+- **It does reach subagents.** `SubagentStart` puts the parent run's pins above its own,
+  smaller recalled block, under a budget of its own, so a fan-out is told the constraint too.

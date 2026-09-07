@@ -100,7 +100,7 @@ failure glyph while the instance comes up — see [Connection states](#connectio
 | `PostToolUse` (every tool) | `capture.mjs` | 3 s | Redacts and spools the tool call, whatever the tool was — built-in or any MCP server's. Zero network. A short skip list drops the handful that carry no memory (mode switches, list-only queries), and Mubit's own tool calls are suppressed. |
 | `PostToolUseFailure` | `capture.mjs --failure` | 3 s | Captures the failure — these produce the most useful lessons. |
 | `Stop` | `capture.mjs --stop` | 5 s | Writes the `Q: … / A: …` turn, spawns the drain, and attributes the turn's outcome to the memories that were recalled for it. |
-| `SubagentStop` | `capture.mjs --subagent` | 3 s | Same, under a distinct subagent identity. |
+| `SubagentStop` | `capture.mjs --subagent` | 3 s | Same, under a distinct subagent identity — and filed as a **handoff** from that subagent to this session's role, with `requested_action: review`, so a fan-out's results are listed as open until each is answered. Still zero network. |
 | `PreCompact` | `checkpoint.mjs --pre` | 10 s | The one blocking network call in the plugin: snapshots the last 200 KB of transcript before the host throws it away. |
 | `PostCompact` | `checkpoint.mjs --post` | 5 s | Zero network. Records that the compaction happened; injects nothing, because Claude Code accepts no injected context on this event. The re-anchor arrives instead from `SessionStart`, which also fires on a `compact` source. |
 | `SessionEnd` | `session-end.mjs` | 8 s | Drains inline, flushes pending outcomes, then reflects. |
@@ -128,6 +128,8 @@ an unwritable data dir, or a corrupt state file costs you a memory, never a turn
 | `/mubit-memory:memory-health` | Report what is actually stored: entry counts, staleness, contradictions. The store, not the connection. |
 | `/mubit-memory:activity` | The audit question: what does this instance actually hold, filtered by time, type, agent or origin — and an export of the whole record as JSONL you can keep. Prints to stdout; writes a file only if you ask. Also not model-invocable. |
 | `/mubit-memory:pin` | Pin a standing constraint for the rest of this run — "don't touch the vendored server" — so it is put in front of the model on every prompt, including the ones recall skips. Cleared when it stops being true; a durable, cross-session rule is `remember` instead. |
+| `/mubit-memory:import` | Backfill memory from the transcripts already on this machine — Claude Code's, Codex's, or both — so an install made after the work still knows about it. A dry run by default; nothing is sent without `--send`. Not model-invocable. |
+| `/mubit-memory:handoff` | Hand work to another agent in this run, list what is still open, or answer a handoff with a verdict. Every subagent's result arrives here as an open handoff to review. |
 | `@mubit-memory:mubit-recall` | Subagent: multi-angle memory search in an isolated context, returns a synthesis instead of raw evidence. |
 
 ### Seven MCP tools
@@ -257,11 +259,24 @@ never slice a secret in half and leave a recognizable prefix behind.
 - The plugin suppresses its own traffic: its MCP tool calls, shell commands mentioning the
   Mubit endpoint or `MUBIT_*`, and reads of anything inside its own data directory are never
   captured. Other MCP servers' output is captured — that cross-tool memory is the point.
+- A tool call that changed a file also carries a structured record of it: `metadata_json.files`
+  on the item, one `{path, kind}` per file with `kind` one of `add`, `update`, `delete`. The
+  path is subject to the denylist exactly as the call is — a patch that touches `.env` is
+  dropped whole, not recorded as "touched `.env`". `Write` says `add` or `update` from the
+  host's own result, since its input is the same either way; `delete` is only ever stated by
+  Codex's `apply_patch`, because Claude Code removes files with `rm` in a shell, which carries
+  no path. The same rows are merged into `runs/<run_id>/files.json`, a per-run index of what is
+  in play, most recently touched first, so a later recall can ask about the files without a
+  round trip.
+- An import (`/mubit-memory:import`) goes through the three stages above item by item, the
+  same as live capture, and a joined call+result is checked against the denylist as one — a
+  `.env` whose body arrived on a different transcript line from its path is still dropped whole.
 - The status line performs no network I/O at all, ever.
 - Local state (spool, markers, session map, breaker, logs) lives under
   `${MUBIT_CC_DATA_DIR}` → `${CLAUDE_PLUGIN_DATA}` → `~/.claude/plugins/data/mubit-memory`, and
   is pruned on a TTL: turns after 6 h, status markers after 12 h, spool and job records after
-  24 h, quarantined payloads and run directories after 7 days, session maps after 30 days.
+  24 h, quarantined payloads, run directories and the per-run file index after 7 days, session
+  maps and import cursors after 30 days.
 
 Nothing is sent to Mubit AI. The endpoint you configure is the only destination.
 
@@ -400,8 +415,67 @@ constraints, it is a document, and a document belongs in `CLAUDE.md` where it co
 prompt. The pinned tokens are reported separately from `recall.tokens`, as `recall.pin_tokens`,
 so recall's own cost keeps meaning what it always did.
 
-Subagents do not get pins yet: `SubagentStart` injects its own, smaller recalled block and does
-not read them.
+Subagents get them too: `SubagentStart` puts the parent run's pins above its own, smaller
+recalled block, under a budget of its own (96 tokens, the same share of a smaller window), so a
+fan-out of ten is ten agents told the constraint rather than none.
+
+### Importing the history already on this machine
+
+A fresh install knows nothing that happened before it, and a hook that timed out lost that
+turn. The transcripts are still on disk, and `/mubit-memory:import` reads them:
+
+```
+/mubit-memory:import
+```
+
+That is a **dry run**, and it prints where it read from, the projects in scope, and how many
+items it would send — one line per source. Nothing is sent until `--send` is on the command
+line, and the skill is not model-invocable: a conversation cannot decide on its own to ship
+months of somebody's history to a server.
+
+`--source claude-code` reads `~/.claude/projects`, including the subagent transcripts nested
+under each session, which a naive glob misses. `--source codex` reads Codex's rollouts under
+`~/.codex/sessions`, in both the shape Codex wrote before 0.149 and the one it writes now,
+skipping the reviewer threads it spawns to approve its own actions and the preamble it writes
+in the user's voice at the top of every thread. `--source all` reads both, against one item
+cap and one set of cursors; a Codex item carries `tool:codex` in its tags so the two histories
+stay tellable apart. The default is the host the plugin is running under.
+
+The scope is this project plus the git worktrees linked to it; `--all` is every project on
+the machine and is a flag somebody types. Each transcript keeps a cursor, so a second run over
+unchanged files reads nothing and an interrupted import resumes rather than repeats — a claim
+about this client's bookkeeping, not about what the server stores. An imported tool call
+carries the same item id live capture would have written for it, and `imported: true` in its
+metadata so a reader can tell the two apart. Three counts are findings, not decoration:
+`denied` is the denylist working, `oversize` is lines too large to read, and `this answer is
+incomplete` means a bound was hit and the import is a prefix of the history, not the whole of
+it.
+
+### Handing work to another agent
+
+A handoff is a note from one agent to another inside a run — "review this", "continue from
+here", "approve before I execute" — and feedback is the answer: a verdict (`approve`,
+`request_changes`, `block`, `acknowledge`) filed against the handoff's id. A handoff nobody has
+answered is **open**.
+
+```
+/mubit-memory:handoff send --to codex --action review "the auth diff is ready"
+/mubit-memory:handoff list --open
+/mubit-memory:handoff feedback <handoff_id> --verdict approve --comments "fine"
+```
+
+Every subagent files one without being asked: its result is stored as a handoff from that
+subagent to this session's role, addressed for review, so after a fan-out `list --open` is the
+list of results nobody has looked at yet. That note is written by the `SubagentStop` hook with
+zero network — it rides the ordinary drain, redaction and circuit breaker included — and under
+the **parent's** run id, because a handoff is scoped to a run and a subagent's sub-run id never
+reaches the wire. There is no way to address a note to another run.
+
+"Open" is computed by the command, not by the instance: the instance never flips a handoff's
+`active` flag and has no list route, so the command reads both entry types for the run and
+joins them — open means no feedback names that id. The resume briefing a new session gets
+includes the open handoffs, so work handed back and never reviewed is the first thing the next
+session hears about.
 
 ### When recall is slow rather than empty
 

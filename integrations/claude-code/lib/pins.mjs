@@ -60,12 +60,21 @@
  * can refuse it.
  *
  * ---------------------------------------------------------------------------
- * Not yet: subagents
+ * Subagents, and the budget that needed a measurement
  * ---------------------------------------------------------------------------
- * `SubagentStart` injects its own recalled block and does not pass through here, so a subagent
- * inherits none of the parent's pins today. That is the obvious follow-up and is deliberately
- * not built here: `subagentRecallTokenBudget` is 600 tokens against a parent's 1500, and
- * spending 240 of them on pins is a decision that wants its own measurement.
+ * `SubagentStart` injects its own recalled block and does not pass through `prompt-recall`,
+ * so for a while a subagent inherited none of the parent's pins. It does now, and the whole
+ * of the work was the budget: `subagentRecallTokenBudget` is 600 against a parent's 1500, so
+ * `MAX_PIN_TOKENS` — 16% there — would have been 40% here.
+ *
+ * The number was measured rather than picked, with `estimateTokens` over this module's own
+ * render path: the heading costs 6 tokens, a realistic five-pin set (31-69 characters each)
+ * costs 82 in total, and five pins at the 200-character cap cost 261. That last figure is
+ * what makes `MAX_PIN_TOKENS` bind before `MAX_PINS` does, and it is the *behaviour* the
+ * subagent budget has to reproduce at its own scale — not a number to copy.
+ *
+ * `MAX_SUBAGENT_PIN_TOKENS` is 96: the same 16% share of a smaller window. Every realistic
+ * pin set still renders whole, and the essay case truncates sooner, in proportion.
  *
  * Constraints, as everywhere in `lib/`: zero dependencies, Node >= 20 built-ins only,
  * synchronous apart from the one network export, and nothing here throws (§4.9).
@@ -114,6 +123,17 @@ export const MAX_PIN_CHARS = 200;
  */
 export const MAX_PIN_TOKENS = 240;
 
+/**
+ * The same 16% of a subagent's 600-token recall budget — see the header for the measurement
+ * this is derived from rather than guessed at.
+ *
+ * Deliberately a second constant rather than a fraction computed from
+ * `subagentRecallTokenBudget`: that value is user-configurable, and a pin budget that moved
+ * with it would silently become 40% again the moment somebody halved the recall budget to
+ * make subagents cheaper.
+ */
+export const MAX_SUBAGENT_PIN_TOKENS = 96;
+
 /** The one heading. Pins are not sections; they are one list. */
 const HEADING = '## Pinned for this run';
 
@@ -154,9 +174,13 @@ const EMPTY = Object.freeze({
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
+ * @param {{maxTokens?: number}} [opts] `maxTokens` overrides `MAX_PIN_TOKENS` for one call.
+ *   The only caller that passes it is `hooks/src/subagent-start.mjs`, whose window is 600
+ *   tokens rather than 1500. Anything that is not a positive finite number falls back, so a
+ *   caller cannot accidentally render an unbounded block by handing over a bad value.
  * @returns {PinBlock}
  */
-export function readPins(cfg, runId) {
+export function readPins(cfg, runId, opts = {}) {
   try {
     // The switch, read first: off means the cache on disk is invisible, and the injected
     // block goes back to being byte-for-byte what it was before pins existed.
@@ -182,7 +206,7 @@ export function readPins(cfg, runId) {
     // that moved, and a refresh is due either way.
     const stale = !(at > 0) || Math.abs(Date.now() - at) >= PIN_TTL_MS;
 
-    const { pins, dropped } = capped(raw.pins);
+    const { pins, dropped } = capped(raw.pins, tokenCapOf(opts));
     if (pins.length === 0) {
       // A successful refresh that found nothing writes an empty set — that is how a cleared
       // pin reaches a second terminal — and it renders no heading rather than an empty one.
@@ -211,9 +235,11 @@ export function readPins(cfg, runId) {
  * that is visibly refused, because the user has no reason to look.
  *
  * @param {any[]} raw
+ * @param {number} [maxTokens] defaults to `MAX_PIN_TOKENS`; `readPins` is what lets a caller
+ *   with a smaller window ask for a smaller one.
  * @returns {{pins: Pin[], dropped: number}}
  */
-function capped(raw) {
+function capped(raw, maxTokens = MAX_PIN_TOKENS) {
   /** @type {Pin[]} */
   const clean = [];
   let dropped = 0;
@@ -247,7 +273,7 @@ function capped(raw) {
   let spent = estimateTokens(`${HEADING}\n`);
   for (const pin of clean) {
     const cost = estimateTokens(`- ${pin.text}\n`);
-    if (spent + cost > MAX_PIN_TOKENS) { dropped++; continue; }
+    if (spent + cost > maxTokens) { dropped++; continue; }
     spent += cost;
     fitted.push(pin);
   }
@@ -462,6 +488,17 @@ function str(v) {
 function num(v, d) {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : d;
+}
+
+/**
+ * The token cap for one `readPins` call. Anything that is not a positive finite number is the
+ * parent budget — a caller handing over `undefined`, `0` or a string must not end up
+ * rendering an unbounded block.
+ * @param {{maxTokens?: any}|null|undefined} opts @returns {number}
+ */
+function tokenCapOf(opts) {
+  const n = Number(opts && opts.maxTokens);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : MAX_PIN_TOKENS;
 }
 
 /** @param {any} v @returns {boolean} */

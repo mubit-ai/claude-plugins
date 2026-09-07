@@ -268,6 +268,43 @@ test('PostToolUse survives a string tool_response, which is what Codex sends', a
     'the item lost the tool`s output. Codex sends tool_response as a plain string.');
 });
 
+/**
+ * The structured file-change lane, on the host where the path is hardest to find.
+ *
+ * Claude Code puts it under `tool_input.file_path`; Codex puts it inside an `apply_patch`
+ * blob under no key at all, which is why `PATH_KEYS` — the list both drop checks read — saw
+ * nothing here. The markers are the only place the *kind* is stated outright on either host,
+ * so this is also the only test in either suite that can assert a `delete`.
+ */
+test('apply_patch: the paths inside the blob become a structured record', async (t) => {
+  const { server, dataDir, projectDir } = await harness(t);
+  await runHook('capture', postToolUse({
+    tool_name: 'apply_patch',
+    tool_input: {
+      command: [
+        '*** Begin Patch',
+        '*** Update File: src/lib.rs', '@@', '-let a = 1;', '+let a = 2;',
+        '*** Add File: NOTES.md', '+probe note',
+        '*** Delete File: old.txt',
+        '*** End Patch',
+      ].join('\n'),
+    },
+    tool_response: 'Success. Updated the following files:\nM src/lib.rs\nA NOTES.md\nD old.txt\n',
+  }), { env: env(dataDir, projectDir, server.url) });
+
+  const item = readJsonDir(join(dataDir, 'runs', RUN_ID, 'spool')).map((f) => f.json)[0];
+  assert.ok(item, 'the patch must still be captured');
+  assert.deepEqual(JSON.parse(item.metadata_json).files, [
+    { path: 'src/lib.rs', kind: 'update' },
+    { path: 'NOTES.md', kind: 'add' },
+    { path: 'old.txt', kind: 'delete' },
+  ], 'the markers say the kind outright, which is more than either host says anywhere else');
+
+  const index = readJsonDir(join(dataDir, 'runs', RUN_ID)).find((f) => f.file === 'files.json');
+  assert.ok(index, 'and the run index is written on this host too');
+  assert.deepEqual(index.json.files.map((f) => f.path), ['src/lib.rs', 'NOTES.md', 'old.txt']);
+});
+
 test('the model`s own recall calls are not captured back into memory', async (t) => {
   const { server, dataDir, projectDir } = await harness(t);
   await runHook('capture', postToolUse({
@@ -361,6 +398,14 @@ test('SubagentStop attributes the result to the subagent, not to the parent', as
   assert.match(String(meta.mubit_agent_id ?? ''), /^codex-sub-/,
     'the derived Mubit identity must be a Codex sub-agent role. `claude-code-sub-…` here '
     + 'would count the two harnesses as one actor upstream.');
+
+  // § The result is a handoff note to the parent role, with zero HTTP from the hook: it rides
+  //   the parent's drain like every item. `to_agent_id` is the role, never a sub-run id.
+  assert.equal(items[0].intent, 'handoff');
+  assert.equal(meta.to_agent_id, 'codex');
+  assert.match(String(meta.from_agent_id ?? ''), /^codex-sub-/);
+  assert.equal(meta.requested_action, 'review');
+  assert.equal(server.requests.length, 0, `capture must dial nothing; saw: ${server.summary()}`);
 });
 
 // ===========================================================================

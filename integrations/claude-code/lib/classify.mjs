@@ -191,8 +191,14 @@ export function classifyTool(toolName, toolInput, outcome = 'ok') {
  * §4.5, the turn-level rows:
  *
  *   | Stop Q&A pair | `task_result` | `medium` | staged prompt + final message |
- *   | SubagentStop  | `task_result` | `medium` | attributed to the subagent `agent_id` |
+ *   | SubagentStop  | `handoff`     | `medium` | attributed to the subagent `agent_id`; the note it hands back |
  *   | PreCompact    | `checkpoint`  | —        | goes via `/v2/control/checkpoint` |
+ *
+ * A subagent's result is a `handoff` rather than a `task_result` because that is what it is:
+ * an answer handed back to the parent role for review, which the parent — or a person — can
+ * answer with feedback. The server files `handoff` and `task_result` in the same promotion
+ * tier, so nothing is lost by the distinction, and `lib/handoff.mjs` gains the one thing it
+ * needs: a fan-out's results listed as open handoffs until each is answered.
  *
  * `PreCompact`'s importance is "—" in the table because the item never reaches ingest: it
  * goes to `POST /v2/control/checkpoint` (§5.6), which has no importance field. A valid
@@ -216,7 +222,9 @@ export function classifyTurn(prompt, lastAssistantMessage, opts = {}) {
   const isSubagent = event === 'SubagentStop';
   const [intent, importance] = event === 'PreCompact'
     ? ['checkpoint', 'medium']
-    : ['task_result', 'medium'];
+    : isSubagent
+      ? ['handoff', 'medium']
+      : ['task_result', 'medium'];
 
   const rawAgentId = o.agent_id ?? o.agentId;
   return {

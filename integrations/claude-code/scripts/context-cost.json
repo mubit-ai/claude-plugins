@@ -1,8 +1,8 @@
 {
-  "measuredAt": "2026-09-03T20:25:36.641Z",
-  "value": 3009,
+  "measuredAt": "2026-09-07T16:37:26.183Z",
+  "value": 3125,
   "cached": 0,
-  "curatedValue": 3009,
+  "curatedValue": 3125,
   "allowlistHonoured": true,
   "method": "word/number/symbol segmentation; see the header of scripts/measure-context-cost.mjs",
   "surface": {
@@ -31,6 +31,8 @@
       "dashboard",
       "doctor",
       "forget",
+      "handoff",
+      "import",
       "memory-health",
       "pin",
       "recall",
@@ -60,9 +62,9 @@
       "count": 7
     },
     "skillFrontmatter": {
-      "tokens": 495,
-      "chars": 1668,
-      "count": 13
+      "tokens": 611,
+      "chars": 2070,
+      "count": 15
     },
     "agentFrontmatter": {
       "tokens": 62,

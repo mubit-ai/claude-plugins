@@ -46,6 +46,8 @@
 
 import { openSync, readSync, closeSync, fstatSync } from 'node:fs';
 
+import { messageText } from './transcript.mjs';
+
 /** How much of the tail to read. A `CommandExecution` line runs a few KB at most. */
 const TAIL_BYTES = 512 * 1024;
 
@@ -55,8 +57,43 @@ const HEAD_BYTES = 256 * 1024;
 /** A subagent's task, not its transcript: enough to identify the work, not to replay it. */
 const MAX_PROMPT_CHARS = 4096;
 
-/** `input_text` / `output_text` are Codex's spellings of `text`. */
-const TEXT_BLOCKS = new Set(['text', 'input_text', 'output_text']);
+/**
+ * Text Codex writes on a `user` record that no user typed.
+ *
+ * From 0.149 the first `user` message of every thread is the harness talking: a
+ * `<recommended_plugins>` listing and an `<environment_context>` block, and the prompt the
+ * person typed arrives on the record after them. Before that version the same material sat
+ * on `event_msg/user_message` and never reached a `role: "user"` record, which is why
+ * `firstUserText` — the `Q:` of every Codex subagent capture — was right until 0.149 and has
+ * been returning a plugin listing since. The other entries are the remaining envelopes the
+ * host puts in a user's voice: an aborted turn, a shell command the user ran outside the
+ * model, a skill body, an image, the `AGENTS.md` and mentioned-files preambles.
+ *
+ * Anchored at the start of a block. A user who *quotes* one of these mid-sentence is still a
+ * user, and a block is filtered whole rather than trimmed because the host writes each as its
+ * own content block.
+ */
+export const INJECTED_USER_RE = /^\s*(?:<(?:environment_context|recommended_plugins|turn_aborted|user_shell_command|skill|image)\b|# AGENTS\.md instructions|# Files mentioned)/;
+
+/** @param {any} text @returns {boolean} */
+export function isInjectedUserText(text) {
+  return typeof text === 'string' && INJECTED_USER_RE.test(text);
+}
+
+/**
+ * A `content` with the injected blocks removed, so `messageText` renders what the user said
+ * and nothing the host said for them. A string is one block; anything unrecognised is
+ * returned as it came, for `messageText` to refuse on its own terms.
+ *
+ * @param {any} content
+ * @returns {any}
+ */
+export function stripInjectedBlocks(content) {
+  if (typeof content === 'string') return isInjectedUserText(content) ? '' : content;
+  if (!Array.isArray(content)) return content;
+  return content.filter((b) => !(b && typeof b === 'object' && !Array.isArray(b) && isInjectedUserText(b.text)));
+}
+
 
 /**
  * @typedef {object} ToolCallRecord
@@ -185,6 +222,8 @@ function readTail(path, bytes) {
  * The envelope is the one Codex writes and the checkpoint reader already knows:
  * `{"type":"response_item","payload":{"type":"message","role":"user",
  * "content":[{"type":"input_text","text":…}]}}`. `input_text` is Codex's spelling of `text`.
+ * Blocks matching `INJECTED_USER_RE` are skipped, because from 0.149 the first of them is
+ * always the host's.
  *
  * Returns `''` for anything that does not answer — no path, no file, no user message, a
  * transcript in a shape this does not know. The caller falls back to the parent's staged
@@ -217,27 +256,13 @@ export function firstUserText(transcriptPath, opts = {}) {
     if (!record || typeof record !== 'object') continue;
     if (record.role !== 'user') continue;
 
-    const body = blockText(record.content);
+    // The first user record of a 0.149+ thread is the host's own preamble; the task is on the
+    // next one. Without this filter every Codex subagent since 0.149 has been captured as an
+    // answer to `<recommended_plugins>`.
+    const body = messageText(stripInjectedBlocks(record.content));
     if (body.trim()) return body.slice(0, Number(opts.maxChars) > 0 ? Number(opts.maxChars) : MAX_PROMPT_CHARS);
   }
   return '';
-}
-
-/** The text out of a message's content blocks. Mirrors the checkpoint reader's rules. */
-function blockText(content) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .map((b) => {
-      if (typeof b === 'string') return b;
-      if (!b || typeof b !== 'object') return '';
-      const type = typeof b.type === 'string' ? b.type : '';
-      if (TEXT_BLOCKS.has(type) && typeof b.text === 'string') return b.text;
-      if (!type && typeof b.text === 'string') return b.text;
-      return '';
-    })
-    .filter(Boolean)
-    .join('\n');
 }
 
 /** The first `bytes` of a file, as text. `''` for anything that goes wrong. */

@@ -312,6 +312,16 @@ export function pruneStale(cfg = {}) {
       expire(join(root, 'status', name), name === 'health.json' ? 30 * SEC : 12 * HOUR);
     }
 
+    // import/<hash>.json — 30 d. One cursor per transcript file, and the only state the
+    // transcript importer keeps. Thirty days matches `sessions/`: a transcript nobody has
+    // re-imported in a month is one whose cursor costs more to keep than the file costs to
+    // re-read, and dropping it is safe because the ids an import mints are the ones live
+    // capture would have written. Without a row here it would live forever — 1,283 files on
+    // one machine, measured.
+    for (const name of jsonFiles(join(root, 'import'))) {
+      expire(join(root, 'import', name), 30 * DAY);
+    }
+
     // tmp/<uuid>.json — 1 h (detached payload handoff; the child normally unlinks it)
     for (const e of dirEntries(join(root, 'tmp'))) {
       if (e.isFile()) expire(join(root, 'tmp', e.name), 1 * HOUR);
@@ -362,6 +372,13 @@ export function pruneStale(cfg = {}) {
       // prompts between it and that drain. Kept in the table rather than left out so a run
       // nobody returns to does not leave a file behind for ever.
       expire(join(rd, 'pins.json'), 7 * DAY);
+      // runs/<run_id>/files.json — 7 d, the same window as `pins.json` and for the same
+      // reason: it is scoped to a *run*, and under the default `per-directory` strategy a run
+      // is a project someone comes back to for weeks. It is also a cache — capture rebuilds
+      // it from the next tool call — so an early sweep costs nothing but the calls between it
+      // and that one. In the table rather than left out so a run nobody returns to does not
+      // leave a file behind for ever.
+      expire(join(rd, 'files.json'), 7 * DAY);
       // runs/<run_id>/drain.lock — 60 s, stolen after
       expire(join(rd, 'drain.lock'), 60 * SEC);
       // runs/<run_id>/checkpoints.json — 30 d; jobs.json — 24 h

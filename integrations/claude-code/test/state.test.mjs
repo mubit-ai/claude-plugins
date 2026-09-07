@@ -296,6 +296,15 @@ const TTL_ROWS = [
   // nothing reads any more and this sweep drains.
   { what: 'seen-set', rel: `runs/cc-x/seen/${fx.SESSION_ID}.json`, ttl: 6 * HOUR },
   { what: 'legacy seen roll-up', rel: 'runs/cc-x/seen.json', ttl: 6 * HOUR },
+  // The per-run file-change index. Seven days, matching `pins.json`: both are run-scoped, and
+  // a run under the default `per-directory` strategy is a project someone comes back to. Both
+  // are caches the next tool call rebuilds, so the row is here to stop a run nobody returns
+  // to leaving a file behind for ever, not to bound staleness.
+  { what: 'file-change index', rel: 'runs/cc-x/files.json', ttl: 7 * DAY },
+  // The transcript importer's per-file cursor. Thirty days, matching `sessions/`: a transcript
+  // nobody has re-imported in a month costs more to remember than to re-read. Without this row
+  // it would live forever, and there are 1,283 transcript files on one measured machine.
+  { what: 'import cursor', rel: 'import/0a1b2c3d4e5f6071.json', ttl: 30 * DAY },
 ];
 
 for (const row of TTL_ROWS) {

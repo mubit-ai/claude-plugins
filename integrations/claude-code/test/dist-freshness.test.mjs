@@ -29,18 +29,38 @@ const REPO_ROOT = resolve(PLUGIN_ROOT, '..', '..');
 
 const isVendoredServer = (rel) => rel === 'server.js' || rel.endsWith('/server.js');
 
+/**
+ * What lives in `bin/` and is not a build product.
+ *
+ * `bin/` is the one output directory that also holds inputs: `bin/<name>.src.mjs` is the
+ * source esbuild reads, and `bin/dashboard.html` is a tracked asset the dashboard bundle reads
+ * at runtime as a sibling of itself rather than importing. Neither is produced by a rebuild,
+ * so both would read as "committed files the build no longer produces" — which is the check
+ * this file exists for, pointed at the wrong thing.
+ */
+const isBinSource = (rel) => rel.endsWith('.src.mjs') || rel === 'dashboard.html';
+
 test('the committed bundles are what this source builds', () => {
   const build = rebuildInto(PLUGIN_ROOT);
   try {
     assert.ok(build.ok,
       `the rebuild failed, so the committed bundles cannot be checked at all:\n${build.stderr}`);
 
-    for (const dir of ['hooks/dist', 'mcp/dist']) {
+    // `bin/` is here for the same reason the other two are, and it was missing.
+    //
+    // The gate covered the bundles the *host* execs and not the ones a *skill* execs, so
+    // `bin/activity.mjs` could drift arbitrarily from `bin/activity.src.mjs` and the suite
+    // stayed green — every test drives `main()` by importing the `.src.mjs`, so nothing in
+    // 1,500 assertions ever reads the file a user actually runs. Five pairs live there now,
+    // and the fifth is what made the gap worth closing rather than noting.
+    for (const dir of ['hooks/dist', 'mcp/dist', 'bin']) {
       const { missing, extra, differing } = compareTrees({
         committed: join(PLUGIN_ROOT, dir),
         built: join(build.outDir, dir),
         repoRoot: REPO_ROOT,
-        ignore: isVendoredServer,
+        ignore: dir === 'bin'
+          ? (rel) => isVendoredServer(rel) || isBinSource(rel)
+          : isVendoredServer,
       });
 
       assert.deepEqual(missing, [],

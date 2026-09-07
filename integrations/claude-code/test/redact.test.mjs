@@ -312,6 +312,109 @@ describe('stage 1 — pattern scrub (§4.4)', () => {
     });
   });
 
+  /**
+   * The three shapes that survived the re-probe of the item 5 gate, on the tree that closed
+   * `env: X_API_TOKEN=` and `postgres://admin:pw@host`. Each was probed against the live
+   * module, and each came back byte-identical with zero redactions:
+   *
+   * ```
+   * DB_PASS=hunter2            → unchanged
+   * MY_PASSPHRASE=hunter2      → unchanged
+   * STRIPE_SK=sk_live_shortish → unchanged
+   * ```
+   *
+   * All three are short and low-entropy, so the `high-entropy` backstop never reaches them —
+   * and short, low-entropy secrets are what a pasted `.env` is made of. Two different causes:
+   *
+   *   - `ASSIGNMENT_KEYWORDS` has `password` but not `pass` or `passphrase`, so the two most
+   *     ordinary abbreviations of the most ordinary secret name both miss.
+   *   - `sk_live_…` uses an underscore where the `openai-key` rule expects a hyphen, and no
+   *     other rule claims it.
+   *
+   * The gate says a bulk import multiplies whatever capture leaks by every transcript on the
+   * machine. These three are what it would have multiplied.
+   *
+   * Every widening below carries its own negative case, in the same block rather than
+   * elsewhere in the file: a keyword that over-matches is a redactor that mangles ordinary
+   * output, and `MUBIT_CC_REDACT=0` — the escape hatch for exactly that — turns off stage 1
+   * wholesale. Making the scrub annoying is a way of turning it off.
+   */
+  describe('the shapes a pasted .env is actually made of', () => {
+    it('redacts an abbreviated password name', async () => {
+      const { redactText } = await R();
+      const r = redactText('DB_PASS=hunter2', cfg(), 'output');
+
+      assert.ok(!r.text.includes('hunter2'), `abbreviated password name leaked:\n${r.text}`);
+      assert.ok(r.text.includes(PH('assignment')), `expected an assignment placeholder; got:\n${r.text}`);
+    });
+
+    it('redacts a passphrase', async () => {
+      const { redactText } = await R();
+      const r = redactText('MY_PASSPHRASE=hunter2', cfg(), 'output');
+
+      assert.ok(!r.text.includes('hunter2'), `passphrase leaked:\n${r.text}`);
+      assert.ok(r.text.includes(PH('assignment')), `expected an assignment placeholder; got:\n${r.text}`);
+    });
+
+    it('redacts the other spellings a .env reaches for', async () => {
+      const { redactText } = await R();
+      for (const name of ['PGPASS', 'MYSQL_PASSWD', 'SSH_PASSPHRASE', 'db_pass']) {
+        const r = redactText(`${name}=hunter2`, cfg(), 'output');
+        assert.ok(!r.text.includes('hunter2'), `${name} leaked:\n${r.text}`);
+      }
+    });
+
+    /**
+     * The negative case for `pass`, and the reason it is matched as a *terminal* segment of
+     * the name rather than as a substring. `passed` and `bypassed` both contain it, both are
+     * ordinary words in captured output, and a plain `includes('pass')` would redact the
+     * number beside every one of them.
+     */
+    it('leaves an ordinary name that merely contains "pass" alone', async () => {
+      const { redactText } = await R();
+      for (const line of ['tests_passed=40', 'bypassed=true', 'pass_rate=0.98', 'passing: 12']) {
+        const r = redactText(line, cfg(), 'output');
+        assert.equal(r.text, line, `over-redacted an ordinary assignment:\n${r.text}`);
+        assert.equal(r.redactions, 0);
+      }
+    });
+
+    it('redacts a Stripe secret key, which no rule claimed', async () => {
+      const { redactText } = await R();
+      const r = redactText('STRIPE_SK=sk_live_shortish', cfg(), 'output');
+
+      assert.ok(!r.text.includes('sk_live_shortish'), `Stripe key leaked:\n${r.text}`);
+      assert.ok(r.text.includes(PH('stripe-key')), `expected a stripe-key placeholder; got:\n${r.text}`);
+    });
+
+    it('redacts a Stripe key in prose, where no assignment rule can reach', async () => {
+      const { redactText } = await R();
+      const r = redactText('use rk_test_9f2a11c4bd for the sandbox', cfg(), 'output');
+
+      assert.ok(!r.text.includes('rk_test_9f2a11c4bd'), `Stripe key leaked from prose:\n${r.text}`);
+      assert.ok(r.text.startsWith('use '), `surrounding prose must survive:\n${r.text}`);
+    });
+
+    /**
+     * The negative case for `stripe-key`. `pk_live_…` is the *publishable* key: Stripe
+     * documents it as safe to ship in client-side code, so it turns up in committed source and
+     * in browser bundles. Redacting it would scrub something the user is looking at on
+     * purpose, and would say "secret" about a value that is published by design.
+     */
+    it('leaves a Stripe publishable key alone', async () => {
+      const { redactText } = await R();
+      // Short on purpose, and the same length as the `sk_live_` fixture above: a realistic
+      // 32-character key is one `high-entropy` run — separator included, since `=` is in the
+      // entropy charset — and would be redacted whatever this rule decides. The pair only
+      // isolates the new rule while both sit under that backstop.
+      const line = 'STRIPE_PK=pk_live_shortish';
+      const r = redactText(line, cfg(), 'output');
+
+      assert.equal(r.text, line, `publishable key must survive:\n${r.text}`);
+      assert.equal(r.redactions, 0);
+    });
+  });
+
   // §4.4: the placeholder format is exactly `[REDACTED:<kind>]` (spec §6.4 says
   // `[redacted:<kind>]`; the build guide is the implementation contract).
   it('uses the exact [REDACTED:<kind>] placeholder form', async () => {
@@ -786,7 +889,7 @@ describe('self-reference suppression (§4.4)', () => {
 
   it('KEEPS other foreign MCP tools', async () => {
     const { isSelfReference } = await R();
-    for (const tool of ['mcp__codaph__codaph_status', 'mcp__linear__list_issues', 'mcp__slack__post_message']) {
+    for (const tool of ['mcp__acme__acme_status', 'mcp__linear__list_issues', 'mcp__slack__post_message']) {
       assert.equal(isSelfReference(tool, {}, cfg()), false, `${tool} must be kept`);
     }
   });

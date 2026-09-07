@@ -364,6 +364,10 @@ export function defaultRoutes() {
     'POST /v2/control/variables/list': { json: { variables: [] } },
     'POST /v2/control/variables/set': { json: { success: true } },
     'POST /v2/control/variables/delete': { json: { success: true } },
+    // The handoff lane (`lib/handoff.mjs`). Answered here so the typed-wrapper tests in
+    // `http.test.mjs` see a routed 200, as every other wrapper does.
+    'POST /v2/control/handoff': { json: { success: true, handoff_id: 'hnd_test_1' } },
+    'POST /v2/control/feedback': { json: { success: true, feedback_id: 'fb_test_1' } },
   };
 }
 

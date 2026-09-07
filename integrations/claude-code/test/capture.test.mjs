@@ -779,8 +779,11 @@ async function waitForSpawn(file, ms = 3000) {
 }
 
 // §4.5 — a SubagentStop is attributed to the subagent's own agent_id, not the parent's.
-// The batch-level agent_id cannot carry it, so it rides on the item.
-test('capture --subagent: attributes the item to the subagent agent_id', async (t) => {
+// The batch-level agent_id cannot carry it, so it rides on the item. And it is a handoff
+// note: the subagent's answer, addressed to the parent role for review, carrying the fields a
+// handoff created through `/v2/control/handoff` carries — so `lib/handoff.mjs` lists a
+// fan-out's results as open until each is answered, and joins feedback to either the same way.
+test('capture --subagent: a handoff note to the parent role, attributed to the subagent', async (t) => {
   const dataDir = makeDataDir();
   const server = await mubit(t);
   seedTurn(dataDir);
@@ -793,11 +796,29 @@ test('capture --subagent: attributes the item to the subagent agent_id', async (
   assert.equal(server.requests.length, 0, `capture must issue ZERO HTTP requests; saw: ${server.summary()}`);
   const item = soleItem(dataDir, RUN_ID);
   assertRequiredItemFields(item);
-  assert.equal(item.intent, 'task_result');
+  assert.equal(item.intent, 'handoff');
   assert.ok(item.text.startsWith('Q: '));
   assert.ok(item.text.includes('Found three call sites'));
   assert.ok(JSON.stringify(item).includes('sub_01HZXK8Q9N7M'),
     `the subagent's own agent_id must appear on the item: ${item.metadata_json}`);
+
+  const meta = JSON.parse(item.metadata_json);
+  assert.match(meta.from_agent_id, /^claude-code-sub-/, 'from the subagent, in its wire-level identity');
+  assert.equal(meta.to_agent_id, 'claude-code', 'to the parent role — never a sub-run id, never a session');
+  assert.equal(meta.requested_action, 'review');
+  assert.equal(meta.task_id, meta.prompt_id, 'the task is the turn the subagent was spawned in');
+  assert.equal(meta.active, true);
+});
+
+// The parent's own Stop is not a handoff: there is nobody to hand it to.
+test('capture --stop: the parent turn stays a task_result', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedTurn(dataDir);
+  assertHookContract(await runHook('capture', stop(), { env: staticEnv(dataDir, server), args: ['--stop'] }));
+  const item = soleItem(dataDir, RUN_ID);
+  assert.equal(item.intent, 'task_result');
+  assert.ok(!('to_agent_id' in JSON.parse(item.metadata_json)));
 });
 
 /**
@@ -968,6 +989,151 @@ test('capture: a denylisted path drops silently', async (t) => {
   assertHookContract(r);
   assert.deepEqual(r.json, { suppressOutput: true });
   assert.equal(spoolFiles(dataDir, RUN_ID).length, 0, '.env is on the denylist (§4.4)');
+});
+
+// ---------------------------------------------------------------------------
+// The structured file-change lane
+// ---------------------------------------------------------------------------
+
+/**
+ * Until this lane existed, a path survived only as a substring of the prose episode and only
+ * if it fell inside the first 24 rendered params and 4096 bytes. These assertions are about
+ * the *structured* record — `metadata_json.files`, which is what makes the path a retrieval
+ * axis, and `runs/<run_id>/files.json`, which is what lets recall filter by the files in play
+ * without a round trip.
+ */
+test('capture: an edit carries its file change in metadata_json.files', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUse(), { env: staticEnv(dataDir, server) });
+  assertHookContract(r);
+
+  const meta = JSON.parse(soleItem(dataDir, RUN_ID).metadata_json);
+  assert.deepEqual(meta.files, [{ path: '/Users/x/repo/src/lib.rs', kind: 'update' }],
+    'an Edit names its prior text, so it is an update of the path it names');
+});
+
+// A field that is always present and never says anything is worse than an absent one — the
+// rule `withModel` and `withActor` already follow in this file.
+test('capture: a call that changes no file carries no files key at all', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUse({
+    tool_name: 'Read',
+    tool_input: { file_path: '/Users/x/repo/src/lib.rs' },
+    tool_response: { type: 'text', file: { content: 'pub fn main() {}' } },
+  }), { env: staticEnv(dataDir, server) });
+  assertHookContract(r);
+
+  const meta = JSON.parse(soleItem(dataDir, RUN_ID).metadata_json);
+  assert.ok(!('files' in meta), `a Read must not claim to have changed anything: ${meta.files}`);
+});
+
+test('capture: the run index records what the run has touched', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  for (const payload of [
+    postToolUse(),
+    postToolUse({
+      tool_name: 'Write',
+      tool_input: { file_path: '/Users/x/repo/NOTES.md', content: 'a note' },
+      tool_response: { type: 'create', filePath: '/Users/x/repo/NOTES.md', content: 'a note' },
+      tool_use_id: 'toolu_01FILECHANGEINDEX0000000',
+    }),
+  ]) {
+    assertHookContract(await runHook('capture', payload, { env: staticEnv(dataDir, server) }));
+  }
+
+  const stored = readJsonFile(join(runDir(dataDir), 'files.json'));
+  assert.equal(stored.version, 1);
+  assert.deepEqual(stored.files.map((f) => f.path),
+    ['/Users/x/repo/NOTES.md', '/Users/x/repo/src/lib.rs'],
+    'most recently touched first — the index answers "what is in play", not "what exists"');
+  assert.deepEqual(stored.files.find((f) => f.path === '/Users/x/repo/NOTES.md').kinds, ['add'],
+    'the Write result says `create`, and that is the kind');
+});
+
+/**
+ * A `Write` over an existing file. The input is byte-identical to the one that creates a
+ * file — `file_path` and `content`, no prior text — so the only thing that can tell the two
+ * apart is the host's result, `{type: 'update'}`. Capture hands it through; this is the
+ * assertion that it arrives.
+ */
+test('capture: a Write that overwrote is recorded as an update, from its result', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUse({
+    tool_name: 'Write',
+    tool_input: { file_path: '/Users/x/repo/NOTES.md', content: 'a longer note' },
+    tool_response: {
+      type: 'update', filePath: '/Users/x/repo/NOTES.md', content: 'a longer note',
+      structuredPatch: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-a note', '+a longer note'] }],
+    },
+  }), { env: staticEnv(dataDir, server) });
+  assertHookContract(r);
+
+  const meta = JSON.parse(soleItem(dataDir, RUN_ID).metadata_json);
+  assert.deepEqual(meta.files, [{ path: '/Users/x/repo/NOTES.md', kind: 'update' }],
+    'the result said update, so the lane must not call the overwrite a create');
+  const stored = readJsonFile(join(runDir(dataDir), 'files.json'));
+  assert.deepEqual(stored.files.find((f) => f.path === '/Users/x/repo/NOTES.md').kinds, ['update']);
+});
+
+/**
+ * A failed call changed nothing. Recording its subject would put a file in the index — and
+ * on the retrieval axis — on the strength of an edit that did not land, which is the one
+ * error a "what changed in auth?" answer cannot survive: it is confidently wrong.
+ */
+test('capture: a failed tool call contributes no file change', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUseFailure(), {
+    env: staticEnv(dataDir, server), args: ['--failure'],
+  });
+  assertHookContract(r);
+
+  const meta = JSON.parse(soleItem(dataDir, RUN_ID).metadata_json);
+  assert.ok(!('files' in meta), 'a failed edit changed nothing');
+  assert.ok(!existsSync(join(runDir(dataDir), 'files.json')), 'and wrote no index');
+});
+
+/**
+ * The denylist hole this lane closes.
+ *
+ * `hasDeniedSubject` reads `PATH_KEYS` off `tool_input`, and Codex's `apply_patch` carries no
+ * path key at all — its subjects are inside the patch body. So a patch writing `.env` was
+ * captured in full on that host, while the same file read through `Read(file_path=…)` was
+ * dropped. Now that one extractor knows where the paths are on both hosts, the denylist asks
+ * it rather than carrying its own second answer.
+ */
+test('capture: a denylisted path inside an apply_patch body drops the item', async (t) => {
+  const dataDir = makeDataDir();
+  const projectDir = makeProjectDir({ files: { '.env': `OPENAI_API_KEY=${SECRETS.openaiKey}
+` } });
+  const server = await mubit(t);
+
+  const r = await runHook('capture', postToolUse({
+    tool_name: 'apply_patch',
+    tool_input: {
+      command: `*** Begin Patch\n*** Add File: ${join(projectDir, '.env')}\n+OPENAI_API_KEY=${SECRETS.openaiKey}\n*** End Patch`,
+    },
+    tool_response: 'Success. Updated the following files:\nA .env',
+  }), {
+    env: baseEnv({
+      dataDir, endpoint: server.url, projectDir,
+      extra: { MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: RUN_ID },
+    }),
+  });
+
+  assertHookContract(r);
+  assert.equal(spoolFiles(dataDir, RUN_ID).length, 0,
+    'a patch that writes .env is the same secret as a read of it');
+  assert.ok(!existsSync(join(runDir(dataDir), 'files.json')), 'and it reaches no index either');
 });
 
 // §5.4 — zero HTTP in EVERY mode. Capture's only outbound work is spawnDetached('drain'),

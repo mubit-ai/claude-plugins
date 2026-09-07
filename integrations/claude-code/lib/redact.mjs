@@ -56,12 +56,29 @@ const EXEMPT_RE = /idempotency[-_]key/i;
 // ---------------------------------------------------------------------------
 
 /**
- * Kept aligned with the server's own redaction policy, so client and server
- * agree on what counts as a secret.
+ * Matched as a substring of the assignment's *name*, lowercased.
+ *
+ * Started aligned with the server's own redaction policy so client and server agreed on what
+ * counts as a secret. It is now deliberately wider in one direction: `passphrase` and
+ * `passwd` were added because a re-probe found `MY_PASSPHRASE=hunter2` surviving intact, and
+ * a client that scrubs more than the server is the safe side of that divergence — the server
+ * never sees what this removes.
  */
 const ASSIGNMENT_KEYWORDS = [
-  'secret', 'token', 'password', 'credential', 'assertion', 'signature', 'apikey', 'api_key',
+  'secret', 'token', 'password', 'passphrase', 'passwd', 'credential', 'assertion',
+  'signature', 'apikey', 'api_key',
 ];
+
+/**
+ * Matched only at the *end* of the name, and `pass` is the whole reason the distinction
+ * exists. `DB_PASS=` and `PGPASS=` are ordinary `.env` spellings that no substring in the
+ * list above reaches, and adding `pass` there instead would take `tests_passed=40`,
+ * `bypassed=true` and every other ordinary word that happens to contain it. Over-redaction is
+ * not a harmless failure here: the documented escape hatch for a scrub that mangles output is
+ * `MUBIT_CC_REDACT=0`, which turns stage 1 off wholesale, so making the scrub annoying is a
+ * way of turning it off.
+ */
+const ASSIGNMENT_NAME_SUFFIXES = ['pass'];
 
 /**
  * `NAME<sep>VALUE`, where NAME is a whole `[A-Za-z0-9_-]` token.
@@ -137,6 +154,16 @@ const RULES = [
   { kind: 'pem', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { kind: 'mubit-key', re: /mbt_[A-Za-z0-9_-]{8,}/g },
   { kind: 'openai-key', re: /sk-[A-Za-z0-9_-]{16,}/g },
+  // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+  // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+  // underscore where that rule expects a hyphen, so it fell through every rule in this table
+  // and, being short, under the `high-entropy` floor as well.
+  //
+  // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+  // safe to ship in client-side code — it is in committed source and in browser bundles, and
+  // redacting it would scrub something the user is deliberately looking at while calling a
+  // published value a secret.
+  { kind: 'stripe-key', re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
   { kind: 'github-token', re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
   { kind: 'aws-access-key', re: /AKIA[0-9A-Z]{16}/g },
   { kind: 'jwt', re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -180,7 +207,7 @@ function scrubAssignments(text, count) {
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
 
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -197,6 +224,17 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+
+/**
+ * Does this assignment's name say its value is a secret? Lowercased name in, so the two lists
+ * can be read as written.
+ * @param {string} lower
+ * @returns {boolean}
+ */
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))
+    || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 
 /**
@@ -502,16 +540,10 @@ function isGitIgnored(p, projectDir) {
   const root = gitRootOf(projectDir);
   if (!root) return false;
 
-  let rel = String(p).replace(/\\/g, '/');
-  if (isAbsolute(rel)) {
-    const abs = resolve(rel);
-    for (const base of new Set([resolve(projectDir), root])) {
-      if (abs === base) return false;
-      if (abs.startsWith(base + sep)) { rel = abs.slice(base.length + 1); break; }
-    }
-    if (isAbsolute(rel)) return false; // outside the repo — git cannot speak to it
-  }
-  if (!rel || rel.startsWith('..')) return false;
+  // Shared with `warmIgnoreCache`, so a batched warm and this single lookup key the cache
+  // identically. Two spellings of one path would make a warm look like a hit and fork anyway.
+  const rel = relativeToRepo(p, projectDir, root);
+  if (!rel) return false; // outside the repo — git cannot speak to it
 
   const key = `${root} ${rel}`;
   const hit = _ignoreCache.get(key);
@@ -528,6 +560,86 @@ function isGitIgnored(p, projectDir) {
   }
   _ignoreCache.set(key, ignored);
   return ignored;
+}
+
+/**
+ * Answer `git check-ignore` for many paths in one fork, filling the same cache
+ * `isGitIgnored` reads.
+ *
+ * `isGitIgnored` shells out per unique `(repo, path)` with a 2 s timeout. That is right for
+ * capture, which sees one path per tool call and memoises it — the rule is "one
+ * `git check-ignore` per drain batch, never one per capture". It is wrong for anything
+ * holding a list: a caller walking hundreds of sessions would be dominated by `git` forks,
+ * and a 2 s timeout each is a bound on the wrong thing entirely.
+ *
+ * `--stdin -z` takes the whole list and prints back the subset that is ignored, so both
+ * answers are learned in one process. Paths that come back are cached `true`; every other
+ * path *that was asked about* is cached `false`, which is the half that matters — without it
+ * the caller still forks once per unignored path, which is most of them.
+ *
+ * Anything that goes wrong caches nothing at all, so `isGitIgnored` falls back to asking one
+ * at a time. A failed warm must not read as "nothing is ignored": that is the direction in
+ * which a `.env` gets captured.
+ *
+ * @param {string[]} paths
+ * @param {string} projectDir
+ * @returns {number} how many paths this resolved; 0 if the warm did nothing
+ */
+export function warmIgnoreCache(paths, projectDir) {
+  try {
+    const root = gitRootOf(projectDir);
+    if (!root) return 0;
+
+    /** rel -> the key `isGitIgnored` would look up. */
+    const wanted = new Map();
+    for (const p of Array.isArray(paths) ? paths : []) {
+      const rel = relativeToRepo(p, projectDir, root);
+      if (!rel) continue;
+      const key = `${root} ${rel}`;
+      if (_ignoreCache.has(key)) continue;
+      wanted.set(rel, key);
+    }
+    if (wanted.size === 0) return 0;
+
+    const input = `${[...wanted.keys()].join('\0')}\0`;
+    const r = spawnSync('git', ['check-ignore', '-z', '--stdin'], {
+      cwd: root, input, encoding: 'utf8', timeout: 30000, maxBuffer: 16 * 1024 * 1024,
+    });
+    // 0 = some paths are ignored, 1 = none are. Anything else — including a timeout, which
+    // leaves `status` null — is an error, and an error is not evidence that nothing is
+    // ignored.
+    if (r.error || (r.status !== 0 && r.status !== 1)) return 0;
+
+    const ignored = new Set(String(r.stdout ?? '').split('\0').filter(Boolean));
+    for (const [rel, key] of wanted) _ignoreCache.set(key, ignored.has(rel));
+    return wanted.size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * A path as `git` would name it from `root`, or `''` when git cannot speak to it.
+ *
+ * Extracted from `isGitIgnored` so the batched warm above keys the cache identically. Two
+ * spellings of one path would make a warm look like a hit and fork anyway, which is the
+ * failure mode a batch exists to remove and the one that would be hardest to notice.
+ *
+ * @param {string} p @param {string} projectDir @param {string} root @returns {string}
+ */
+function relativeToRepo(p, projectDir, root) {
+  if (typeof p !== 'string' || !p) return '';
+  let rel = p.replace(/\\/g, '/');
+  if (isAbsolute(rel)) {
+    const abs = resolve(rel);
+    for (const base of new Set([resolve(projectDir || root), root])) {
+      if (abs === base) return '';
+      if (abs.startsWith(base + sep)) { rel = abs.slice(base.length + 1); break; }
+    }
+    if (isAbsolute(rel)) return '';
+  }
+  if (!rel || rel.startsWith('..')) return '';
+  return rel;
 }
 
 /**

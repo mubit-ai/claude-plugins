@@ -500,10 +500,6 @@ export const RULES = [
     exclude: [
       // The one users need.
       '**/docs/user-guide.md',
-      // Published deliberately: a feature audit and working brief, kept as the public record of
-      // what the port shipped. It reads like an internal document because it was one — it is
-      // here on an explicit decision, and it is scanned for everything else in this catalogue.
-      '**/docs/codaph-port.md',
     ],
   },
   {
@@ -543,7 +539,7 @@ export const RULES = [
     severity: 'block',
     kind: 'path',
     pattern: /(?:^|\/)\.codaph\/|\.ndjson$|(?:^|\/)transcripts?\//,
-    why: 'Codaph session recordings hold verbatim tool calls, file contents and command output from private repositories. Tens of megabytes of it sit in this worktree; one `git add -f` publishes it.',
+    why: 'Third-party session recordings hold verbatim tool calls, file contents and command output from private repositories. Tens of megabytes of it sit in this worktree; one `git add -f` publishes it.',
     fix: 'It is already ignored at the root. This rule is the second lock, because the `.gitignore` is itself overwritten on every publish and there is a window where it is not there.',
     found: 'Nothing tracked today, and forty-odd session recordings sitting untracked in the working tree.',
   },

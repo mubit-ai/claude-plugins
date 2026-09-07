@@ -62,6 +62,8 @@ const SKILLS = [
   'memory-health',
   'activity',
   'pin',
+  'import',
+  'handoff',
 ];
 
 /**
@@ -74,7 +76,7 @@ const SKILLS = [
  * registers twenty-one tools and not one of them touches variables, so there is no tool a
  * `tools:` grant could name. All four are skipped by name rather than by accident.
  */
-const NO_MCP_SKILLS = ['auth', 'dashboard', 'activity', 'pin'];
+const NO_MCP_SKILLS = ['auth', 'dashboard', 'activity', 'pin', 'import', 'handoff'];
 const MCP_SKILLS = SKILLS.filter((s) => !NO_MCP_SKILLS.includes(s));
 
 // ---------------------------------------------------------------------------
@@ -490,6 +492,7 @@ test('auth/SKILL.md lets an env-pinned MUBIT_CC_DATA_DIR outrank the host interp
 const DATA_DIR_FLAG = '--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"';
 for (const [name, script] of [
   ['checkpoint', 'admin'], ['forget', 'admin'], ['reflect', 'admin'], ['strategies', 'admin'], ['pin', 'pin'],
+  ['handoff', 'handoff'],
 ]) {
   test(`${name}/SKILL.md passes --data-dir on every bin/${script}.mjs command, spelled so an env pin wins`, () => {
     const { body } = loadSkill(name);

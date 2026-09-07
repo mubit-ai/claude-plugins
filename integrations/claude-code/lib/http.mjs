@@ -98,7 +98,18 @@ export const ROUTES = Object.freeze({
   lessons: '/v2/control/lessons',
   reflect: '/v2/control/reflect',
   strategies: '/v2/control/strategies',
+  handoff: '/v2/control/handoff',
+  feedback: '/v2/control/feedback',
 });
+
+/**
+ * What `POST /v2/control/handoff` accepts as `requested_action`, and what `/feedback`
+ * accepts as `verdict`. Both are closed vocabularies on the server — an empty or unknown
+ * value is a 400 — so the wrappers below refuse before dialing, the way a missing `run_id`
+ * is refused.
+ */
+export const HANDOFF_ACTIONS = Object.freeze(['review', 'continue', 'approve', 'execute']);
+export const FEEDBACK_VERDICTS = Object.freeze(['approve', 'request_changes', 'block', 'acknowledge']);
 
 /** §1.1: `POST /v2/control/query` has its own body limit. */
 export const MAX_QUERY_BYTES = 256 * 1024;
@@ -441,6 +452,65 @@ export async function heartbeat(cfg, req, opts = {}) {
   );
   if (bad) return refuse(cfg, started, bad, { route: ROUTES.heartbeat });
   return request(cfg, 'POST', ROUTES.heartbeat, req, opts);
+}
+
+/**
+ * `POST /v2/control/handoff` — a note from one agent to another, filed as a `handoff` entry
+ * in the run. The server requires `to_agent_id` and `content`, and a `requested_action` from
+ * `HANDOFF_ACTIONS`; `continue` is the default here because a note with no stated ask is
+ * "pick this up", and sending the server an empty string is a 400 rather than a default.
+ * `run_id` is required by every scoped route and this one is no exception: a handoff to
+ * nobody's run is a handoff nobody lists.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} req
+ * @param {{timeoutMs?: number, retry?: boolean, record?: boolean}} [opts]
+ * @returns {Promise<Result>}
+ */
+export async function postHandoff(cfg, req, opts = {}) {
+  const started = Date.now();
+  const bad = firstOf(
+    requireString(req, 'run_id', 'postHandoff'),
+    requireString(req, 'to_agent_id', 'postHandoff'),
+    requireString(req, 'content', 'postHandoff'),
+  );
+  if (bad) return refuse(cfg, started, bad, { route: ROUTES.handoff });
+  const raw = typeof req.requested_action === 'string' ? req.requested_action.trim().toLowerCase() : '';
+  const action = raw || 'continue';
+  if (!HANDOFF_ACTIONS.includes(action)) {
+    return refuse(cfg, started,
+      `postHandoff: "requested_action" must be one of ${HANDOFF_ACTIONS.join(', ')} (got "${raw}")`,
+      { route: ROUTES.handoff });
+  }
+  return request(cfg, 'POST', ROUTES.handoff, { ...req, requested_action: action }, opts);
+}
+
+/**
+ * `POST /v2/control/feedback` — an answer to a handoff, filed as a `feedback` entry naming
+ * the handoff it answers. The server requires `handoff_id` and a `verdict` from
+ * `FEEDBACK_VERDICTS`; `comments` is optional and, when empty, the server writes
+ * `Feedback: <verdict> (<handoff_id>)` as the content itself.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} req
+ * @param {{timeoutMs?: number, retry?: boolean, record?: boolean}} [opts]
+ * @returns {Promise<Result>}
+ */
+export async function postFeedback(cfg, req, opts = {}) {
+  const started = Date.now();
+  const bad = firstOf(
+    requireString(req, 'run_id', 'postFeedback'),
+    requireString(req, 'handoff_id', 'postFeedback'),
+    requireString(req, 'verdict', 'postFeedback', `one of ${FEEDBACK_VERDICTS.join(', ')}`),
+  );
+  if (bad) return refuse(cfg, started, bad, { route: ROUTES.feedback });
+  const verdict = String(req.verdict).trim().toLowerCase();
+  if (!FEEDBACK_VERDICTS.includes(verdict)) {
+    return refuse(cfg, started,
+      `postFeedback: "verdict" must be one of ${FEEDBACK_VERDICTS.join(', ')} (got "${verdict}")`,
+      { route: ROUTES.feedback });
+  }
+  return request(cfg, 'POST', ROUTES.feedback, { ...req, verdict }, opts);
 }
 
 /**

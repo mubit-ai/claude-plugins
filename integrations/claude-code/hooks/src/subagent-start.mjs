@@ -60,6 +60,29 @@
  *    a fan-out of ten pays it ten times.
  *
  * ---------------------------------------------------------------------------
+ * The parent's pins, which are not recall
+ * ---------------------------------------------------------------------------
+ * A pin is a standing constraint the user set for this run — "for the rest of this, don't
+ * touch the vendored server" — and until this hook read them a subagent inherited none. The
+ * reason was structural rather than deliberate: pins render inside `prompt-recall`, and
+ * `UserPromptSubmit` does not fire for a subagent.
+ *
+ * That is the worst place for a constraint to go missing. A fan-out of ten is ten agents
+ * doing work, none of them told, none of them watched, and every one of their outputs
+ * accepted by the parent.
+ *
+ * It costs nothing to fix: `readPins` is one `readJson` and a string join — no socket, no
+ * subprocess — so it sits inside this hook's budget with room to spare. The only real
+ * decision was the cap. `MAX_PIN_TOKENS` is 240, which is 16% of a parent's 1500 and **40%**
+ * of the 600 here, so `lib/pins.mjs` carries a second, measured constant and this hook asks
+ * for it by name.
+ *
+ * Pins render where recall does not, exactly as in `prompt-recall`: `recall: false` turns
+ * *recall* off and is not a switch for "inject nothing ever", and a failed query, an absent
+ * parent turn or an empty result are all reasons to have retrieved nothing and none of them
+ * is a reason to withhold a constraint that came off local disk.
+ *
+ * ---------------------------------------------------------------------------
  * Two things deliberately absent
  * ---------------------------------------------------------------------------
  * **No breaker pre-check.** `prompt-recall` reads the breaker itself because it blocks every
@@ -71,7 +94,9 @@
  * status line renders as `recall 6/1.2k tok` for the *parent's* prompt. A subagent
  * overwriting that group would attribute its own numbers to the parent's turn — six spawns
  * would leave whichever finished last. The per-subagent record below is the read-out
- * instead.
+ * instead. This is the one rule `prompt-recall`'s pin path does not share: its `pinsOnly`
+ * stamps `pin_tokens` on the marker, and doing the same here is precisely the attribution
+ * error above, so the pin spend goes on the sub-run record with everything else.
  *
  * §4.9 throughout: never blocks, never exits non-zero. The only thing a failure here costs
  * is the memory.
@@ -82,6 +107,7 @@ import { join } from 'node:path';
 import { isConfigured, loadConfig } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
+import { MAX_SUBAGENT_PIN_TOKENS, readPins } from '../../lib/pins.mjs';
 import { rankForRecall } from '../../lib/rank.mjs';
 import { recallBlock } from '../../lib/recall.mjs';
 import { deriveAgentId, deriveRunId, deriveSubRunId, resolveProjectDir, turnKey } from '../../lib/runid.mjs';
@@ -133,7 +159,13 @@ await runHook('subagent-start', {
     const deadline = started + RECALL_BUDGET_MS;
 
     // --- Every skip below is "dial nothing", not "dial and discard".
-    if (!cfg.recall) return SUPPRESS;
+    //
+    // `recall: false` turns *recall* off. It is not a switch for "inject nothing ever", and
+    // the user who set it is the one most likely to be leaning on a pin instead — so this
+    // gate, like the three below it, still renders the run's standing constraints. Derived
+    // lazily here rather than above, so a gate nobody takes does not put a possible
+    // `git rev-parse` in front of every spawn.
+    if (!cfg.recall) return pinsGate(cfg, payload);
     // §4.1: with no endpoint there is nothing to recall from. Ahead of run-id derivation,
     // which can shell out to `git rev-parse` — a fan-out of ten on an install nobody has
     // signed in to yet should not cost ten subprocesses to learn that.
@@ -157,11 +189,15 @@ await runHook('subagent-start', {
       return SUPPRESS;
     }
 
+    // The parent run's pinned context. One `readJson`, before the branch, so every path
+    // below renders from the same read. The cap is the subagent one — see `lib/pins.mjs`.
+    const pins = readPins(cfg, runId, { maxTokens: MAX_SUBAGENT_PIN_TOKENS });
+
     const query = parentQuery(cfg, runId, payload);
     if (!query) {
       log(cfg, 'debug', 'subagent-start: no staged parent turn to query against; skipping',
         { run_id: runId });
-      return SUPPRESS;
+      return pinsOnly(runId, agentId, pins);
     }
 
     const outcome = await recallBlock(cfg, {
@@ -189,22 +225,24 @@ await runHook('subagent-start', {
       log(cfg, 'warn',
         `subagent-start: recall failed on rung ${outcome.rung} (${str(outcome.state) || 'unknown'})`,
         { run_id: runId, error: str(outcome.error).slice(0, 300) });
-      return SUPPRESS;
+      // A failed query says nothing about the pins, which never left this machine.
+      return pinsOnly(runId, agentId, pins);
     }
 
     // Written even on an empty result: an absent record and a record of an empty recall are
     // different facts about a subagent that ran.
-    persistSubRun(cfg, { runId, subRunId, agentId, payload, outcome, ms });
+    persistSubRun(cfg, { runId, subRunId, agentId, payload, outcome, ms, pins });
 
-    // An empty result injects NOTHING. Injecting "I found nothing" wastes tokens and teaches
-    // the model to distrust the channel.
-    if (!outcome.block) return SUPPRESS;
+    // An empty *recall* injects nothing of its own. Injecting "I found nothing" wastes tokens
+    // and teaches the model to distrust the channel — but a pin is not a search result, and
+    // an empty search is not a reason to drop one.
+    if (!outcome.block) return pinsOnly(runId, agentId, pins);
 
     return {
       hookSpecificOutput: {
         hookEventName: 'SubagentStart',
         additionalContext: wrap(runId, agentId,
-          outcome.refIds.length || outcome.sources, outcome.tokens, outcome.block),
+          outcome.refIds.length || outcome.sources, outcome.tokens, outcome.block, pins),
       },
       suppressOutput: true,
     };
@@ -311,6 +349,12 @@ function persistSubRun(cfg, o) {
         pointers: numOr(o.outcome?.pointers, 0),
         empty_reason: str(o.outcome?.emptyReason),
         ms: numOr(o.ms, 0),
+        // The parent's standing constraints, counted separately from recall because they are
+        // paid on a different budget and are never ranked. This is where the figure lives:
+        // `prompt-recall` puts its equivalent on the marker, and a subagent may not — see the
+        // "No marker write" note in the header.
+        pins: o.pins?.pins?.length ?? 0,
+        pin_tokens: numOr(o.pins?.tokens, 0),
       },
       // What this subagent was actually given, separable from what its siblings were given.
       recalled: Array.isArray(o.outcome?.refIds) ? [...o.outcome.refIds] : [],
@@ -350,13 +394,77 @@ function persistSubRun(cfg, o) {
  * @param {number} tokens @param {string} block
  * @returns {string}
  */
-function wrap(runId, agentId, sources, tokens, block) {
-  return `<mubit-memory run="${runId}" agent="${agentId}" sources="${sources}" tokens="${tokens}">\n`
-    + 'Recalled from memory of earlier work on this project, retrieved against the prompt '
-    + 'that spawned you rather than against your own instructions — so it may be incomplete, '
-    + 'out of date, or about a different part of the task. Verify against the code before '
-    + 'relying on it.\n'
-    + `\n${block.replace(/\s+$/, '')}\n</mubit-memory>`;
+function wrap(runId, agentId, sources, tokens, block, pins = null) {
+  const pinned = pins && pins.text ? pins : null;
+  const recalled = typeof block === 'string' && block !== '';
+  return `<mubit-memory run="${runId}" agent="${agentId}" sources="${sources}" tokens="${tokens}"`
+    // Only when there are pins, so a run without them gets the envelope it always had.
+    + `${pinned ? ` pins="${pinned.pins.length}"` : ''}>\n`
+    // The pins come first and say what they are. A subagent has no other window on the run:
+    // it never saw the user type the constraint, and a block that listed it beside retrieved
+    // material would read as one list of equally-provisional facts — with the one line that
+    // is not negotiable buried in it.
+    + (pinned
+      ? `${pinned.text}${recalled
+        ? 'Those were pinned for this run and hold until they are cleared. Everything below '
+          + 'them was retrieved for the prompt that spawned you.\n'
+        : 'Those were pinned for this run and hold until they are cleared.\n'}`
+      : '')
+    + (recalled
+      ? 'Recalled from memory of earlier work on this project, retrieved against the prompt '
+        + 'that spawned you rather than against your own instructions — so it may be incomplete, '
+        + 'out of date, or about a different part of the task. Verify against the code before '
+        + 'relying on it.\n'
+      : '')
+    + (recalled ? `\n${block.replace(/\s+$/, '')}\n` : '')
+    + '</mubit-memory>';
+}
+
+/**
+ * The pinned block on its own, for every path where recall produced nothing to add to it.
+ *
+ * The seam `prompt-recall` already has, with one difference that matters: no marker write.
+ * See the "No marker write" note in the header — the pin spend goes on the sub-run record.
+ *
+ * @param {string} runId
+ * @param {string} agentId
+ * @param {import('../../lib/pins.mjs').PinBlock} pins
+ * @returns {Record<string, any>}
+ */
+function pinsOnly(runId, agentId, pins) {
+  if (!pins || !pins.text) return SUPPRESS;
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'SubagentStart',
+      additionalContext: wrap(runId, agentId, 0, 0, '', pins),
+    },
+    suppressOutput: true,
+  };
+}
+
+/**
+ * The pinned block for the one gate that fires *before* the run id is derived.
+ *
+ * `!cfg.recall` used to return before any derivation, and moving it below would put a
+ * possible `git rev-parse` in front of every spawn — ten of them on a fan-out of ten — for
+ * everybody, including the users who have no pins. Deriving lazily, only on the gate actually
+ * taken, keeps that cost exactly where it was.
+ *
+ * A derivation that cannot answer is not an error here; it is a run with no pins.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {Record<string, any>} payload
+ * @returns {Record<string, any>}
+ */
+function pinsGate(cfg, payload) {
+  try {
+    const runId = deriveRunId(cfg, payload);
+    return pinsOnly(runId, deriveAgentId(payload),
+      readPins(cfg, runId, { maxTokens: MAX_SUBAGENT_PIN_TOKENS }));
+  } catch {
+    // `static` with no pin, or a derivation that could only have answered "default" (§4.3).
+    return SUPPRESS;
+  }
 }
 
 // ---------------------------------------------------------------------------

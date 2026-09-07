@@ -285,3 +285,77 @@ test('readPins renders oldest pin first', () => {
   ]));
   assert.equal(P.readPins(cfg(dir), RUN_ID).pins.map((p) => p.slug).join(','), 'earlier,later');
 });
+
+// ---------------------------------------------------------------------------
+// A second budget, for a smaller window
+// ---------------------------------------------------------------------------
+
+/**
+ * `MAX_PIN_TOKENS` is 240 against the parent's 1500 recall budget — 16%, and the header
+ * explains why that is defensible for content that is never ranked and never degraded.
+ * Against a subagent's 600 the same constant is **40%**, which is not the same trade at all.
+ *
+ * So the cap is a parameter, and `MAX_SUBAGENT_PIN_TOKENS` is the second value of it. The
+ * number is a measurement rather than a guess, taken with `estimateTokens` over the module's
+ * own render path:
+ *
+ * | | heading | five realistic pins (31-69 chars) | five pins at the 200-char cap |
+ * | --- | --- | --- | --- |
+ * | tokens | 6 | 82 total | 261 total |
+ *
+ * A real five-pin set costs 82. The 200-char cap is what makes `MAX_PIN_TOKENS` bind before
+ * `MAX_PINS` does — at 240 the fifth maximal pin is dropped — and that is the behaviour the
+ * subagent budget has to reproduce at its own scale rather than a number to copy.
+ *
+ * 96 is 16% of 600: the same share of the window, against the same content. Every realistic
+ * pin set still fits whole (82 < 96), and the essay case truncates sooner, which is exactly
+ * what it does at the parent's budget.
+ */
+test('MAX_SUBAGENT_PIN_TOKENS is the same share of a subagent window as MAX_PIN_TOKENS is of a parent', () => {
+  assert.equal(P.MAX_PIN_TOKENS, 240);
+  assert.equal(P.MAX_SUBAGENT_PIN_TOKENS, 96);
+  assert.equal(P.MAX_SUBAGENT_PIN_TOKENS / 600, P.MAX_PIN_TOKENS / 1500,
+    'the two budgets are one ratio; changing either alone is what this assertion is for');
+});
+
+test('readPins takes a token cap, and the subagent cap still fits a realistic pin set whole', () => {
+  const dir = makeDataDir();
+  write(dir, cache([
+    "don't touch the vendored server",
+    'never run npm run verify — its clean deletes mcp/dist/server.js',
+    'use grep -a on lib/config.mjs; the file carries NUL bytes',
+    'PR small fixes into pre-main, never a whole integration branch',
+    'raise MUBIT_CC_RECALL_BUDGET_MS to 8000 for any manual end-to-end run',
+  ]));
+
+  const got = P.readPins(cfg(dir), RUN_ID, { maxTokens: P.MAX_SUBAGENT_PIN_TOKENS });
+  assert.equal(got.pins.length, 5, 'a realistic five-pin set costs 82 tokens and must fit whole');
+  assert.equal(got.dropped, 0);
+  assert.ok(got.tokens <= P.MAX_SUBAGENT_PIN_TOKENS, `${got.tokens} is over the cap`);
+});
+
+test('the smaller cap truncates sooner, and says how many it refused', () => {
+  const dir = makeDataDir();
+  const essay = 'x'.repeat(200);
+  write(dir, cache([essay, essay, essay, essay, essay]));
+
+  const parent = P.readPins(cfg(dir), RUN_ID);
+  const sub = P.readPins(cfg(dir), RUN_ID, { maxTokens: P.MAX_SUBAGENT_PIN_TOKENS });
+
+  assert.equal(parent.pins.length, 4, 'the parent budget already binds before MAX_PINS does');
+  assert.equal(parent.dropped, 1);
+  assert.equal(sub.pins.length, 1, 'and the subagent budget binds sooner, in proportion');
+  assert.equal(sub.dropped, 4, 'a silent drop is a lie at either budget');
+});
+
+test('an absent, zero or absurd cap falls back to the parent budget', () => {
+  const dir = makeDataDir();
+  write(dir, cache(['one pin']));
+
+  const base = P.readPins(cfg(dir), RUN_ID).text;
+  for (const opts of [undefined, {}, { maxTokens: 0 }, { maxTokens: -5 }, { maxTokens: 'lots' },
+    { maxTokens: NaN }, null]) {
+    assert.equal(P.readPins(cfg(dir), RUN_ID, /** @type {any} */ (opts)).text, base,
+      `a nonsense cap must not change what renders: ${JSON.stringify(opts)}`);
+  }
+});

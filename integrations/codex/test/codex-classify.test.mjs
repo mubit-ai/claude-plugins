@@ -173,7 +173,7 @@ describe('classifyTurn — a Codex subagent owns its own result', () => {
     //   fan-out collapses into one indistinguishable blob at recall time — and Codex sends the
     //   parent's session_id and turn_id on every subagent event, so agent_id is the only thing
     //   that separates siblings.
-    assert.equal(got.intent, 'task_result');
+    assert.equal(got.intent, 'handoff', 'a subagent result is the note it hands back to the parent');
     assert.equal(got.agentId, '01a02413-16ff-75b3-a2c0-b3e93f9cfa63',
       'the agent id was dropped; sibling subagents become indistinguishable.');
     assert.equal(got.agentType, 'default',

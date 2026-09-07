@@ -122,7 +122,7 @@ describe('classifyTool — the §4.5 tool_name table', () => {
 
   it('handles other foreign mcp__* servers the same way', async () => {
     const { classifyTool } = await C();
-    for (const tool of ['mcp__codaph__codaph_status', 'mcp__linear__list_issues']) {
+    for (const tool of ['mcp__acme__acme_status', 'mcp__linear__list_issues']) {
       const r = classifyTool(tool, {}, 'ok');
       assert.equal(r.intent, 'tool_output', `${tool} intent`);
       assert.equal(r.importance, 'low', `${tool} importance`);
@@ -193,12 +193,14 @@ describe('classifyTurn — Stop, SubagentStop, PreCompact (§4.5)', () => {
   });
 
   /**
-   * §4.5: SubagentStop → task_result/medium, "attributed to the subagent
-   * agent_id". The third argument is the options bag carrying the hook event
-   * and the payload's `agent_id`, which `deriveAgentId` (§4.3) turns into
-   * `claude-code-<sessionShort>-sub-<agentShort>`.
+   * §4.5: SubagentStop → handoff/medium, "attributed to the subagent agent_id". A subagent's
+   * result is the note it hands back to the parent for review — the server files `handoff`
+   * and `task_result` in one promotion tier, so nothing is lost, and the handoff lane gains a
+   * fan-out's results listed as open until each is answered. The third argument is the
+   * options bag carrying the hook event and the payload's `agent_id`, which `deriveAgentId`
+   * (§4.3) turns into `claude-code-<sessionShort>-sub-<agentShort>`.
    */
-  it('a SubagentStop → task_result/medium attributed to the subagent agent_id', async () => {
+  it('a SubagentStop → handoff/medium attributed to the subagent agent_id', async () => {
     const { classifyTurn } = await C();
     const s = subagentStop();
     const r = classifyTurn('find the call sites', s.last_assistant_message, {
@@ -207,7 +209,7 @@ describe('classifyTurn — Stop, SubagentStop, PreCompact (§4.5)', () => {
       agent_type: s.agent_type,
     });
 
-    assert.equal(r.intent, 'task_result');
+    assert.equal(r.intent, 'handoff');
     assert.equal(r.importance, 'medium');
     assert.equal(r.agentId, s.agent_id,
       'the subagent must own its own result, not the parent session');
@@ -257,7 +259,7 @@ describe('§1.5 — every produced item carries a real intent', () => {
     'Read', 'Grep', 'Glob', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit',
     'Bash', 'BashOutput', 'KillShell', 'WebFetch', 'WebSearch', 'Task',
     'TodoWrite', 'ExitPlanMode', 'SlashCommand', 'Skill', 'AskUserQuestion',
-    'mcp__github__create_issue', 'mcp__codaph__codaph_status',
+    'mcp__github__create_issue', 'mcp__acme__acme_status',
   ];
 
   const DEGENERATE = [

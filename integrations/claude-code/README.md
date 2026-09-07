@@ -400,8 +400,9 @@ constraints, it is a document, and a document belongs in `CLAUDE.md` where it co
 prompt. The pinned tokens are reported separately from `recall.tokens`, as `recall.pin_tokens`,
 so recall's own cost keeps meaning what it always did.
 
-Subagents do not get pins yet: `SubagentStart` injects its own, smaller recalled block and does
-not read them.
+Subagents get them too: `SubagentStart` puts the parent run's pins above its own, smaller
+recalled block, under a budget of its own (96 tokens, the same share of a smaller window), so a
+fan-out of ten is ten agents told the constraint rather than none.
 
 ### When recall is slow rather than empty
 

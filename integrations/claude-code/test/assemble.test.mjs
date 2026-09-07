@@ -39,12 +39,14 @@ const SECTION_KEYS = [
 ];
 
 /**
- * The §4.10 `entry_type → section` table, verbatim.
+ * The §4.10 `entry_type → section` table, plus the two rows the handoff lane added.
  *
  * NOTE for whoever implements this: the table's last row is literally "anything else →
- * `other`", so `handoff`, `feedback`, `reflection`, `log` and `workflow` land in `other`
- * even though §1.3 defines `handoffs`, `feedback` and `logs` section keys. If that is
- * ever changed, change it here first — this table is the spec.
+ * `other`", so `reflection`, `log` and `workflow` land in `other` even though §1.3 defines a
+ * `logs` section key. `handoff` and `feedback` fill the `handoffs` and `feedback` sections
+ * §1.3 defines for them, because the resume briefing asks for `handoffs` and a section no
+ * entry type can fill renders as nothing. If that is ever changed, change it here first —
+ * this table is the spec.
  */
 const SECTION_FOR = {
   mental_model: 'mental_models',
@@ -61,8 +63,8 @@ const SECTION_FOR = {
   step_outcome: 'traces',
   archive_block: 'archive_blocks',
   checkpoint: 'checkpoints',
-  handoff: 'other',
-  feedback: 'other',
+  handoff: 'handoffs',
+  feedback: 'feedback',
   reflection: 'other',
   log: 'other',
   workflow: 'other',
@@ -110,7 +112,7 @@ test('sectionFor maps all 17 LTM entry types per the §4.10 table', async () => 
     assert.equal(sectionFor(et), SECTION_FOR[et], `entry_type "${et}" mapped wrong`);
   }
   const inOther = ENTRY_TYPES.filter((et) => SECTION_FOR[et] === 'other');
-  assert.deepEqual(inOther, ['handoff', 'feedback', 'reflection', 'log', 'workflow'],
+  assert.deepEqual(inOther, ['reflection', 'log', 'workflow'],
     'the set of unmapped types is a spec decision — change the table, not the test');
 });
 

@@ -143,9 +143,11 @@ const CONTEXT_LIMIT = 6;
  *
  * `facts` is deliberately absent. A fact is timeless — true before the session, during it and
  * after — so it answers "what is true here", not "what were we doing". Everything a resume
- * needs is state: what was in flight (`working_memory`), what happened (`traces`), the shape
- * the work is being done in (`mental_models`), and the constraints that were being observed
- * while doing it (`active_rules`, `lessons`).
+ * needs is state: what was in flight (`working_memory`), what happened (`traces`), what was
+ * handed back and may still be waiting for a verdict (`handoffs`), the shape the work is
+ * being done in (`mental_models`), and the constraints that were being observed while doing
+ * it (`active_rules`, `lessons`). `feedback` is not asked for: an answered handoff is closed
+ * business, and the answer's substance is in the next turn's traces.
  *
  * The list is paired with `RESUME_ENTRY_TYPES` below and the two cannot be edited apart: a
  * section no entry type can fill renders as nothing, silently, on a healthy 200.
@@ -172,7 +174,7 @@ const CONTEXT_LIMIT = 6;
  * `resumeContext` is one small function with one caller is so it can be swapped whole.
  */
 export const RESUME_SECTIONS = Object.freeze([
-  'working_memory', 'traces', 'mental_models', 'active_rules', 'lessons',
+  'working_memory', 'traces', 'handoffs', 'mental_models', 'active_rules', 'lessons',
 ]);
 
 /**
@@ -188,7 +190,7 @@ export const RESUME_SECTIONS = Object.freeze([
  * budget against every `observation` and `tool_output` the run has produced.
  */
 export const RESUME_ENTRY_TYPES = Object.freeze([
-  'trace', 'task_result', 'mental_model', 'rule', 'lesson',
+  'trace', 'task_result', 'handoff', 'mental_model', 'rule', 'lesson',
 ]);
 
 /**

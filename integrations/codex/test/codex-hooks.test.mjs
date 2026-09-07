@@ -398,6 +398,14 @@ test('SubagentStop attributes the result to the subagent, not to the parent', as
   assert.match(String(meta.mubit_agent_id ?? ''), /^codex-sub-/,
     'the derived Mubit identity must be a Codex sub-agent role. `claude-code-sub-…` here '
     + 'would count the two harnesses as one actor upstream.');
+
+  // § The result is a handoff note to the parent role, with zero HTTP from the hook: it rides
+  //   the parent's drain like every item. `to_agent_id` is the role, never a sub-run id.
+  assert.equal(items[0].intent, 'handoff');
+  assert.equal(meta.to_agent_id, 'codex');
+  assert.match(String(meta.from_agent_id ?? ''), /^codex-sub-/);
+  assert.equal(meta.requested_action, 'review');
+  assert.equal(server.requests.length, 0, `capture must dial nothing; saw: ${server.summary()}`);
 });
 
 // ===========================================================================

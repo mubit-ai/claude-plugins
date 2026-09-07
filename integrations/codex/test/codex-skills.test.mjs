@@ -49,6 +49,7 @@ const SKILLS = [
   'activity',
   'pin',
   'import',
+  'handoff',
 ];
 
 /**

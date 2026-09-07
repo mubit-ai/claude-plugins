@@ -779,8 +779,11 @@ async function waitForSpawn(file, ms = 3000) {
 }
 
 // §4.5 — a SubagentStop is attributed to the subagent's own agent_id, not the parent's.
-// The batch-level agent_id cannot carry it, so it rides on the item.
-test('capture --subagent: attributes the item to the subagent agent_id', async (t) => {
+// The batch-level agent_id cannot carry it, so it rides on the item. And it is a handoff
+// note: the subagent's answer, addressed to the parent role for review, carrying the fields a
+// handoff created through `/v2/control/handoff` carries — so `lib/handoff.mjs` lists a
+// fan-out's results as open until each is answered, and joins feedback to either the same way.
+test('capture --subagent: a handoff note to the parent role, attributed to the subagent', async (t) => {
   const dataDir = makeDataDir();
   const server = await mubit(t);
   seedTurn(dataDir);
@@ -793,11 +796,29 @@ test('capture --subagent: attributes the item to the subagent agent_id', async (
   assert.equal(server.requests.length, 0, `capture must issue ZERO HTTP requests; saw: ${server.summary()}`);
   const item = soleItem(dataDir, RUN_ID);
   assertRequiredItemFields(item);
-  assert.equal(item.intent, 'task_result');
+  assert.equal(item.intent, 'handoff');
   assert.ok(item.text.startsWith('Q: '));
   assert.ok(item.text.includes('Found three call sites'));
   assert.ok(JSON.stringify(item).includes('sub_01HZXK8Q9N7M'),
     `the subagent's own agent_id must appear on the item: ${item.metadata_json}`);
+
+  const meta = JSON.parse(item.metadata_json);
+  assert.match(meta.from_agent_id, /^claude-code-sub-/, 'from the subagent, in its wire-level identity');
+  assert.equal(meta.to_agent_id, 'claude-code', 'to the parent role — never a sub-run id, never a session');
+  assert.equal(meta.requested_action, 'review');
+  assert.equal(meta.task_id, meta.prompt_id, 'the task is the turn the subagent was spawned in');
+  assert.equal(meta.active, true);
+});
+
+// The parent's own Stop is not a handoff: there is nobody to hand it to.
+test('capture --stop: the parent turn stays a task_result', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  seedTurn(dataDir);
+  assertHookContract(await runHook('capture', stop(), { env: staticEnv(dataDir, server), args: ['--stop'] }));
+  const item = soleItem(dataDir, RUN_ID);
+  assert.equal(item.intent, 'task_result');
+  assert.ok(!('to_agent_id' in JSON.parse(item.metadata_json)));
 });
 
 /**

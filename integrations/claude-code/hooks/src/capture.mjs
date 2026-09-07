@@ -546,6 +546,10 @@ function buildPermissionItem(payload, cfg) {
  * `Stop` carries `last_assistant_message` but NOT the prompt, so the other half of the
  * conversation comes from the turn file `stage-prompt.mjs` wrote (§5.3).
  *
+ * A `Stop` is a `task_result`; a `SubagentStop` is a `handoff` — the same text, addressed to
+ * the parent role and carrying the fields a handoff created through the route carries, so a
+ * fan-out's answers can be listed as open until each is reviewed.
+ *
  * @param {Record<string, any>} payload
  * @param {Record<string, any>} cfg
  * @param {string} runId
@@ -588,6 +592,22 @@ function buildTurnItem(payload, cfg, runId, mode) {
   // fan-out collapses into one indistinguishable blob at recall time.
   const subAgent = str(cls.agentId);
 
+  // A subagent's result is a handoff note: the answer handed back to the parent role for
+  // review. The metadata mirrors what `POST /v2/control/handoff` stamps on a note created
+  // through the route, so the two read alike in `/activity` and `lib/handoff.mjs` joins
+  // feedback to either the same way. Nothing is dialed here — the note rides the parent's
+  // drain like every item, with redaction and the breaker in front of it — and the run id on
+  // the wire is the parent's: a sub-run id never leaves this machine.
+  const handoff = mode === 'subagent'
+    ? {
+      from_agent_id: attempt(() => deriveAgentId(payload), ''),
+      to_agent_id: attempt(() => deriveAgentId({}), ''),
+      requested_action: 'review',
+      task_id: turnKey(payload),
+      active: true,
+    }
+    : {};
+
   return item({
     cfg,
     payload,
@@ -606,6 +626,7 @@ function buildTurnItem(payload, cfg, runId, mode) {
       turn_number: attempt(() => turnNumber(cfg, runId, payload), 0),
       ...(subAgent ? { agent_id: subAgent, agent_type: str(cls.agentType) } : {}),
       ...(subAgent ? { mubit_agent_id: attempt(() => deriveAgentId(payload), '') } : {}),
+      ...handoff,
       // The path itself, so a later reader can rejoin this subagent to its own rollout —
       // which is what `persistSubRun` names as the next step on real per-subagent isolation.
       ...(str(payload.agent_transcript_path)

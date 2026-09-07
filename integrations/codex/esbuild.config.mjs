@@ -201,6 +201,8 @@ const targets = [
   // binary here: the transcripts it reads are Claude Code's, and a Codex user with both
   // installed has the same history to import.
   { entryPoints: [resolve(SHARED, 'bin', 'import.src.mjs')], outfile: out('bin/import.mjs'), ...shared },
+  // `/mubit-memory:handoff`, from the same shared source; the Codex skill names this path.
+  { entryPoints: [resolve(SHARED, 'bin', 'handoff.src.mjs')], outfile: out('bin/handoff.mjs'), ...shared },
   // The dashboard binary, built from the same shared source as the Claude Code copy. Two
   // installable plugins cannot share a path — the same reason this tree carries its own
   // `mcp/dist/server.js` — so the bundle is emitted here rather than referenced across.

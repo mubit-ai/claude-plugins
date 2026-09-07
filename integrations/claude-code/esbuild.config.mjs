@@ -205,6 +205,9 @@ const targets = [
   // command in this list that writes to somebody else's server in volume, which is why its
   // default mode is a dry run rather than the work.
   { entryPoints: ['bin/import.src.mjs'], outfile: out('bin/import.mjs'), ...shared },
+  // `/mubit-memory:handoff` — send, list and answer handoffs. A binary for the reason `pin`
+  // is one: no MCP tool covers the routes, and the allowlist stays at seven.
+  { entryPoints: ['bin/handoff.src.mjs'], outfile: out('bin/handoff.mjs'), ...shared },
   // No launcher, for the same reason `bin/auth.mjs` has none: launchers exist for the entries
   // the *host* execs on its own (`hooks.json`, `settings.json`), where a parse error on an old
   // Node would be silent. A skill-invoked script is run by a person who is watching, and the

@@ -60,13 +60,15 @@ const RENDER_ORDER = Object.freeze([
 ]);
 
 /**
- * §4.10's `entry_type → section` table, verbatim.
+ * §4.10's `entry_type → section` table, plus two rows.
  *
  * The last row of that table is literally "anything else → `other`", which is why
- * `handoff`, `feedback`, `reflection`, `log` and `workflow` land in `other` even though §1.3
- * defines `handoffs`, `feedback` and `logs` section keys. That gap is a recorded decision,
- * not an oversight: `assemble.test.mjs` encodes this table as the spec, so a change belongs
- * there first.
+ * `reflection`, `log` and `workflow` land in `other` even though §1.3 defines a `logs`
+ * section key. `handoff` and `feedback` used to land there too; they now fill the `handoffs`
+ * and `feedback` sections §1.3 defines for them, because the handoff lane writes both entry
+ * types and the resume briefing asks for `handoffs` — a section no entry type could fill
+ * would render as nothing, silently, on a healthy 200. `assemble.test.mjs` encodes this table
+ * as the spec, so a change belongs there first.
  */
 const SECTION_BY_ENTRY_TYPE = Object.freeze({
   mental_model: 'mental_models',
@@ -83,6 +85,8 @@ const SECTION_BY_ENTRY_TYPE = Object.freeze({
   step_outcome: 'traces',
   archive_block: 'archive_blocks',
   checkpoint: 'checkpoints',
+  handoff: 'handoffs',
+  feedback: 'feedback',
 });
 
 /** Human headings, chosen so `"## Working memory"` normalises back to `working_memory`. */

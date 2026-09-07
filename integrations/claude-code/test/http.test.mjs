@@ -580,6 +580,18 @@ const REJECT_ROWS = [
   ['registerAgent requires agent_id', (h, c) => h.registerAgent(c, { run_id: RUN, role: 'worker' })],
   // job query — run_id on the query string
   ['getIngestJob requires run_id', (h, c) => h.getIngestJob(c, '', 'job_test_1')],
+  // POST /v2/control/handoff — run_id, to_agent_id, content; a closed action vocabulary
+  ['postHandoff requires run_id', (h, c) => h.postHandoff(c, { to_agent_id: 'codex', content: 'take this' })],
+  ['postHandoff requires to_agent_id', (h, c) => h.postHandoff(c, { run_id: RUN, content: 'take this' })],
+  ['postHandoff requires content', (h, c) => h.postHandoff(c, { run_id: RUN, to_agent_id: 'codex', content: '  ' })],
+  ['postHandoff rejects an action the server does not know',
+    (h, c) => h.postHandoff(c, { run_id: RUN, to_agent_id: 'codex', content: 'x', requested_action: 'ponder' })],
+  // POST /v2/control/feedback — run_id, handoff_id; a closed verdict vocabulary
+  ['postFeedback requires run_id', (h, c) => h.postFeedback(c, { handoff_id: 'hnd_1', verdict: 'approve' })],
+  ['postFeedback requires handoff_id', (h, c) => h.postFeedback(c, { run_id: RUN, verdict: 'approve' })],
+  ['postFeedback requires a verdict', (h, c) => h.postFeedback(c, { run_id: RUN, handoff_id: 'hnd_1' })],
+  ['postFeedback rejects a verdict the server does not know',
+    (h, c) => h.postFeedback(c, { run_id: RUN, handoff_id: 'hnd_1', verdict: 'meh' })],
 ];
 
 for (const [label, call] of REJECT_ROWS) {
@@ -612,6 +624,10 @@ const HAPPY_ROWS = [
     (h, c) => h.registerAgent(c, { run_id: RUN, agent_id: AGENT, role: 'worker', status: 'active', capabilities: ['code'] })],
   ['heartbeat', '/v2/control/agents/heartbeat',
     (h, c) => h.heartbeat(c, { run_id: RUN, agent_id: AGENT, status: 'idle' })],
+  ['postHandoff', '/v2/control/handoff',
+    (h, c) => h.postHandoff(c, { run_id: RUN, from_agent_id: AGENT, to_agent_id: 'codex', content: 'take this', requested_action: 'review' })],
+  ['postFeedback', '/v2/control/feedback',
+    (h, c) => h.postFeedback(c, { run_id: RUN, handoff_id: 'hnd_1', verdict: 'approve', comments: 'fine' })],
 ];
 
 for (const [name, path, call] of HAPPY_ROWS) {
@@ -624,6 +640,16 @@ for (const [name, path, call] of HAPPY_ROWS) {
     assert.equal(server.requests.length, 1, `${name} must not dial anything else`);
   });
 }
+
+// The server answers an empty `requested_action` with a 400, not a default, so the default is
+// applied on this side of the wire — and it is `continue`, the ask a note with no ask means.
+test('postHandoff: an unstated action goes on the wire as "continue"', async (t) => {
+  const { server, cfg, http } = await setup(t);
+  const r = await http.postHandoff(cfg, { run_id: RUN, to_agent_id: 'codex', content: 'pick this up' });
+  assert.equal(r.ok, true);
+  assert.equal(server.lastCall('POST', '/v2/control/handoff').body.requested_action, 'continue');
+  assert.equal(r.body.handoff_id, 'hnd_test_1', 'the id the server minted is what feedback names');
+});
 
 // §1.3: the job query takes run_id on the QUERY STRING, not the body —
 // GET /v2/control/ingest/jobs/:job_id?run_id=<id>.

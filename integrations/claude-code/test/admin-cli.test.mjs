@@ -10,8 +10,9 @@
  *      and the dashboard send — a run id on every write, the same reflect bound, the same
  *      delete route.
  *   2. What it prints is the compact form a tool result takes: one line per lesson with the
- *      id on it, a repeat degraded to the injection's pointer off the shared seen-set, and the
- *      ceiling honoured. `--json` is the raw reply.
+ *      id on it, every line in full — a shell command never reads or writes the seen-set,
+ *      because it cannot know whether its output reached a model — and the ceiling honoured.
+ *      `--json` is the raw reply.
  *   3. A person is watching: a bad flag exits 2 and dials nothing, a failed call exits 1 and
  *      says why.
  *
@@ -20,13 +21,15 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { baseEnv, fakeMubit, makeDataDir, mod, tempDir } from './helpers/harness.mjs';
 
 const RUN = 'cc-admin-test-run';
 const OTHER = 'cc-someone-elses-run';
+/** A conversation that has been shown something, whose record the script must leave alone. */
+const SESSION = '4f21ab90-1c2d-4e5f-8a9b-0c1d2e3f4a5b';
 const LIST_ROUTE = 'POST /v2/control/activity';
 
 /** One lesson as the activity feed serves it, metadata nested the way the census expects. */
@@ -125,8 +128,7 @@ test('lessons: one line per lesson with id and tags, this run plus what travelle
   assert.equal(server.countOf('POST', '/v2/control/lessons'), 0, 'the lessons route filters after its limit');
 });
 
-// Each listing marks what it showed, so every sub-case gets a data dir of its own: the
-// filters are under test here, not the seen-set.
+// One fake instance per sub-case, so each assertion reads a request log of its own.
 test('lessons: --scope and --importance narrow, --limit cuts and says so', async (t) => {
   const routes = { [LIST_ROUTE]: page(CATALOGUE) };
 
@@ -165,25 +167,34 @@ test('lessons: --json is the raw catalogue, uncapped', async (t) => {
   assert.equal(json.lessons[2].rationale, 'measured twice', 'the raw form keeps the metadata');
 });
 
-test('lessons: a lesson this run has already been shown renders as the injection\'s pointer, and a first showing is marked', async (t) => {
+// The defect: a verification run from a plain terminal marked a run's whole catalogue as
+// shown, and the next conversation in that directory was handed four "(seen earlier)"
+// fragments with nothing to dereference them against. A shell command cannot know whether
+// its stdout reached a model, so it is out of the seen-set in both directions — it neither
+// degrades what a conversation has been shown, nor records what it printed.
+test('lessons: renders every lesson in full whatever a conversation has been shown, and records nothing', async (t) => {
   const { run, stdout, out, dataDir } = await cli(t, { routes: { [LIST_ROUTE]: page(CATALOGUE) } });
-  const { markSeen, readSeen } = await mod('lib/seen.mjs');
-  const cfg = { dataDir };
-  markSeen(cfg, RUN, ['les-0002']);
+  const { markSeen } = await mod('lib/seen.mjs');
+  markSeen({ dataDir }, RUN, ['les-0002'], SESSION);
+  const seenDir = join(dataDir, 'runs', RUN, 'seen');
+  const before = readFileSync(join(seenDir, `${SESSION}.json`), 'utf8');
 
   assert.equal(await run(['lessons']), 0);
   const text = stdout();
-  assert.match(text, /^Lessons \(3, 1 seen earlier\):$/m, text);
-  assert.match(text, /^- \(seen earlier\) les-0002 — A retry against a wedged daemon only queues behind the wedge…?$/m, text);
-  assert.ok(!text.includes('- [rule, medium, run] les-0002'), 'the seen lesson was rendered in full anyway');
-  assert.match(text, /mubit_dereference returns its text/);
+  assert.match(text, /^Lessons \(3\):$/m, text);
+  assert.match(text, /^- \[rule, medium, run\] les-0002 — A retry against a wedged daemon/m, text);
+  assert.ok(!text.includes('(seen earlier)'),
+    `a shell command pointed at text it cannot know the model has:\n${text}`);
+  assert.ok(!text.includes('mubit_dereference'), `a pointer footer with no pointer to explain:\n${text}`);
 
-  const ids = [...readSeen(cfg, RUN).ids].sort();
-  assert.deepEqual(ids, ['les-0001', 'les-0002', 'les-0003'], 'the lessons shown in full were not marked seen');
+  assert.deepEqual(readdirSync(seenDir), [`${SESSION}.json`], 'the listing must not create a seen-set of its own');
+  assert.equal(readFileSync(join(seenDir, `${SESSION}.json`), 'utf8'), before,
+    'nor touch the conversation\'s');
   out.length = 0;
 
   assert.equal(await run(['lessons']), 0);
-  assert.match(stdout(), /Lessons \(3, 3 seen earlier\):/, 'the second listing should point at all three');
+  assert.match(stdout(), /^Lessons \(3\):$/m, 'the second listing is as full as the first');
+  assert.ok(!stdout().includes('(seen earlier)'), stdout());
 });
 
 test('lessons: the ceiling cuts a prefix and names the way to the rest', async (t) => {
@@ -316,8 +327,8 @@ test('reflect: sends the SessionEnd body for this run and renders the extracted 
   assert.match(text, /^lessons_stored: 1$/m);
   assert.match(text, /^Lessons \(1\):\n- \[failure, high, run\] les_1 — When X, do Y\.$/m, text);
 
-  const { readSeen } = await mod('lib/seen.mjs');
-  assert.deepEqual([...readSeen({ dataDir }, RUN).ids], ['les_1'], 'a lesson shown in full here is a pointer in the next injection');
+  assert.equal(existsSync(join(dataDir, 'runs', RUN, 'seen')), false,
+    'a reflect printed from a shell records nothing as shown: the next injection renders les_1 in full');
 });
 
 test('reflect: an empty reflect is a real answer', async (t) => {
@@ -338,6 +349,37 @@ test('reflect: --json is the raw reply', async (t) => {
 // ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
+
+test('admin parseArgs: --data-dir is taken as given, and a blank or unsubstituted value is dropped', async () => {
+  const { parseArgs } = await mod('bin/admin.src.mjs');
+  assert.equal(parseArgs(['lessons', '--data-dir', '/store/ours']).dataDir, '/store/ours');
+  assert.equal(parseArgs(['lessons', '--data-dir', '   ']).dataDir, '', 'a Bash tool call can expand the expression to nothing');
+  assert.equal(parseArgs(['lessons', '--data-dir', '${CLAUDE_PLUGIN_DATA}']).dataDir, '',
+    'a host that substitutes nothing hands the literal down; taken as a path it would be a directory under the cwd');
+  assert.equal(parseArgs(['lessons', '--data-dir', '${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}']).dataDir, '');
+  assert.equal(parseArgs(['lessons']).dataDir, '');
+  assert.match(parseArgs(['lessons', '--data-dir']).error, /--data-dir needs a value/);
+});
+
+// The skills run this through Bash, where `CLAUDE_PLUGIN_DATA` arrives empty. Without the
+// flag the script searched `~/.claude/plugins/data/` and picked a sibling install's store —
+// one whose markers named a run this session's hooks never wrote to.
+test('--data-dir names the store the run is picked from', async (t) => {
+  const theirs = makeDataDir();
+  const ours = makeDataDir();
+  const { run, server, stderr } = await cli(t, {
+    dataDir: theirs,
+    routes: { 'POST /v2/control/strategies': { json: { strategies: [] } } },
+    extra: { MUBIT_CC_RUN_STRATEGY: 'per-directory', MUBIT_CC_RUN_ID: '' },
+  });
+  mkdirSync(join(ours, 'status'), { recursive: true });
+  writeFileSync(join(ours, 'status', 'cc-from-our-store.json'),
+    JSON.stringify({ run_id: 'cc-from-our-store', updated_at: Date.now() }));
+
+  assert.equal(await run(['strategies', '--data-dir', ours]), 0, stderr());
+  assert.equal(server.lastCall('POST', '/v2/control/strategies').body.run_id, 'cc-from-our-store',
+    'the run must come from the named store, not from the one the environment pinned');
+});
 
 test('--run names the run every command acts on', async (t) => {
   const { run, server } = await cli(t, { routes: { 'POST /v2/control/strategies': { json: { strategies: [] } } } });

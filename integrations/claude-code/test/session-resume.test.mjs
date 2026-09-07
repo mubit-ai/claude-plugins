@@ -92,7 +92,7 @@ const RESUME_ON = { MUBIT_CC_RESUME_BLOCK: '1' };
 
 const resumePath = (d, run = RUN_ID) => join(d, 'runs', run, 'resume.json');
 const carryPath = (d, run = RUN_ID) => join(d, 'runs', run, 'carry.json');
-const seenPath = (d, run = RUN_ID) => join(d, 'runs', run, 'seen.json');
+const seenPath = (d, run = RUN_ID) => join(d, 'runs', run, 'seen', `${fx.SESSION_ID}.json`);
 const turnPath = (d, promptId, run = RUN_ID) => join(d, 'runs', run, 'turns', `${promptId}.json`);
 const markerPath = (d, run = RUN_ID) => join(d, 'status', `${run}.json`);
 

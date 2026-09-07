@@ -835,7 +835,7 @@ function normaliseSource(v) {
  * @param {Record<string, any>} payload
  * @returns {string}
  */
-function hostSessionId(payload) {
+export function hostSessionId(payload) {
   const v = isObject(payload) && typeof payload.session_id === 'string'
     ? payload.session_id.trim()
     : '';

@@ -9,10 +9,19 @@ Run the bundled script with the snapshot on stdin. It posts `POST /v2/control/ch
 under this session's run, and nothing else:
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs checkpoint --label "<short name>" <<'SNAPSHOT'
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs checkpoint --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --label "<short name>" <<'SNAPSHOT'
 <the snapshot>
 SNAPSHOT
 ```
+
+**`--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"` is not optional.** A Bash tool
+call does not inherit `CLAUDE_PLUGIN_DATA` — it arrives empty — so without the flag the script
+has to guess which of several `mubit-memory*` directories the host is using, and either
+refuses with `no_run` or acts on a run this session's hooks never touch. The host substitutes
+`${CLAUDE_PLUGIN_DATA}` into this file before you read it, and the shell default around it
+lets a session that pins `MUBIT_CC_DATA_DIR` keep its pin — the same order every hook resolves
+in. Pass the whole expression straight through. Do not turn it into an `ENV=… node …` prefix:
+that is no longer a `node` command and will stop for a permission prompt.
 
 `--label` is required: a short name the user can ask for later. The snapshot is whatever is on
 stdin (`--file <path>` reads it from a file instead). The script prints the checkpoint id it

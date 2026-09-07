@@ -38,7 +38,7 @@ import { fileURLToPath } from 'node:url';
 import {
   clearCredentials, credentialsPath, readCredentials, writeCredentials,
 } from '../lib/credentials.mjs';
-import { liveDataDir, safeHome } from '../lib/state.mjs';
+import { dataDirFlag, liveDataDir, safeHome } from '../lib/state.mjs';
 
 /** Where keys are issued. `MUBIT_CONSOLE_URL` overrides it for staging. */
 export const CONSOLE_URL = 'https://console.mubit.ai';
@@ -934,8 +934,8 @@ function warnOnDataDirSplit(env = {}, args = {}, logProgress = () => {}) {
  */
 function resolveDataDirFrom(env = process.env, args = {}) {
   const e = env ?? {};
-  const flag = typeof args?.dataDir === 'string' ? args.dataDir.trim() : '';
-  if (flag && !/^\$\{/.test(flag)) return flag;
+  const flag = dataDirFlag(args?.dataDir);
+  if (flag) return flag;
   if (e.MUBIT_CC_DATA_DIR) return e.MUBIT_CC_DATA_DIR;
   if (e.CLAUDE_PLUGIN_DATA) return e.CLAUDE_PLUGIN_DATA;
   return liveDataDir(e.HOME || safeHome(), e);

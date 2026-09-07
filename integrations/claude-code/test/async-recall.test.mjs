@@ -68,7 +68,7 @@ import {
   assertHookContract, baseEnv, evidence, fakeMubit, lib, makeDataDir, queryResponse,
   readJsonFile, runHook, tempDir, waitFor,
 } from './helpers/harness.mjs';
-import { postCompact, userPromptSubmit, PROMPT_ID } from './helpers/fixtures.mjs';
+import { postCompact, userPromptSubmit, PROMPT_ID, SESSION_ID } from './helpers/fixtures.mjs';
 
 const RUN_ID = 'cc-test-async-1';
 
@@ -100,7 +100,7 @@ function env(dataDir, server, extra = {}) {
 const ASYNC_ON = { MUBIT_CC_RECALL_ASYNC: '1' };
 
 const carryPath = (d) => join(d, 'runs', RUN_ID, 'carry.json');
-const seenPath = (d) => join(d, 'runs', RUN_ID, 'seen.json');
+const seenPath = (d) => join(d, 'runs', RUN_ID, 'seen', `${SESSION_ID}.json`);
 const turnPath = (d, promptId) => join(d, 'runs', RUN_ID, 'turns', `${promptId}.json`);
 const marker = (d) => readJsonFile(join(d, 'status', `${RUN_ID}.json`));
 

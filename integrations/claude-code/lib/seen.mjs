@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `lib/seen.mjs` — what this run has already injected, and when.
+ * `lib/seen.mjs` — what one conversation has already been shown, and when.
  *
  * The state layout and its TTL table, and the recall path that reads and
  * writes it), §5.6 (the compaction reset).
@@ -17,6 +17,26 @@
  * the surfaces it was assumed to be cheaper than: the MCP tool names load once at 356
  * tokens, the skill and agent frontmatter once at 409, and recall injection costs up to
  * 1500 tokens **on every prompt**. Over forty prompts that is 60,000 against 356.
+ *
+ * ---------------------------------------------------------------------------
+ * The scope is one conversation, and only a conversation can hold it
+ * ---------------------------------------------------------------------------
+ * A pointer says "you were given this in full earlier in this conversation". That sentence
+ * is only true of the transcript the entry was injected into, so the set is keyed by the
+ * host session id **and** the run: `runs/<run_id>/seen/<session_id>.json`.
+ *
+ * It was keyed by the run alone, and the run is the wrong unit. Under the default
+ * `per-directory` strategy a run id is derived from the path, so every session opened in a
+ * directory shared one set for six hours. Session B was handed pointers for what session A
+ * had seen, and A's compaction wiped B's record. Worse, a shell command that rendered the
+ * catalogue marked the set too, and a shell has no way of knowing whether its stdout ever
+ * reached a model — one verification run from a plain terminal turned the next conversation's
+ * whole listing into fragments with nothing to dereference them against.
+ *
+ * So two things hold now. A process with no usable session id **never touches this file**:
+ * it reads an empty set, marks nothing, and clears nothing, which degrades to "render in
+ * full" — the fail-safe direction, and what a caller that forgets the argument gets. And
+ * `bin/admin.mjs`, which is a shell command, does not call this module at all.
  *
  * ---------------------------------------------------------------------------
  * A roll-up, not a new source of truth
@@ -41,6 +61,7 @@
 import { unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { hostSessionId } from './runid.mjs';
 import { readJson, runDir, safeSegment, writeJsonAtomic } from './state.mjs';
 
 /**
@@ -67,6 +88,15 @@ export const SEEN_TTL_MS = 6 * 60 * 60 * 1000;
  */
 export const MAX_SEEN_REFS = 512;
 
+/** The directory under the run that holds one file per conversation. */
+export const SEEN_DIR = 'seen';
+
+/**
+ * A session id is a path segment here. Host ids are UUIDs; this leaves room for a longer
+ * one without letting an arbitrary string become an arbitrarily long file name.
+ */
+const MAX_SESSION_SEGMENT = 128;
+
 /**
  * @typedef {object} SeenEntry
  * @property {number} first  when this id was first injected — when full price was paid
@@ -87,18 +117,27 @@ function emptySeen() {
 }
 
 /**
- * §7: `runs/<run_id>/seen.json`, or `''` when the run id leaves no usable path segment.
+ * §7: `runs/<run_id>/seen/<session_id>.json`, or `''` when either id leaves no usable path
+ * segment.
  *
  * A run id normally arrives from `lib/runid.mjs`, but it can be pinned by hand in a
  * settings file or an environment variable, so it is untrusted input to a path — the same
  * rule `lib/state.mjs` applies everywhere. An empty segment would resolve to `runs/`
  * itself, which is a shared directory and not this run's.
  *
- * @param {Record<string, any>} cfg @param {string} runId @returns {string}
+ * The session id is judged by `hostSessionId`, the one definition of "a usable session id"
+ * the plugin has: blank and the placeholders (`default`, `none`, …) are not identities, and
+ * a process holding one of those is not a conversation, so it gets no file. That is the
+ * whole mechanism behind "a process with no session never touches the set".
+ *
+ * @param {Record<string, any>} cfg @param {string} runId @param {string} sessionId
+ * @returns {string}
  */
-function seenPath(cfg, runId) {
+function seenPath(cfg, runId, sessionId) {
   if (!safeSegment(runId)) return '';
-  return join(runDir(cfg, runId), 'seen.json');
+  const session = safeSegment(hostSessionId({ session_id: sessionId }), MAX_SESSION_SEGMENT);
+  if (!session) return '';
+  return join(runDir(cfg, runId), SEEN_DIR, `${session}.json`);
 }
 
 // ---------------------------------------------------------------------------
@@ -106,19 +145,20 @@ function seenPath(cfg, runId) {
 // ---------------------------------------------------------------------------
 
 /**
- * What this run has already put in front of the model, with the TTL applied.
+ * What this conversation has already put in front of the model, with the TTL applied.
  *
  * Total by construction: a missing file is the ordinary first-prompt case, and a truncated
  * or foreign one is the ordinary state after a SIGKILL. Both answer "nothing seen", which
- * re-expands every entry — expensive, never wrong.
+ * re-expands every entry — expensive, never wrong. So does a missing session id.
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
+ * @param {string} [sessionId]  the host's `session_id`; nothing is read without one
  * @returns {Seen}
  */
-export function readSeen(cfg, runId) {
+export function readSeen(cfg, runId, sessionId = '') {
   try {
-    const p = seenPath(cfg, runId);
+    const p = seenPath(cfg, runId, sessionId);
     if (!p) return emptySeen();
 
     const raw = readJson(p, null);
@@ -153,11 +193,12 @@ export function readSeen(cfg, runId) {
 // ---------------------------------------------------------------------------
 
 /**
- * Record the reference ids one turn actually injected.
+ * Record the reference ids one turn actually injected into one conversation.
  *
  * Called from `hooks/src/prompt-recall.mjs` beside `persistRecalled`, and only on a turn
  * that rendered something: marking a recall that failed or returned nothing would make the
- * *next* prompt point at a memory the model was never given.
+ * *next* prompt point at a memory the model was never given. The MCP results guard marks
+ * what a tool result rendered, for the same reason and under the same session.
  *
  * Read-modify-write with `writeJsonAtomic`, matching every other per-run file. Two prompt
  * hooks cannot race here in practice — `UserPromptSubmit` fires once per prompt — and if
@@ -166,11 +207,12 @@ export function readSeen(cfg, runId) {
  * @param {Record<string, any>} cfg
  * @param {string} runId
  * @param {string[]} refIds  `reference_id` values, as rendered
+ * @param {string} [sessionId]  the host's `session_id`; nothing is written without one
  * @returns {boolean} true when the roll-up landed
  */
-export function markSeen(cfg, runId, refIds) {
+export function markSeen(cfg, runId, refIds, sessionId = '') {
   try {
-    const p = seenPath(cfg, runId);
+    const p = seenPath(cfg, runId, sessionId);
     if (!p) return false;
 
     const ids = usableIds(refIds);
@@ -178,7 +220,7 @@ export function markSeen(cfg, runId, refIds) {
 
     // Reading through `readSeen` applies the TTL on the way in, so the sweep is free and
     // the file never accumulates entries nothing will ever consult again.
-    const prior = readSeen(cfg, runId).entries;
+    const prior = readSeen(cfg, runId, sessionId).entries;
     const now = Date.now();
     /** @type {Record<string, SeenEntry>} */
     const refs = { ...prior };
@@ -194,6 +236,7 @@ export function markSeen(cfg, runId, refIds) {
 
     return writeJsonAtomic(p, {
       run_id: String(runId ?? ''),
+      session_id: String(sessionId ?? ''),
       updated_at: now,
       refs: bounded(refs),
     });
@@ -254,7 +297,7 @@ function usableIds(refIds) {
 // ---------------------------------------------------------------------------
 
 /**
- * Forget everything this run has shown — the compaction reset (§5.6).
+ * Forget everything this conversation has been shown — the compaction reset (§5.6).
  *
  * Compaction resets the model's window, not the file. After `PostCompact` the transcript
  * the entries were injected into is **gone**, so a surviving pointer names a memory that
@@ -263,16 +306,21 @@ function usableIds(refIds) {
  * given no way to read it. `hooks/src/checkpoint.mjs --post` already runs on exactly that
  * event and calls this.
  *
+ * Only the compacted session's file goes. Another conversation in the same run still has
+ * its transcript, and its pointers are still true.
+ *
  * Returns true when there is nothing left to clear, which includes the file never having
- * existed: the caller's question is "is this run's slate clean", not "did I delete a file".
+ * existed and there being no session to clear for: the caller's question is "is this
+ * conversation's slate clean", not "did I delete a file".
  *
  * @param {Record<string, any>} cfg
  * @param {string} runId
+ * @param {string} [sessionId]  the host's `session_id`; nothing is deleted without one
  * @returns {boolean}
  */
-export function clearSeen(cfg, runId) {
+export function clearSeen(cfg, runId, sessionId = '') {
   try {
-    const p = seenPath(cfg, runId);
+    const p = seenPath(cfg, runId, sessionId);
     if (!p) return true;
     try { unlinkSync(p); } catch { /* never written, or already cleared */ }
     return true;

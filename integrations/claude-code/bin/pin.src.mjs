@@ -68,6 +68,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../lib/config.mjs';
 import { MAX_PIN_CHARS, MAX_PINS, writePinsLocal } from '../lib/pins.mjs';
 import { pickRun } from '../lib/runpick.mjs';
+import { dataDirFlag } from '../lib/state.mjs';
 import { deleteVariable, listVariables, PIN_NAMESPACE, setVariable } from '../lib/variables.mjs';
 
 /** The run id that must never be written to, from any surface. */
@@ -109,7 +110,7 @@ export function parseArgs(argv = []) {
   // Only *known* flags are consumed. Anything else that happens to start with `--` is a pin:
   // `pin add "--force is banned while we finish this"` arrives as one argv element, and a
   // blanket `startsWith('--')` filter would silently swallow the user's first word.
-  const takesValue = new Set(['--name', '--run']);
+  const takesValue = new Set(['--name', '--run', '--data-dir']);
   const known = new Set([...takesValue, '--all', '--json']);
   /** @type {string[]} */
   const positional = [];
@@ -133,6 +134,9 @@ export function parseArgs(argv = []) {
     text: rest.join(' ').trim(),
     slug: valueOf('--name').trim(),
     runId: valueOf('--run').trim(),
+    // The skill passes the data directory the host interpolated into its body, because a Bash
+    // tool call inherits none; blank and unsubstituted values are dropped (`lib/state.mjs`).
+    dataDir: dataDirFlag(valueOf('--data-dir')),
     all: flag('--all'),
     json: flag('--json'),
   };
@@ -159,7 +163,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
 
   let cfg;
   try {
-    cfg = deps.cfg ?? loadConfig(env);
+    // `--data-dir` rides the first rung of `dataDir()`, so the run scan and every read below
+    // it look in the store the session's hooks write to.
+    cfg = deps.cfg ?? loadConfig(args.dataDir ? { ...env, MUBIT_CC_DATA_DIR: args.dataDir } : env);
   } catch (err) {
     return emit({ ok: false, state: 'config_error', detail: `Could not read the plugin configuration: ${messageOf(err)}` });
   }

@@ -36,6 +36,9 @@ const R = () => mod('mcp/src/results.mjs');
 const A = () => mod('lib/assemble.mjs');
 const SEEN = () => mod('lib/seen.mjs');
 
+/** The host session the server was started under — what keys the seen-set (`lib/seen.mjs`). */
+const SESSION = '4f21ab90-1c2d-4e5f-8a9b-0c1d2e3f4a5b';
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -357,13 +360,17 @@ function fakeStream() {
 test('installResultsGuard wraps the stream once, shapes tool results, and leaves the rest alone', async () => {
   const { installResultsGuard } = await R();
   const { stream, written, original } = fakeStream();
-  const opts = { cfg: {}, runId: 'r', budget: 2000, stream, seen: () => new Set(), spill: spillStub().spill, mark: () => {} };
+  const opts = {
+    cfg: {}, runId: 'r', sessionId: SESSION, budget: 2000, stream,
+    seen: () => new Set(), spill: spillStub().spill, mark: () => {},
+  };
 
   installResultsGuard(opts);
   installResultsGuard(opts);
 
   assert.equal(stream.write.mubitResultsGuardOriginal, original, 'the second install stacked instead of rewrapping');
-  assert.deepEqual(stream.write.mubitResultsGuard, { budget: 2000 });
+  assert.deepEqual(stream.write.mubitResultsGuard, { budget: 2000, seen: 'session', repeat: 'pointer' },
+    'the marker is what the launch tests observe, so it has to say how the set is keyed');
 
   const initLine = `${JSON.stringify({ jsonrpc: '2.0', id: 1, result: { protocolVersion: '1', serverInfo: {} } })}\n`;
   stream.write(initLine);
@@ -382,14 +389,14 @@ test('a ceiling of 0 installs nothing', async () => {
   assert.equal(stream.write, original);
 });
 
-test('in production the spill and the seen set live under the run directory, and the set is shared', async () => {
+test('in production the spill lives under the run and the seen set under the session, shared with the hooks', async () => {
   const { installResultsGuard, SPILL_DIR } = await R();
   const { readSeen } = await SEEN();
   const dataDir = makeDataDir();
   const cfg = { dataDir };
   const runId = 'cc-results-unit';
   const { stream, written } = fakeStream();
-  installResultsGuard({ cfg, runId, stream });
+  installResultsGuard({ cfg, runId, sessionId: SESSION, stream });
   const original = pretty(queryResponse());
 
   stream.write(`${JSON.stringify(frame(original))}\n`);
@@ -402,14 +409,61 @@ test('in production the spill and the seen set live under the run directory, and
   assert.ok(existsSync(m[1]), `the named file does not exist: ${m[1]}`);
   assert.equal(readFileSync(m[1], 'utf8'), original, 'the file is not the server\'s own text');
 
-  const seen = readSeen(cfg, runId);
+  const seen = readSeen(cfg, runId, SESSION);
   assert.deepEqual([...seen.ids].sort(), ['ref_fact_1', 'ref_lesson_1', 'ref_rule_1'],
-    'the ids shown in full were not marked in the run\'s seen-set');
+    'the ids shown in full were not marked in the conversation\'s seen-set');
+  assert.ok(existsSync(join(dataDir, 'runs', runId, 'seen', `${SESSION}.json`)),
+    'the set is the hooks\' own file for this session, so it has to be at their path');
 
   stream.write(`${JSON.stringify(frame(original))}\n`);
   const second = JSON.parse(written[1]).result.content[0].text;
   assert.ok(second.includes('(seen earlier) ref_rule_1'),
     `the second result did not degrade what the first one showed:\n${second}`);
+});
+
+// A launcher with no session id is not a conversation. The host hands `CLAUDE_CODE_SESSION_ID`
+// to every MCP server it starts, but a server started by hand, by another host, or before the
+// id existed has nothing to key on — and a pointer it wrote would name text nobody was shown.
+test('with no session id, every result renders in full and no seen-set is written', async () => {
+  const { installResultsGuard } = await R();
+  const dataDir = makeDataDir();
+  const cfg = { dataDir };
+  const runId = 'cc-results-nosession';
+  const { stream, written } = fakeStream();
+  installResultsGuard({ cfg, runId, stream });
+  assert.deepEqual(stream.write.mubitResultsGuard, { budget: 2000, seen: 'off', repeat: 'pointer' });
+
+  const original = pretty(queryResponse());
+  stream.write(`${JSON.stringify(frame(original))}\n`);
+  stream.write(`${JSON.stringify(frame(original))}\n`);
+
+  for (const w of written) {
+    const text = JSON.parse(w).result.content[0].text;
+    assert.ok(text.includes('Memories (3):') && !text.includes('(seen earlier)'),
+      `a server that is not a conversation pointed at text it cannot know the model has:\n${text}`);
+  }
+  assert.equal(existsSync(join(dataDir, 'runs', runId, 'seen')), false,
+    'nothing without a session may write a seen-set');
+});
+
+// `recallRepeatMode: full` is the documented opt-out for the injection; the tool results
+// have to honour it too, or the setting turns pointers off in one place and leaves them on
+// in the other.
+test('repeatMode "full" renders a seen memory in full and reads no set', async () => {
+  const { installResultsGuard } = await R();
+  const { markSeen } = await SEEN();
+  const dataDir = makeDataDir();
+  const cfg = { dataDir };
+  const runId = 'cc-results-full';
+  markSeen(cfg, runId, ['ref_rule_1'], SESSION);
+  const { stream, written } = fakeStream();
+  installResultsGuard({ cfg, runId, sessionId: SESSION, repeatMode: 'full', stream });
+  assert.deepEqual(stream.write.mubitResultsGuard, { budget: 2000, seen: 'session', repeat: 'full' });
+
+  stream.write(`${JSON.stringify(frame(pretty(queryResponse())))}\n`);
+  const text = JSON.parse(written[0]).result.content[0].text;
+  assert.ok(text.includes('Memories (3):') && !text.includes('(seen earlier)'),
+    `the opt-out was ignored:\n${text}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -436,8 +490,9 @@ test('through the shipped bundle: mubit_recall comes back compact, under the cei
   const fake = await fakeMubit({ 'POST /v2/control/query': { json: richQuery() } });
   const dataDir = makeDataDir();
   const runId = 'cc-results-e2e';
+  const keyed = { endpoint: fake.url, dataDir, runId, extra: { CLAUDE_CODE_SESSION_ID: SESSION } };
   try {
-    const r = await mcpCallTool('mubit_recall', { query: 'ingest' }, { endpoint: fake.url, dataDir, runId });
+    const r = await mcpCallTool('mubit_recall', { query: 'ingest' }, keyed);
 
     assert.equal(r.isError, false, `the tool failed: ${r.text}\n${r.stderr}`);
     assert.equal(r.json, null, 'the result is still raw JSON — the guard is not on the shipped frame');
@@ -453,10 +508,18 @@ test('through the shipped bundle: mubit_recall comes back compact, under the cei
     assert.equal(raw.evidence.length, 40, 'the file on disk is not the whole reply');
     assert.equal(raw.evidence[1].score, 0.99, 'the file on disk lost the metadata the line dropped');
 
-    // The seen-set is the hooks' own file, so a second process on the same run reads it.
-    const again = await mcpCallTool('mubit_recall', { query: 'ingest' }, { endpoint: fake.url, dataDir, runId });
+    // The seen-set is the hooks' own file for this session, so a second process started
+    // under the same host session id reads it.
+    const again = await mcpCallTool('mubit_recall', { query: 'ingest' }, keyed);
     assert.ok(again.text.includes('(seen earlier) ref-e2e-00'),
-      `a second call on the same run rendered the same hit in full again:\n${again.text}`);
+      `a second call on the same session rendered the same hit in full again:\n${again.text}`);
+    assert.ok(existsSync(join(dataDir, 'runs', runId, 'seen', `${SESSION}.json`)),
+      'the set is keyed by the host session, at the path the hooks read');
+
+    // …and a process the host gave no session id to is not a conversation: full, and no file.
+    const anonymous = await mcpCallTool('mubit_recall', { query: 'ingest' }, { endpoint: fake.url, dataDir, runId });
+    assert.ok(anonymous.text.includes('- [rule] ref-e2e-00 — Hit 0:') && !anonymous.text.includes('(seen earlier)'),
+      `a server with no session id pointed at text it cannot know the model has:\n${anonymous.text}`);
   } finally {
     await fake.close();
   }

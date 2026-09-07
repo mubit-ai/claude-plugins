@@ -81,7 +81,7 @@ import { runHook } from '../../lib/hook.mjs';
 import { postCheckpoint } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
-import { deriveAgentId, deriveRunId, resolveProjectDir, turnNumber } from '../../lib/runid.mjs';
+import { deriveAgentId, deriveRunId, hostSessionId, resolveProjectDir, turnNumber } from '../../lib/runid.mjs';
 import { clearResume } from '../../lib/resume.mjs';
 import { clearSeen } from '../../lib/seen.mjs';
 import { appendItem } from '../../lib/spool.mjs';
@@ -289,11 +289,15 @@ async function precompact(payload, cfg, ctx) {
  * Why the seen-set is cleared here
  * ---------------------------------------------------------------------------
  * `hooks/src/prompt-recall.mjs` degrades a memory it has already injected into a one-line
- * pointer, on the strength of `runs/<run_id>/seen.json` saying the model has it
- * (`lib/seen.mjs`). **Compaction resets the model's window, not the file.** After this event
- * the transcript those entries were injected into is gone, so a surviving pointer names a
- * memory that exists nowhere in the conversation — the model is told a memory applies and is
- * given no way to read it, which is strictly worse than having paid full price for it.
+ * pointer, on the strength of `runs/<run_id>/seen/<session_id>.json` saying the model has
+ * it (`lib/seen.mjs`). **Compaction resets the model's window, not the file.** After this
+ * event the transcript those entries were injected into is gone, so a surviving pointer names
+ * a memory that exists nowhere in the conversation — the model is told a memory applies and
+ * is given no way to read it, which is strictly worse than having paid full price for it.
+ *
+ * Only this session's file goes. The set is keyed by conversation, and another session in
+ * the same run still has its transcript, so its pointers are still true; a payload with no
+ * session id names no file and clears nothing.
  *
  * The clear runs before every other decision in this function on purpose. A compaction with
  * no stored anchor still emptied the window; gating the reset on `--pre` having succeeded
@@ -319,7 +323,7 @@ function postcompact(payload, cfg) {
   }
 
   // The seen-set reset, ahead of every other decision here — see the header above.
-  clearSeen(cfg, runId);
+  clearSeen(cfg, runId, hostSessionId(payload));
   // …and the block `recallAsync` left for the next prompt, for the same reason and no other.
   // A carried block was assembled against the pre-compaction seen-set, so its pointer lines
   // are already baked in — clearing the set alone would leave a block promising that the full

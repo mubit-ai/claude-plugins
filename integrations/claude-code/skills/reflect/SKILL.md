@@ -10,8 +10,17 @@ behind it — and relay what it prints: one line per extracted lesson, with the 
 type, importance and scope on the line.
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs reflect
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs reflect --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"
 ```
+
+**`--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"` is not optional.** A Bash tool
+call does not inherit `CLAUDE_PLUGIN_DATA` — it arrives empty — so without the flag the script
+has to guess which of several `mubit-memory*` directories the host is using, and either
+refuses with `no_run` or acts on a run this session's hooks never touch. The host substitutes
+`${CLAUDE_PLUGIN_DATA}` into this file before you read it, and the shell default around it
+lets a session that pins `MUBIT_CC_DATA_DIR` keep its pin — the same order every hook resolves
+in. Pass the whole expression straight through. Do not turn it into an `ENV=… node …` prefix:
+that is no longer a `node` command and will stop for a permission prompt.
 
 If it reports no lessons, say so plainly; an empty reflect is a real answer, not an error.
 Neither command here is an MCP tool: `mubit_reflect` and `mubit_lessons` left the default
@@ -23,10 +32,10 @@ two routes.
 When the user wants what memory holds rather than what this run just produced:
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons                    # this run, plus what travelled
-node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --scope run        # this run alone
-node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --scope global     # only what has travelled
-node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --importance high --limit 10
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"                    # this run, plus what travelled
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --scope run        # this run alone
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --scope global     # only what has travelled
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --importance high --limit 10
 ```
 
 The three scopes answer three different questions, and asking the wrong one is how a healthy
@@ -38,9 +47,10 @@ store reads as empty:
 - **`--scope session` / `global`** — only the lessons that have travelled, from every run
   the key can see. Read a zero here as a real zero rather than as a fault.
 
-The listing says what it is showing and how many matched. A lesson this conversation has
-already been shown is printed as its id and first clause, marked `(seen earlier)`;
-`mubit_dereference` returns the text. `--json` is the whole catalogue with its metadata.
+The listing says what it is showing and how many matched. Every lesson is printed in full:
+the script never degrades a lesson to a `(seen earlier)` pointer and never records what it
+printed, because a shell command cannot know whether its output reached the model. `--json`
+is the whole catalogue with its metadata.
 
 ## Why the explicit call exists at all
 

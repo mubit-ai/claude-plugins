@@ -555,6 +555,28 @@ test('installs the results guard BEFORE importing the server, at the configured 
     + 'result goes out as the bundle pretty-printed it — a lesson list at up to ~12k tokens');
   assert.equal(Number(r.resultsAtImport.budget), 2000,
     'the results guard was installed at a ceiling other than the documented default of 2000');
+  assert.equal(r.resultsAtImport.seen, 'off',
+    'with no CLAUDE_CODE_SESSION_ID this process is not a conversation, so the guard must read '
+    + 'and mark no seen-set — a pointer it wrote would name text nobody was shown');
+  assert.equal(r.resultsAtImport.repeat, 'pointer');
+});
+
+// The seen-set is one conversation's (`lib/seen.mjs`), and the host's session id is the only
+// thing that names the conversation this server belongs to. `recallRepeatMode: full` is the
+// documented opt-out for the injection, and it has to reach the tool results too.
+test('keys the results guard by the host session, and honours recallRepeatMode=full', async () => {
+  const keyed = await runLauncher({ extra: { CLAUDE_CODE_SESSION_ID: HOST_SESSION_ID } });
+  assert.ok(keyed.importedServer, `the launcher never imported ./server.js. stderr:\n${keyed.stderr}`);
+  assert.equal(keyed.resultsAtImport.seen, 'session',
+    'with CLAUDE_CODE_SESSION_ID set, tool results share the conversation\'s seen-set with the hooks');
+  assert.equal(keyed.resultsAtImport.repeat, 'pointer');
+
+  const full = await runLauncher({
+    extra: { CLAUDE_CODE_SESSION_ID: HOST_SESSION_ID, MUBIT_CC_RECALL_REPEAT_MODE: 'full' },
+  });
+  assert.ok(full.importedServer, `the launcher never imported ./server.js. stderr:\n${full.stderr}`);
+  assert.equal(full.resultsAtImport.repeat, 'full',
+    'the pointer opt-out must switch pointers off in tool results as well as in the injection');
 });
 
 // `0` is the operator asking for the raw result back, and the launcher must honour it by

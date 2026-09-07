@@ -27,11 +27,15 @@
  * original is written under the run's data directory and the note at the foot of the result
  * names the path — so the rest costs nothing until the model chooses to read it.
  *
- * **Repeats.** The hooks keep a run-scoped set of every reference the model has already been
- * shown (`lib/seen.mjs`) and degrade a repeat in the per-prompt injection to a one-line
+ * **Repeats.** The hooks keep a session-scoped set of every reference the model has already
+ * been shown (`lib/seen.mjs`) and degrade a repeat in the per-prompt injection to a one-line
  * pointer. A tool result reads the same set and writes back to it: a lesson the injection
  * already rendered in full appears here as a pointer, and a lesson first shown in full here is
- * a pointer in the next injection. One transcript, one set.
+ * a pointer in the next injection. One transcript, one set — which is why the set is keyed by
+ * the host session (`CLAUDE_CODE_SESSION_ID`, the same id the hook payloads carry) beside the
+ * run. Two states switch the pointer off and render every result in full: a launcher with no
+ * session id, which is not a conversation and gets no file; and `recallRepeatMode: 'full'`,
+ * the operator's opt-out, which the injection already honours.
  *
  * **The seam** is `process.stdout.write`, the one `mcp/src/instructions.mjs` uses and for the
  * same reason: the server bundle cannot be changed here, `StdioServerTransport` writes exactly
@@ -45,6 +49,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { estimateTokens, firstClause, POINTER_MARK } from '../../lib/assemble.mjs';
+import { hostSessionId } from '../../lib/runid.mjs';
 import { markSeen, readSeen } from '../../lib/seen.mjs';
 import { runDir, safeSegment } from '../../lib/state.mjs';
 
@@ -83,7 +88,7 @@ const SHAPES = [
 /**
  * @typedef {object} ShapeOptions
  * @property {number} [budget]                          token ceiling; `DEFAULT_RESULT_TOKENS`
- * @property {Set<string>|null} [seen]                  ids already shown this run
+ * @property {Set<string>|null} [seen]                  ids already shown this conversation
  * @property {(text: string, shape: string) => string} [spill]  writes the original, returns its path or `''`
  */
 
@@ -394,10 +399,13 @@ function holdText(original, budget, spill, shape, already = '') {
  *
  * Idempotent. Re-installing rewraps the original `write` rather than stacking a second layer.
  *
- * @param {{cfg: any, runId: string, budget?: number, stream?: any,
- *          seen?: () => Set<string>, spill?: (text: string, shape: string) => string,
+ * @param {{cfg: any, runId: string, sessionId?: string, repeatMode?: string, budget?: number,
+ *          stream?: any, seen?: () => Set<string>|null,
+ *          spill?: (text: string, shape: string) => string,
  *          mark?: (ids: string[]) => void}} opts
- *   `stream`, `seen`, `spill` and `mark` override the production wiring for tests.
+ *   `sessionId` keys the seen-set; without a usable one nothing is read or marked.
+ *   `repeatMode: 'full'` reads no set at all. `stream`, `seen`, `spill` and `mark` override
+ *   the production wiring for tests.
  * @returns {void}
  */
 export function installResultsGuard(opts) {
@@ -414,9 +422,16 @@ export function installResultsGuard(opts) {
 
   const cfg = opts?.cfg ?? {};
   const runId = typeof opts?.runId === 'string' ? opts.runId : '';
-  const seen = typeof opts?.seen === 'function' ? opts.seen : () => readSeen(cfg, runId).ids;
+  // The same test `lib/seen.mjs` applies, so the marker below says what the set will do.
+  const sessionId = hostSessionId({ session_id: opts?.sessionId });
+  const repeatMode = opts?.repeatMode === 'full' ? 'full' : 'pointer';
+  const seen = typeof opts?.seen === 'function'
+    ? opts.seen
+    : () => (repeatMode === 'full' ? null : readSeen(cfg, runId, sessionId).ids);
   const spill = typeof opts?.spill === 'function' ? opts.spill : spillWriter(cfg, runId);
-  const mark = typeof opts?.mark === 'function' ? opts.mark : (ids) => { markSeen(cfg, runId, ids); };
+  const mark = typeof opts?.mark === 'function'
+    ? opts.mark
+    : (ids) => { markSeen(cfg, runId, ids, sessionId); };
 
   /**
    * @param {any} chunk
@@ -445,7 +460,7 @@ export function installResultsGuard(opts) {
     value: base, writable: true, configurable: true, enumerable: false,
   });
   // The launch tests read this off `process.stdout.write` and JSON-serialise it.
-  wrapped.mubitResultsGuard = { budget };
+  wrapped.mubitResultsGuard = { budget, seen: sessionId ? 'session' : 'off', repeat: repeatMode };
 
   stream.write = wrapped;
 }
@@ -456,7 +471,7 @@ export function installResultsGuard(opts) {
  * re-serialised; every other line keeps the exact bytes the server produced.
  *
  * @param {string} chunk
- * @param {{budget: number, seen: () => Set<string>,
+ * @param {{budget: number, seen: () => Set<string>|null,
  *          spill: (text: string, shape: string) => string, mark: (ids: string[]) => void}} ctx
  * @returns {string|null}
  */

@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `lib/seen.mjs` — the cross-turn seen-set, at `runs/<run_id>/seen.json`.
+ * `lib/seen.mjs` — the cross-turn seen-set, at `runs/<run_id>/seen/<session_id>.json`.
  *
  * Guide sections under test: §7 (state layout and the TTL table), §4.8/§4.9 (synchronous,
  * atomic, never throws), §5.2 (who calls it, and when).
@@ -18,8 +18,16 @@
  * expensive turn and never costs correctness, which is what lets the write be best-effort
  * and the read be total.
  *
- * These tests are written before the implementation. Failing with
- * "lib/seen.mjs does not exist yet" is the expected red state.
+ * ---------------------------------------------------------------------------
+ * The scope is one conversation
+ * ---------------------------------------------------------------------------
+ * A pointer says "you were given this in full earlier in this conversation", and that is only
+ * true of the transcript the entry was injected into. Keyed by the run alone — which under
+ * the default `per-directory` strategy is the *path* — every session in a directory shared
+ * one set: session B was pointered for what session A saw, A's compaction wiped B's record,
+ * and a shell command that rendered the catalogue poisoned both. So the file is keyed by the
+ * host `session_id` beside the run, and a caller with no usable session id gets the fail-safe
+ * answer on every export: nothing seen, nothing marked, nothing cleared.
  */
 
 import test from 'node:test';
@@ -30,6 +38,8 @@ import { join } from 'node:path';
 import { lib, baseEnv, makeDataDir } from './helpers/harness.mjs';
 
 const RUN = 'cc-my-project-9f2a11c4';
+const SESSION = '4f21ab90-1c2d-4e5f-8a9b-0c1d2e3f4a5b';
+const OTHER_SESSION = '7a0b3c2d-9e8f-4a1b-8c2d-3e4f5a6b7c8d';
 const HOUR = 60 * 60 * 1000;
 
 /** Fresh data dir + resolved config + a fresh `lib/seen.mjs`. */
@@ -42,13 +52,15 @@ async function setup(extra = {}) {
 }
 
 const runDir = (dataDir, runId = RUN) => join(dataDir, 'runs', runId);
-const seenPath = (dataDir, runId = RUN) => join(runDir(dataDir, runId), 'seen.json');
+const seenDir = (dataDir, runId = RUN) => join(runDir(dataDir, runId), 'seen');
+const seenPath = (dataDir, runId = RUN, session = SESSION) => join(seenDir(dataDir, runId), `${session}.json`);
 
 /** Write the roll-up by hand, so a test can age an entry without sleeping. */
-function seed(dataDir, entries, runId = RUN) {
-  mkdirSync(runDir(dataDir, runId), { recursive: true });
-  writeFileSync(seenPath(dataDir, runId), JSON.stringify({
+function seed(dataDir, entries, runId = RUN, session = SESSION) {
+  mkdirSync(seenDir(dataDir, runId), { recursive: true });
+  writeFileSync(seenPath(dataDir, runId, session), JSON.stringify({
     run_id: runId,
+    session_id: session,
     updated_at: Date.now(),
     refs: entries,
   }));
@@ -58,11 +70,11 @@ function seed(dataDir, entries, runId = RUN) {
 // readSeen — total, and empty by default
 // ---------------------------------------------------------------------------
 
-// §5.2: this is read on the blocking path in front of every prompt. A run that has never
-// injected anything is the ordinary first-prompt case, not an error.
-test('readSeen: a run with no roll-up yet reports nothing seen', async () => {
+// §5.2: this is read on the blocking path in front of every prompt. A conversation that has
+// never injected anything is the ordinary first-prompt case, not an error.
+test('readSeen: a conversation with no roll-up yet reports nothing seen', async () => {
   const { cfg, S } = await setup();
-  const got = S.readSeen(cfg, RUN);
+  const got = S.readSeen(cfg, RUN, SESSION);
 
   assert.ok(got.ids instanceof Set, 'readSeen must hand back a Set of ids for assembleContext');
   assert.equal(got.ids.size, 0);
@@ -74,20 +86,20 @@ test('readSeen: a run with no roll-up yet reports nothing seen', async () => {
 // normal state after a SIGKILL and must cost the saving, never the prompt.
 test('readSeen: a corrupt roll-up degrades to nothing seen rather than throwing', async () => {
   const { cfg, dataDir, S } = await setup();
-  mkdirSync(runDir(dataDir), { recursive: true });
+  mkdirSync(seenDir(dataDir), { recursive: true });
   writeFileSync(seenPath(dataDir), '{"refs": {"ref_a": ');   // truncated mid-write
 
-  const got = S.readSeen(cfg, RUN);
+  const got = S.readSeen(cfg, RUN, SESSION);
   assert.equal(got.ids.size, 0,
     'an unreadable roll-up must re-expand every entry, which is only expensive — not wrong');
 });
 
 test('readSeen: a roll-up whose refs are not an object is ignored', async () => {
   const { cfg, dataDir, S } = await setup();
-  mkdirSync(runDir(dataDir), { recursive: true });
+  mkdirSync(seenDir(dataDir), { recursive: true });
   writeFileSync(seenPath(dataDir), JSON.stringify({ run_id: RUN, refs: ['ref_a'] }));
 
-  assert.equal(S.readSeen(cfg, RUN).ids.size, 0);
+  assert.equal(S.readSeen(cfg, RUN, SESSION).ids.size, 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -95,15 +107,21 @@ test('readSeen: a roll-up whose refs are not an object is ignored', async () => 
 // ---------------------------------------------------------------------------
 
 // §5.2 step 6: `prompt-recall` marks what it rendered, next to the ids it stages on the turn.
-test('markSeen: records the reference ids a turn injected', async () => {
+test('markSeen: records the reference ids a turn injected, under the session', async () => {
   const { cfg, dataDir, S } = await setup();
 
-  assert.equal(S.markSeen(cfg, RUN, ['ref_rule_1', 'ref_lesson_1']), true);
+  assert.equal(S.markSeen(cfg, RUN, ['ref_rule_1', 'ref_lesson_1'], SESSION), true);
   assert.equal(existsSync(seenPath(dataDir)), true,
-    'the roll-up must land at runs/<run_id>/seen.json (§7)');
+    'the roll-up must land at runs/<run_id>/seen/<session_id>.json (§7)');
+  assert.equal(existsSync(join(runDir(dataDir), 'seen.json')), false,
+    'the run-keyed file of releases up to 0.13.0 must not be written any more');
 
-  const got = S.readSeen(cfg, RUN);
+  const got = S.readSeen(cfg, RUN, SESSION);
   assert.deepEqual([...got.ids].sort(), ['ref_lesson_1', 'ref_rule_1']);
+
+  const raw = JSON.parse(readFileSync(seenPath(dataDir), 'utf8'));
+  assert.equal(raw.run_id, RUN);
+  assert.equal(raw.session_id, SESSION, 'the file says which conversation it belongs to');
 });
 
 // The roll-up is cumulative across turns — that is the entire point. A turn that recalls a
@@ -111,11 +129,11 @@ test('markSeen: records the reference ids a turn injected', async () => {
 test('markSeen: accumulates across turns instead of replacing', async () => {
   const { cfg, S } = await setup();
 
-  S.markSeen(cfg, RUN, ['ref_rule_1']);
-  S.markSeen(cfg, RUN, ['ref_lesson_1']);
-  S.markSeen(cfg, RUN, ['ref_rule_1', 'ref_fact_1']);
+  S.markSeen(cfg, RUN, ['ref_rule_1'], SESSION);
+  S.markSeen(cfg, RUN, ['ref_lesson_1'], SESSION);
+  S.markSeen(cfg, RUN, ['ref_rule_1', 'ref_fact_1'], SESSION);
 
-  assert.deepEqual([...S.readSeen(cfg, RUN).ids].sort(),
+  assert.deepEqual([...S.readSeen(cfg, RUN, SESSION).ids].sort(),
     ['ref_fact_1', 'ref_lesson_1', 'ref_rule_1']);
 });
 
@@ -124,13 +142,13 @@ test('markSeen: accumulates across turns instead of replacing', async () => {
 test('markSeen: keeps the first sighting and moves the last', async () => {
   const { cfg, S } = await setup();
 
-  S.markSeen(cfg, RUN, ['ref_rule_1']);
-  const first = S.readSeen(cfg, RUN).entries.ref_rule_1;
+  S.markSeen(cfg, RUN, ['ref_rule_1'], SESSION);
+  const first = S.readSeen(cfg, RUN, SESSION).entries.ref_rule_1;
   assert.equal(typeof first.first, 'number');
   assert.equal(first.count, 1);
 
-  S.markSeen(cfg, RUN, ['ref_rule_1']);
-  const second = S.readSeen(cfg, RUN).entries.ref_rule_1;
+  S.markSeen(cfg, RUN, ['ref_rule_1'], SESSION);
+  const second = S.readSeen(cfg, RUN, SESSION).entries.ref_rule_1;
   assert.equal(second.first, first.first,
     'the first sighting is when the full price was paid; a later turn must not overwrite it');
   assert.ok(second.last >= first.last);
@@ -142,9 +160,9 @@ test('markSeen: keeps the first sighting and moves the last', async () => {
 test('markSeen: ignores blank, non-string and duplicate ids', async () => {
   const { cfg, S } = await setup();
 
-  S.markSeen(cfg, RUN, ['ref_a', '', '   ', null, 42, { id: 'x' }, 'ref_a']);
+  S.markSeen(cfg, RUN, ['ref_a', '', '   ', null, 42, { id: 'x' }, 'ref_a'], SESSION);
 
-  const got = S.readSeen(cfg, RUN);
+  const got = S.readSeen(cfg, RUN, SESSION);
   assert.deepEqual([...got.ids], ['ref_a']);
   assert.equal(got.entries.ref_a.count, 1,
     'the same id twice in one turn is one injection, not two');
@@ -153,8 +171,8 @@ test('markSeen: ignores blank, non-string and duplicate ids', async () => {
 test('markSeen: an empty id list writes nothing at all', async () => {
   const { cfg, dataDir, S } = await setup();
 
-  S.markSeen(cfg, RUN, []);
-  assert.equal(existsSync(seenPath(dataDir)), false,
+  S.markSeen(cfg, RUN, [], SESSION);
+  assert.equal(existsSync(seenDir(dataDir)), false,
     'a turn that injected nothing must not create a roll-up for it');
 });
 
@@ -163,11 +181,80 @@ test('markSeen: an empty id list writes nothing at all', async () => {
 // writer took the non-atomic path.
 test('markSeen: leaves no temp file beside the roll-up', async () => {
   const { cfg, dataDir, S } = await setup();
-  S.markSeen(cfg, RUN, ['ref_a']);
+  S.markSeen(cfg, RUN, ['ref_a'], SESSION);
 
-  const stray = readdirSync(runDir(dataDir)).filter((f) => f !== 'seen.json');
+  const stray = readdirSync(seenDir(dataDir)).filter((f) => f !== `${SESSION}.json`);
   assert.deepEqual(stray, [],
     `the write must rename into place; found ${stray.join(', ')} left behind`);
+});
+
+// ---------------------------------------------------------------------------
+// The session key — one conversation, one file
+// ---------------------------------------------------------------------------
+
+/*
+ * The defect this keying removed: two sessions open in the same directory share a run under
+ * `per-directory`, and shared one set. The second was handed "(seen earlier)" pointers to
+ * text that had only ever been in the first's transcript.
+ */
+test('two sessions in one run keep separate sets', async () => {
+  const { cfg, dataDir, S } = await setup();
+
+  S.markSeen(cfg, RUN, ['ref_rule_1', 'ref_lesson_1'], SESSION);
+
+  assert.equal(S.readSeen(cfg, RUN, OTHER_SESSION).ids.size, 0,
+    'a second conversation has been shown none of what the first saw');
+  S.markSeen(cfg, RUN, ['ref_fact_1'], OTHER_SESSION);
+  assert.deepEqual([...S.readSeen(cfg, RUN, SESSION).ids].sort(), ['ref_lesson_1', 'ref_rule_1'],
+    'the second conversation marking must not leak into the first');
+  assert.deepEqual(readdirSync(seenDir(dataDir)).sort(), [`${OTHER_SESSION}.json`, `${SESSION}.json`].sort());
+});
+
+/*
+ * A process with no session id is not a conversation: a shell command, a launcher started
+ * before the host handed over its id, a hand-built payload. It gets the fail-safe answer on
+ * every export — render in full, record nothing, delete nothing — and never touches disk.
+ * The empty default is also what a caller that forgets the argument gets, which is why the
+ * argument is last and optional rather than required.
+ */
+test('no session id: readSeen is empty, markSeen writes nothing, clearSeen deletes nothing', async () => {
+  const { cfg, dataDir, S } = await setup();
+  seed(dataDir, { ref_a: { first: Date.now(), last: Date.now(), count: 2 } });
+
+  for (const none of ['', undefined, null, '   ', 'default', 'none', 'NULL', 'undefined']) {
+    assert.equal(S.readSeen(cfg, RUN, /** @type {any} */ (none)).ids.size, 0,
+      `readSeen with session ${JSON.stringify(none)} must report nothing seen`);
+    assert.equal(S.markSeen(cfg, RUN, ['ref_b'], /** @type {any} */ (none)), false,
+      `markSeen with session ${JSON.stringify(none)} must refuse rather than write somewhere`);
+    assert.equal(S.clearSeen(cfg, RUN, /** @type {any} */ (none)), true,
+      'clearing for no conversation is a clean slate, not an error');
+  }
+  assert.equal(S.readSeen(cfg, RUN).ids.size, 0, 'the argument omitted is the same as empty');
+  assert.equal(S.markSeen(cfg, RUN, ['ref_b']), false);
+
+  assert.deepEqual(readdirSync(seenDir(dataDir)), [`${SESSION}.json`],
+    'nothing without a session may create, alter or remove a conversation\'s file');
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(seenPath(dataDir), 'utf8')).refs), ['ref_a'],
+    'the seeded conversation\'s file is byte-for-byte what it was');
+});
+
+// The session id is a path segment and arrives from the host, so it is untrusted input to a
+// path exactly as the run id is.
+test('a session id cannot escape the run directory', async () => {
+  const { cfg, dataDir, S } = await setup();
+
+  assert.equal(S.markSeen(cfg, RUN, ['ref_a'], '../../escaped'), true,
+    'a hostile id is flattened, not refused: the caller still gets its file');
+  assert.equal(existsSync(join(dataDir, 'runs', 'escaped.json')), false);
+  assert.equal(existsSync(join(dataDir, 'escaped.json')), false);
+  const files = readdirSync(seenDir(dataDir));
+  assert.equal(files.length, 1, `the write must land under seen/; found ${files.join(', ')}`);
+  assert.ok(!files[0].includes('/') && !files[0].startsWith('.'), files[0]);
+
+  const long = 'x'.repeat(4000);
+  assert.equal(S.markSeen(cfg, RUN, ['ref_a'], long), true);
+  const longest = Math.max(...readdirSync(seenDir(dataDir)).map((f) => f.length));
+  assert.ok(longest <= 128 + '.json'.length, `a session id must be capped as a file name; got ${longest}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -189,7 +276,7 @@ test('readSeen: an entry older than the 6 h turn TTL stops counting as seen', as
     ref_stale: { first: now - 7 * HOUR, last: now - 7 * HOUR, count: 9 },
   });
 
-  const got = S.readSeen(cfg, RUN);
+  const got = S.readSeen(cfg, RUN, SESSION);
   assert.deepEqual([...got.ids], ['ref_fresh'],
     'an entry the model can no longer see must be re-expanded, not pointed at');
 });
@@ -201,7 +288,7 @@ test('readSeen: a sighting inside the window keeps an old first sighting alive',
     ref_long_lived: { first: now - 7 * HOUR, last: now - 60_000, count: 20 },
   });
 
-  assert.deepEqual([...S.readSeen(cfg, RUN).ids], ['ref_long_lived'],
+  assert.deepEqual([...S.readSeen(cfg, RUN, SESSION).ids], ['ref_long_lived'],
     'the TTL is measured from the LAST sighting — a memory injected again a minute ago is '
     + 'still in the window, however long ago it first arrived');
 });
@@ -210,7 +297,7 @@ test('readSeen: an entry with no usable timestamp is treated as expired', async 
   const { cfg, dataDir, S } = await setup();
   seed(dataDir, { ref_a: { count: 3 }, ref_b: 'not an entry' });
 
-  assert.equal(S.readSeen(cfg, RUN).ids.size, 0,
+  assert.equal(S.readSeen(cfg, RUN, SESSION).ids.size, 0,
     'without a timestamp there is no evidence the model ever saw it, so it renders in full');
 });
 
@@ -225,9 +312,9 @@ test('markSeen: the roll-up is bounded, keeping the most recent sightings', asyn
 
   const many = [];
   for (let i = 0; i < S.MAX_SEEN_REFS + 40; i++) many.push(`ref_${i}`);
-  S.markSeen(cfg, RUN, many);
+  S.markSeen(cfg, RUN, many, SESSION);
 
-  const got = S.readSeen(cfg, RUN);
+  const got = S.readSeen(cfg, RUN, SESSION);
   assert.ok(got.ids.size <= S.MAX_SEEN_REFS,
     `the roll-up grew to ${got.ids.size} ids; a file read before every prompt needs a ceiling`);
   assert.ok(got.ids.has(`ref_${S.MAX_SEEN_REFS + 39}`),
@@ -250,16 +337,28 @@ test('markSeen: the roll-up is bounded, keeping the most recent sightings', asyn
  */
 test('clearSeen: forgets everything, so the next prompt re-expands in full', async () => {
   const { cfg, dataDir, S } = await setup();
-  S.markSeen(cfg, RUN, ['ref_rule_1', 'ref_lesson_1']);
+  S.markSeen(cfg, RUN, ['ref_rule_1', 'ref_lesson_1'], SESSION);
 
-  assert.equal(S.clearSeen(cfg, RUN), true);
+  assert.equal(S.clearSeen(cfg, RUN, SESSION), true);
   assert.equal(existsSync(seenPath(dataDir)), false, 'the roll-up file must be gone');
-  assert.equal(S.readSeen(cfg, RUN).ids.size, 0);
+  assert.equal(S.readSeen(cfg, RUN, SESSION).ids.size, 0);
+});
+
+// A compaction in one conversation says nothing about another's window.
+test('clearSeen: clears only the compacted conversation\'s file', async () => {
+  const { cfg, dataDir, S } = await setup();
+  S.markSeen(cfg, RUN, ['ref_rule_1'], SESSION);
+  S.markSeen(cfg, RUN, ['ref_lesson_1'], OTHER_SESSION);
+
+  assert.equal(S.clearSeen(cfg, RUN, SESSION), true);
+  assert.equal(existsSync(seenPath(dataDir)), false);
+  assert.deepEqual([...S.readSeen(cfg, RUN, OTHER_SESSION).ids], ['ref_lesson_1'],
+    'the other conversation still has its transcript, so its pointers are still true');
 });
 
 test('clearSeen: clearing a run that never had a roll-up is not an error', async () => {
   const { cfg, S } = await setup();
-  assert.equal(S.clearSeen(cfg, 'cc-never-seen-anything'), true);
+  assert.equal(S.clearSeen(cfg, 'cc-never-seen-anything', SESSION), true);
 });
 
 // ---------------------------------------------------------------------------
@@ -275,27 +374,30 @@ test('markSeen: an unwritable run directory costs the roll-up, never the prompt'
   chmodSync(runDir(dataDir), 0o500);
   t.after(() => { try { chmodSync(runDir(dataDir), 0o700); } catch { /* already gone */ } });
 
-  assert.equal(S.markSeen(cfg, RUN, ['ref_a']), false,
+  assert.equal(S.markSeen(cfg, RUN, ['ref_a'], SESSION), false,
     'a failed write reports false; it must not throw out of a hook body');
-  assert.equal(S.readSeen(cfg, RUN).ids.size, 0);
+  assert.equal(S.readSeen(cfg, RUN, SESSION).ids.size, 0);
 });
 
-test('every export is total against a missing config and a missing run id', async () => {
+test('every export is total against a missing config, a missing run id and a missing session', async () => {
   const { S } = await setup();
   const cfg = /** @type {any} */ ({});
 
-  assert.doesNotThrow(() => S.readSeen(cfg, ''));
-  assert.doesNotThrow(() => S.readSeen(/** @type {any} */ (null), RUN));
-  assert.doesNotThrow(() => S.markSeen(cfg, '', ['ref_a']));
-  assert.doesNotThrow(() => S.markSeen(cfg, RUN, /** @type {any} */ (null)));
-  assert.doesNotThrow(() => S.clearSeen(cfg, ''));
+  assert.doesNotThrow(() => S.readSeen(cfg, '', SESSION));
+  assert.doesNotThrow(() => S.readSeen(/** @type {any} */ (null), RUN, SESSION));
+  assert.doesNotThrow(() => S.readSeen(cfg, RUN, /** @type {any} */ ({ not: 'a string' })));
+  assert.doesNotThrow(() => S.markSeen(cfg, '', ['ref_a'], SESSION));
+  assert.doesNotThrow(() => S.markSeen(cfg, RUN, /** @type {any} */ (null), SESSION));
+  assert.doesNotThrow(() => S.markSeen(cfg, RUN, ['ref_a'], /** @type {any} */ (42)));
+  assert.doesNotThrow(() => S.clearSeen(cfg, '', SESSION));
+  assert.doesNotThrow(() => S.clearSeen(cfg, RUN, /** @type {any} */ (undefined)));
 });
 
 // §7: the run id names a directory and can be pinned by hand, so it is untrusted input to a
 // path — the same rule `lib/state.mjs` applies everywhere else.
 test('the roll-up cannot be written outside the run directory', async () => {
   const { cfg, dataDir, S } = await setup();
-  S.markSeen(cfg, '../../escaped', ['ref_a']);
+  S.markSeen(cfg, '../../escaped', ['ref_a'], SESSION);
 
   assert.equal(existsSync(join(dataDir, '..', 'escaped')), false,
     'a run id is untrusted input to a path (lib/state.mjs safeSegment)');

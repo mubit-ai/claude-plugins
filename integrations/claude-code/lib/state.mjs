@@ -61,6 +61,27 @@ export function dataDir(cfg = {}, env = process.env) {
 }
 
 /**
+ * A `--data-dir` value as a command line received it: the trimmed path, or `''` when it is
+ * blank or an expression the host never substituted.
+ *
+ * The rung above `MUBIT_CC_DATA_DIR` for the CLIs a skill runs through Bash. A Bash tool
+ * call gets `CLAUDE_PLUGIN_DATA=""`, so the skill passes the value the host interpolated
+ * into its body instead — and on a host that interpolates nothing, the shell hands the
+ * command a literal `${CLAUDE_PLUGIN_DATA}` or an empty string. Taken as a path, the
+ * literal would create a directory of that name under whatever the cwd happened to be,
+ * write into it, and report success. So both are dropped, and the caller falls through to
+ * the same order `dataDir()` resolves in.
+ *
+ * @param {unknown} v
+ * @returns {string}
+ */
+export function dataDirFlag(v) {
+  const s = typeof v === 'string' ? v.trim() : '';
+  if (!s || /^\$\{/.test(s)) return '';
+  return s;
+}
+
+/**
  * Where this machine's Mubit state actually lives, for a process nobody told.
  *
  * Hooks and the MCP server are launched with `MUBIT_CC_DATA_DIR` pinned into them by setup, but
@@ -318,9 +339,15 @@ export function pruneStale(cfg = {}) {
       for (const e of dirEntries(join(rd, 'spill'))) {
         if (e.isFile()) expire(join(rd, 'spill', e.name), 24 * HOUR);
       }
-      // runs/<run_id>/seen.json — 6 h, the same window as the turns it aggregates
-      // (`lib/seen.mjs`). It also expires entry by entry on every read; this is the sweep
-      // for a run nobody comes back to, whose whole file would otherwise outlive its turns.
+      // runs/<run_id>/seen/<session_id>.json — 6 h, the same window as the turns it
+      // aggregates (`lib/seen.mjs`). It also expires entry by entry on every read; this is
+      // the sweep for a conversation nobody comes back to, whose whole file would otherwise
+      // outlive its turns.
+      for (const name of jsonFiles(join(rd, 'seen'))) {
+        expire(join(rd, 'seen', name), 6 * HOUR);
+      }
+      // runs/<run_id>/seen.json — the run-keyed file releases up to 0.13.0 wrote. Nothing
+      // reads it any more; this line only drains it, and can go after one release.
       expire(join(rd, 'seen.json'), 6 * HOUR);
       // runs/<run_id>/resume.json — 1 h. The briefing is already consume-once and
       // already carries its own 30 min injectability window (`lib/resume.mjs`), so this is

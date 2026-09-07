@@ -409,7 +409,10 @@ test('the parent\'s seen ids do not degrade the subagent\'s block into pointers'
     entries: Object.fromEntries(['ref_rule_1', 'ref_lesson_1', 'ref_fact_1']
       .map((id) => [id, { first: now, last: now, count: 4 }])),
   };
-  const seenFile = join(runDir, 'seen.json');
+  // Under the parent's own session file: the set is keyed by conversation, and the subagent
+  // payload carries the parent's `session_id`, so only the `-sub-` run id keeps them apart.
+  mkdirSync(join(runDir, 'seen'), { recursive: true });
+  const seenFile = join(runDir, 'seen', `${SESSION_ID}.json`);
   writeFileSync(seenFile, JSON.stringify(seen));
   const before = readFileSync(seenFile, 'utf8');
 

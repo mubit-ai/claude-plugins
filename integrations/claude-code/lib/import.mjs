@@ -542,7 +542,9 @@ export function importItems(cfg, path, opts = {}) {
  * @param {{id: string, name: string, input: Record<string, any>, cwd: string, root: string,
  *          sessionId: string, host?: string, files?: Array<{path: string, kind: string}>,
  *          exitCode?: number|null}} call
- * @param {{content: any, isError: boolean}} result
+ * @param {{content: any, isError: boolean, response?: any}} result  `response` is the host's
+ *   structured result when the source has it; on Claude Code it is where a `Write` says
+ *   whether it created or overwrote
  * @param {{projectDir?: string}} opts
  * @returns {ImportedItem|null|'denied'}
  */
@@ -577,7 +579,9 @@ export function buildToolItem(cfg, call, result, opts = {}) {
 
     const changes = failed
       ? []
-      : (Array.isArray(call.files) ? call.files : attempt(() => fileChanges(call.name, call.input), []));
+      : (Array.isArray(call.files)
+        ? call.files
+        : attempt(() => fileChanges(call.name, call.input, result.response), []));
     const runId = runIdFor(cfg, projectDir);
     if (!runId) return null;
 

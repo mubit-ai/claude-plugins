@@ -347,6 +347,9 @@ export function renderEntry(line, opts = {}) {
  * @property {string} id      `tool_result.tool_use_id`
  * @property {any} content    string or block array, as sent
  * @property {boolean} isError
+ * @property {any} [response] the host's structured result for the call, when the envelope
+ *                            carries one — Claude Code writes it as `toolUseResult` beside
+ *                            the message, and it is where a `Write` says `create` or `update`
  */
 
 /**
@@ -362,6 +365,11 @@ export function renderEntry(line, opts = {}) {
  * that walks lines independently gets the contents of a `.env` with no stage-2 protection at
  * all. Anything consuming this must pair them before it decides what to keep.
  *
+ * A result line also carries the host's structured `toolUseResult` beside the message — the
+ * same object a live `PostToolUse` receives as `tool_response`. It rides on the result so the
+ * importer can hand it to the file-change extractor, which is the only way a historical
+ * `Write` can be told apart as a create or an overwrite.
+ *
  * @param {Record<string, any>} entry
  * @returns {{uses: ToolUse[], results: ToolResult[]}}
  */
@@ -371,6 +379,7 @@ export function toolBlocks(entry) {
   try {
     const content = messageRecord(entry).content;
     if (!Array.isArray(content)) return out;
+    const response = isObject(entry) && isObject(entry.toolUseResult) ? entry.toolUseResult : undefined;
     for (const b of content) {
       if (!isObject(b)) continue;
       const type = str(b.type);
@@ -379,7 +388,7 @@ export function toolBlocks(entry) {
         if (id) out.uses.push({ id, name: str(b.name), input: isObject(b.input) ? b.input : {} });
       } else if (type === 'tool_result') {
         const id = str(b.tool_use_id);
-        if (id) out.results.push({ id, content: b.content, isError: b.is_error === true });
+        if (id) out.results.push({ id, content: b.content, isError: b.is_error === true, ...(response ? { response } : {}) });
       }
     }
   } catch {

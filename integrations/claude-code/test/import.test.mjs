@@ -200,6 +200,36 @@ describe('the tool_use / tool_result join', () => {
    * because a scrubbed `.env` is still a map of which secrets a project holds — would never
    * fire.
    */
+  /**
+   * The input of a `Write` is the same whether it created or overwrote; the host says which
+   * on the result line, as `toolUseResult.type`. The join carries it so the file-change lane
+   * records an overwrite as `update` on import, the way live capture does from `tool_response`.
+   */
+  it('reads a Write\'s create-or-update from the toolUseResult beside the result', async () => {
+    const { importItems } = await I();
+    const { cfg } = await setup({ projectDir: '/r/app' });
+    const root = transcriptRoot({
+      '/r/app': {
+        records: [
+          callLine('toolu_01W', 'Write', { file_path: '/r/app/NOTES.md', content: 'a longer note' }, '/r/app'),
+          {
+            ...resultLine('toolu_01W', 'The file /r/app/NOTES.md has been updated successfully.', '/r/app'),
+            toolUseResult: { type: 'update', filePath: '/r/app/NOTES.md', content: 'a longer note', structuredPatch: [] },
+          },
+          callLine('toolu_01C', 'Write', { file_path: '/r/app/NEW.md', content: 'new' }, '/r/app'),
+          {
+            ...resultLine('toolu_01C', 'File created successfully at: /r/app/NEW.md', '/r/app'),
+            toolUseResult: { type: 'create', filePath: '/r/app/NEW.md', content: 'new' },
+          },
+        ],
+      },
+    });
+    const r = importItems(cfg, join(root, '-r-app', `${SESSION}.jsonl`), { roots: ['/r/app'] });
+    const kinds = Object.fromEntries(r.items.map((i) => [i.item.item_id, JSON.parse(i.item.metadata_json).files]));
+    assert.deepEqual(kinds['cc-toolu_01W'], [{ path: '/r/app/NOTES.md', kind: 'update' }]);
+    assert.deepEqual(kinds['cc-toolu_01C'], [{ path: '/r/app/NEW.md', kind: 'add' }]);
+  });
+
   it('drops a .env read whole, body and all, because the join is what sees the path', async () => {
     const { importItems } = await I();
     const projectDir = makeProjectDir({ files: { '.env': 'OPENAI_API_KEY=sk-x\n' } });

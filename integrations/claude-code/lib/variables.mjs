@@ -68,10 +68,11 @@ export const VARIABLE_ROUTES = Object.freeze({
 /**
  * The namespace this plugin writes under: `cc.pin.<slug>`.
  *
- * One variable per pin rather than one blob for all of them. Codaph keeps a single
- * `codaph.run_state`, but that shape is read-modify-write, and under the default
- * `per-directory` strategy two terminals in one directory share a run — so a blob loses a
- * concurrent pin silently, which is the worst way to lose a standing constraint.
+ * One variable per pin rather than one blob for all of them. A single `run_state`-style
+ * blob is read-modify-write, and under the default `per-directory` strategy two terminals
+ * in one directory share a run — so a blob loses a concurrent pin silently, which is the
+ * worst way to lose a standing constraint. One variable per pin makes every write
+ * independent of every other.
  */
 export const PIN_NAMESPACE = 'cc.pin.';
 

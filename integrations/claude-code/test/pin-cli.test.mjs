@@ -261,7 +261,7 @@ test('pin clear --all: deletes every pin in the namespace and nothing else', asy
         variables: [
           { name: 'cc.pin.a', value_json: '"one"' },
           { name: 'cc.pin.b', value_json: '"two"' },
-          { name: 'codaph.run_state', value_json: '{"step":3}' },
+          { name: 'other.run_state', value_json: '{"step":3}' },
         ],
       },
     },

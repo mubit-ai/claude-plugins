@@ -122,7 +122,7 @@ describe('classifyTool — the §4.5 tool_name table', () => {
 
   it('handles other foreign mcp__* servers the same way', async () => {
     const { classifyTool } = await C();
-    for (const tool of ['mcp__codaph__codaph_status', 'mcp__linear__list_issues']) {
+    for (const tool of ['mcp__acme__acme_status', 'mcp__linear__list_issues']) {
       const r = classifyTool(tool, {}, 'ok');
       assert.equal(r.intent, 'tool_output', `${tool} intent`);
       assert.equal(r.importance, 'low', `${tool} importance`);
@@ -259,7 +259,7 @@ describe('§1.5 — every produced item carries a real intent', () => {
     'Read', 'Grep', 'Glob', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit',
     'Bash', 'BashOutput', 'KillShell', 'WebFetch', 'WebSearch', 'Task',
     'TodoWrite', 'ExitPlanMode', 'SlashCommand', 'Skill', 'AskUserQuestion',
-    'mcp__github__create_issue', 'mcp__codaph__codaph_status',
+    'mcp__github__create_issue', 'mcp__acme__acme_status',
   ];
 
   const DEGENERATE = [

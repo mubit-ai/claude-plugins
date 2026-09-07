@@ -889,7 +889,7 @@ describe('self-reference suppression (§4.4)', () => {
 
   it('KEEPS other foreign MCP tools', async () => {
     const { isSelfReference } = await R();
-    for (const tool of ['mcp__codaph__codaph_status', 'mcp__linear__list_issues', 'mcp__slack__post_message']) {
+    for (const tool of ['mcp__acme__acme_status', 'mcp__linear__list_issues', 'mcp__slack__post_message']) {
       assert.equal(isSelfReference(tool, {}, cfg()), false, `${tool} must be kept`);
     }
   });

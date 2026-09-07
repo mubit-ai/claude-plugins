@@ -196,7 +196,7 @@ test('variables: only the plugin namespace survives a list', async (t) => {
       json: {
         variables: [
           { name: 'cc.pin.vendored', value_json: '"no vendored server edits"', last_updated: '2026-08-24T00:00:00Z' },
-          { name: 'codaph.run_state', value_json: '{"step":3}' },
+          { name: 'other.run_state', value_json: '{"step":3}' },
           { name: 'cc.pinned', value_json: '"near miss"' },
           { name: 'CC.PIN.shouty', value_json: '"case matters"' },
           { name: 'cc.pin.twin', value_json: '"ship the codex twin"' },

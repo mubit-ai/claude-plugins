@@ -448,18 +448,33 @@ for (const row of LANG_ROWS) {
 }
 
 // §4.1: the always-on identity tag, plus the TYPE:NAME[:VERSION] grammar.
-test('envTags(): always carries tool:claude-code and repo:<slug>, in TYPE:NAME form', async () => {
+test('envTags(): always carries tool:<host> first and repo:<slug>, in TYPE:NAME form', async () => {
   const config = await lib('config.mjs');
   const dataDir = makeDataDir();
   const projectDir = makeProjectDir({ files: { 'Cargo.toml': '[package]\n' } });
 
   const tags = loadAnd(config, envOf(dataDir, projectDir), (cfg) => config.envTags(cfg, projectDir));
-  assert.ok(tags.includes('tool:claude-code'), `missing tool:claude-code in [${tags.join(', ')}]`);
+  assert.equal(tags[0], 'tool:claude-code', `expected tool:claude-code first in [${tags.join(', ')}]`);
   assert.ok(tags.some((t) => /^repo:\S+$/.test(t)), `missing repo:<slug> in [${tags.join(', ')}]`);
   for (const t of tags) {
     assert.match(t, /^[a-z][a-z0-9_-]*:[^\s:]+(:[^\s:]+)?$/,
       `"${t}" is not TYPE:NAME[:VERSION]`);
   }
+});
+
+// §4.1: the identity tag names the host that wrote the item. The Codex plugin's boot declares
+// `MUBIT_CC_HOST=codex`; a Codex capture tagged `tool:claude-code` made the two hosts'
+// histories indistinguishable on the wire, while an *imported* Codex rollout said `tool:codex`.
+test('envTags(): under Codex the identity tag is tool:codex, and tool:claude-code is absent', async () => {
+  const config = await lib('config.mjs');
+  const dataDir = makeDataDir();
+  const projectDir = makeProjectDir({ files: { 'package.json': '{}' } });
+  const env = envOf(dataDir, projectDir, { MUBIT_CC_HOST: 'codex' });
+
+  const tags = loadAnd(config, env, (cfg) => config.envTags(cfg, projectDir));
+  assert.equal(tags[0], 'tool:codex', `expected tool:codex first in [${tags.join(', ')}]`);
+  assert.ok(!tags.includes('tool:claude-code'),
+    `a Codex item must not also claim tool:claude-code: [${tags.join(', ')}]`);
 });
 
 // §4.1: branch:<name> comes from the checked-out branch.

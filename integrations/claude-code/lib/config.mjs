@@ -212,11 +212,13 @@ const LANG_FILES = [
 ];
 
 /**
- * `["tool:claude-code", "repo:<slug>", "branch:<name>", "lang:<x>"]`, plus
+ * `["tool:<host>", "repo:<slug>", "branch:<name>", "lang:<x>"]`, plus
  * `MUBIT_CC_ENV_TAGS` extras appended verbatim, capped at 8.
  *
  * The cap slices from the tail, and the derived identity tag is emitted first,
- * so `tool:claude-code` can never be the thing the cap drops.
+ * so the `tool:` tag can never be the thing the cap drops. The host is `cfg.host`
+ * — `MUBIT_CC_HOST`, which the Codex plugin's boot declares — so a Codex capture says
+ * `tool:codex` and the two histories stay tellable apart on the wire.
  *
  * @param {Record<string, any>} cfg
  * @param {string} [projectDir]
@@ -225,7 +227,7 @@ const LANG_FILES = [
 export function envTags(cfg, projectDir = '') {
   const dir = projectDir || cfg?.projectDir || process.cwd();
   /** @type {string[]} */
-  const tags = ['tool:claude-code'];
+  const tags = [`tool:${cfg?.host === 'codex' ? 'codex' : host()}`];
 
   const root = gitToplevel(dir) || dir;
   const slug = sanitiseTag(basename(root));

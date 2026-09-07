@@ -114,6 +114,9 @@ import { messageRecord, messageText, parseLine, readForward, statOf, toolBlocks 
 // Where the transcripts are
 // ---------------------------------------------------------------------------
 
+/** The `tool:` tag every item from this source carries, whichever host is running the import. */
+const HOST = 'claude-code';
+
 /** The host's transcript root. Overridable so a test never reads the real one. */
 export const TRANSCRIPT_ROOT_ENV = 'MUBIT_CC_TRANSCRIPT_ROOT';
 
@@ -475,7 +478,7 @@ export function importItems(cfg, path, opts = {}) {
     if (roots.length && !root) { skipped += 1; continue; }
 
     const { uses, results } = toolBlocks(entry);
-    for (const u of uses) pending.set(u.id, { ...u, cwd, root, sessionId });
+    for (const u of uses) pending.set(u.id, { ...u, cwd, root, sessionId, host: HOST });
 
     for (const r of results) {
       const call = pending.get(r.id);
@@ -500,7 +503,7 @@ export function importItems(cfg, path, opts = {}) {
     if (said.role === 'user' && said.text) {
       const done = buildTurnItem(cfg, turn, opts);
       if (done) items.push(done);
-      turn = { prompt: said.text, answer: [], cwd, root, sessionId };
+      turn = { prompt: said.text, answer: [], cwd, root, sessionId, host: HOST };
     } else if (said.role === 'assistant' && said.text && turn) {
       if (turn.answer.join('\n').length < MAX_TEXT_CHARS) turn.answer.push(said.text);
     }
@@ -747,18 +750,14 @@ export function buildTurnItem(cfg, turn, opts = {}) {
 /**
  * The ingest item shape, as `hooks/src/capture.mjs` builds one.
  *
- * `envTags` always leads with `tool:claude-code`. An item from another source replaces that
- * one tag and keeps the rest — the repo, branch and language tags describe the project, which
- * is the same project whichever harness was driving it.
+ * `envTags` leads with the `tool:` tag of the host the plugin is running under. An imported
+ * item names its own host instead — Claude Code's transcripts read under Codex are still
+ * Claude Code's — and keeps the rest: the repo, branch and language tags describe the project,
+ * which is the same project whichever harness was driving it.
  */
 function item(cfg, o) {
-  const tags = attempt(() => envTags(cfg, o.projectDir), ['tool:claude-code']);
-  const host = str(o.host);
-  if (host && host !== 'claude-code') {
-    const i = tags.findIndex((t) => typeof t === 'string' && t.startsWith('tool:'));
-    if (i === -1) tags.unshift(`tool:${host}`);
-    else tags[i] = `tool:${host}`;
-  }
+  const host = str(o.host) || str(cfg?.host) || 'claude-code';
+  const tags = attempt(() => envTags({ ...cfg, host }, o.projectDir), [`tool:${host}`]);
   return {
     item_id: clamp(o.id, MAX_ID_CHARS),
     content_type: 'text',
@@ -814,7 +813,7 @@ function runIdFor(cfg, projectDir) {
  */
 export const claudeCodeSource = Object.freeze({
   name: 'claude-code',
-  host: 'claude-code',
+  host: HOST,
   root: (env = process.env) => transcriptRoot(env),
   discover: (opts = {}) => discoverTranscripts(opts),
   readItems: (cfg, path, opts = {}) => importItems(cfg, path, opts),

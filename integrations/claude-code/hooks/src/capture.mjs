@@ -670,7 +670,7 @@ function item(o) {
     // run id that follows a mid-session `cd` while `repo:`/`branch:` stay on the launch repo
     // would be half a fix: the memory would land in the right run wearing the wrong labels.
     env_tags: attempt(
-      () => envTags(cfg, resolveProjectDir(cfg, o.payload)), ['tool:claude-code']),
+      () => envTags(cfg, resolveProjectDir(cfg, o.payload)), [`tool:${host()}`]),
     // Both merged here rather than at each call site, so *every* ingest item this hook
     // writes carries them uniformly, and both omitted entirely when unknown rather than
     // written empty — a field that is always present and never says anything is worse

@@ -48,6 +48,7 @@ const SKILLS = [
   'memory-health',
   'activity',
   'pin',
+  'import',
 ];
 
 /**

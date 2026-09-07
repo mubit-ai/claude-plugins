@@ -46,6 +46,8 @@
 
 import { openSync, readSync, closeSync, fstatSync } from 'node:fs';
 
+import { messageText } from './transcript.mjs';
+
 /** How much of the tail to read. A `CommandExecution` line runs a few KB at most. */
 const TAIL_BYTES = 512 * 1024;
 
@@ -55,8 +57,6 @@ const HEAD_BYTES = 256 * 1024;
 /** A subagent's task, not its transcript: enough to identify the work, not to replay it. */
 const MAX_PROMPT_CHARS = 4096;
 
-/** `input_text` / `output_text` are Codex's spellings of `text`. */
-const TEXT_BLOCKS = new Set(['text', 'input_text', 'output_text']);
 
 /**
  * @typedef {object} ToolCallRecord
@@ -217,27 +217,10 @@ export function firstUserText(transcriptPath, opts = {}) {
     if (!record || typeof record !== 'object') continue;
     if (record.role !== 'user') continue;
 
-    const body = blockText(record.content);
+    const body = messageText(record.content);
     if (body.trim()) return body.slice(0, Number(opts.maxChars) > 0 ? Number(opts.maxChars) : MAX_PROMPT_CHARS);
   }
   return '';
-}
-
-/** The text out of a message's content blocks. Mirrors the checkpoint reader's rules. */
-function blockText(content) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .map((b) => {
-      if (typeof b === 'string') return b;
-      if (!b || typeof b !== 'object') return '';
-      const type = typeof b.type === 'string' ? b.type : '';
-      if (TEXT_BLOCKS.has(type) && typeof b.text === 'string') return b.text;
-      if (!type && typeof b.text === 'string') return b.text;
-      return '';
-    })
-    .filter(Boolean)
-    .join('\n');
 }
 
 /** The first `bytes` of a file, as text. `''` for anything that goes wrong. */

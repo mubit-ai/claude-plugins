@@ -312,6 +312,16 @@ export function pruneStale(cfg = {}) {
       expire(join(root, 'status', name), name === 'health.json' ? 30 * SEC : 12 * HOUR);
     }
 
+    // import/<hash>.json — 30 d. One cursor per transcript file, and the only state the
+    // transcript importer keeps. Thirty days matches `sessions/`: a transcript nobody has
+    // re-imported in a month is one whose cursor costs more to keep than the file costs to
+    // re-read, and dropping it is safe because the ids an import mints are the ones live
+    // capture would have written. Without a row here it would live forever — 1,283 files on
+    // one machine, measured.
+    for (const name of jsonFiles(join(root, 'import'))) {
+      expire(join(root, 'import', name), 30 * DAY);
+    }
+
     // tmp/<uuid>.json — 1 h (detached payload handoff; the child normally unlinks it)
     for (const e of dirEntries(join(root, 'tmp'))) {
       if (e.isFile()) expire(join(root, 'tmp', e.name), 1 * HOUR);

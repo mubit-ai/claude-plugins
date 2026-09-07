@@ -301,6 +301,10 @@ const TTL_ROWS = [
   // are caches the next tool call rebuilds, so the row is here to stop a run nobody returns
   // to leaving a file behind for ever, not to bound staleness.
   { what: 'file-change index', rel: 'runs/cc-x/files.json', ttl: 7 * DAY },
+  // The transcript importer's per-file cursor. Thirty days, matching `sessions/`: a transcript
+  // nobody has re-imported in a month costs more to remember than to re-read. Without this row
+  // it would live forever, and there are 1,283 transcript files on one measured machine.
+  { what: 'import cursor', rel: 'import/0a1b2c3d4e5f6071.json', ttl: 30 * DAY },
 ];
 
 for (const row of TTL_ROWS) {

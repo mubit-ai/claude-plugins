@@ -82,6 +82,7 @@ import { postCheckpoint } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { redactText } from '../../lib/redact.mjs';
 import { deriveAgentId, deriveRunId, hostSessionId, resolveProjectDir, turnNumber } from '../../lib/runid.mjs';
+import { renderEntry } from '../../lib/transcript.mjs';
 import { clearResume } from '../../lib/resume.mjs';
 import { clearSeen } from '../../lib/seen.mjs';
 import { appendItem } from '../../lib/spool.mjs';
@@ -108,23 +109,24 @@ const MIN_POST_MS = 300;
 const SNAPSHOT_BYTES = 200 * 1024;
 
 /**
- * Content-block types that carry human-readable message text, across both hosts —
- * Claude Code's `text` and Codex's `input_text` / `output_text`.
+ * The line renderer now lives in `lib/transcript.mjs`, along with the block allowlist it
+ * applies and the envelope sniff that finds a record under `message` (Claude Code) or
+ * `payload` (Codex). It was carried here, and near-copied in `lib/codex-rollout.mjs`, whose
+ * copy said outright that it "mirrors the checkpoint reader's rules" — a rule that is
+ * mirrored is a rule that drifts, and the importer would have made it three.
  *
- * `messageText` rejects every block type outside this set, and that rejection is
- * load-bearing: tool-use and tool-result blocks are already captured item-by-item through
- * the ordinary ingest path, and including them here would spend the 200 KB window on the one
- * part of the session that is not being thrown away. So it stays an allowlist — a block type
- * nobody has taught it about is silently skipped, which is the safe direction.
+ * **The rejection this hook depends on is the default and stays the default.** Tool-use and
+ * tool-result blocks are skipped, because on a live session they are already captured
+ * item-by-item through the ordinary ingest path and including them here would spend the
+ * 200 KB window on the one part of the session that is not being thrown away. The importer
+ * passes `includeTools` to invert it, on a transcript where nothing was ever captured.
  *
- * It lives up here with the other constants rather than beside its one reader, and that is
- * not tidiness. This module runs `await runHook(...)` at module scope, so every `const` below
- * that line is still in its temporal dead zone while the hook body executes — and the body's
- * `attempt()` wrapper swallows the ReferenceError, yielding `no_transcript` on a transcript
- * that was there all along. Declared below, this constant silently disabled every checkpoint
- * on both hosts.
+ * A note worth keeping with the move: it was an `import` that made it safe. This module runs
+ * `await runHook(...)` at module scope, so every `const` below that line is still in its
+ * temporal dead zone while the hook body executes — and `attempt()` swallows the
+ * ReferenceError, yielding `no_transcript` on a transcript that was there all along. Imports
+ * are hoisted and evaluated before the body; a `const` here would not have been.
  */
-const TEXT_BLOCKS = new Set(['text', 'input_text', 'output_text']);
 
 /**
  * How much raw transcript is read to find that 200 KB. A `.jsonl` transcript spends most of
@@ -483,112 +485,6 @@ function lastMessages(raw, maxBytes) {
   return { text: picked.join('\n'), messages: picked.length };
 }
 
-/**
- * One transcript record as `"<role>: <text>"`, or `''` for a record that carries no message
- * text (a tool result, a summary marker, a blank line).
- *
- * A line that is not JSON is treated as message text verbatim: a hand-rolled or older
- * transcript format is still a transcript, and refusing to snapshot it would trade a whole
- * feature for a parser assumption.
- *
- * ---------------------------------------------------------------------------
- * Two hosts, two envelopes, one rendering
- * ---------------------------------------------------------------------------
- * Claude Code writes `{"type":…,"message":{"role":…,"content":[{"type":"text","text":…}]}}`.
- * Codex writes a rollout: `{"type":"response_item","payload":{"type":"message","role":…,
- * "content":[{"type":"input_text"|"output_text","text":…}]}}`.
- *
- * The shape is sniffed **per line**, not per file, which costs nothing and means a data
- * directory shared by both hosts — which is exactly what the Codex port arranges — can hold
- * checkpoints from either without a mode flag anywhere.
- *
- * What made this worth a branch rather than a lenient `??` chain is that the failure is
- * silent and unrecoverable. `PreCompact` is the one event where the plugin gets no second
- * chance: once the host compacts, the transcript is gone. A reader that finds no `message`
- * key, falls back to the envelope, finds no `content` there either and returns `''` for every
- * line produces a hook that exits 0, logs "no readable transcript text", and loses the whole
- * pre-compaction context of every Codex session.
- *
- * @param {string} line
- * @returns {string}
- */
-function renderEntry(line) {
-  const s = typeof line === 'string' ? line.trim() : '';
-  if (!s) return '';
-
-  /** @type {any} */
-  let entry;
-  try {
-    entry = JSON.parse(s);
-  } catch {
-    return s;
-  }
-  if (!isObject(entry)) return '';
-
-  const message = messageRecord(entry);
-  const body = messageText(message.content ?? entry.content ?? entry.text);
-  if (!body.trim()) return '';
-
-  const role = str(message.role) || str(entry.role) || str(entry.type) || 'message';
-  return `${role}: ${body}`;
-}
-
-/**
- * The record inside a transcript line's envelope.
- *
- * Claude Code nests it under `message`. Codex nests it under `payload`, but only some
- * `payload`s are conversation — a rollout is mostly `session_meta`, `turn_context`,
- * `world_state`, `token_count` and `reasoning`, and one of those (`reasoning`) carries a
- * base64 blob large enough to fill the entire 200 KB window on its own. So the Codex branch
- * is taken on a **positive** signal: a `payload` that is an object carrying a `role` or a
- * `content`. Everything else falls through to the envelope itself, which is what the older
- * lenient behaviour did and what keeps a hand-rolled transcript readable.
- *
- * @param {Record<string, any>} entry
- * @returns {Record<string, any>}
- */
-function messageRecord(entry) {
-  if (isObject(entry.message)) return entry.message;
-  const payload = entry.payload;
-  if (isObject(payload) && (typeof payload.role === 'string' || payload.content !== undefined)) {
-    return payload;
-  }
-  return entry;
-}
-
-/**
- * The human-readable text of a `message.content`, which arrives as a string, a block array,
- * or a single block depending on the record.
- *
- * Tool-use and tool-result blocks are deliberately skipped: their content is already captured
- * item-by-item by `capture.mjs` through the ordinary ingest path, and including it here would
- * spend the 200 KB window on the one part of the session that is not being thrown away.
- *
- * @param {any} content
- * @param {number} [depth]
- * @returns {string}
- */
-function messageText(content, depth = 0) {
-  if (content === null || content === undefined) return '';
-  if (typeof content === 'string') return content;
-  if (depth > 3) return '';
-
-  if (Array.isArray(content)) {
-    return content.map((b) => messageText(b, depth + 1)).filter(Boolean).join('\n');
-  }
-  if (!isObject(content)) return '';
-
-  const type = str(content.type);
-  // `input_text` / `output_text` are Codex's spellings of `text`. Without them the branch
-  // below rejects every conversational block in a rollout — the envelope sniff finds the
-  // right object and this drops its contents, which looks identical to having no reader at
-  // all.
-  if (TEXT_BLOCKS.has(type) && typeof content.text === 'string') return content.text;
-  if (type === 'thinking' && typeof content.thinking === 'string') return content.thinking;
-  if (type) return ''; // tool_use, tool_result, image, reasoning, …
-  if (typeof content.text === 'string') return content.text;
-  return '';
-}
 
 
 // ---------------------------------------------------------------------------

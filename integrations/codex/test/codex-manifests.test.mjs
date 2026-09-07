@@ -66,6 +66,7 @@ const SKILLS = [
   'memory-health',
   'activity',
   'pin',
+  'import',
 ];
 
 /** `.mcp.json` names the server `mubit`, so the model sees `mcp__mubit__<tool>`. */

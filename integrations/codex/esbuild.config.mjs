@@ -197,6 +197,10 @@ const targets = [
   // The admin binary, from the same shared source. The four skills that call it ship under
   // both hosts, so without this target the Codex copies name a path that does not exist.
   { entryPoints: [resolve(SHARED, 'bin', 'admin.src.mjs')], outfile: out('bin/admin.mjs'), ...shared },
+  // `/mubit-memory:import`, the transcript backfill. Shared source, same as every other
+  // binary here: the transcripts it reads are Claude Code's, and a Codex user with both
+  // installed has the same history to import.
+  { entryPoints: [resolve(SHARED, 'bin', 'import.src.mjs')], outfile: out('bin/import.mjs'), ...shared },
   // The dashboard binary, built from the same shared source as the Claude Code copy. Two
   // installable plugins cannot share a path — the same reason this tree carries its own
   // `mcp/dist/server.js` — so the bundle is emitted here rather than referenced across.

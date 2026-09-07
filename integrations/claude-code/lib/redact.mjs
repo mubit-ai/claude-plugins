@@ -540,16 +540,10 @@ function isGitIgnored(p, projectDir) {
   const root = gitRootOf(projectDir);
   if (!root) return false;
 
-  let rel = String(p).replace(/\\/g, '/');
-  if (isAbsolute(rel)) {
-    const abs = resolve(rel);
-    for (const base of new Set([resolve(projectDir), root])) {
-      if (abs === base) return false;
-      if (abs.startsWith(base + sep)) { rel = abs.slice(base.length + 1); break; }
-    }
-    if (isAbsolute(rel)) return false; // outside the repo — git cannot speak to it
-  }
-  if (!rel || rel.startsWith('..')) return false;
+  // Shared with `warmIgnoreCache`, so a batched warm and this single lookup key the cache
+  // identically. Two spellings of one path would make a warm look like a hit and fork anyway.
+  const rel = relativeToRepo(p, projectDir, root);
+  if (!rel) return false; // outside the repo — git cannot speak to it
 
   const key = `${root} ${rel}`;
   const hit = _ignoreCache.get(key);
@@ -566,6 +560,86 @@ function isGitIgnored(p, projectDir) {
   }
   _ignoreCache.set(key, ignored);
   return ignored;
+}
+
+/**
+ * Answer `git check-ignore` for many paths in one fork, filling the same cache
+ * `isGitIgnored` reads.
+ *
+ * `isGitIgnored` shells out per unique `(repo, path)` with a 2 s timeout. That is right for
+ * capture, which sees one path per tool call and memoises it — the rule is "one
+ * `git check-ignore` per drain batch, never one per capture". It is wrong for anything
+ * holding a list: a caller walking hundreds of sessions would be dominated by `git` forks,
+ * and a 2 s timeout each is a bound on the wrong thing entirely.
+ *
+ * `--stdin -z` takes the whole list and prints back the subset that is ignored, so both
+ * answers are learned in one process. Paths that come back are cached `true`; every other
+ * path *that was asked about* is cached `false`, which is the half that matters — without it
+ * the caller still forks once per unignored path, which is most of them.
+ *
+ * Anything that goes wrong caches nothing at all, so `isGitIgnored` falls back to asking one
+ * at a time. A failed warm must not read as "nothing is ignored": that is the direction in
+ * which a `.env` gets captured.
+ *
+ * @param {string[]} paths
+ * @param {string} projectDir
+ * @returns {number} how many paths this resolved; 0 if the warm did nothing
+ */
+export function warmIgnoreCache(paths, projectDir) {
+  try {
+    const root = gitRootOf(projectDir);
+    if (!root) return 0;
+
+    /** rel -> the key `isGitIgnored` would look up. */
+    const wanted = new Map();
+    for (const p of Array.isArray(paths) ? paths : []) {
+      const rel = relativeToRepo(p, projectDir, root);
+      if (!rel) continue;
+      const key = `${root} ${rel}`;
+      if (_ignoreCache.has(key)) continue;
+      wanted.set(rel, key);
+    }
+    if (wanted.size === 0) return 0;
+
+    const input = `${[...wanted.keys()].join('\0')}\0`;
+    const r = spawnSync('git', ['check-ignore', '-z', '--stdin'], {
+      cwd: root, input, encoding: 'utf8', timeout: 30000, maxBuffer: 16 * 1024 * 1024,
+    });
+    // 0 = some paths are ignored, 1 = none are. Anything else — including a timeout, which
+    // leaves `status` null — is an error, and an error is not evidence that nothing is
+    // ignored.
+    if (r.error || (r.status !== 0 && r.status !== 1)) return 0;
+
+    const ignored = new Set(String(r.stdout ?? '').split('\0').filter(Boolean));
+    for (const [rel, key] of wanted) _ignoreCache.set(key, ignored.has(rel));
+    return wanted.size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * A path as `git` would name it from `root`, or `''` when git cannot speak to it.
+ *
+ * Extracted from `isGitIgnored` so the batched warm above keys the cache identically. Two
+ * spellings of one path would make a warm look like a hit and fork anyway, which is the
+ * failure mode a batch exists to remove and the one that would be hardest to notice.
+ *
+ * @param {string} p @param {string} projectDir @param {string} root @returns {string}
+ */
+function relativeToRepo(p, projectDir, root) {
+  if (typeof p !== 'string' || !p) return '';
+  let rel = p.replace(/\\/g, '/');
+  if (isAbsolute(rel)) {
+    const abs = resolve(rel);
+    for (const base of new Set([resolve(projectDir || root), root])) {
+      if (abs === base) return '';
+      if (abs.startsWith(base + sep)) { rel = abs.slice(base.length + 1); break; }
+    }
+    if (isAbsolute(rel)) return '';
+  }
+  if (!rel || rel.startsWith('..')) return '';
+  return rel;
 }
 
 /**

@@ -62,6 +62,7 @@ const SKILLS = [
   'memory-health',
   'activity',
   'pin',
+  'import',
 ];
 
 /**
@@ -74,7 +75,7 @@ const SKILLS = [
  * registers twenty-one tools and not one of them touches variables, so there is no tool a
  * `tools:` grant could name. All four are skipped by name rather than by accident.
  */
-const NO_MCP_SKILLS = ['auth', 'dashboard', 'activity', 'pin'];
+const NO_MCP_SKILLS = ['auth', 'dashboard', 'activity', 'pin', 'import'];
 const MCP_SKILLS = SKILLS.filter((s) => !NO_MCP_SKILLS.includes(s));
 
 // ---------------------------------------------------------------------------

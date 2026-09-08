@@ -181,8 +181,14 @@ function prepare(env) {
   // `cfg` is handed over so the guard can *assemble* that catalogue rather than only narrow
   // the request for it — one read of the activity feed, filtered here. Without it the read
   // path still narrows; it just cannot answer.
+  //
+  // The host session id is what lets a write say which session and which prompt it came
+  // from: the guard reads the open turn under the run the session record names, which after
+  // a `/clear` is not the run pinned above. Absent — the startup race, or a host that
+  // exposes none — writes go out unstamped rather than stamped with a guess.
+  const sessionId = hostPayload(env).session_id ?? '';
   const ceiling = resolveCeiling(cfg.mcpLessonScope);
-  installFetchGuard({ ceiling, runId, pinRun: true, cfg });
+  installFetchGuard({ ceiling, runId, pinRun: true, cfg, sessionId });
 
   // And the seventh. Under tool search the host loads only tool *names* and the server's
   // `instructions` field at session start, and a subagent sees neither the SessionStart
@@ -194,9 +200,7 @@ function prepare(env) {
   // `process.stdout` as a constructor default and holds it from then on.
   installInstructionsGuard({ instructions: INSTRUCTIONS });
   // The seen-set the guard reads is one conversation's (`lib/seen.mjs`), so it is keyed by
-  // the host session id this process was started with. Without one — the startup race, or a
-  // host that exposes none — every result renders in full and nothing is marked.
-  const sessionId = hostPayload(env).session_id ?? '';
+  // the same host session id. Without one every result renders in full and nothing is marked.
   installResultsGuard({
     cfg, runId, sessionId, repeatMode: cfg.recallRepeatMode, budget: cfg.mcpResultTokenBudget,
   });
@@ -206,6 +210,7 @@ function prepare(env) {
     lesson_scope: ceiling, pin_run: true, instruction_chars: INSTRUCTIONS.length,
     result_tokens: cfg.mcpResultTokenBudget,
     seen: sessionId ? 'session' : 'off', repeat_mode: cfg.recallRepeatMode,
+    provenance: sessionId ? 'stamped' : 'off',
   });
   return true;
 }

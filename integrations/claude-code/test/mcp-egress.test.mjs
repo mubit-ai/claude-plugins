@@ -381,3 +381,255 @@ test('the vendored bundle still hard-codes the scope this guard exists to correc
     + '  Re-check what the SDK now sends, then retire the guard (or narrow it to the run pin)\n'
     + '  rather than leaving two layers correcting the same value.');
 });
+
+// ---------------------------------------------------------------------------
+// Provenance: which session and which prompt a write came from
+// ---------------------------------------------------------------------------
+
+/*
+ * A lesson written through `mubit_learned` reached the instance with `metadata_json` of
+ * `{verified_in_production}` or nothing at all, so nothing on the instance could say which
+ * session or which prompt produced it. The hooks know both: `stage-prompt` writes the open turn
+ * under `runs/<run>/turns/<prompt_id>.json`, and the host puts `CLAUDE_CODE_SESSION_ID` in the
+ * MCP server's environment. The guard joins them at write time and stamps the item.
+ *
+ * The stamp is a third, separate concern from the clamp and the pin: it changes no scope,
+ * moves no run, and annotates nothing on the way back — a stamped write is still "a write that
+ * needed no correcting".
+ */
+
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { makeDataDir } from './helpers/harness.mjs';
+
+const SID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+const PROMPT = '11111111-2222-4333-8444-555555555555';
+
+/** One turn file, in the shape `stage-prompt.mjs` writes it. */
+function writeTurn(dataDir, runId, turn) {
+  const dir = join(dataDir, 'runs', runId, 'turns');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${turn.prompt_id}.json`), JSON.stringify({
+    prompt: 'give me the commands to start the daemon',
+    prompt_id: PROMPT,
+    session_id: SID,
+    started_at: Date.now() - 20_000,
+    recalled: [],
+    turn_number: 7,
+    ...turn,
+  }));
+}
+
+/** One session record, in the shape `lib/runid.mjs` writes it. */
+function writeSession(dataDir, sid, runId) {
+  mkdirSync(join(dataDir, 'sessions'), { recursive: true });
+  writeFileSync(join(dataDir, 'sessions', `${sid}.json`), JSON.stringify({
+    run_id: runId, agent_id: 'claude-code', strategy: 'per-directory',
+    project_dir: '/home/user/proj', project_root: '/home/user/proj',
+    created_at: Date.now() - 60_000, last_seen_at: Date.now(), mode: 'hosted', clear_count: 0,
+  }));
+}
+
+/** The `metadata_json` an item carried, parsed. */
+function metaOf(item) {
+  assert.equal(typeof item.metadata_json, 'string', 'metadata_json goes on the wire as a JSON string');
+  return item.metadata_json ? JSON.parse(item.metadata_json) : null;
+}
+
+/** A call with a data dir the test wrote fixtures into, and the host session id in the env. */
+async function callStamped(t, name, args, o = {}) {
+  const dataDir = o.dataDir ?? makeDataDir();
+  const server = await fakeMubit(o.routes ?? {});
+  t.after(() => server.close());
+  const out = await mcpCallTool(name, args, {
+    endpoint: server.url,
+    runId: RUN,
+    dataDir,
+    extra: { ...(o.session === false ? {} : { CLAUDE_CODE_SESSION_ID: SID }), ...(o.extra ?? {}) },
+  });
+  return { server, out, dataDir };
+}
+
+test('a lesson written during an open turn is stamped with the session, the prompt and the turn number', async (t) => {
+  const dataDir = makeDataDir();
+  const startedAt = Date.now() - 20_000;
+  writeTurn(dataDir, RUN, { started_at: startedAt });
+
+  const { server, out } = await callStamped(t, 'mubit_learned', { text: LESSON }, { dataDir });
+  const { item } = wrote(server);
+  const meta = metaOf(item);
+
+  assert.equal(meta.session_id, SID);
+  assert.equal(meta.prompt_id, PROMPT);
+  assert.equal(meta.turn_number, 7);
+  assert.equal(meta.prompt_started_at, startedAt);
+  assert.equal(item.text, LESSON, 'the stamp rides beside the lesson, never instead of it');
+  assert.equal(out.isError, false);
+  assert.doesNotMatch(out.text, /mcpLessonScope|MUBIT_MCP_LESSON_SCOPE/,
+    `a stamp is not a correction and must not be reported as one:\n${out.text}`);
+});
+
+// Provenance is not a lesson property: an archived note has a session and a prompt too.
+test('an archived note is stamped the same way', async (t) => {
+  const dataDir = makeDataDir();
+  writeTurn(dataDir, RUN, {});
+
+  const { server } = await callStamped(t, 'mubit_archive',
+    { content: 'the decision we took', artifact_kind: 'note' },
+    { dataDir, extra: { MUBIT_MCP_TOOLS: 'mubit_archive' } });
+  const call_ = server.lastCall('POST', '/v2/control/archive');
+  assert.ok(call_, 'nothing was posted to /v2/control/archive at all');
+  const meta = metaOf(call_.body);
+
+  assert.equal(meta.session_id, SID);
+  assert.equal(meta.prompt_id, PROMPT);
+  assert.equal(meta.turn_number, 7);
+  assert.equal(call_.body.content, 'the decision we took');
+  assert.equal(call_.body.artifact_kind, 'note');
+});
+
+// A turn that ended five minutes ago is not the one this write belongs to. Attributing a write
+// to the last prompt that happened to close would put a wrong fact on the instance for ever.
+test('with the newest turn long closed, only the session is stamped', async (t) => {
+  const dataDir = makeDataDir();
+  writeTurn(dataDir, RUN, { started_at: Date.now() - 400_000, ended_at: Date.now() - 300_000 });
+
+  const { server } = await callStamped(t, 'mubit_learned', { text: LESSON }, { dataDir });
+  const meta = metaOf(wrote(server).item);
+
+  assert.equal(meta.session_id, SID);
+  assert.equal('prompt_id' in meta, false, `a closed turn must not be attributed: ${JSON.stringify(meta)}`);
+  assert.equal('turn_number' in meta, false);
+  assert.equal('prompt_started_at' in meta, false);
+});
+
+/**
+ * After `/clear` the hooks write to `<run>-c1` while this process still pins `<run>` — the
+ * pinned id is the process-start one. The session record is what says where the live turns
+ * are, so that is where the open turn is read from.
+ */
+test('the open turn is read from the run the session record names, not the pinned one', async (t) => {
+  const dataDir = makeDataDir();
+  writeSession(dataDir, SID, `${RUN}-c1`);
+  writeTurn(dataDir, `${RUN}-c1`, { prompt_id: '99999999-8888-4777-8666-555555555555', turn_number: 2 });
+  // A stale open turn under the pinned run, which must lose to the live one.
+  writeTurn(dataDir, RUN, { turn_number: 40 });
+
+  const { server } = await callStamped(t, 'mubit_learned', { text: LESSON }, { dataDir });
+  const { body, item } = wrote(server);
+  const meta = metaOf(item);
+
+  assert.equal(meta.prompt_id, '99999999-8888-4777-8666-555555555555');
+  assert.equal(meta.turn_number, 2);
+  assert.equal(body.run_id, RUN, 'the run pin itself is unchanged; the family view absorbs the split');
+});
+
+// A turn another terminal opened in the same directory is not this session's turn.
+test('a turn belonging to another session in the same run is not attributed', async (t) => {
+  const dataDir = makeDataDir();
+  writeTurn(dataDir, RUN, { session_id: 'ffffffff-0000-4000-8000-000000000000' });
+
+  const { server } = await callStamped(t, 'mubit_learned', { text: LESSON }, { dataDir });
+  const meta = metaOf(wrote(server).item);
+
+  assert.equal(meta.session_id, SID);
+  assert.equal('prompt_id' in meta, false, JSON.stringify(meta));
+});
+
+test('a key the caller already set survives the stamp', async (t) => {
+  const dataDir = makeDataDir();
+  writeTurn(dataDir, RUN, {});
+
+  const { server } = await callStamped(t, 'mubit_learned',
+    { text: LESSON, verified_in_production: true }, { dataDir });
+  const meta = metaOf(wrote(server).item);
+
+  assert.equal(meta.verified_in_production, true);
+  assert.equal(meta.session_id, SID);
+});
+
+// With no session id in the environment there is nothing true to say, and the guard says nothing.
+test('without a host session id the items go out exactly as the server built them', async (t) => {
+  const dataDir = makeDataDir();
+  writeTurn(dataDir, RUN, {});
+
+  const { server } = await callStamped(t, 'mubit_learned', { text: LESSON }, { dataDir, session: false });
+  const { item } = wrote(server);
+
+  assert.equal(item.metadata_json ?? '', '', `nothing should have been stamped: ${item.metadata_json}`);
+});
+
+test('stampProvenance merges into every item, keeps existing keys, and is inert without a stamp', async () => {
+  const { stampProvenance } = await E();
+  const stamp = { session_id: SID, prompt_id: PROMPT, turn_number: 3, prompt_started_at: 1_700_000_000_000 };
+
+  const body = {
+    run_id: RUN,
+    items: [
+      { intent: 'lesson', text: 'a', metadata_json: JSON.stringify({ verified_in_production: true, session_id: 'theirs' }) },
+      { intent: 'tool_output', text: 'b', metadata_json: '' },
+      { intent: 'trace', text: 'c' },
+      null,
+    ],
+  };
+  const before = JSON.stringify(body);
+  const out = stampProvenance(body, stamp);
+
+  assert.equal(out.stamped, true);
+  assert.notEqual(out.body, body, 'a stamped body is a copy');
+  assert.equal(JSON.stringify(body), before, 'the input is not mutated');
+  assert.deepEqual(JSON.parse(out.body.items[0].metadata_json),
+    { verified_in_production: true, session_id: 'theirs', prompt_id: PROMPT, turn_number: 3, prompt_started_at: 1_700_000_000_000 },
+    'a key already present wins; the rest of the stamp is added');
+  assert.deepEqual(JSON.parse(out.body.items[1].metadata_json), stamp, 'an empty string becomes a JSON object string');
+  assert.deepEqual(JSON.parse(out.body.items[2].metadata_json), stamp, 'an absent field is created');
+  assert.equal(out.body.items[3], null, 'a non-object item is left alone');
+  assert.equal(out.body.run_id, RUN);
+  assert.equal(out.body.items[0].text, 'a');
+  assert.equal(out.body.items[0].intent, 'lesson');
+
+  // A body with its own top-level metadata_json (the archive route) is stamped there.
+  const archive = stampProvenance({ run_id: RUN, content: 'x', metadata_json: '' }, stamp);
+  assert.equal(archive.stamped, true);
+  assert.deepEqual(JSON.parse(archive.body.metadata_json), stamp);
+  assert.equal(archive.body.content, 'x');
+
+  // Nothing to say, or nothing to say it on: identity, untouched.
+  for (const [b, s] of [[body, null], [body, {}], [body, undefined], [{ items: 'nope' }, stamp], [null, stamp], ['x', stamp], [{ run_id: RUN }, stamp]]) {
+    const r = stampProvenance(/** @type {any} */ (b), /** @type {any} */ (s));
+    assert.equal(r.stamped, false, `${JSON.stringify(b)} with ${JSON.stringify(s)} should be inert`);
+    assert.equal(r.body, b, 'an untouched body is passed through by identity');
+  }
+
+  // Unparseable metadata is somebody else's problem, not something to overwrite.
+  const torn = stampProvenance({ items: [{ intent: 'lesson', metadata_json: '{ not json' }] }, stamp);
+  assert.equal(torn.stamped, false);
+  assert.equal(torn.body.items[0].metadata_json, '{ not json');
+});
+
+test('guardIngest carries the stamp as its own field and never as a change', async () => {
+  const { guardIngest } = await E();
+  const stamp = { session_id: SID };
+
+  const out = guardIngest(
+    { run_id: RUN, items: [{ intent: 'lesson', lesson_scope: 'run', metadata_json: '' }] },
+    { ceiling: 'run', runId: RUN, pinRun: true, stamp });
+  assert.equal(out.stamped, true);
+  assert.equal(out.changed, false, 'a stamp is not a clamp');
+  assert.equal(out.note, null, 'and it is not reported as one');
+  assert.deepEqual(JSON.parse(out.body.items[0].metadata_json), stamp);
+
+  const both = guardIngest(
+    { run_id: 'elsewhere', items: [{ intent: 'lesson', lesson_scope: 'global', metadata_json: '' }] },
+    { ceiling: 'run', runId: RUN, pinRun: true, stamp });
+  assert.equal(both.changed, true);
+  assert.equal(both.stamped, true);
+  assert.equal(both.body.run_id, RUN);
+  assert.equal(both.body.items[0].lesson_scope, 'run');
+  assert.deepEqual(JSON.parse(both.body.items[0].metadata_json), stamp);
+
+  const off = guardIngest(
+    { run_id: RUN, items: [{ intent: 'lesson', lesson_scope: 'run', metadata_json: '' }] },
+    { ceiling: 'run', runId: RUN, pinRun: true });
+  assert.equal(off.stamped, false);
+  assert.equal(off.changed, false);
+});

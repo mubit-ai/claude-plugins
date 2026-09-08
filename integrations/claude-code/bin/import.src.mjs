@@ -178,6 +178,7 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   }
 
   const report = await runImport(cfg, {
+    env,
     roots: args.all ? [] : roots,
     all: args.all,
     dryRun: !args.send,
@@ -203,6 +204,9 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     if (report.runs.length) out(`runs: ${report.runs.join(', ')}\n`);
     err(`lines ${report.lines} · batches ${report.batches} · skipped ${report.skipped}`
       + ` · denied ${report.denied} · oversize ${report.oversize} · failed ${report.failed}\n`);
+    // `failed 1` is a count, not a reason. The reason used to go only to the log, and a person
+    // reading the terminal — or the model relaying it — had nothing to act on.
+    if (report.error) err(`ingest failed (${report.errorState || 'unknown'}): ${report.error}\n`);
     // Three findings rather than decoration, in the order a reader needs them.
     if (report.denied) {
       err(`${report.denied} tool call(s) were dropped by the path denylist — a denied subject `

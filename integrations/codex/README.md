@@ -358,6 +358,13 @@ carries the item id live capture would have minted for the same call (`cc-<item 
 denylist working, `oversize` is lines too large to read, and `this answer is incomplete` means a
 bound was hit and the import is a prefix of the history.
 
+When a batch is refused, the counts line is followed by the reason — `ingest failed (<state>):
+<message>`, the same sentence the plugin logs — so `failed 1` never stands alone. The case this
+host meets first: Codex runs an unapproved command inside its sandbox with the network off, and
+a `--send` from there is refused before a rollout is opened, with that sentence on the terminal.
+A dry run only reads and goes ahead; the send needs the command run with escalated permissions,
+which the skill tells the model to ask for.
+
 ---
 
 ## Handing work to another agent

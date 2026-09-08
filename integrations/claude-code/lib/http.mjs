@@ -977,8 +977,28 @@ function NETWORK_HINT(err) {
 function SANDBOX_BLOCKED() {
   const env = (typeof process === 'object' && process) ? (process.env || {}) : {};
   if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return '';
-  return 'this process has no network access — Codex ran it inside its sandbox. Approve the '
-    + 'command and run it again; the endpoint is almost certainly fine';
+  return SANDBOX_SENTENCE;
+}
+
+const SANDBOX_SENTENCE = 'this process has no network access — Codex ran it inside its sandbox. '
+  + 'Approve the command and run it again; the endpoint is almost certainly fine';
+
+/**
+ * The same verdict, for a caller that can act on it *before* dialing — a bulk send that would
+ * otherwise read a whole corpus and fail on its first batch.
+ *
+ * Only `CODEX_SANDBOX_NETWORK_DISABLED` counts here. `CODEX_SANDBOX` alone says the process
+ * is in seatbelt, and seatbelt can be run with the network on; `SANDBOX_BLOCKED` above may
+ * name the sandbox on either variable because it speaks only after a request has already
+ * failed, whereas a refusal on that weaker evidence would turn away a send that would have
+ * worked.
+ *
+ * @param {Record<string, any>} [env]
+ * @returns {string} the sentence, or `''` when nothing says the network is off
+ */
+export function sandboxNetworkBlocked(env = process.env) {
+  const v = env?.CODEX_SANDBOX_NETWORK_DISABLED;
+  return v === undefined || v === null || String(v) === '' || String(v) === '0' ? '' : SANDBOX_SENTENCE;
 }
 
 /** @param {any} err */

@@ -103,7 +103,7 @@ import { join, resolve, sep } from 'node:path';
 import { classifyTool, classifyTurn } from './classify.mjs';
 import { envTags } from './config.mjs';
 import { fileChanges } from './filechange.mjs';
-import { postIngest } from './http.mjs';
+import { postIngest, sandboxNetworkBlocked } from './http.mjs';
 import { log } from './log.mjs';
 import { isDeniedPath, isSelfReference, redactParams, redactText, warmIgnoreCache } from './redact.mjs';
 import { deriveRunId } from './runid.mjs';
@@ -833,6 +833,8 @@ export const claudeCodeSource = Object.freeze({
  * @property {number} skipped     lines that produced nothing
  * @property {number} oversize    lines over the reader's cap
  * @property {number} failed      batches the server refused
+ * @property {string} error       what the refused batch said, `''` when none was
+ * @property {string} errorState  its transport verdict (`unreachable`, `auth_failed`, …)
  * @property {string} root        the directory this source read
  * @property {string} truncatedReason  `''` when nothing was bounded away
  */
@@ -847,6 +849,8 @@ export const claudeCodeSource = Object.freeze({
  * @property {number} skipped     lines that produced nothing
  * @property {number} oversize    lines over the reader's cap
  * @property {number} failed      batches the server refused
+ * @property {string} error       the first failure's message — `failed: 1` alone says nothing
+ * @property {string} errorState  its transport verdict (`unreachable`, `auth_failed`, …)
  * @property {number} ms
  * @property {boolean} dryRun
  * @property {string} truncatedReason  `''` when nothing was bounded away
@@ -899,10 +903,27 @@ export async function runImport(cfg, opts = {}) {
   /** @type {ImportReport} */
   const report = {
     files: 0, lines: 0, items: 0, batches: 0, denied: 0, skipped: 0, oversize: 0, failed: 0,
-    ms: 0, dryRun, truncatedReason: '', runs: [], sources: {},
+    error: '', errorState: '', ms: 0, dryRun, truncatedReason: '', runs: [], sources: {},
   };
   const runs = new Set();
   let budget = maxItems;
+
+  // Codex runs an unapproved command inside its sandbox with the network off. A send from
+  // there used to read the whole corpus, fail on its first batch, and print `failed 1` with
+  // the reason in a log the person at the prompt never sees. Refusing before the first file
+  // is opened puts the reason where they are looking. A dry run only reads, and reading is
+  // allowed in there, so it goes ahead and counts.
+  if (!dryRun) {
+    const blocked = sandboxNetworkBlocked(opts?.env ?? process.env);
+    if (blocked) {
+      report.failed = 1;
+      report.error = blocked;
+      report.errorState = 'unreachable';
+      report.truncatedReason = 'refused before the first transcript was opened: this shell has no network';
+      report.ms = Date.now() - started;
+      return report;
+    }
+  }
 
   for (const source of sources) {
     const name = str(source.name) || 'source';
@@ -914,7 +935,7 @@ export async function runImport(cfg, opts = {}) {
     /** @type {SourceCounts} */
     const counts = {
       files: 0, lines: 0, items: 0, batches: 0, denied: 0, skipped: 0, oversize: 0, failed: 0,
-      root, truncatedReason: str(found.truncatedReason),
+      error: '', errorState: '', root, truncatedReason: str(found.truncatedReason),
     };
     report.sources[name] = counts;
     if (counts.truncatedReason && !report.truncatedReason) report.truncatedReason = counts.truncatedReason;
@@ -968,6 +989,8 @@ export async function runImport(cfg, opts = {}) {
         sequence += 1;
         if (!res.ok) {
           counts.failed += 1;
+          counts.error = str(res.error) || 'the server refused the batch and said nothing';
+          counts.errorState = str(res.state) || 'unknown';
           ok = false;
           log(cfg, 'warn', `import: ingest failed (${str(res.state) || 'unknown'})`,
             { run_id: runId, source: name, error: str(res.error).slice(0, 300) });
@@ -1002,6 +1025,7 @@ export async function runImport(cfg, opts = {}) {
 
     for (const k of ['files', 'lines', 'items', 'denied', 'skipped', 'oversize', 'failed']) report[k] += counts[k];
     if (counts.truncatedReason && !report.truncatedReason) report.truncatedReason = counts.truncatedReason;
+    if (counts.error && !report.error) { report.error = counts.error; report.errorState = counts.errorState; }
     // An ingest failure stops the whole import, not just the source: the server that refused
     // this batch is the one the next source would post to.
     if (stopped) break;

@@ -15,7 +15,7 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// lib/state.mjs
+// ../claude-code/lib/state.mjs
 import {
   closeSync,
   existsSync as existsSync2,
@@ -156,7 +156,7 @@ function runDir(cfg, runId) {
 }
 var SEC, MIN, HOUR, DAY, DATA_DIR_PREFIX2;
 var init_state = __esm({
-  "lib/state.mjs"() {
+  "../claude-code/lib/state.mjs"() {
     SEC = 1e3;
     MIN = 60 * SEC;
     HOUR = 60 * MIN;
@@ -165,7 +165,7 @@ var init_state = __esm({
   }
 });
 
-// lib/breaker.mjs
+// ../claude-code/lib/breaker.mjs
 import { createHash } from "node:crypto";
 import { join as join3 } from "node:path";
 function classifyError(err, status) {
@@ -375,7 +375,7 @@ function posInt(v, d) {
 }
 var CONN_STATES, TIMEOUT_ESCALATION, NEVER_WARMING, DEFAULT_THRESHOLD, DEFAULT_WINDOW_MS, DEFAULT_COOLDOWN_MS, UNREACHABLE_CODES, TIMEOUT_CODES, TIMEOUT_NAMES;
 var init_breaker = __esm({
-  "lib/breaker.mjs"() {
+  "../claude-code/lib/breaker.mjs"() {
     init_state();
     CONN_STATES = /** @type {const} */
     [
@@ -415,7 +415,7 @@ var init_breaker = __esm({
   }
 });
 
-// lib/credentials.mjs
+// ../claude-code/lib/credentials.mjs
 import { existsSync as existsSync3, readFileSync as readFileSync3, unlinkSync as unlinkSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 function credentialsPath(dataDir2) {
@@ -441,13 +441,13 @@ function isPlainObject(v) {
 }
 var FILE;
 var init_credentials = __esm({
-  "lib/credentials.mjs"() {
+  "../claude-code/lib/credentials.mjs"() {
     init_state();
     FILE = "credentials.json";
   }
 });
 
-// lib/config.mjs
+// ../claude-code/lib/config.mjs
 import { createHash as createHash2 } from "node:crypto";
 import { existsSync as existsSync4, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
 import { basename, dirname as dirname3, join as join5, resolve as resolve2 } from "node:path";
@@ -773,7 +773,7 @@ function safeCwd() {
 }
 var DEFAULT_MCP_TOOLS, CACHE_FILE, CACHE_TTL_MS, CACHE_VERSION, MODE;
 var init_config = __esm({
-  "lib/config.mjs"() {
+  "../claude-code/lib/config.mjs"() {
     init_credentials();
     init_state();
     DEFAULT_MCP_TOOLS = [
@@ -792,7 +792,7 @@ var init_config = __esm({
   }
 });
 
-// lib/redact.mjs
+// ../claude-code/lib/redact.mjs
 function scrubAssignments(text, count) {
   ASSIGNMENT_RE.lastIndex = 0;
   let out = "";
@@ -920,7 +920,7 @@ function numberOr(v, d) {
 }
 var PH, EXEMPT_RE, ASSIGNMENT_KEYWORDS, ASSIGNMENT_NAME_SUFFIXES, ASSIGNMENT_RE, VALUE_RE, ENTROPY_RUN_RE, URL_CREDENTIALS_RE, ENTROPY_MIN_LEN, ENTROPY_THRESHOLD, RULES, truncMarker, OWN_MCP_PREFIXES;
 var init_redact = __esm({
-  "lib/redact.mjs"() {
+  "../claude-code/lib/redact.mjs"() {
     PH = (kind) => `[REDACTED:${kind}]`;
     EXEMPT_RE = /idempotency[-_]key/i;
     ASSIGNMENT_KEYWORDS = [
@@ -970,7 +970,7 @@ var init_redact = __esm({
   }
 });
 
-// lib/log.mjs
+// ../claude-code/lib/log.mjs
 import { appendFileSync, mkdirSync as mkdirSync2, renameSync as renameSync2, statSync as statSync4 } from "node:fs";
 import { join as join6 } from "node:path";
 function log(cfg, level, msg, fields = {}) {
@@ -1036,7 +1036,7 @@ function safeString(v) {
 }
 var LEVELS, MAX_BYTES, FILE2, PREV;
 var init_log = __esm({
-  "lib/log.mjs"() {
+  "../claude-code/lib/log.mjs"() {
     init_redact();
     init_state();
     LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
@@ -1046,7 +1046,7 @@ var init_log = __esm({
   }
 });
 
-// lib/http.mjs
+// ../claude-code/lib/http.mjs
 async function request(cfg, method, path, body, opts = {}) {
   const started = Date.now();
   try {
@@ -1353,7 +1353,7 @@ function snippet(text) {
 }
 var ROUTES, HANDOFF_ACTIONS, FEEDBACK_VERDICTS, MAX_QUERY_BYTES, MAX_BODY_BYTES, DEFAULT_TIMEOUT_MS, HEALTH_TTL_MS, QUERY_MODES, POISONED_RUN_ID;
 var init_http = __esm({
-  "lib/http.mjs"() {
+  "../claude-code/lib/http.mjs"() {
     init_breaker();
     init_config();
     init_log();
@@ -1385,7 +1385,7 @@ var init_http = __esm({
   }
 });
 
-// lib/dashboard-api.mjs
+// ../claude-code/lib/dashboard-api.mjs
 function ok(data) {
   return { ok: true, status: 200, data };
 }
@@ -1660,7 +1660,7 @@ function clamp(v, lo, hi, dflt) {
 }
 var TIMEOUT_MS, READ_ONLY, EXTRA_ROUTES, DEFAULT_SCOPE, REPO_TAG, ERROR_CODES, STATE_MAP, PROMOTION_KEYS;
 var init_dashboard_api = __esm({
-  "lib/dashboard-api.mjs"() {
+  "../claude-code/lib/dashboard-api.mjs"() {
     init_http();
     TIMEOUT_MS = 2e4;
     READ_ONLY = Object.freeze({ record: false, timeoutMs: TIMEOUT_MS });
@@ -1696,7 +1696,7 @@ var init_dashboard_api = __esm({
   }
 });
 
-// lib/activity.mjs
+// ../claude-code/lib/activity.mjs
 async function listActivity(cfg, params2 = {}, opts = {}) {
   const p = obj(params2);
   const run = str3(p.run);
@@ -1925,7 +1925,7 @@ function clamp2(v, lo, hi, dflt) {
 }
 var ACTIVITY_ROUTES, EXPORT_TIMEOUT_MS, EXPORT_OPTS, COMPACT_KEYS, COMPACT_CONTENT_CHARS, PAGE_MIN, PAGE_MAX, PAGE_DEFAULT, SCAN_MAX_ENTRIES, SCAN_MAX_PAGES, SCAN_BUDGET_MS, CENSUS_MAX_PAGES, CENSUS_PAGE_LIMIT, CENSUS_MAX_ENTRIES, CENSUS_BUDGET_MS, DERIVED_KEYS;
 var init_activity = __esm({
-  "lib/activity.mjs"() {
+  "../claude-code/lib/activity.mjs"() {
     init_dashboard_api();
     init_http();
     ACTIVITY_ROUTES = Object.freeze({
@@ -1950,7 +1950,7 @@ var init_activity = __esm({
   }
 });
 
-// lib/markers.mjs
+// ../claude-code/lib/markers.mjs
 import { join as join7 } from "node:path";
 function defaultMarker(runId = "") {
   return {
@@ -2019,13 +2019,13 @@ function readMarker(cfg, runId) {
 }
 var GROUPS;
 var init_markers = __esm({
-  "lib/markers.mjs"() {
+  "../claude-code/lib/markers.mjs"() {
     init_state();
     GROUPS = ["recall", "captured", "lessons", "reflect", "mcp"];
   }
 });
 
-// lib/spool.mjs
+// ../claude-code/lib/spool.mjs
 import {
   closeSync as closeSync2,
   existsSync as existsSync5,
@@ -2079,12 +2079,12 @@ function spoolStats(cfg, runId) {
   }
 }
 var init_spool = __esm({
-  "lib/spool.mjs"() {
+  "../claude-code/lib/spool.mjs"() {
     init_state();
   }
 });
 
-// lib/dashboard-data.mjs
+// ../claude-code/lib/dashboard-data.mjs
 import {
   appendFileSync as appendFileSync2,
   existsSync as existsSync6,
@@ -2565,7 +2565,7 @@ function positive(v, dflt) {
 }
 var PREVIEW_BYTES, DETAIL_BYTES, ROLLUP_DIR, ROLLUP_MAX_ROWS, ROLLUP_MAX_BYTES, BROWSER_REDACTION, DEFAULT_COOLDOWN_MS2, STRATEGY_TEXT, WRITES_AT_TEXT, READS_ACROSS_TEXT;
 var init_dashboard_data = __esm({
-  "lib/dashboard-data.mjs"() {
+  "../claude-code/lib/dashboard-data.mjs"() {
     init_breaker();
     init_markers();
     init_redact();
@@ -2597,7 +2597,7 @@ var init_dashboard_data = __esm({
   }
 });
 
-// bin/dashboard.src.mjs
+// ../claude-code/bin/dashboard.src.mjs
 var dashboard_src_exports = {};
 __export(dashboard_src_exports, {
   IDLE_MS: () => IDLE_MS,
@@ -3279,7 +3279,7 @@ function describe(url, cfg, reused) {
 }
 var STATE_FILE, STATE_MODE, IDLE_MS, POLL_MS, MAX_BODY_BYTES2, LAUNCH_TIMEOUT_MS, CSP, HTML_URL, FALLBACK_HTML, UNTAGGED_PROJECT, selfPath, selfReal, entryPath;
 var init_dashboard_src = __esm({
-  async "bin/dashboard.src.mjs"() {
+  async "../claude-code/bin/dashboard.src.mjs"() {
     init_activity();
     init_config();
     init_dashboard_api();
@@ -3316,7 +3316,7 @@ var init_dashboard_src = __esm({
   }
 });
 
-// ../codex/lib/boot.mjs
+// lib/boot.mjs
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -3438,7 +3438,7 @@ function projectDir(env, payload) {
 }
 applyCodexEnv(process.env);
 
-// ../codex/cli/dashboard.mjs
+// cli/dashboard.mjs
 var shared = await init_dashboard_src().then(() => dashboard_src_exports);
 var main2 = shared.main;
 export {

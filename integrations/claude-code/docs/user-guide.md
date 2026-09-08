@@ -380,14 +380,21 @@ prefer letting outcome attribution down-weight it.
 ```
 
 Opens a page on `127.0.0.1` — a random port, a token minted for that launch, and nothing on
-your network can reach it. Three tabs:
+your network can reach it. A strip across the top, then three tabs:
 
+- **Current run** — which run you are looking at, the full directory it belongs to, every
+  session that shares it and when each was last seen, and what the run writes at and reads from
+  as two plain sentences. It marks the run the dashboard was launched in, and it is the first
+  place the plugin has said any of this out loud.
 - **Memory** — every lesson your instance holds, across **every run** unless you switch to
-  *This run*. Filter instantly, or press *Search instance* to ask it properly. There is a filter
-  for lessons **visible outside the run that wrote them**, which is the question nothing else
-  here answers: a rule saved at global scope follows you into every project, and one saved at
-  run scope dies with the session. `session` and `global` are separately selectable, and
-  *scope not recorded* is its own bucket rather than being folded into `run`.
+  *This run*. Rows are grouped by day (*Today*, *Yesterday*, then dates) and sorted newest or
+  oldest first; each leads with its time and its scope badge, and the chip rows above the list
+  count what is loaded by scope and by type and filter on a click. Filter instantly, or press
+  *Search instance* to ask it properly. There is a filter for lessons **visible outside the run
+  that wrote them**, which is the question nothing else here answers: a rule saved at global
+  scope follows you into every project, and one saved at run scope dies with the session.
+  `session` and `global` are separately selectable, and *scope not recorded* is its own bucket
+  rather than being folded into `run`.
 - **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
   they cost, and how many were repeats rendered as a one-line pointer. This is read from disk,
   so it works with the network off.

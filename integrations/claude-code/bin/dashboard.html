@@ -7,7 +7,9 @@
 <title>Mubit memory</title>
 <style>
 /* Brand tokens. Dark is the base, so an install with no expressed preference gets dark;
-   light is opted into by the system setting or by the toggle. */
+   light is opted into by the system setting or by the toggle. The eleven colour tokens are
+   shared with the rest of the plugin's UI and are pinned by test/dashboard-layout.test.mjs;
+   everything under them is this page's own vocabulary. */
 :root {
   --bg: hsl(28 9% 8%);
   --panel: hsl(28 10% 10%);
@@ -21,12 +23,30 @@
   --danger: hsl(0 72% 58%);
   --danger-dim: hsl(0 72% 58% / 0.12);
 
+  /* Hairlines: one-pixel rules at low alpha, so they read as structure rather than as boxes. */
+  --hair: hsl(30 10% 60% / 0.14);
+  --hair-strong: hsl(30 10% 60% / 0.26);
+  /* The accent, lifted enough to pass as text on the dark ground. */
+  --accent-ink: hsl(16 100% 62%);
+  --surface-hover: hsl(30 10% 60% / 0.08);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --rail-w: 268px;
+  --col-max: 1360px;
+  --track: 0.08em;
+
   --r-sm: 2px;
   --r-md: 4px;
   --r-card: 8px;
 
-  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* System stacks only: the page is served under default-src 'self' and carries no fonts. */
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
@@ -41,6 +61,10 @@
     --success: hsl(149 70% 33%);
     --danger: hsl(0 82% 54%);
     --danger-dim: hsl(0 82% 54% / 0.10);
+    --hair: hsl(30 10% 30% / 0.14);
+    --hair-strong: hsl(30 10% 30% / 0.28);
+    --accent-ink: hsl(16 100% 42%);
+    --surface-hover: hsl(30 10% 30% / 0.07);
   }
 }
 :root[data-theme="light"] {
@@ -55,6 +79,10 @@
   --success: hsl(149 70% 33%);
   --danger: hsl(0 82% 54%);
   --danger-dim: hsl(0 82% 54% / 0.10);
+  --hair: hsl(30 10% 30% / 0.14);
+  --hair-strong: hsl(30 10% 30% / 0.28);
+  --accent-ink: hsl(16 100% 42%);
+  --surface-hover: hsl(30 10% 30% / 0.07);
 }
 
 * { box-sizing: border-box; }
@@ -67,164 +95,294 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 button, input, select, textarea { font: inherit; color: inherit; }
-a { color: var(--accent); }
+a { color: var(--accent-ink); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.app { display: grid; grid-template-rows: auto auto 1fr; height: 100%; }
+/* The frame: header, banner, identity strip, then the body, which is the only row that
+   grows. `main` scrolls inside it; the page itself does not, until the narrow breakpoint
+   below hands scrolling back to the page so the strip can scroll away on a phone. */
+.app { display: grid; grid-template-rows: auto auto auto 1fr; height: 100vh; height: 100dvh; }
+
+.eyebrow {
+  font: 600 11px/16px var(--mono); text-transform: uppercase; letter-spacing: var(--track);
+  color: var(--muted);
+}
 
 /* ---- header ---------------------------------------------------------- */
 header {
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--panel);
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--space-2) var(--space-4);
+  padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--hair);
 }
-.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: -0.01em; }
-.brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
-.spacer { flex: 1; }
-.endpoint { font: 11px/16px var(--mono); color: var(--muted); }
+.brand { display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 500; letter-spacing: -0.01em; }
+.brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.spacer { flex: 1 1 auto; }
+.endpoint { font: 11px/16px var(--mono); color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border);
-  font-size: 11px; color: var(--muted); background: var(--panel-2);
+  padding: 2px 9px; border-radius: 999px; border: 1px solid var(--hair-strong);
+  font-size: 11px; color: var(--muted);
 }
 .pill .led { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .pill.ok .led { background: var(--success); }
 .pill.bad .led { background: var(--danger); }
 .iconbtn {
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md);
+  background: none; border: 1px solid var(--hair-strong); border-radius: var(--r-md);
   padding: 3px 9px; cursor: pointer; font-size: 12px;
 }
-.iconbtn:hover { border-color: var(--accent); }
+.iconbtn:hover { background: var(--surface-hover); }
 
 /* ---- banner ---------------------------------------------------------- */
 .banner {
-  display: none; gap: 10px; align-items: baseline;
-  padding: 7px 14px; border-bottom: 1px solid var(--border);
+  display: none; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  padding: 7px var(--space-5); border-bottom: 1px solid var(--hair);
   background: var(--danger-dim); color: var(--text); font-size: 12px;
 }
 .banner.show { display: flex; }
-.banner code { font: 11px/16px var(--mono); color: var(--muted); }
+.banner code { font: 11px/16px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 
-/* ---- layout ---------------------------------------------------------- */
-.body { display: grid; grid-template-columns: 268px 1fr; min-height: 0; }
-aside {
-  border-right: 1px solid var(--border); background: var(--panel);
-  overflow-y: auto; padding: 10px; min-height: 0;
+/* ---- identity strip -------------------------------------------------- */
+#identity { border-bottom: 1px solid var(--hair); padding: var(--space-4) var(--space-5); }
+.identity-grid {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-5); max-width: var(--col-max);
 }
+.cell { min-width: 0; border-left: 1px solid var(--hair); padding-left: var(--space-4); }
+.cell:first-child { border-left: 0; padding-left: 0; }
+.cell .eyebrow { margin-bottom: var(--space-1); }
+#id-run { font: 500 20px/26px var(--mono); overflow-wrap: anywhere; }
+#id-run-state { color: var(--muted); font-size: 12px; margin-top: 2px; }
+#id-run-note { color: var(--muted); font-size: 12px; }
+/* The whole path, wrapped. A truncated path is two projects that look alike. */
+#id-path { font: 12px/18px var(--mono); overflow-wrap: anywhere; }
+#id-root, #id-datadir { color: var(--muted); font: 11px/16px var(--mono); overflow-wrap: anywhere; margin-top: 2px; }
+#id-sessions { overflow-wrap: anywhere; }
+#id-session-list { margin-top: var(--space-1); }
+#id-session-list summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+#id-session-list .sessions { margin-top: var(--space-1); }
+#id-session-list .session { font: 11px/17px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+#id-scope p { margin: 0 0 var(--space-1); }
+.state-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted); vertical-align: middle; margin-right: 5px;
+}
+.state-dot.ok { background: var(--success); }
+.state-dot.bad { background: var(--danger); }
+/* Shown only below 48rem, where the rail is collapsed behind it. */
+#rail-toggle { display: none; margin-top: var(--space-2); }
+
+/* ---- body: rail + main ----------------------------------------------- */
+.body { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); min-height: 0; }
+#rail { border-right: 1px solid var(--hair); overflow-y: auto; padding: var(--space-3); min-height: 0; }
+#rail .eyebrow { margin: var(--space-3) 2px var(--space-2); }
+#rail .eyebrow:first-child { margin-top: 2px; }
 main { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0; }
 
-.rail-label {
-  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--muted); margin: 10px 2px 6px;
-}
 select, input[type="text"], input[type="search"] {
-  width: 100%; background: var(--panel-2); border: 1px solid var(--border);
-  border-radius: var(--r-md); padding: 4px 7px;
-}
-input:focus, select:focus, button:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: 1px;
+  width: 100%; background: var(--panel); border: 1px solid var(--hair-strong);
+  border-radius: var(--r-md); padding: 4px 8px;
 }
 
-.run { display: block; width: 100%; text-align: left; cursor: pointer;
-  background: none; border: 1px solid transparent; border-radius: var(--r-md);
-  padding: 6px 8px; margin-bottom: 2px; }
-.run:hover { background: var(--panel-2); }
-.run[aria-current="true"] { background: var(--accent-dim); border-color: var(--accent); }
+.run {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 0; border-left: 2px solid transparent;
+  padding: 6px 8px; margin-bottom: 1px;
+}
+.run:hover { background: var(--surface-hover); }
+.run[aria-current="true"] { background: var(--surface-hover); border-left-color: var(--accent); }
 .run .id { font: 12px/17px var(--mono); overflow-wrap: anywhere; }
-.run .meta { font-size: 11px; color: var(--muted); }
+.run .meta { font-size: 11px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; }
+.run .meta .proj { font-family: var(--mono); }
 
 /* ---- tabs ------------------------------------------------------------ */
-nav.tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-bottom: 1px solid var(--border); }
+nav.tabs { display: flex; gap: var(--space-5); padding: 0 var(--space-5); border-bottom: 1px solid var(--hair); }
 nav.tabs button {
-  background: none; border: 1px solid transparent; border-bottom: none;
-  border-radius: var(--r-md) var(--r-md) 0 0; padding: 6px 14px; cursor: pointer;
-  color: var(--muted); margin-bottom: -1px;
+  background: none; border: 0; border-bottom: 2px solid transparent;
+  padding: 10px 2px; cursor: pointer; color: var(--muted); margin-bottom: -1px;
 }
-nav.tabs button[aria-selected="true"] {
-  color: var(--text); background: var(--bg);
-  border-color: var(--border); border-bottom-color: var(--bg);
-}
-.tabpanel { display: none; min-height: 0; overflow: auto; padding: 12px; }
+nav.tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.tabpanel { display: none; min-height: 0; overflow: auto; padding: var(--space-4) var(--space-5) var(--space-6); }
 .tabpanel.active { display: block; }
+.panel-inner { max-width: var(--col-max); }
 
-/* ---- shared ---------------------------------------------------------- */
-.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+/* ---- shared controls ------------------------------------------------- */
+.toolbar { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
 .toolbar > * { flex: 0 0 auto; }
 .toolbar .grow { flex: 1 1 220px; min-width: 160px; }
-.seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
-.seg button { background: var(--panel-2); border: none; padding: 4px 11px; cursor: pointer; color: var(--muted); }
-.seg button[aria-pressed="true"] { background: var(--accent-dim); color: var(--text); }
+.toolbar select { width: auto; max-width: 100%; }
+.seg { display: inline-flex; border: 1px solid var(--hair-strong); border-radius: var(--r-md); overflow: hidden; }
+.seg button { background: none; border: 0; padding: 4px 11px; cursor: pointer; color: var(--muted); }
+.seg button + button { border-left: 1px solid var(--hair-strong); }
+.seg button[aria-pressed="true"] { background: var(--surface-hover); color: var(--text); }
 .btn {
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md);
+  background: none; border: 1px solid var(--hair-strong); border-radius: var(--r-md);
   padding: 4px 11px; cursor: pointer;
 }
-.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:hover:not(:disabled) { background: var(--surface-hover); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+/* The one accented button on the page: the action that costs something. */
+.btn.primary { border-color: var(--accent); color: var(--accent-ink); }
 .btn.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-dim); }
+.btn.small { padding: 1px 8px; font-size: 11px; }
 /* A facet that cannot answer the question is dimmed rather than hidden. Hiding it would leave
    a person hunting for a control they saw a moment ago; the `title` says why it is off. */
 select:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn.link { background: none; border: none; padding: 0 2px; color: var(--accent); text-decoration: underline; }
+.btn.link { background: none; border: 0; padding: 0 2px; color: var(--accent-ink); text-decoration: underline; }
 
-.split { display: grid; grid-template-columns: minmax(240px, 380px) 1fr; gap: 12px; align-items: start; }
-/* The turns table carries seven columns plus a prompt that has to stay readable, so it takes
-   the larger half rather than the master-detail rail width. */
-.split.wide { grid-template-columns: minmax(0, 1.7fr) minmax(260px, 1fr); }
-@media (max-width: 1100px) { .split, .split.wide { grid-template-columns: 1fr; } }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-card); }
-.list { max-height: calc(100vh - 210px); overflow: auto; }
-.item {
-  display: block; width: 100%; text-align: left; cursor: pointer;
-  background: none; border: none; border-bottom: 1px solid var(--border);
-  padding: 8px 10px;
+/* Chip rows: the loaded window counted by scope and by type. */
+.chips { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-2); align-items: center; margin: 0 0 var(--space-2); }
+.chips:empty { display: none; }
+.chips .lbl { margin-right: var(--space-1); }
+.chip {
+  background: none; border: 1px solid var(--hair-strong); border-radius: 999px;
+  padding: 1px 9px; font-size: 11px; color: var(--muted); cursor: pointer;
 }
-.item:last-child { border-bottom: none; }
-.item:hover { background: var(--panel-2); }
-.item[aria-current="true"] { background: var(--accent-dim); }
-.item .line1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.item .line2 { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.chip b { font-weight: 500; color: var(--text); font-family: var(--mono); margin-left: 4px; }
+.chip[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
+.chip:hover:not(:disabled) { background: var(--surface-hover); }
+.chip:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.split { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, 1fr); gap: var(--space-4); align-items: start; }
+/* The turns table carries eight columns plus a prompt that has to stay readable, so it takes
+   the larger share rather than the master-detail split. */
+.split.wide { grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr); }
+.card { background: var(--panel); border: 1px solid var(--hair); border-radius: var(--r-card); min-width: 0; }
+.detail.sticky { position: sticky; top: 0; }
+
+/* ---- the lesson list ------------------------------------------------- */
+.dayhead {
+  position: sticky; top: 0; z-index: 1; background: var(--panel);
+  font: 600 11px/16px var(--mono); text-transform: uppercase; letter-spacing: var(--track);
+  color: var(--muted); padding: 8px 12px 5px; border-bottom: 1px solid var(--hair);
+}
+.dayhead:first-child { border-radius: var(--r-card) var(--r-card) 0 0; }
+.item {
+  display: flex; gap: 10px; width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 0; border-bottom: 1px solid var(--hair);
+  padding: 8px 12px; color: inherit;
+}
+.item:last-child { border-bottom: 0; }
+.item:hover { background: var(--surface-hover); }
+.item[aria-current="true"] { background: var(--accent-dim); box-shadow: inset 2px 0 0 var(--accent); }
+.item .t { flex: 0 0 44px; font: 11px/18px var(--mono); color: var(--muted); }
+.item .main { flex: 1 1 auto; min-width: 0; }
+.item .badges { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 2px; }
+.item .c {
+  font: 14px/21px var(--sans); overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.item .m { font: 11px/16px var(--mono); color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 8px; margin-top: 2px; overflow-wrap: anywhere; }
 
 .tag {
   display: inline-block; padding: 0 6px; border-radius: var(--r-sm);
-  border: 1px solid var(--border); font-size: 11px; color: var(--muted);
-  margin-right: 4px; background: var(--panel-2);
+  border: 1px solid var(--hair-strong); font: 11px/17px var(--mono); color: var(--muted);
 }
-.tag.leak { color: var(--accent); border-color: var(--accent); }
+/* Scope tones: `local` is the muted outline above; `shared` is the one place the accent means
+   something; `unknown` is dashed because it reports the absence of a fact rather than a fact. */
+.tag.shared { color: var(--accent-ink); border-color: var(--accent); }
 .tag.ok { color: var(--success); border-color: var(--success); }
 .tag.bad { color: var(--danger); border-color: var(--danger); }
-/* Dashed, because the badge is reporting the absence of a fact rather than a fact. */
 .tag.unknown { border-style: dashed; }
+.tag.type { text-transform: none; }
 
-.detail { padding: 14px; }
-.detail h2 { font-size: 14px; margin: 0 0 8px; }
-.detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 12px 0 0; }
+/* ---- detail ---------------------------------------------------------- */
+.detail { padding: var(--space-4); }
+.detail h2 { font: 500 16px/22px var(--sans); margin: 0 0 var(--space-2); }
+.detail .reach { margin: 0 0 var(--space-3); }
+.detail .stored { font: 11px/17px var(--mono); color: var(--muted); overflow-wrap: anywhere; margin: 0 0 var(--space-3); }
+.detail .eyebrow { margin: var(--space-4) 0 var(--space-1); }
+.detail dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 14px; margin: var(--space-3) 0 0; }
 .detail dt { color: var(--muted); font-size: 12px; }
 .detail dd { margin: 0; font: 12px/18px var(--mono); overflow-wrap: anywhere; }
-.prose { white-space: pre-wrap; overflow-wrap: anywhere; }
+.detail dd .btn { margin-left: 6px; vertical-align: baseline; }
+.prose { white-space: pre-wrap; overflow-wrap: anywhere; font: 14px/21px var(--sans); margin: 0; }
 .empty { color: var(--muted); padding: 22px 14px; text-align: center; }
 
 /* ---- tables ---------------------------------------------------------- */
 .scroll-x { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 12px; }
-th, td { text-align: left; padding: 5px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--hair); white-space: nowrap; vertical-align: top; }
+th { color: var(--muted); font: 600 11px/16px var(--mono); text-transform: uppercase; letter-spacing: var(--track); }
 td.num, th.num { text-align: right; font-family: var(--mono); }
+td.time { font-family: var(--mono); color: var(--muted); }
 td.prompt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 1px; width: 100%; }
+/* Under horizontal scroll the time column stays put, so a row can still be placed in time. */
+#panel-turns th:first-child, #panel-turns td:first-child {
+  position: sticky; left: 0; z-index: 1; background: var(--panel);
+  box-shadow: inset -1px 0 0 var(--hair);
+}
 tbody tr { cursor: pointer; }
-tbody tr:hover { background: var(--panel-2); }
-tbody tr[aria-current="true"] { background: var(--accent-dim); }
+tbody tr:hover td { background: var(--surface-hover); }
+tbody tr[aria-current="true"] td { background: var(--accent-dim); }
+#panel-turns tbody tr:hover td:first-child { background: var(--panel-2); }
+#panel-turns tbody tr[aria-current="true"] td:first-child {
+  background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent), inset -1px 0 0 var(--hair);
+}
 
 /* ---- tiles ----------------------------------------------------------- */
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 10px; }
-.tile { padding: 10px 12px; }
-.tile .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
-.tile .v { font: 600 21px/28px var(--mono); }
-.tile .s { font-size: 11px; color: var(--muted); }
-.tile svg { display: block; width: 100%; height: 30px; margin-top: 4px; }
-.note { color: var(--muted); font-size: 11px; margin: 10px 2px 0; }
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
+.tile { padding: var(--space-3) var(--space-4); }
+.tile .v { font: 500 28px/32px var(--mono); margin-top: 4px; overflow-wrap: anywhere; }
+.tile .u { font: 12px/16px var(--sans); color: var(--muted); margin-left: 5px; }
+.tile .s { font-size: 11px; line-height: 16px; color: var(--muted); margin-top: 2px; }
+.tile svg { display: block; width: 100%; height: 30px; margin-top: 6px; }
+.note { color: var(--muted); font-size: 11px; line-height: 16px; margin: var(--space-3) 2px 0; }
+.section-label { margin: var(--space-5) 0 var(--space-2); }
 
-.confirm { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
+.confirm { border-top: 1px solid var(--hair); margin-top: var(--space-4); padding-top: var(--space-3); }
 .confirm input { font-family: var(--mono); }
-.row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+/* ---- responsive: nothing hidden, only collapsed behind a visible control ---- */
+@media (max-width: 64rem) {
+  .identity-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cell:nth-child(3) { border-left: 0; padding-left: 0; }
+  .split.wide { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 60rem) {
+  .split { grid-template-columns: minmax(0, 1fr); }
+  .detail.sticky { position: static; }
+}
+@media (max-width: 48rem) {
+  /* The page scrolls as a whole here, so the identity strip can scroll away on a phone. */
+  .app { height: auto; min-height: 100vh; min-height: 100dvh; }
+  .tabpanel { overflow: visible; }
+  .body { grid-template-columns: minmax(0, 1fr); }
+  #rail { display: none; border-right: 0; border-bottom: 1px solid var(--hair); }
+  .body.rail-open #rail { display: block; }
+  #rail-toggle { display: inline-flex; }
+  .identity-grid { grid-template-columns: minmax(0, 1fr); }
+  .cell { border-left: 0; padding-left: 0; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .toolbar .grow { flex-basis: 100%; }
+}
+@media (max-width: 40rem) {
+  header { padding: var(--space-2) var(--space-4); }
+  #identity, .tabpanel { padding-left: var(--space-4); padding-right: var(--space-4); }
+  nav.tabs { padding: 0 var(--space-4); gap: var(--space-4); }
+  .seg, .toolbar select, .toolbar .btn { width: 100%; }
+  .seg button { flex: 1 1 0; }
+  .tiles { grid-template-columns: minmax(0, 1fr); }
+  .item .t { flex-basis: 40px; }
+}
+@media (max-width: 520px) {
+  /* The turns table becomes card rows: each cell carries its own column label. */
+  #panel-turns thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  #panel-turns table, #panel-turns tbody, #panel-turns tr, #panel-turns td { display: block; }
+  #panel-turns tr { border-bottom: 1px solid var(--hair); padding: 6px 0; }
+  #panel-turns td { border: 0; white-space: normal; padding: 2px 10px; }
+  #panel-turns td:first-child { position: static; box-shadow: none; background: none; }
+  #panel-turns td::before {
+    content: attr(data-k); display: inline-block; min-width: 68px; color: var(--muted);
+    font: 600 11px/16px var(--mono); text-transform: uppercase; letter-spacing: var(--track);
+  }
+  #panel-turns td.prompt {
+    max-width: none; width: auto; overflow: hidden; text-overflow: clip; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  }
+  #panel-turns td.num { text-align: left; }
+}
 </style>
 </head>
 <body>
@@ -233,22 +391,55 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     <span class="brand"><span class="dot"></span>Mubit memory</span>
     <span class="endpoint" id="endpoint"></span>
     <span class="spacer"></span>
-    <span class="pill" id="conn"><span class="led"></span><span id="conn-text">connecting</span></span>
+    <span class="pill" id="conn" aria-live="polite"><span class="led"></span><span id="conn-text">connecting</span></span>
     <button class="iconbtn" id="theme" title="Switch between light and dark">theme</button>
   </header>
 
-  <div class="banner" id="banner">
+  <div class="banner" id="banner" role="status">
     <strong id="banner-title"></strong>
     <span id="banner-text"></span>
     <code id="banner-code"></code>
   </div>
 
-  <div class="body">
-    <aside>
-      <div class="rail-label">Data directory</div>
+  <!-- Which run, for which directory, shared by which sessions, writing and reading at what
+       scope. The session map has held the first three all along; this is the first place the
+       page has said any of it. -->
+  <section id="identity" aria-label="Current run">
+    <div class="identity-grid">
+      <div class="cell">
+        <div class="eyebrow">Run</div>
+        <div id="id-run">—</div>
+        <div id="id-run-state"></div>
+        <div id="id-run-note"></div>
+      </div>
+      <div class="cell">
+        <div class="eyebrow">Directory</div>
+        <div id="id-path">—</div>
+        <div id="id-root"></div>
+        <div id="id-datadir"></div>
+      </div>
+      <div class="cell">
+        <div class="eyebrow">Sessions</div>
+        <div id="id-sessions">—</div>
+        <details id="id-session-list">
+          <summary>every session</summary>
+          <div class="sessions"></div>
+        </details>
+        <button class="btn" id="rail-toggle" aria-expanded="false" aria-controls="rail">Change run</button>
+      </div>
+      <div class="cell">
+        <div class="eyebrow">Scope</div>
+        <div id="id-scope"></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="body" id="body">
+    <aside id="rail" aria-label="Data directories and runs">
+      <div class="eyebrow">Data directory</div>
       <select id="dirs" aria-label="Data directory"></select>
 
-      <div class="rail-label">Runs</div>
+      <div class="eyebrow">Runs</div>
       <div id="runs"></div>
     </aside>
 
@@ -261,80 +452,94 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
 
       <!-- ---------------- Memory ---------------- -->
       <section class="tabpanel active" id="panel-memory" role="tabpanel" aria-labelledby="tab-memory">
-        <div class="toolbar">
-          <span class="seg">
-            <button id="mode-lessons" aria-pressed="true">Lessons</button>
-            <button id="mode-activity" aria-pressed="false">Activity</button>
-          </span>
-          <span class="seg">
-            <button id="runs-this" aria-pressed="false">This run</button>
-            <button id="runs-all" aria-pressed="true">All runs</button>
-          </span>
-          <input class="grow" type="search" id="filter" placeholder="Filter what is loaded (instant)" aria-label="Filter loaded entries">
-          <!-- One control, not a value plus a "leaks?" toggle. Reach and exact scope are the same
-               axis asked at two grains, and two controls would let a person select "global" and
-               "only its own run" at once — a state with no rows in it by construction. -->
-          <select id="scope-filter" style="width:auto" aria-label="Scope filter">
-            <option value="">Every scope</option>
-            <optgroup label="Reach">
-              <option value="leak">Visible outside its own run</option>
-              <option value="run">Only its own run</option>
-            </optgroup>
-            <optgroup label="Exact">
-              <option value="session">session</option>
-              <option value="global">global</option>
-              <!-- `org` is written by promotion and by nothing on the client, so offering it on an
-                   instance that has never promoted anything is offering a guaranteed empty result.
-                   It is unhidden by `syncScopeVocabulary()` the moment a loaded row carries it. -->
-              <option value="org" hidden disabled>org</option>
-              <option value="unknown">scope not recorded</option>
-            </optgroup>
-          </select>
-          <select id="project-filter" style="width:auto" aria-label="Project filter"></select>
-          <button class="btn" id="do-search" title="Ask the instance, rather than filtering what is already loaded">Search instance</button>
-        </div>
+        <div class="panel-inner">
+          <div class="toolbar">
+            <span class="seg" role="group" aria-label="Source">
+              <button id="mode-lessons" aria-pressed="true">Lessons</button>
+              <button id="mode-activity" aria-pressed="false">Activity</button>
+            </span>
+            <span class="seg" role="group" aria-label="Runs">
+              <button id="runs-this" aria-pressed="false">This run</button>
+              <button id="runs-all" aria-pressed="true">All runs</button>
+            </span>
+            <span class="seg" role="group" aria-label="Order">
+              <button id="sort-newest" aria-pressed="true">Newest first</button>
+              <button id="sort-oldest" aria-pressed="false">Oldest first</button>
+            </span>
+            <input class="grow" type="search" id="filter" placeholder="Filter what is loaded (instant)" aria-label="Filter loaded entries">
+            <!-- One control, not a value plus a "leaks?" toggle. Reach and exact scope are the same
+                 axis asked at two grains, and two controls would let a person select "global" and
+                 "only its own run" at once — a state with no rows in it by construction. -->
+            <select id="scope-filter" aria-label="Scope filter">
+              <option value="">Every scope</option>
+              <optgroup label="Reach">
+                <option value="leak">Visible outside its own run</option>
+                <option value="run">Only its own run</option>
+              </optgroup>
+              <optgroup label="Exact">
+                <option value="session">session</option>
+                <option value="global">global</option>
+                <!-- `org` is written by promotion and by nothing on the client, so offering it on an
+                     instance that has never promoted anything is offering a guaranteed empty result.
+                     It is unhidden by `syncScopeVocabulary()` the moment a loaded row carries it. -->
+                <option value="org" hidden disabled>org</option>
+                <option value="unknown">scope not recorded</option>
+              </optgroup>
+            </select>
+            <select id="project-filter" aria-label="Project filter"></select>
+            <button class="btn primary" id="do-search" title="Ask the instance, rather than filtering what is already loaded">Search instance</button>
+          </div>
 
-        <div class="split">
-          <div class="card list" id="memory-list"></div>
-          <div class="card detail" id="memory-detail"><p class="empty">Select an entry.</p></div>
+          <div class="chips" id="scope-summary" aria-label="Loaded rows by scope"></div>
+          <div class="chips" id="type-summary" aria-label="Loaded rows by type"></div>
+
+          <div class="split">
+            <div class="card list" id="memory-list"></div>
+            <div class="card detail sticky" id="memory-detail"><p class="empty">Select an entry.</p></div>
+          </div>
+          <p class="note" id="memory-footer" aria-live="polite"></p>
+          <p class="note" id="memory-scope-note"></p>
         </div>
-        <p class="note" id="memory-footer"></p>
-        <p class="note" id="memory-scope-note"></p>
       </section>
 
       <!-- ---------------- Turns ---------------- -->
       <section class="tabpanel" id="panel-turns" role="tabpanel" aria-labelledby="tab-turns">
-        <div class="toolbar">
-          <input class="grow" type="search" id="turn-filter" placeholder="Filter prompts" aria-label="Filter turns">
-          <span class="pill"><span id="turn-count">0</span>&nbsp;turns on disk</span>
-        </div>
-        <div class="split wide">
-          <div class="card scroll-x list">
-            <table>
-              <thead><tr>
-                <th>Prompt</th><th class="num">rung</th><th class="num">src</th>
-                <th class="num">tok</th><th class="num">ptr</th><th>used</th><th>outcome</th>
-              </tr></thead>
-              <tbody id="turn-rows"></tbody>
-            </table>
+        <div class="panel-inner">
+          <div class="toolbar">
+            <input class="grow" type="search" id="turn-filter" placeholder="Filter prompts" aria-label="Filter turns">
+            <span class="pill"><span id="turn-count">0</span>&nbsp;turns on disk</span>
           </div>
-          <div class="card detail" id="turn-detail"><p class="empty">Select a turn.</p></div>
+          <div class="split wide">
+            <div class="card scroll-x">
+              <table>
+                <thead><tr>
+                  <th>time</th><th>Prompt</th><th class="num">rung</th><th class="num">src</th>
+                  <th class="num">tok</th><th class="num">ptr</th><th>used</th><th>outcome</th>
+                </tr></thead>
+                <tbody id="turn-rows"></tbody>
+              </table>
+            </div>
+            <div class="card detail" id="turn-detail"><p class="empty">Select a turn.</p></div>
+          </div>
+          <p class="note">
+            Turn files are pruned six hours after they are written, so this table is the recent
+            past only. There is no per-prompt latency column because per-prompt latency is not
+            recorded anywhere: the timing on the status marker describes the last prompt, not each one.
+          </p>
         </div>
-        <p class="note">
-          Turn files are pruned six hours after they are written, so this table is the recent
-          past only. There is no per-prompt latency column because per-prompt latency is not
-          recorded anywhere: the timing on the status marker describes the last prompt, not each one.
-        </p>
       </section>
 
       <!-- ---------------- Analytics ---------------- -->
       <section class="tabpanel" id="panel-analytics" role="tabpanel" aria-labelledby="tab-analytics">
-        <div class="tiles" id="tiles"></div>
-        <p class="note" id="analytics-note"></p>
+        <div class="panel-inner">
+          <div class="eyebrow section-label">Recall, per prompt</div>
+          <div class="tiles" id="tiles"></div>
+          <p class="note" id="analytics-note"></p>
 
-        <div class="rail-label">Ingest health</div>
-        <div class="tiles" id="health-tiles"></div>
-        <p class="note" id="health-note"></p>
+          <div class="eyebrow section-label">Ingest health</div>
+          <div class="tiles" id="health-tiles"></div>
+          <p class="note" id="health-note"></p>
+        </div>
       </section>
     </main>
   </div>
@@ -360,6 +565,7 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     meta: null,
     dir: '',
     run: '',
+    runs: [],
     // Memory-only, and it does not touch `state.run`. An empty `run=` upstream means *every*
     // run, which is the only way the scope question can be asked at all — but /api/search,
     // /api/outcome, /api/archive and /api/health/remote all refuse an empty run, and the Turns
@@ -369,11 +575,13 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     allRuns: true,
     mode: 'lessons',
     tab: 'memory',
+    sort: 'newest',
     lessons: [],
     activity: [],
     turns: [],
     scope: '',
     project: '',
+    type: '',
     selectedEntry: null,
     selectedTurn: null,
     searchResults: null,
@@ -394,6 +602,12 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     // A slow all-runs fetch started before a fast this-run one must not land after it and
     // repaint the older answer. Every render path checks the sequence it was issued under.
     reqSeq: 0,
+    // What the identity strip last rendered, so the one-second poll rewrites it only when
+    // something in it changed — a rebuild every tick would close the session list and steal
+    // focus from the toggle.
+    identitySig: '',
+    runsSig: '',
+    railOpen: false,
   };
 
   async function api(path, init) {
@@ -431,12 +645,8 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
   };
   const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
   const num = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
-  const short = (id, n) => (id ? String(id).slice(0, n || 8) : '—');
-  const clock = (ms) => (ms ? new Date(ms).toLocaleTimeString() : '—');
-  const day = (iso) => {
-    if (!iso) return '—';
-    const d = new Date(iso);
-    return isNaN(d.getTime()) ? String(iso) : d.toLocaleDateString();
+  const narrow = (q) => {
+    try { return window.matchMedia(q).matches; } catch (e) { return false; }
   };
 
   function tag(text, cls) {
@@ -475,12 +685,15 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     return svg;
   }
 
-  function tile(key, value, sub, series) {
+  /** A metric as a big number, its unit, and the line that says how it was measured. */
+  function tile(spec) {
     const card = el('div', 'card tile');
-    card.appendChild(el('div', 'k', key));
-    card.appendChild(el('div', 'v', value));
-    if (sub) card.appendChild(el('div', 's', sub));
-    if (series && series.length > 1) card.appendChild(sparkline(series));
+    card.appendChild(el('div', 'eyebrow', spec.key));
+    const v = el('div', 'v', spec.value);
+    if (spec.unit) v.appendChild(el('span', 'u', spec.unit));
+    card.appendChild(v);
+    if (spec.method) card.appendChild(el('div', 's', spec.method));
+    if (spec.series && spec.series.length > 1) card.appendChild(sparkline(spec.series));
     return card;
   }
 
@@ -520,50 +733,6 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     pill.classList.toggle('ok', ok === true);
     pill.classList.toggle('bad', ok === false);
     $('conn-text').textContent = text;
-  }
-
-  // -------------------------------------------------------------------------
-  // Rail
-  // -------------------------------------------------------------------------
-
-  function renderDirs(dirs) {
-    const sel = $('dirs');
-    if (sel.dataset.count === String(dirs.length) && sel.value === state.dir) return;
-    sel.dataset.count = String(dirs.length);
-    clear(sel);
-    dirs.forEach((d) => {
-      const o = el('option', null, d.name + '  (' + d.runCount + ' runs)');
-      o.value = d.path;
-      sel.appendChild(o);
-    });
-    sel.value = state.dir;
-  }
-
-  function renderRuns(runs) {
-    const box = $('runs');
-    clear(box);
-    if (!runs.length) {
-      box.appendChild(el('p', 'empty', 'No runs in this directory yet.'));
-      return;
-    }
-    runs.forEach((r) => {
-      const b = el('button', 'run');
-      b.setAttribute('aria-current', String(r.runId === state.run));
-      b.appendChild(el('div', 'id', r.runId));
-      b.appendChild(el('div', 'meta',
-        r.state + ' · ' + r.turnCount + ' turns · spool ' + r.spoolDepth));
-      b.addEventListener('click', () => {
-        state.run = r.runId;
-        state.selectedEntry = null;
-        state.selectedTurn = null;
-        state.searchResults = null;
-        state.lastRemoteAt = 0;
-        refreshLocal();
-        refreshAnalytics();
-        refreshRemote();
-      });
-      box.appendChild(b);
-    });
   }
 
   // -------------------------------------------------------------------------
@@ -667,6 +836,621 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
   }
   // #endregion scope-predicate
 
+  // #region identity-model
+  /*
+   * The identity strip's arithmetic: which run, whose sessions, which directory, in what words.
+   * Pure for the same reason as the region above — the test slices it out and runs it with a
+   * fixed clock, so every "ago" and every fallback is a table rather than a screenshot.
+   */
+
+  const STRATEGY_LABEL = {
+    'per-directory': 'one run per directory',
+    'git-branch': 'one run per git branch',
+    'per-conversation': 'one run per host session',
+    static: 'a fixed run id',
+  };
+
+  function strategyLabel(s) {
+    const k = String(s || '');
+    return STRATEGY_LABEL[k] || (k ? 'strategy "' + k + '"' : 'strategy unknown');
+  }
+
+  // Fallback wording only. The server's `describeRunScope` is the authority and its text wins
+  // whenever the meta carries one; these exist so a page served by an older bundle still says
+  // something true rather than nothing.
+  const WRITES_AT_TEXT = {
+    run: 'lessons an agent saves stay inside this run',
+    session: 'lessons an agent saves can surface in later sessions of this project',
+    global: 'lessons an agent saves are visible to every run on this instance',
+  };
+  const READS_ACROSS_TEXT = {
+    auto: 'recall consults other runs when at least 3 s of budget remains',
+    on: 'every recall consults other runs',
+    off: 'recall never consults other runs; only the session-start briefing does',
+  };
+
+  /** The two sentences the Scope cell shows, from the server's scope block. */
+  function scopeSentences(scope) {
+    const s = scope && typeof scope === 'object' ? scope : {};
+    const writesAt = String(s.writesAt || 'session');
+    const reads = String(s.readsAcrossRuns || 'auto');
+    const writesText = String(s.writesAtText || WRITES_AT_TEXT[writesAt]
+      || ('lessons an agent saves are capped at "' + writesAt + '" scope'));
+    const readsText = String(s.readsAcrossRunsText || READS_ACROSS_TEXT[reads]
+      || ('cross-run recall is set to "' + reads + '"'));
+    return {
+      writes: 'Writes: hook captures stay at run scope; ' + writesText + ' (cap: ' + writesAt + ').',
+      reads: 'Reads: ' + readsText + ' (cross-run: ' + reads + ').',
+    };
+  }
+
+  /** A path split for display: everything up to the last separator, and the last segment. */
+  function pathParts(path) {
+    const full = String(path || '');
+    const m = /^(.*[\/\\])([^\/\\]+)[\/\\]?$/.exec(full);
+    if (!m) return { full: full, head: '', tail: full };
+    return { full: full, head: m[1], tail: m[2] };
+  }
+
+  /** A subagent's marker is `<parent>-sub-<id>`; nothing is stored under it, so it borrows. */
+  function parentRunId(id) {
+    const s = String(id || '');
+    const at = s.indexOf('-sub-');
+    return at > 0 ? s.slice(0, at) : s;
+  }
+
+  function relativeTime(ms, now) {
+    const t = typeof ms === 'number' && isFinite(ms) && ms > 0 ? ms : 0;
+    if (!t) return '—';
+    const ref = typeof now === 'number' ? now : Date.now();
+    const s = Math.floor(Math.max(0, ref - t) / 1000);
+    if (s < 10) return 'just now';
+    if (s < 60) return s + 's ago';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ago';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ago';
+    return Math.floor(h / 24) + 'd ago';
+  }
+
+  function runStateTone(st) {
+    const s = String(st || '');
+    if (s === 'ready') return 'ok';
+    if (s === 'unreachable' || s === 'auth_failed' || s === 'invalid_request') return 'bad';
+    return 'muted';
+  }
+
+  function shortSession(id) {
+    const s = String(id || '');
+    if (!s) return '—';
+    return s.length > 10 ? s.slice(0, 5) + '…' + s.slice(-3) : s;
+  }
+
+  function sessionLabel(s, now) {
+    const x = s && typeof s === 'object' ? s : {};
+    const parts = [
+      shortSession(x.sessionId),
+      x.agentId || 'agent unknown',
+      'first seen ' + relativeTime(x.createdAt, now),
+      'last seen ' + relativeTime(x.lastSeenAt, now),
+    ];
+    if (Number(x.clearCount) > 0) parts.push('cleared ' + x.clearCount + '×');
+    return parts.join(' · ');
+  }
+
+  /**
+   * Everything the strip renders, from a run row, the meta, and the run list (for a subagent
+   * marker to borrow its parent's sessions). The launch directory is the fallback only for
+   * the launch run — the one run that can be identified without a session record at all.
+   * Any other run with no record has no directory, and guessing one would be worse than blank.
+   */
+  function runIdentity(run, meta, runs) {
+    const r = run && typeof run === 'object' ? run : {};
+    const m = meta && typeof meta === 'object' ? meta : {};
+    const launch = m.launch && typeof m.launch === 'object' ? m.launch : {};
+    const runId = String(r.runId || '');
+    const parent = parentRunId(runId);
+    let sessions = Array.isArray(r.sessions) ? r.sessions : [];
+    if (!sessions.length && parent !== runId && Array.isArray(runs)) {
+      const p = runs.find((x) => x && x.runId === parent);
+      if (p && Array.isArray(p.sessions)) sessions = p.sessions;
+    }
+    const newest = sessions.length ? sessions[0] : null;
+    const launchRun = String(launch.run || '');
+    const isLaunchRun = !!runId && !!launchRun && (runId === launchRun || parent === launchRun);
+    return {
+      runId: runId,
+      isLaunchRun: isLaunchRun,
+      state: String(r.state || 'unknown'),
+      mode: String(r.mode || ''),
+      lastWrite: Number(r.lastWrite) || 0,
+      sessions: sessions,
+      newest: newest,
+      sessionCount: sessions.length,
+      clearTotal: sessions.reduce((a, s) => a + (Number(s && s.clearCount) || 0), 0),
+      projectDir: String(r.projectDir || (newest && newest.projectDir)
+        || (isLaunchRun ? launch.projectDir : '') || ''),
+      projectRoot: String(r.projectRoot || (newest && newest.projectRoot) || ''),
+    };
+  }
+
+  /** What a rebuild of the strip would change. Same string, same strip, no DOM writes. */
+  function identitySignature(id) {
+    const x = id && typeof id === 'object' ? id : {};
+    return [
+      x.runId, x.isLaunchRun, x.state, x.mode, x.sessionCount, x.clearTotal, x.projectDir, x.projectRoot,
+    ].concat((x.sessions || []).map((s) => s.sessionId + ':' + s.lastSeenAt + ':' + s.clearCount)).join('|');
+  }
+  // #endregion identity-model
+
+  // #region lesson-view
+  /*
+   * The lesson list's arithmetic: order, day groups, counts and sentences. Depends on the
+   * scope predicate above and on nothing in the page.
+   */
+
+  function scopeTone(row) {
+    if (!scopeKnown(row)) return 'unknown';
+    return leaksScope(row) ? 'shared' : 'local';
+  }
+
+  /** What the scope means for this entry, in words rather than in a bucket name. */
+  const REACH = {
+    run: 'Only the run that wrote it. It goes away with that session.',
+    session: 'Every run in the same session — so it survives a compaction, but not a new session.',
+    global: 'Every run on this instance, in every project. This is the one that follows you.',
+    org: 'Everyone on this instance’s organisation. Only promotion writes this scope.',
+  };
+
+  function reachSentence(row) {
+    const s = scopeOf(row);
+    const base = REACH[s] || ('Scope "' + s + '" is not one this page knows about.');
+    return scopeKnown(row) ? base : base + ' That is the default, though, not a recorded scope.';
+  }
+
+  /** Counted the way the filter keeps them: `run` includes the unrecorded rows, `unknown` counts them again. */
+  function scopeCounts(rows) {
+    const out = { run: 0, session: 0, global: 0, org: 0, unknown: 0 };
+    (rows || []).forEach((r) => {
+      const s = scopeOf(r);
+      if (Object.prototype.hasOwnProperty.call(out, s)) out[s] += 1;
+      if (!scopeKnown(r)) out.unknown += 1;
+    });
+    return out;
+  }
+
+  function typeOf(row) {
+    return String((row && (row.lessonType || row.entry_type)) || 'entry');
+  }
+
+  function matchesType(row, filter) {
+    return !filter || typeOf(row) === filter;
+  }
+
+  function typeCounts(rows) {
+    const m = new Map();
+    (rows || []).forEach((r) => { const k = typeOf(r); m.set(k, (m.get(k) || 0) + 1); });
+    return Array.from(m.entries())
+      .map((e) => ({ key: e[0], count: e[1] }))
+      .sort((a, b) => b.count - a.count || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  }
+
+  function isoOf(row) {
+    return String((row && (row.createdAt || row.created_at)) || '');
+  }
+
+  function timeOf(row) {
+    const iso = isoOf(row);
+    if (!iso) return 0;
+    const t = Date.parse(iso);
+    return isNaN(t) ? 0 : t;
+  }
+
+  const pad2 = (n) => (n < 10 ? '0' : '') + n;
+  const ymd = (d) => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+
+  /** `Today`, `Yesterday`, a local calendar date, or `Undated` — by the viewer's clock. */
+  function dayKey(iso, now) {
+    const t = iso ? Date.parse(iso) : NaN;
+    if (!iso || isNaN(t)) return 'Undated';
+    const key = ymd(new Date(t));
+    const n = new Date(typeof now === 'number' ? now : Date.now());
+    if (key === ymd(n)) return 'Today';
+    n.setDate(n.getDate() - 1);
+    if (key === ymd(n)) return 'Yesterday';
+    return key;
+  }
+
+  /** Newest or oldest first; undated rows last either way, in the order they arrived. */
+  function sortRows(rows, order) {
+    const dir = order === 'oldest' ? 1 : -1;
+    return (rows || []).map((r, i) => ({ r: r, i: i, t: timeOf(r) })).sort((a, b) => {
+      if (!a.t && !b.t) return a.i - b.i;
+      if (!a.t) return 1;
+      if (!b.t) return -1;
+      return (a.t - b.t) * dir || a.i - b.i;
+    }).map((x) => x.r);
+  }
+
+  function groupByDay(rows, now, order) {
+    const groups = [];
+    const byKey = new Map();
+    sortRows(rows, order).forEach((r) => {
+      const k = dayKey(isoOf(r), now);
+      let g = byKey.get(k);
+      if (!g) { g = { key: k, rows: [] }; byKey.set(k, g); groups.push(g); }
+      g.rows.push(r);
+    });
+    return groups;
+  }
+
+  /** `HH:MM`, local, 24-hour. */
+  function clockOf(iso) {
+    const t = iso ? Date.parse(iso) : NaN;
+    if (!iso || isNaN(t)) return '—';
+    const d = new Date(t);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  function localStamp(iso) {
+    const t = iso ? Date.parse(iso) : NaN;
+    if (!iso || isNaN(t)) return '';
+    return ymd(new Date(t)) + ' ' + clockOf(iso);
+  }
+
+  /** One sentence that answers "when, by whom, through what, at what scope". */
+  function storedLine(row, currentRun) {
+    const iso = isoOf(row);
+    const when = iso
+      ? localStamp(iso) + ' (' + iso + ')'
+      : 'at a time this instance did not record';
+    const by = String((row && (row.sourceRunId || row.run_id)) || '');
+    return 'Stored ' + when + ' by run ' + (by || 'unknown')
+      + (fromOtherRun(row, currentRun) ? ' (not the selected run)' : '')
+      + ' via ' + String((row && row.source) || 'an unrecorded source')
+      + ' at ' + scopeOf(row) + ' scope (' + (scopeKnown(row) ? 'recorded' : 'defaulted') + ').';
+  }
+
+  function shortId(id, n) {
+    return id ? String(id).slice(0, n || 8) : '—';
+  }
+
+  /**
+   * A failed fetch and an instance holding nothing must not render the same sentence. It is
+   * the single most expensive thing this page could get wrong: it tells somebody their memory
+   * is empty when their memory is fine and their network is not.
+   */
+  function listEmptyMessage(ctx) {
+    const c = ctx && typeof ctx === 'object' ? ctx : {};
+    const lessons = c.mode === 'lessons';
+    if (c.error) {
+      return {
+        kind: 'error',
+        text: lessons ? 'Could not load lessons from the instance.' : 'Could not load activity from the instance.',
+        detail: String(c.error),
+      };
+    }
+    if (!c.loaded) return { kind: 'loading', text: 'Loading…', detail: '' };
+    if (c.total) {
+      return { kind: 'filtered', text: 'No entry in the ' + c.total + ' loaded matches these filters.', detail: '' };
+    }
+    return {
+      kind: 'empty',
+      text: 'This instance returned no ' + (lessons ? 'lessons' : 'activity') + ' for '
+        + (c.allRuns ? 'any run.' : 'this run.'),
+      detail: '',
+    };
+  }
+
+  /** The footer's clauses. The census numbers are what make "0 results" legible. */
+  function footerParts(ctx) {
+    const c = ctx && typeof ctx === 'object' ? ctx : {};
+    const shown = Number(c.shown) || 0;
+    const parts = [shown + (shown === 1 ? ' result' : ' results')];
+    if (c.hidden) parts.push(c.hidden + ' hidden by the scope filter');
+    const cen = c.census;
+    if (c.mode === 'lessons' && !c.search && cen) {
+      parts.push(cen.totalVisible + ' visible to this instance');
+      if (cen.source) parts.push('answered by ' + cen.source);
+      if (cen.truncated) {
+        parts.push('the census stopped after ' + cen.pages + (cen.pages === 1 ? ' page' : ' pages')
+          + (cen.truncatedReason ? ' (' + cen.truncatedReason + ')' : ''));
+      }
+      if (cen.unknownScope) parts.push(cen.unknownScope + ' with no recorded scope');
+    }
+    if (c.search) parts.push('search results for “' + String(c.searchQuery || '') + '”');
+    return parts;
+  }
+
+  function scopeNoteText(ctx) {
+    const c = ctx && typeof ctx === 'object' ? ctx : {};
+    const what = c.mode === 'lessons' ? 'lessons' : 'entries';
+    const bits = [c.allRuns
+      ? 'Showing ' + what + ' from every run this instance holds. Worked / Did not work / '
+        + 'Archive / delete still attribute to the run selected in the rail, because those '
+        + 'routes need a concrete run.'
+      : 'Showing only ' + what + ' the run selected in the rail wrote, so anything a previous '
+        + 'session saved at global scope is out of view.'];
+    if (c.joinError) bits.push('Creation dates are missing: the activity join failed — ' + c.joinError);
+    return bits.join(' ');
+  }
+  // #endregion lesson-view
+
+  // #region turn-view
+  /*
+   * The turns table and the analytics tiles, as data. Pure; depends on nothing in the page.
+   */
+
+  function turnMatches(t, q) {
+    if (!q) return true;
+    const x = t && typeof t === 'object' ? t : {};
+    return ((x.promptPreview || '') + ' ' + (x.outcomeState || '')).toLowerCase().indexOf(q) >= 0;
+  }
+
+  /** `0` is not a rung. The ladder is 1–2, and an absent rung is coerced to zero on the way in. */
+  function rungText(rung) {
+    const n = Number(rung) || 0;
+    return n > 0 ? String(n) : '—';
+  }
+
+  /**
+   * Tri-state, and the third state is not "no". Absent means the signal could not be measured,
+   * and rendering it as a count of nothing ("0/0") reads as a measured zero. A bare question
+   * mark cannot.
+   */
+  function usedCell(used) {
+    const u = used && typeof used === 'object' ? used : {};
+    const ratio = (Number(u.matched) || 0) + '/' + (Number(u.candidates) || 0);
+    if (u.used === true) {
+      return { text: ratio, tone: 'ok', title: 'The reply carried vocabulary from the injected block that was not already in the prompt.' };
+    }
+    if (u.used === false) {
+      return { text: ratio, tone: 'muted', title: 'No echo found. Weak evidence: the false negatives of this proxy dominate.' };
+    }
+    return {
+      text: '?',
+      tone: 'unknown',
+      title: 'Not measurable for this turn' + (u.reason ? ' (' + u.reason + ')' : '') + ' — not "unused".',
+    };
+  }
+
+  function fmtInt(n) {
+    const v = Math.round(Number(n) || 0);
+    return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  function pct(x) {
+    return Math.round((Number(x) || 0) * 100) + '%';
+  }
+
+  /** `YYYY-MM-DD HH:MM`, local. Its own zero-pad: this region evaluates on its own. */
+  function stampMs(ms) {
+    const t = Number(ms) || 0;
+    if (!t) return '—';
+    const d = new Date(t);
+    const two = (n) => (n < 10 ? '0' : '') + n;
+    return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate())
+      + ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
+  }
+
+  function tileSpecs(a) {
+    const x = a && typeof a === 'object' ? a : {};
+    const series = Array.isArray(x.series) ? x.series : [];
+    const avg = x.averages || {};
+    const n = Number(x.points) || 0;
+    const over = 'mean over ' + n + (n === 1 ? ' prompt' : ' prompts');
+    const col = (k) => series.map((r) => Number(r && r[k]) || 0);
+    return [
+      { key: 'Recall cost', value: fmtInt(avg.tok), unit: 'tok / prompt', method: over, series: col('tok') },
+      { key: 'Memories injected', value: String(Number(avg.sources) || 0), unit: '/ prompt', method: over, series: col('sources') },
+      { key: 'Pointer ratio', value: pct(x.pointerRatio), unit: '', method: 'repeats rendered as a one-line pointer', series: col('ptr') },
+      { key: 'Characters', value: fmtInt(avg.chars), unit: '/ prompt', method: over, series: col('chars') },
+    ];
+  }
+
+  function analyticsNote(a) {
+    const x = a && typeof a === 'object' ? a : {};
+    const n = Number(x.points) || 0;
+    return n
+      ? 'The series covers ' + n + (n === 1 ? ' prompt' : ' prompts') + ' recorded since '
+        + stampMs(x.firstSampleAt) + '. It is the dashboard’s own rollup rather than the raw '
+        + 'turn files, which are pruned after six hours — so it accrues from the first launch '
+        + 'and cannot reconstruct anything from before that.'
+      : 'Nothing recorded yet. The rollup starts empty and grows one row per prompt while this '
+        + 'page is open, so the first session here is sparse by construction.';
+  }
+
+  function healthTileSpecs(health) {
+    const h = health && typeof health === 'object' ? health : {};
+    const marker = h.marker || {};
+    const captured = marker.captured || {};
+    const b = h.breaker || {};
+    const rejected = Number(h.rejectedCount) || 0;
+    return [
+      { key: 'Spool depth', value: fmtInt(h.spoolDepth), unit: 'waiting',
+        method: rejected ? rejected + ' rejected' : 'captures waiting to ship', series: [] },
+      { key: 'Ingested', value: fmtInt(captured.ingested), unit: '',
+        method: fmtInt(captured.pending) + ' pending · ' + fmtInt(captured.tools) + ' tools', series: [] },
+      { key: 'Breaker', value: String(b.phase || 'closed'), unit: '',
+        method: String(b.state || 'ready') + (Number(b.cooldownLeftMs) > 0
+          ? ' · ' + Math.ceil(Number(b.cooldownLeftMs) / 1000) + 's left' : ''), series: [] },
+      { key: 'Run state', value: String(marker.state || 'unknown'), unit: '',
+        method: marker.mode ? marker.mode + ' · updated ' + stampMs(marker.updated_at) : '', series: [] },
+    ];
+  }
+
+  function healthNote(health) {
+    const h = health && typeof health === 'object' ? health : {};
+    const marker = h.marker || {};
+    const reflect = marker.reflect || {};
+    const recall = marker.recall || {};
+    const n = (v) => Number(v) || 0;
+    return 'Last recall on the marker: ' + n(recall.sources) + ' memories, ' + n(recall.tokens)
+      + ' tok, rung ' + n(recall.rung)
+      + (recall.empty_reason ? ', empty because ' + recall.empty_reason : '')
+      + ', dry streak ' + n(recall.dry_streak) + '. '
+      + 'Reflection: ' + (reflect.status || 'never run') + ', ' + n(reflect.lessons_stored)
+      + ' lessons stored. The marker is last-write-wins, so this row describes the most recent '
+      + 'prompt only — the table on the Turns tab is the per-prompt series.';
+  }
+  // #endregion turn-view
+
+  // -------------------------------------------------------------------------
+  // Identity strip
+  // -------------------------------------------------------------------------
+
+  function currentRunRow() {
+    return state.runs.find((r) => r.runId === state.run) || (state.run ? { runId: state.run } : null);
+  }
+
+  function dirNameOf(path) {
+    const dirs = (state.meta && state.meta.dirs) || [];
+    const hit = dirs.find((d) => d.path === path);
+    return hit ? hit.name : pathParts(path).tail;
+  }
+
+  function renderIdentity() {
+    const now = Date.now();
+    const id = runIdentity(currentRunRow(), state.meta, state.runs);
+    const meta = state.meta || {};
+    const scope = meta.scope || {};
+
+    // The parts that tick: cheap text nodes, rewritten every poll.
+    const st = $('id-run-state');
+    clear(st);
+    if (id.runId) {
+      st.appendChild(el('span', 'state-dot ' + runStateTone(id.state)));
+      st.appendChild(document.createTextNode(
+        id.state + (id.mode ? ' · ' + id.mode : '') + ' · updated ' + relativeTime(id.lastWrite, now)));
+    }
+    $('id-sessions').textContent = !id.runId ? '—' : id.sessionCount
+      ? (id.sessionCount + (id.sessionCount === 1 ? ' session is mapped to' : ' sessions share') + ' this run'
+        + ' · newest ' + shortSession(id.newest.sessionId) + ' seen ' + relativeTime(id.newest.lastSeenAt, now)
+        + ' · ' + strategyLabel((id.newest && id.newest.strategy) || scope.strategy))
+      : 'No session record maps to this run yet · ' + strategyLabel(scope.strategy);
+
+    // The parts that do not: rewritten only when something in them changed, so the session
+    // list stays open and the toggle keeps focus across the one-second poll.
+    const sig = identitySignature(id) + '|' + (meta.dir || '') + '|' + JSON.stringify(scope);
+    if (sig === state.identitySig) return;
+    state.identitySig = sig;
+
+    $('id-run').textContent = id.runId || '—';
+    $('id-run-note').textContent = id.isLaunchRun ? '(the run this dashboard was launched in)' : '';
+
+    $('id-path').textContent = id.projectDir || (id.runId ? 'no directory recorded for this run' : '—');
+    $('id-root').textContent = id.projectRoot && id.projectRoot !== id.projectDir
+      ? 'git root ' + id.projectRoot : '';
+    $('id-datadir').textContent = meta.dir ? 'data directory ' + dirNameOf(meta.dir) : '';
+
+    const list = $('id-session-list');
+    const box = list.querySelector('.sessions');
+    clear(box);
+    list.querySelector('summary').textContent = id.sessionCount
+      ? 'every session (' + id.sessionCount + (id.clearTotal ? ', cleared ' + id.clearTotal + '× in total' : '') + ')'
+      : 'no sessions';
+    id.sessions.forEach((s) => {
+      const row = el('div', 'session', sessionLabel(s, now));
+      row.title = s.sessionId + (s.projectDir ? ' · ' + s.projectDir : '');
+      box.appendChild(row);
+    });
+
+    const sc = $('id-scope');
+    clear(sc);
+    const sentences = scopeSentences(scope);
+    sc.appendChild(el('p', null, sentences.writes));
+    sc.appendChild(el('p', null, sentences.reads));
+  }
+
+  function syncRail() {
+    $('body').classList.toggle('rail-open', state.railOpen);
+    $('rail-toggle').setAttribute('aria-expanded', String(state.railOpen));
+    $('rail-toggle').textContent = state.railOpen ? 'Hide runs' : 'Change run';
+  }
+  $('rail-toggle').addEventListener('click', () => { state.railOpen = !state.railOpen; syncRail(); });
+
+  // -------------------------------------------------------------------------
+  // Rail
+  // -------------------------------------------------------------------------
+
+  function renderDirs(dirs) {
+    const sel = $('dirs');
+    if (sel.dataset.count === String(dirs.length) && sel.value === state.dir) return;
+    sel.dataset.count = String(dirs.length);
+    clear(sel);
+    dirs.forEach((d) => {
+      const o = el('option', null, d.name + '  (' + d.runCount + ' runs)');
+      o.value = d.path;
+      sel.appendChild(o);
+    });
+    sel.value = state.dir;
+  }
+
+  function selectRun(runId) {
+    state.run = runId;
+    state.selectedEntry = null;
+    state.selectedTurn = null;
+    state.searchResults = null;
+    state.lastRemoteAt = 0;
+    state.railOpen = false;
+    syncRail();
+    renderRuns(state.runs);
+    renderIdentity();
+    refreshLocal();
+    refreshAnalytics();
+    refreshRemote();
+  }
+
+  function runMeta(r, now) {
+    return r.state + ' · ' + r.turnCount + (r.turnCount === 1 ? ' turn' : ' turns') + ' · '
+      + relativeTime(r.lastWrite, now);
+  }
+
+  /**
+   * Rebuilt only when the set of runs changes; otherwise the rows are patched in place. The
+   * one-second poll would otherwise rebuild the list under a focused button every tick.
+   */
+  function renderRuns(runs) {
+    state.runs = runs;
+    const now = Date.now();
+    const box = $('runs');
+    const sig = runs.map((r) => r.runId + ':' + (r.projectDir || '')).join('|');
+
+    if (sig === state.runsSig && box.children.length === runs.length && runs.length) {
+      runs.forEach((r, i) => {
+        const b = box.children[i];
+        b.setAttribute('aria-current', String(r.runId === state.run));
+        b.querySelector('.state-dot').className = 'state-dot ' + runStateTone(r.state);
+        b.querySelector('.txt').textContent = runMeta(r, now);
+      });
+      return;
+    }
+    state.runsSig = sig;
+    clear(box);
+    if (!runs.length) {
+      box.appendChild(el('p', 'empty', 'No runs in this directory yet.'));
+      return;
+    }
+    runs.forEach((r) => {
+      const b = el('button', 'run');
+      b.setAttribute('aria-current', String(r.runId === state.run));
+      b.appendChild(el('div', 'id', r.runId));
+      const meta = el('div', 'meta');
+      const dot = el('span', 'state-dot ' + runStateTone(r.state));
+      meta.appendChild(dot);
+      meta.appendChild(el('span', 'txt', runMeta(r, now)));
+      const proj = pathParts(r.projectDir || '').tail;
+      if (proj) {
+        const p = el('span', 'proj', proj);
+        p.title = r.projectDir;
+        meta.appendChild(p);
+      }
+      b.appendChild(meta);
+      b.addEventListener('click', () => selectRun(r.runId));
+      box.appendChild(b);
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Memory tab
   // -------------------------------------------------------------------------
@@ -709,7 +1493,7 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     const scope = activeScope();
     const project = activeProject();
     return currentEntries().filter((e) => matchesScope(e, scope)
-      && matchesProject(e, project) && matchesText(e, q));
+      && matchesProject(e, project) && matchesType(e, state.type) && matchesText(e, q));
   }
 
   /** What the scope filter alone costs, so the footer can offer to give it back. */
@@ -718,64 +1502,134 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     if (!scope) return 0;
     const q = activeText();
     const project = activeProject();
-    return currentEntries().filter((e) => matchesProject(e, project) && matchesText(e, q)
-      && !matchesScope(e, scope)).length;
+    return currentEntries().filter((e) => matchesProject(e, project) && matchesType(e, state.type)
+      && matchesText(e, q) && !matchesScope(e, scope)).length;
+  }
+
+  const FACET_OFF = 'The activity feed is fetched with the compact projection, which the instance '
+    + 'returns with the scope metadata stripped out — so no scope or project filter can say '
+    + 'anything true about these rows. Switch to Lessons to filter by scope.';
+
+  /** The loaded window, counted by scope. A chip is the scope filter with a number on it. */
+  function renderScopeChips() {
+    const box = $('scope-summary');
+    clear(box);
+    const rows = currentEntries();
+    if (!rows.length) return;
+    const on = facetsApply();
+    const c = scopeCounts(rows);
+    box.appendChild(el('span', 'eyebrow lbl', 'scope'));
+    [['run', 'run'], ['session', 'session'], ['global', 'global'], ['org', 'org'], ['unknown', 'not recorded']]
+      .forEach((pair) => {
+        if (!c[pair[0]] && pair[0] === 'org') return;
+        const chip = el('button', 'chip', pair[1]);
+        chip.appendChild(el('b', null, c[pair[0]]));
+        chip.setAttribute('aria-pressed', String(on && state.scope === pair[0]));
+        chip.disabled = !on;
+        chip.title = on ? 'Show only ' + pair[1] + ' scope' : FACET_OFF;
+        chip.addEventListener('click', () => {
+          state.scope = state.scope === pair[0] ? '' : pair[0];
+          $('scope-filter').value = state.scope;
+          renderMemory();
+        });
+        box.appendChild(chip);
+      });
+  }
+
+  function renderTypeChips() {
+    const box = $('type-summary');
+    clear(box);
+    const counts = typeCounts(currentEntries());
+    if (state.type && !counts.some((t) => t.key === state.type)) state.type = '';
+    if (counts.length < 2 && !state.type) return;
+    box.appendChild(el('span', 'eyebrow lbl', 'type'));
+    counts.forEach((t) => {
+      const chip = el('button', 'chip', t.key);
+      chip.appendChild(el('b', null, t.count));
+      chip.setAttribute('aria-pressed', String(state.type === t.key));
+      chip.title = 'Show only ' + t.key + ' entries';
+      chip.addEventListener('click', () => {
+        state.type = state.type === t.key ? '' : t.key;
+        renderMemory();
+      });
+      box.appendChild(chip);
+    });
   }
 
   function renderMemoryList() {
     const box = $('memory-list');
     clear(box);
 
-    // A failed fetch and an instance holding nothing used to render the same sentence, which
-    // is the single most expensive thing this page could get wrong: it tells somebody their
-    // memory is empty when their memory is fine and their network is not.
-    const err = state.mode === 'lessons' ? state.lessonsError : state.activityError;
-    if (err) {
-      const p = el('p', 'empty', state.mode === 'lessons'
-        ? 'Could not load lessons from the instance.'
-        : 'Could not load activity from the instance.');
-      box.appendChild(p);
-      box.appendChild(el('p', 'note', err));
-      return;
-    }
-
     const rows = filteredEntries();
-    if (!rows.length) {
-      if (!state.loaded) {
-        box.appendChild(el('p', 'empty', 'Loading…'));
-        return;
-      }
-      const total = currentEntries().length;
-      box.appendChild(el('p', 'empty', total
-        ? 'No entry in the ' + total + ' loaded matches these filters.'
-        : (state.mode === 'lessons'
-          ? 'This instance returned no lessons for ' + (state.allRuns ? 'any run.' : 'this run.')
-          : 'This instance returned no activity for '
-            + (state.allRuns ? 'any run.' : 'this run.'))));
+    const err = state.mode === 'lessons' ? state.lessonsError : state.activityError;
+    if (err || !rows.length) {
+      const msg = listEmptyMessage({
+        mode: state.mode, error: err, loaded: state.loaded,
+        total: currentEntries().length, allRuns: state.allRuns,
+      });
+      box.appendChild(el('p', 'empty', msg.text));
+      if (msg.detail) box.appendChild(el('p', 'note', msg.detail));
       return;
     }
 
-    rows.forEach((e) => {
-      const b = el('button', 'item');
-      b.setAttribute('aria-current', String(state.selectedEntry && state.selectedEntry.id === e.id));
-      b.appendChild(el('div', 'line1', e.content || '(no content)'));
-
-      const meta = el('div', 'line2');
-      if (e.lessonType || e.entry_type) meta.appendChild(tag(e.lessonType || e.entry_type));
-      meta.appendChild(scopeBadge(e));
-      if (fromOtherRun(e, state.run)) {
-        const t = tag('other run');
-        t.title = 'Written by ' + (e.sourceRunId || e.run_id) + ', not by the run selected in the '
-          + 'rail. Where it is visible is the scope badge; this only says who wrote it.';
-        meta.appendChild(t);
-      }
-      if (e.importance) meta.appendChild(tag(e.importance));
-      meta.appendChild(document.createTextNode(day(e.createdAt || e.created_at)));
-      b.appendChild(meta);
-
-      b.addEventListener('click', () => { state.selectedEntry = e; renderMemory(); });
-      box.appendChild(b);
+    const now = Date.now();
+    let undated = 0;
+    groupByDay(rows, now, state.sort).forEach((g) => {
+      box.appendChild(el('div', 'dayhead', g.key + ' (' + g.rows.length + ')'));
+      if (g.key === 'Undated') undated = g.rows.length;
+      g.rows.forEach((e) => box.appendChild(memoryRow(e)));
     });
+    if (undated && undated === rows.length) {
+      box.appendChild(el('p', 'note', state.searchResults
+        ? 'Search evidence carries no timestamp of its own; a result that is also in the loaded '
+          + 'window borrows its date from there.'
+        : 'None of these rows carries a creation time, so they cannot be placed in order.'));
+    }
+  }
+
+  /** Time first, scope first among the badges, then the content: the order the question is asked in. */
+  function memoryRow(e) {
+    const b = el('button', 'item');
+    b.setAttribute('aria-current', String(state.selectedEntry && state.selectedEntry.id === e.id));
+
+    const iso = isoOf(e);
+    const t = el('div', 't', clockOf(iso));
+    t.title = iso || 'no creation time recorded';
+    b.appendChild(t);
+
+    const main = el('div', 'main');
+    const badges = el('div', 'badges');
+    badges.appendChild(scopeBadge(e));
+    const type = typeOf(e);
+    if (type !== 'entry') badges.appendChild(tag(type, 'type'));
+    if (e.importance) badges.appendChild(tag(e.importance));
+    main.appendChild(badges);
+    main.appendChild(el('div', 'c', e.content || '(no content)'));
+
+    const m = el('div', 'm');
+    const by = e.sourceRunId || e.run_id || '';
+    if (by) {
+      const who = el('span', null, 'by ' + shortId(by, 12) + (by.length > 12 ? '…' : ''));
+      who.title = 'Written by ' + by;
+      m.appendChild(who);
+    }
+    if (fromOtherRun(e, state.run)) {
+      const o = el('span', null, 'other run');
+      o.title = 'Written by ' + by + ', not by the run selected in the rail. Where it is visible '
+        + 'is the scope badge; this only says who wrote it.';
+      m.appendChild(o);
+    }
+    if (e.project) m.appendChild(el('span', null, e.project));
+    main.appendChild(m);
+    b.appendChild(main);
+
+    b.addEventListener('click', () => {
+      state.selectedEntry = e;
+      renderMemory();
+      // Below the split's breakpoint the detail stacks under the list, out of view.
+      if (narrow('(max-width: 60rem)')) $('memory-detail').scrollIntoView({ block: 'nearest' });
+    });
+    return b;
   }
 
   /**
@@ -785,27 +1639,27 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
    */
   function scopeBadge(e) {
     const known = scopeKnown(e);
-    const t = tag(known ? scopeOf(e) : 'scope ?', leaksScope(e) ? 'leak' : (known ? null : 'unknown'));
-    if (!known) {
-      t.title = 'Nothing recorded a scope for this entry. The instance defaults an untagged '
+    const t = tag(known ? scopeOf(e) : 'scope ?', scopeTone(e));
+    t.title = known
+      ? reachSentence(e)
+      : 'Nothing recorded a scope for this entry. The instance defaults an untagged '
         + 'lesson to run scope, so that is how it behaves — but "defaulted" and "recorded" are '
         + 'different facts, and only this badge can tell you which one you are looking at.';
-    }
     return t;
   }
 
-  /** What the scope means for this entry, in words rather than in a bucket name. */
-  const REACH = {
-    run: 'Only the run that wrote it. It goes away with that session.',
-    session: 'Every run in the same session — so it survives a compaction, but not a new session.',
-    global: 'Every run on this instance, in every project. This is the one that follows you.',
-    org: 'Everyone on this instance’s organisation. Only promotion writes this scope.',
-  };
-
-  function reachOf(e) {
-    const s = scopeOf(e);
-    const base = REACH[s] || ('Scope "' + s + '" is not one this page knows about.');
-    return scopeKnown(e) ? base : base + ' — but that is the default, not a recorded scope.';
+  function copyButton(text) {
+    const b = el('button', 'btn small', 'Copy');
+    b.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        b.textContent = 'copied';
+      } catch (err) {
+        b.textContent = 'select it';
+      }
+      setTimeout(() => { b.textContent = 'Copy'; }, 1400);
+    });
+    return b;
   }
 
   function renderMemoryDetail() {
@@ -817,31 +1671,34 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
       return;
     }
 
-    box.appendChild(el('h2', null, e.lessonType || e.entry_type || 'entry'));
+    box.appendChild(el('h2', null, typeOf(e)));
+    // The bucket name is jargon and the question a person came here with is "who else sees
+    // this". Spelling the answer out is the whole reason the row exists — and it comes first.
+    box.appendChild(el('p', 'reach', reachSentence(e)));
+    box.appendChild(el('p', 'stored', storedLine(e, state.run)));
     box.appendChild(el('p', 'prose', e.content || ''));
 
     if (e.rationale) {
-      box.appendChild(el('div', 'rail-label', 'Rationale'));
+      box.appendChild(el('div', 'eyebrow', 'Rationale'));
       box.appendChild(el('p', 'prose', e.rationale));
     }
     if (e.conditions && e.conditions.length) {
-      box.appendChild(el('div', 'rail-label', 'Conditions'));
+      box.appendChild(el('div', 'eyebrow', 'Conditions'));
       box.appendChild(el('p', 'prose', e.conditions.join(', ')));
     }
 
     const dl = el('dl');
-    const pair = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, v)); };
-    pair('id', e.id || '—');
-    pair('scope', scopeKnown(e) ? scopeOf(e) : scopeOf(e) + ' (not recorded)');
-    // The bucket name is jargon and the question a person came here with is "who else sees
-    // this". Spelling the answer out is the whole reason the row exists.
-    pair('reach', reachOf(e));
+    const pair = (k, v) => {
+      dl.appendChild(el('dt', null, k));
+      const dd = el('dd', null, v);
+      dl.appendChild(dd);
+      return dd;
+    };
     pair('project', e.project || 'no project tag');
     pair('importance', e.importance || '—');
-    pair('written by', (e.sourceRunId || e.run_id || '—')
-      + (fromOtherRun(e, state.run) ? ' (not the selected run)' : ''));
-    pair('source', e.source || '—');
-    pair('created', e.createdAt || e.created_at || 'not recorded');
+    pair('scope', scopeKnown(e) ? scopeOf(e) : scopeOf(e) + ' (not recorded)');
+    const idRow = pair('id', e.id || '—');
+    if (e.id) idRow.appendChild(copyButton(e.id));
     box.appendChild(dl);
 
     if (!e.project) {
@@ -852,11 +1709,10 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     }
 
     if (leaksScope(e)) {
-      const p = el('p', 'note',
+      box.appendChild(el('p', 'note',
         'This entry is above run scope, so it is visible to runs other than the one that wrote '
         + 'it. That is by design for a rule meant to follow you; it is a surprise for anything '
-        + 'that was only ever about one project.');
-      box.appendChild(p);
+        + 'that was only ever about one project.'));
     }
 
     if (state.mode !== 'lessons' || !e.id) return;
@@ -894,7 +1750,7 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
    */
   function deleteConfirm(e) {
     const box = el('div', 'confirm');
-    box.appendChild(el('div', 'rail-label', 'Delete permanently'));
+    box.appendChild(el('div', 'eyebrow', 'Delete permanently'));
     box.appendChild(el('p', 'note',
       'There is no undo and no dry run. For a lesson that is merely wrong rather than unwanted, '
       + '"Did not work" above down-weights it instead. To delete, type the id exactly.'));
@@ -987,13 +1843,10 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
 
   function syncFacetAvailability() {
     const on = facetsApply();
-    const why = 'The activity feed is fetched with the compact projection, which the instance '
-      + 'returns with the scope metadata stripped out — so no scope or project filter can say '
-      + 'anything true about these rows. Switch to Lessons to filter by scope.';
     ['scope-filter', 'project-filter'].forEach((id) => {
       const sel = $(id);
       sel.disabled = !on;
-      sel.title = on ? '' : why;
+      sel.title = on ? '' : FACET_OFF;
     });
   }
 
@@ -1008,24 +1861,15 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     const foot = $('memory-footer');
     clear(foot);
 
-    const shown = filteredEntries().length;
     const hidden = hiddenByScope();
-    const parts = [shown + (shown === 1 ? ' result' : ' results')];
-    if (hidden) parts.push(hidden + ' hidden by the scope filter');
-
-    const c = state.census;
-    if (state.mode === 'lessons' && !state.searchResults && c) {
-      parts.push(c.totalVisible + ' visible to this instance');
-      if (c.source) parts.push('answered by ' + c.source);
-      if (c.truncated) {
-        parts.push('the census stopped after ' + c.pages + (c.pages === 1 ? ' page' : ' pages')
-          + (c.truncatedReason ? ' (' + c.truncatedReason + ')' : ''));
-      }
-      if (c.unknownScope) parts.push(c.unknownScope + ' with no recorded scope');
-    }
-    if (state.searchResults) {
-      parts.push('search results for “' + state.searchQuery + '”');
-    }
+    const parts = footerParts({
+      shown: filteredEntries().length,
+      hidden: hidden,
+      mode: state.mode,
+      census: state.searchResults ? null : state.census,
+      search: !!state.searchResults,
+      searchQuery: state.searchQuery,
+    });
     foot.appendChild(document.createTextNode(parts.join(' · ')));
 
     if (hidden) {
@@ -1040,25 +1884,17 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
       foot.appendChild(b);
     }
 
-    const note = $('memory-scope-note');
-    const bits = [];
-    const what = state.mode === 'lessons' ? 'lessons' : 'entries';
-    bits.push(state.allRuns
-      ? 'Showing ' + what + ' from every run this instance holds. Worked / Did not work / '
-        + 'Archive / delete still attribute to the run selected in the rail, because those '
-        + 'routes need a concrete run.'
-      : 'Showing only ' + what + ' the run selected in the rail wrote, so anything a previous '
-        + 'session saved at global scope is out of view.');
-    if (state.joinError) {
-      bits.push('Creation dates are missing: the activity join failed — ' + state.joinError);
-    }
-    note.textContent = bits.join(' ');
+    $('memory-scope-note').textContent = scopeNoteText({
+      mode: state.mode, allRuns: state.allRuns, joinError: state.joinError,
+    });
   }
 
   function renderMemory() {
     syncScopeVocabulary();
     syncFacetAvailability();
     renderProjectFacet();
+    renderScopeChips();
+    renderTypeChips();
     renderMemoryList();
     renderMemoryDetail();
     renderMemoryFooter();
@@ -1068,10 +1904,11 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
   // Turns tab
   // -------------------------------------------------------------------------
 
+  const clockMs = (ms) => (ms ? clockOf(new Date(ms).toISOString()) : '—');
+
   function renderTurns() {
     const q = $('turn-filter').value.trim().toLowerCase();
-    const rows = state.turns.filter((t) => !q
-      || (t.promptPreview + ' ' + t.outcomeState).toLowerCase().indexOf(q) >= 0);
+    const rows = state.turns.filter((t) => turnMatches(t, q));
 
     $('turn-count').textContent = String(state.turns.length);
 
@@ -1079,41 +1916,45 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     clear(body);
     if (!rows.length) {
       const tr = el('tr');
-      const td = el('td', 'empty', 'No turns on disk for this run. They are pruned after six hours.');
-      td.colSpan = 7;
+      const td = el('td', 'empty', state.turns.length
+        ? 'No turn matches the filter.'
+        : 'No turns on disk for this run. They are pruned after six hours.');
+      td.colSpan = 8;
       tr.appendChild(td);
       body.appendChild(tr);
       return;
     }
 
+    const cell = (cls, text, key) => {
+      const td = el('td', cls, text);
+      td.setAttribute('data-k', key);
+      return td;
+    };
+
     rows.forEach((t) => {
       const tr = el('tr');
       tr.setAttribute('aria-current', String(state.selectedTurn && state.selectedTurn.promptId === t.promptId));
 
-      const prompt = el('td', 'prompt', t.promptPreview || '(empty prompt)');
+      const time = cell('time', clockMs(t.startedAt), 'time');
+      time.title = t.startedAt ? new Date(t.startedAt).toISOString() : '';
+      tr.appendChild(time);
+
+      const prompt = cell('prompt', t.promptPreview || '(empty prompt)', 'prompt');
       prompt.title = t.promptPreview || '';
       tr.appendChild(prompt);
-      // `0` is not a rung. The ladder is 1–2, and an absent rung is coerced to zero on the way
-      // in, so the falsy branch here is what renders "we have no reading" — not "rung zero".
-      tr.appendChild(el('td', 'num', t.rung || '—'));
-      tr.appendChild(el('td', 'num', t.sources));
-      tr.appendChild(el('td', 'num', t.tok));
-      tr.appendChild(el('td', 'num', t.ptr));
+      tr.appendChild(cell('num', rungText(t.rung), 'rung'));
+      tr.appendChild(cell('num', t.sources, 'src'));
+      tr.appendChild(cell('num', t.tok, 'tok'));
+      tr.appendChild(cell('num', t.ptr, 'ptr'));
 
-      // Not "no": absent means the signal could not be measured, and rendering it as a count
-      // of nothing ("0/0") reads as a measured zero. A bare question mark cannot.
-      const used = el('td');
-      if (t.used && t.used.used === true) used.appendChild(tag(t.used.matched + '/' + t.used.candidates, 'ok'));
-      else if (t.used && t.used.used === false) used.appendChild(tag(t.used.matched + '/' + t.used.candidates));
-      else {
-        const q = tag('?');
-        q.title = 'Not measurable for this turn'
-          + (t.used && t.used.reason ? ' (' + t.used.reason + ')' : '') + ' — not "unused".';
-        used.appendChild(q);
-      }
+      const u = usedCell(t.used);
+      const used = cell(null, null, 'used');
+      const ut = tag(u.text, u.tone === 'ok' ? 'ok' : u.tone === 'unknown' ? 'unknown' : null);
+      ut.title = u.title;
+      used.appendChild(ut);
       tr.appendChild(used);
 
-      tr.appendChild(el('td', null, t.outcomeState || '—'));
+      tr.appendChild(cell(null, t.outcomeState || '—', 'outcome'));
       tr.addEventListener('click', () => selectTurn(t));
       body.appendChild(tr);
     });
@@ -1130,6 +1971,7 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     } catch (err) {
       renderTurnDetail(t);
     }
+    if (narrow('(max-width: 64rem)')) $('turn-detail').scrollIntoView({ block: 'nearest' });
   }
 
   function renderTurnDetail(t) {
@@ -1139,29 +1981,29 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
       box.appendChild(el('p', 'empty', 'Select a turn.'));
       return;
     }
-    box.appendChild(el('h2', null, 'Prompt ' + short(t.promptId, 8)));
+    box.appendChild(el('h2', null, 'Prompt ' + shortId(t.promptId, 8)));
     box.appendChild(el('p', 'prose', t.prompt || t.promptPreview || ''));
 
     const dl = el('dl');
     const pair = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, v)); };
-    pair('started', clock(t.startedAt));
+    pair('started', t.startedAt ? stampMs(t.startedAt) + ' (' + new Date(t.startedAt).toISOString() + ')' : '—');
     pair('recall', t.sources + ' memories · ' + t.tok + ' tok · ' + t.chars + ' chars');
     pair('repeats', t.ptr + ' rendered as a pointer');
-    pair('rung', t.rung || '—'); // Same as the table: zero means unrecorded, not a rung.
+    pair('rung', rungText(t.rung)); // Same as the table: zero means unrecorded, not a rung.
     if (t.emptyReason) pair('empty because', t.emptyReason);
     pair('outcome', t.outcomeState || '—');
-    pair('session', short(t.sessionId, 8));
+    pair('session', shortId(t.sessionId, 8));
     box.appendChild(dl);
 
     if (t.recalled && t.recalled.length) {
-      box.appendChild(el('div', 'rail-label', 'Injected memories'));
-      const ul = el('div');
+      box.appendChild(el('div', 'eyebrow', 'Injected memories'));
+      const ul = el('div', 'row');
       t.recalled.forEach((id) => ul.appendChild(tag(id)));
       box.appendChild(ul);
     }
 
     const u = t.used || {};
-    box.appendChild(el('div', 'rail-label', 'Used signal'));
+    box.appendChild(el('div', 'eyebrow', 'Used signal'));
     box.appendChild(el('p', 'note', u.used === null || u.used === undefined
       ? 'Not measurable for this turn' + (u.reason ? ' (' + u.reason + ')' : '')
       + '. A blank here is not "unused".'
@@ -1177,58 +2019,14 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
   function renderAnalytics(a, health) {
     const box = $('tiles');
     clear(box);
-
-    const series = a.series || [];
-    const tok = series.map((r) => num(r.tok));
-    const src = series.map((r) => num(r.sources));
-    const ptr = series.map((r) => num(r.ptr));
-
-    const over = a.points === 1 ? 'over 1 prompt' : 'over ' + a.points + ' prompts';
-    box.appendChild(tile('Recall cost', String(a.averages ? a.averages.tok : 0),
-      'tokens per prompt, mean ' + over, tok));
-    box.appendChild(tile('Memories per prompt', String(a.averages ? a.averages.sources : 0),
-      'injected, mean', src));
-    box.appendChild(tile('Pointer ratio', Math.round(num(a.pointerRatio) * 100) + '%',
-      'repeats rendered as a one-line pointer', ptr));
-    box.appendChild(tile('Characters', String(a.averages ? a.averages.chars : 0),
-      'per prompt, mean', series.map((r) => num(r.chars))));
-
-    $('analytics-note').textContent = a.points
-      ? 'The series covers ' + a.points + (a.points === 1 ? ' prompt' : ' prompts') + ' recorded since '
-        + clock(a.firstSampleAt) + '. It is the dashboard’s own rollup rather than the raw '
-        + 'turn files, which are pruned after six hours — so it accrues from the first launch '
-        + 'and cannot reconstruct anything from before that.'
-      : 'Nothing recorded yet. The rollup starts empty and grows one row per prompt while this '
-        + 'page is open, so the first session here is sparse by construction.';
+    tileSpecs(a).forEach((spec) => box.appendChild(tile(spec)));
+    $('analytics-note').textContent = analyticsNote(a);
 
     if (!health) return;
     const hb = $('health-tiles');
     clear(hb);
-
-    const marker = health.marker || {};
-    const captured = marker.captured || {};
-    const b = health.breaker || {};
-
-    hb.appendChild(tile('Spool depth', String(num(health.spoolDepth)),
-      health.rejectedCount ? health.rejectedCount + ' rejected' : 'captures waiting to ship'));
-    hb.appendChild(tile('Ingested', String(num(captured.ingested)),
-      num(captured.pending) + ' pending · ' + num(captured.tools) + ' tools'));
-    hb.appendChild(tile('Breaker', b.phase || 'closed',
-      (b.state || 'ready') + (b.cooldownLeftMs
-        ? ' · ' + Math.ceil(b.cooldownLeftMs / 1000) + 's left' : '')));
-    hb.appendChild(tile('Run state', marker.state || 'unknown',
-      marker.mode ? marker.mode + ' · updated ' + clock(marker.updated_at) : ''));
-
-    const reflect = marker.reflect || {};
-    const recall = marker.recall || {};
-    $('health-note').textContent =
-      'Last recall on the marker: ' + num(recall.sources) + ' memories, ' + num(recall.tokens)
-      + ' tok, rung ' + num(recall.rung)
-      + (recall.empty_reason ? ', empty because ' + recall.empty_reason : '')
-      + ', dry streak ' + num(recall.dry_streak) + '. '
-      + 'Reflection: ' + (reflect.status || 'never run') + ', ' + num(reflect.lessons_stored)
-      + ' lessons stored. The marker is last-write-wins, so this row describes the most recent '
-      + 'prompt only — the table on the Turns tab is the per-prompt series.';
+    healthTileSpecs(health).forEach((spec) => hb.appendChild(tile(spec)));
+    $('health-note').textContent = healthNote(health);
   }
 
   // -------------------------------------------------------------------------
@@ -1241,17 +2039,28 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
         + '&run=' + encodeURIComponent(state.run));
       state.meta = meta;
       if (!state.dir) state.dir = meta.dir;
-      if (!state.run) state.run = meta.run;
       $('endpoint').textContent = meta.configured ? meta.endpoint : 'no endpoint configured';
       renderDirs(meta.dirs || []);
 
-      const q = 'dir=' + encodeURIComponent(state.dir) + '&run=' + encodeURIComponent(state.run);
+      const q0 = 'dir=' + encodeURIComponent(state.dir);
+      if (!state.run) {
+        // First arrival, or a directory change. The run this page opens on is the one it was
+        // launched in when that run is in the directory, and the newest one otherwise — a
+        // machine with two sessions open would otherwise open on whichever prompted last.
+        const first = await api('/api/runs?' + q0);
+        const ids = (first.runs || []).map((r) => r.runId);
+        const launch = meta.launch && meta.launch.run;
+        state.run = (launch && ids.indexOf(launch) >= 0) ? launch : (meta.run || '');
+      }
+
+      const q = q0 + '&run=' + encodeURIComponent(state.run);
       const [runs, turns] = await Promise.all([
         api('/api/runs?' + q),
         api('/api/turns?' + q + '&limit=100'),
       ]);
 
       renderRuns(runs.runs || []);
+      renderIdentity();
       state.turns = turns.turns || [];
       renderTurns();
       if (bannerCode === 'unauthorized') hideBanner();
@@ -1449,6 +2258,7 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
     state.searchResults = null;
     state.searchQuery = '';
     state.selectedEntry = null;
+    state.type = '';
     $('mode-lessons').setAttribute('aria-pressed', String(mode === 'lessons'));
     $('mode-activity').setAttribute('aria-pressed', String(mode === 'activity'));
     renderMemory();
@@ -1470,6 +2280,15 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
   }
   $('runs-all').addEventListener('click', () => setAllRuns(true));
   $('runs-this').addEventListener('click', () => setAllRuns(false));
+
+  function setSort(order) {
+    state.sort = order;
+    $('sort-newest').setAttribute('aria-pressed', String(order === 'newest'));
+    $('sort-oldest').setAttribute('aria-pressed', String(order === 'oldest'));
+    renderMemory();
+  }
+  $('sort-newest').addEventListener('click', () => setSort('newest'));
+  $('sort-oldest').addEventListener('click', () => setSort('oldest'));
 
   // Instant, over what is already loaded. The instance is only asked when the button is
   // pressed, because a semantic search on every keystroke is a bill.
@@ -1538,6 +2357,7 @@ tbody tr[aria-current="true"] { background: var(--accent-dim); }
   // Firefox restores a `<select>`'s value across a reload, which would leave the control
   // showing one filter while `state` held another. The state object is the authority.
   $('scope-filter').value = state.scope;
+  syncRail();
   renderMemory();
   refreshLocal().then(() => {
     refreshAnalytics();

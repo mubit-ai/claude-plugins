@@ -31,14 +31,23 @@ when the result is going to be parsed rather than read.
 
 ## What it shows
 
-Three tabs, joining two sources that have never been joined before:
+An identity strip, then three tabs joining two sources that have never been joined before:
 
+- **Current run** — the strip across the top says which run the page is looking at, the full
+  directory it is for, every host session that shares it (with when each was last seen), and
+  what the run writes at and reads from, in words: the lesson-scope cap and the cross-run
+  recall setting as sentences rather than as `session` and `auto`. It marks the run the
+  dashboard was launched in; *Change run* opens the run rail on a narrow window.
 - **Memory** — every lesson the instance holds, across **every run** by default, filterable
-  instantly and searchable properly. Each lesson shows its scope, and there is a filter for the
-  ones **visible outside the run that wrote them**, which is the question nothing else in the
-  plugin answers. One-click `Worked` / `Did not work` sends an outcome; deletion requires typing
-  the lesson id. Activity mode shows the raw feed, which is fetched compactly and carries no
-  scope — the scope and project filters switch off there and say so.
+  instantly and searchable properly. The list is grouped by day and sorted newest or oldest
+  first, each row leading with its time and its scope badge, so "what was stored, when, at
+  what scope" reads top to bottom. Chip rows count the loaded window by scope and by type and
+  double as filters. There is a filter for the lessons **visible outside the run that wrote
+  them**, which is the question nothing else in the plugin answers, and the detail pane opens
+  with the reach sentence and a stored-by line: when, by which run, through what, at what
+  scope, recorded or defaulted. One-click `Worked` / `Did not work` sends an outcome; deletion
+  requires typing the lesson id. Activity mode shows the raw feed, which is fetched compactly
+  and carries no scope — the scope and project filters switch off there and say so.
 - **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
   they cost in tokens, and how many were repeats rendered as a pointer. This is the local half,
   read from `runs/<run_id>/turns/`.

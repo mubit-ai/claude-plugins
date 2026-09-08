@@ -37,46 +37,75 @@ import { lib, PLUGIN_ROOT } from './helpers/harness.mjs';
 
 const PAGE = join(PLUGIN_ROOT, 'bin', 'dashboard.html');
 
-/** Everything the region is expected to define. A missing name is a loud ReferenceError. */
+/** Everything the scope region is expected to define. A missing name is a loud ReferenceError. */
 const REGION_EXPORTS = [
   'SCOPE_VALUES', 'NO_PROJECT',
   'scopeOf', 'scopeKnown', 'leaksScope', 'fromOtherRun',
   'matchesScope', 'projectOf', 'matchesProject', 'matchesText',
 ];
 
-const OPEN = '// #region scope-predicate';
-const CLOSE = '// #endregion scope-predicate';
+/** What the three view regions define. Each is sliced and executed the same way. */
+const IDENTITY_EXPORTS = [
+  'strategyLabel', 'scopeSentences', 'pathParts', 'parentRunId', 'runIdentity', 'sessionLabel',
+  'shortSession', 'relativeTime', 'runStateTone', 'identitySignature',
+];
+const LESSON_EXPORTS = [
+  'scopeTone', 'reachSentence', 'scopeCounts', 'typeCounts', 'dayKey', 'groupByDay', 'sortRows',
+  'clockOf', 'storedLine', 'shortId', 'listEmptyMessage', 'footerParts', 'scopeNoteText',
+];
+const TURN_EXPORTS = [
+  'turnMatches', 'rungText', 'usedCell', 'fmtInt', 'pct', 'tileSpecs', 'analyticsNote',
+  'healthTileSpecs', 'healthNote',
+];
 
-/**
- * The scope predicate, lifted out of the shipped page and evaluated on its own.
- *
- * Evaluating it in a context with no `document`, no `state` and no `$` is the point: if
- * anything in the region reaches for the page, the calls below throw rather than quietly
- * passing because a global happened to exist.
- */
-function loadRegion() {
-  const src = readFileSync(PAGE, 'utf8');
-  const from = src.indexOf(OPEN);
-  const to = src.indexOf(CLOSE);
+/** One region's source, sliced out of the page by its markers. */
+function sliceRegion(src, name) {
+  const open = `// #region ${name}`;
+  const close = `// #endregion ${name}`;
+  const from = src.indexOf(open);
+  const to = src.indexOf(close);
   if (from < 0 || to < 0 || to < from) {
     assert.fail(
-      `${PAGE} no longer contains the "${OPEN}" ... "${CLOSE}" markers.\n`
-      + 'They are not decoration: this test slices the scope predicate out of the shipped page '
-      + 'by those exact strings and executes it, so that the filter a browser runs is the one '
-      + 'the truth table below covers. If the block moved, move the markers with it; if it was '
-      + 'inlined into the render path, it is no longer testable and this test is now a lie.',
+      `${PAGE} no longer contains the "${open}" ... "${close}" markers.\n`
+      + 'They are not decoration: this test slices the block out of the shipped page by those '
+      + 'exact strings and executes it, so that the code a browser runs is the one the truth '
+      + 'tables below cover. If the block moved, move the markers with it; if it was inlined '
+      + 'into the render path, it is no longer testable and this test is now a lie.',
     );
   }
+  return src.slice(from + open.length, to);
+}
 
-  const region = src.slice(from + OPEN.length, to);
+/**
+ * One or more regions, lifted out of the shipped page and evaluated on their own.
+ *
+ * Evaluating them in a context with no `document`, no `state` and no `$` is the point: if
+ * anything in a region reaches for the page, the calls below throw rather than quietly
+ * passing because a global happened to exist. Regions are concatenated in the order given,
+ * because the view regions build on the scope predicate and nothing else.
+ *
+ * @param {string|string[]} [names]
+ * @param {string[]} [exports]
+ */
+function loadRegion(names = 'scope-predicate', exports = REGION_EXPORTS) {
+  const src = readFileSync(PAGE, 'utf8');
+  const list = Array.isArray(names) ? names : [names];
+  const region = list.map((n) => sliceRegion(src, n)).join('\n');
   const ctx = vm.createContext({});
   vm.runInNewContext(
-    `${region}\nglobalThis.region = { ${REGION_EXPORTS.join(', ')} };`,
+    `${region}\nglobalThis.region = { ${exports.join(', ')} };`,
     ctx,
-    { filename: 'dashboard.html#scope-predicate' },
+    { filename: `dashboard.html#${list.join('+')}` },
   );
   return ctx.region;
 }
+
+/** Arrays and objects built inside the vm carry that realm's prototypes; compare them as data. */
+const plain = (v) => JSON.parse(JSON.stringify(v));
+
+const identity = () => loadRegion(['scope-predicate', 'identity-model'], [...REGION_EXPORTS, ...IDENTITY_EXPORTS]);
+const lessons = () => loadRegion(['scope-predicate', 'lesson-view'], [...REGION_EXPORTS, ...LESSON_EXPORTS]);
+const turns = () => loadRegion(['turn-view'], TURN_EXPORTS);
 
 /**
  * The six shapes a row's scope arrives in. `''` and absent are separated on purpose — they are
@@ -344,4 +373,315 @@ test('scope: the shipped page offers the whole vocabulary and claims no scope it
     src.slice(src.indexOf('<script>')), /["'`]https?:\/\/(?!www\.w3\.org)/,
     'the page must stay self-contained; the CSP blocks every external origin',
   );
+});
+
+// ---------------------------------------------------------------------------
+// The identity strip
+// ---------------------------------------------------------------------------
+
+/** Local noon today, so an hour either side never crosses a day boundary in any time zone. */
+function localNoon() {
+  const d = new Date();
+  d.setHours(12, 0, 0, 0);
+  return d.getTime();
+}
+
+/** The page's own day key, restated: local calendar date, zero-padded. */
+function ymd(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+const H = 3_600_000;
+
+// Every "ago" and every day header is computed from a clock the caller passes, never from
+// `Date.now()` inside the region — which is what lets this table be exact.
+test('identity: relativeTime, dayKey and groupByDay agree with a fixed clock', () => {
+  const r = loadRegion(
+    ['scope-predicate', 'identity-model', 'lesson-view'],
+    [...REGION_EXPORTS, ...IDENTITY_EXPORTS, ...LESSON_EXPORTS],
+  );
+  const now = localNoon();
+
+  assert.equal(r.relativeTime(now - 3_000, now), 'just now');
+  assert.equal(r.relativeTime(now - 12_000, now), '12s ago');
+  assert.equal(r.relativeTime(now - 120_000, now), '2m ago');
+  assert.equal(r.relativeTime(now - 3 * H, now), '3h ago');
+  assert.equal(r.relativeTime(now - 2 * 24 * H, now), '2d ago');
+  assert.equal(r.relativeTime(now + 5_000, now), 'just now', 'a clock skewed into the future is not "in 5s"');
+  assert.equal(r.relativeTime(0, now), '—');
+  assert.equal(r.relativeTime(undefined, now), '—');
+
+  const iso = (ms) => new Date(ms).toISOString();
+  assert.equal(r.dayKey(iso(now - H), now), 'Today');
+  assert.equal(r.dayKey(iso(now - 24 * H), now), 'Yesterday');
+  assert.equal(r.dayKey(iso(now - 72 * H), now), ymd(now - 72 * H));
+  assert.equal(r.dayKey('', now), 'Undated');
+  assert.equal(r.dayKey('not a date', now), 'Undated');
+  assert.equal(r.dayKey(undefined, now), 'Undated');
+
+  assert.equal(r.clockOf(iso(now)), '12:00', 'HH:MM, local, 24-hour');
+  assert.equal(r.clockOf(''), '—');
+
+  const rows = [
+    { id: 'a', createdAt: iso(now - H) },
+    { id: 'b', createdAt: iso(now - 24 * H) },
+    { id: 'c', created_at: iso(now - 2 * H) },
+    { id: 'd' },
+    { id: 'e', createdAt: iso(now - 72 * H) },
+  ];
+  const groups = r.groupByDay(rows, now, 'newest');
+  assert.deepEqual(plain(groups.map((g) => g.key)), ['Today', 'Yesterday', ymd(now - 72 * H), 'Undated']);
+  assert.deepEqual(plain(groups[0].rows.map((x) => x.id)), ['a', 'c'], 'newest first inside a day, and created_at counts too');
+  assert.deepEqual(plain(groups[3].rows.map((x) => x.id)), ['d']);
+});
+
+/**
+ * The strip names the newest session as the one the page is "in", and the directory comes
+ * from the run row's join — with the launch directory as the fallback for the launch run,
+ * which is the one run that can be identified without a session record at all.
+ */
+test('identity: runIdentity picks the newest session and falls back to the launch directory', () => {
+  const r = identity();
+  const meta = { launch: { cwd: '/home/user/proj', projectDir: '/home/user/proj', run: 'cc-here-00000001' } };
+  const sessions = [
+    { sessionId: 's-new', runId: 'cc-here-00000001', agentId: 'claude-code', lastSeenAt: 300, createdAt: 100, clearCount: 1, projectDir: '/home/user/proj/sub', projectRoot: '/home/user/proj' },
+    { sessionId: 's-old', runId: 'cc-here-00000001', agentId: 'claude-code', lastSeenAt: 200, createdAt: 50, clearCount: 2, projectDir: '/home/user/proj', projectRoot: '/home/user/proj' },
+  ];
+  const row = { runId: 'cc-here-00000001', state: 'ready', mode: 'hosted', lastWrite: 400, sessions, sessionCount: 2, projectDir: '/home/user/proj/sub', projectRoot: '/home/user/proj' };
+
+  const id = r.runIdentity(row, meta, [row]);
+  assert.equal(id.runId, 'cc-here-00000001');
+  assert.equal(id.isLaunchRun, true);
+  assert.equal(id.newest.sessionId, 's-new', 'sessions arrive newest first and the strip names the first');
+  assert.equal(id.sessionCount, 2);
+  assert.equal(id.clearTotal, 3);
+  assert.equal(id.projectDir, '/home/user/proj/sub');
+  assert.equal(id.projectRoot, '/home/user/proj');
+  assert.equal(id.state, 'ready');
+  assert.equal(id.mode, 'hosted');
+  assert.equal(id.lastWrite, 400);
+
+  // The launch run with no session record yet: the directory is still known, because the
+  // server said where it was launched from.
+  const bare = r.runIdentity({ runId: 'cc-here-00000001', state: 'ready' }, meta, []);
+  assert.equal(bare.isLaunchRun, true);
+  assert.equal(bare.sessionCount, 0);
+  assert.equal(bare.newest, null);
+  assert.equal(bare.projectDir, '/home/user/proj', 'the launch directory is the fallback for the launch run');
+  assert.equal(bare.projectRoot, '');
+
+  // Any other run with no record has no directory. Guessing one would be worse than blank.
+  const other = r.runIdentity({ runId: 'cc-else-00000002', state: 'unknown' }, meta, []);
+  assert.equal(other.isLaunchRun, false);
+  assert.equal(other.projectDir, '');
+  assert.equal(other.state, 'unknown');
+
+  // A subagent marker borrows the parent's sessions: nothing is stored under a sub-run id.
+  const sub = r.runIdentity({ runId: 'cc-here-00000001-sub-abc' }, meta, [row]);
+  assert.equal(sub.sessionCount, 2);
+  assert.equal(sub.isLaunchRun, true);
+  assert.equal(sub.projectDir, '/home/user/proj/sub');
+
+  assert.equal(r.runIdentity(null, null, null).runId, '', 'nothing selected is a blank strip, not a throw');
+  assert.equal(r.identitySignature(id), r.identitySignature(r.runIdentity(row, meta, [row])), 'stable across polls');
+  assert.notEqual(r.identitySignature(id), r.identitySignature(bare));
+
+  assert.equal(r.runStateTone('ready'), 'ok');
+  assert.equal(r.runStateTone('unreachable'), 'bad');
+  assert.equal(r.runStateTone('auth_failed'), 'bad');
+  assert.equal(r.runStateTone('unknown'), 'muted');
+  assert.equal(r.runStateTone(''), 'muted');
+
+  assert.equal(r.shortSession('01a08f3e-1111-2222-3333-444444444e11'), '01a08…e11');
+  assert.equal(r.shortSession(''), '—');
+  const label = r.sessionLabel(sessions[0], 1000);
+  assert.ok(label.includes('s-new') && label.includes('claude-code') && label.includes('cleared 1×'), label);
+
+  assert.deepEqual(plain(r.pathParts('/home/user/proj')), { full: '/home/user/proj', head: '/home/user/', tail: 'proj' });
+  assert.deepEqual(plain(r.pathParts('')), { full: '', head: '', tail: '' });
+  assert.deepEqual(plain(r.pathParts('proj')), { full: 'proj', head: '', tail: 'proj' });
+});
+
+// `session`, `auto` and `per-directory` are not answers a person can use. Every value of every
+// setting has to render as a different sentence, and the server's wording wins when it is there.
+test('identity: scopeSentences has a distinct sentence for every strategy, ceiling and cross-run value', () => {
+  const r = identity();
+  const distinct = (values, fn) => {
+    const seen = new Set(values.map(fn));
+    assert.equal(seen.size, values.length, JSON.stringify([...seen]));
+  };
+  distinct(['per-directory', 'git-branch', 'per-conversation', 'static'], (v) => r.strategyLabel(v));
+  distinct(['run', 'session', 'global'], (v) => r.scopeSentences({ writesAt: v }).writes);
+  distinct(['auto', 'on', 'off'], (v) => r.scopeSentences({ readsAcrossRuns: v }).reads);
+
+  const s = r.scopeSentences({
+    writesAt: 'session', writesAtText: 'the server wording', readsAcrossRuns: 'auto', readsAcrossRunsText: 'and this one',
+  });
+  assert.match(s.writes, /^Writes: /);
+  assert.ok(s.writes.includes('the server wording'), s.writes);
+  assert.ok(s.writes.includes('(cap: session)'), 'the setting value is still named, for the person who has to change it');
+  assert.match(s.reads, /^Reads: /);
+  assert.ok(s.reads.includes('and this one') && s.reads.includes('(cross-run: auto)'), s.reads);
+
+  const none = r.scopeSentences(null);
+  assert.ok(none.writes.length > 20 && none.reads.length > 20, 'an old server with no scope block still gets the defaults');
+  assert.ok(r.strategyLabel('custom').includes('custom'), 'an unknown strategy is named, not blanked');
+});
+
+test('identity: parentRunId strips a subagent suffix and nothing else', () => {
+  const r = identity();
+  assert.equal(r.parentRunId('cc-pre-main-af449e06-sub-1a2b3c'), 'cc-pre-main-af449e06');
+  assert.equal(r.parentRunId('cc-pre-main-af449e06'), 'cc-pre-main-af449e06');
+  assert.equal(r.parentRunId('cc-subject-000001'), 'cc-subject-000001', '"sub" inside a word is not the marker');
+  assert.equal(r.parentRunId('-sub-x'), '-sub-x', 'a suffix with no parent before it is left alone');
+  assert.equal(r.parentRunId(''), '');
+  assert.equal(r.parentRunId(undefined), '');
+});
+
+// ---------------------------------------------------------------------------
+// The lesson list
+// ---------------------------------------------------------------------------
+
+// The question the tab exists to answer is "what was stored, in what order". An undated row
+// has no place in that order, so it goes last whichever way the list is sorted — never first
+// because an empty string compares low.
+test('lessons: sortRows and groupByDay put undated rows last in both orders', () => {
+  const r = lessons();
+  const now = localNoon();
+  const iso = (ms) => new Date(ms).toISOString();
+  const rows = [
+    { id: 'undated-1' },
+    { id: 'old', createdAt: iso(now - 72 * H) },
+    { id: 'new', createdAt: iso(now - H) },
+    { id: 'undated-2', createdAt: '' },
+    { id: 'mid', created_at: iso(now - 24 * H) },
+  ];
+  assert.deepEqual(plain(r.sortRows(rows, 'newest').map((x) => x.id)), ['new', 'mid', 'old', 'undated-1', 'undated-2']);
+  assert.deepEqual(plain(r.sortRows(rows, 'oldest').map((x) => x.id)), ['old', 'mid', 'new', 'undated-1', 'undated-2']);
+  assert.deepEqual(rows.map((x) => x.id), ['undated-1', 'old', 'new', 'undated-2', 'mid'], 'the input is not mutated');
+
+  const oldest = r.groupByDay(rows, now, 'oldest');
+  assert.deepEqual(plain(oldest.map((g) => g.key)), [ymd(now - 72 * H), 'Yesterday', 'Today', 'Undated']);
+  assert.equal(oldest[3].rows.length, 2);
+  assert.deepEqual(plain(r.groupByDay([], now, 'newest')), []);
+});
+
+// The chip row is labelled with the numbers of the rows under it — counted the same way the
+// filter keeps them, so `run` includes the unrecorded rows and `unknown` counts them again.
+test('lessons: scopeCounts and typeCounts count what the list will show', () => {
+  const r = lessons();
+  const rows = [
+    { scope: 'run', lessonType: 'rule' },
+    { scope: 'run', lessonType: 'rule' },
+    { scope: 'session', lessonType: 'fact' },
+    { scope: 'global', lessonType: 'rule' },
+    { scope: '', lessonType: 'rule' },
+    { entry_type: 'trace' },
+    { scope: 'org', lessonType: 'rule' },
+  ];
+  const c = r.scopeCounts(rows);
+  assert.equal(c.run, 4, 'two recorded, two defaulted — the run filter keeps all four');
+  assert.equal(c.session, 1);
+  assert.equal(c.global, 1);
+  assert.equal(c.org, 1);
+  assert.equal(c.unknown, 2, 'the two rows nothing recorded a scope for');
+  assert.deepEqual(plain(r.scopeCounts([])), { run: 0, session: 0, global: 0, org: 0, unknown: 0 });
+
+  assert.deepEqual(plain(r.typeCounts(rows)), [
+    { key: 'rule', count: 5 }, { key: 'fact', count: 1 }, { key: 'trace', count: 1 },
+  ], 'by count, then by name; the activity feed spells it entry_type');
+
+  assert.equal(r.scopeTone({ scope: 'global' }), 'shared');
+  assert.equal(r.scopeTone({ scope: 'run' }), 'local');
+  assert.equal(r.scopeTone({}), 'unknown');
+  assert.equal(r.scopeTone({ scope: 'run', scopeKnown: false }), 'unknown');
+
+  const line = r.storedLine({ createdAt: '2026-09-05T10:11:12.000Z', sourceRunId: 'cc-a-1', source: 'reflection', scope: 'session' }, 'cc-b-2');
+  assert.match(line, /^Stored /);
+  assert.ok(line.includes('2026-09-05T10:11:12.000Z'), 'the ISO stamp is there for the person who wants it exact');
+  assert.ok(line.includes('by run cc-a-1 (not the selected run)'), line);
+  assert.ok(line.includes('via reflection at session scope (recorded)'), line);
+  const bare = r.storedLine({}, 'cc-b-2');
+  assert.ok(bare.includes('did not record') && bare.includes('at run scope (defaulted)'), bare);
+
+  assert.equal(r.reachSentence({ scope: 'global' }).length > 20, true);
+  assert.ok(r.reachSentence({}).includes('default'), 'an unrecorded scope says it is the default');
+
+  assert.equal(r.listEmptyMessage({ mode: 'lessons', error: 'boom' }).text, 'Could not load lessons from the instance.');
+  assert.equal(r.listEmptyMessage({ mode: 'lessons', error: 'boom' }).detail, 'boom');
+  assert.equal(r.listEmptyMessage({ mode: 'lessons', loaded: false }).kind, 'loading');
+  assert.match(r.listEmptyMessage({ mode: 'lessons', loaded: true, total: 7 }).text, /7 loaded/);
+  assert.match(r.listEmptyMessage({ mode: 'lessons', loaded: true, total: 0, allRuns: true }).text, /any run/);
+  assert.match(r.listEmptyMessage({ mode: 'activity', loaded: true, total: 0, allRuns: false }).text, /activity.*this run/);
+
+  const parts = r.footerParts({
+    shown: 1, hidden: 2, mode: 'lessons', search: false,
+    census: { totalVisible: 40, source: 'activity', truncated: true, pages: 2, truncatedReason: 'deadline', unknownScope: 3 },
+  });
+  assert.equal(parts[0], '1 result');
+  assert.ok(parts.includes('2 hidden by the scope filter'));
+  assert.ok(parts.includes('40 visible to this instance'));
+  assert.ok(parts.some((p) => p.includes('stopped after 2 pages (deadline)')), JSON.stringify(parts));
+  assert.ok(parts.includes('3 with no recorded scope'));
+  const searching = r.footerParts({ shown: 2, mode: 'lessons', search: true, searchQuery: 'mirror', census: { totalVisible: 40 } });
+  assert.ok(!searching.some((p) => p.includes('visible to this instance')), 'a search answer is not a census');
+  assert.ok(searching.some((p) => p.includes('mirror')));
+  assert.match(r.scopeNoteText({ mode: 'lessons', allRuns: true }), /every run/);
+  assert.match(r.scopeNoteText({ mode: 'lessons', allRuns: false, joinError: 'x' }), /selected in the rail.*x/s);
+});
+
+// ---------------------------------------------------------------------------
+// The turns table
+// ---------------------------------------------------------------------------
+
+// `used` has three states and the third is not `false`; `rung 0` is "no reading", not a rung.
+// Both are places where a cell that looks like a number libels the retrieval path.
+test('turns: usedCell is tri-state and rungText renders zero as unrecorded', () => {
+  const r = turns();
+  const yes = r.usedCell({ used: true, matched: 2, candidates: 4 });
+  assert.equal(yes.text, '2/4');
+  assert.equal(yes.tone, 'ok');
+  const no = r.usedCell({ used: false, matched: 0, candidates: 4 });
+  assert.equal(no.text, '0/4');
+  assert.notEqual(no.tone, 'ok');
+  assert.notEqual(no.tone, 'bad', 'a "no" is weak evidence and must not be painted as a failure');
+  const unknown = r.usedCell({ used: null, matched: 0, candidates: 0, reason: 'no_reply' });
+  assert.equal(unknown.text, '?', 'never "0/0", which reads as a measured zero');
+  assert.ok(unknown.title.includes('no_reply') && unknown.title.includes('not "unused"'), unknown.title);
+  assert.equal(r.usedCell(undefined).text, '?');
+  assert.equal(r.usedCell({}).text, '?');
+
+  assert.equal(r.rungText(0), '—');
+  assert.equal(r.rungText(undefined), '—');
+  assert.equal(r.rungText(1), '1');
+  assert.equal(r.rungText(2), '2');
+
+  assert.equal(r.turnMatches({ promptPreview: 'Rebuild the bundle', outcomeState: 'sent' }, 'bundle'), true);
+  assert.equal(r.turnMatches({ promptPreview: 'Rebuild the bundle', outcomeState: 'sent' }, 'sent'), true);
+  assert.equal(r.turnMatches({ promptPreview: 'Rebuild the bundle', outcomeState: 'sent' }, 'nope'), false);
+  assert.equal(r.turnMatches({}, ''), true);
+
+  assert.equal(r.fmtInt(1234567), '1,234,567');
+  assert.equal(r.fmtInt(0), '0');
+  assert.equal(r.fmtInt(undefined), '0');
+  assert.equal(r.pct(0.5), '50%');
+  assert.equal(r.pct(undefined), '0%');
+
+  const tiles = r.tileSpecs({ points: 14, averages: { tok: 120, sources: 3.5, chars: 480 }, pointerRatio: 0.25, series: [{ tok: 1 }, { tok: 2 }] });
+  assert.equal(tiles.length, 4);
+  for (const t of tiles) {
+    for (const k of ['key', 'value', 'unit', 'method']) assert.equal(typeof t[k], 'string', `tile.${k}`);
+    assert.ok(Array.isArray(t.series));
+  }
+  assert.ok(tiles[0].method.includes('14 prompts'), tiles[0].method);
+  assert.equal(tiles[2].value, '25%');
+  assert.match(r.analyticsNote({ points: 0 }), /starts empty/);
+  assert.match(r.analyticsNote({ points: 3, firstSampleAt: 1_700_000_000_000 }), /3 prompts/);
+
+  const ht = r.healthTileSpecs({ spoolDepth: 2, rejectedCount: 1, marker: { state: 'ready', captured: { ingested: 5, pending: 1, tools: 2 } }, breaker: { phase: 'open', state: 'unreachable', cooldownLeftMs: 4500 } });
+  assert.equal(ht.length, 4);
+  assert.ok(ht[2].method.includes('5s left'), ht[2].method);
+  assert.match(r.healthNote({ marker: { recall: { sources: 2, tokens: 30, rung: 1, dry_streak: 0 }, reflect: { status: 'ok', lessons_stored: 2 } } }), /last-write-wins/);
 });

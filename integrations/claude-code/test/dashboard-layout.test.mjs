@@ -84,7 +84,7 @@ const REQUIRED_IDS = [
   'id-session-list', 'id-scope',
   'rail', 'rail-toggle', 'dirs', 'runs',
   'tab-memory', 'tab-turns', 'tab-analytics', 'panel-memory', 'panel-turns', 'panel-analytics',
-  'mode-lessons', 'mode-activity', 'runs-this', 'runs-all', 'sort-newest', 'sort-oldest',
+  'mode-lessons', 'mode-activity', 'runs-this', 'runs-reach', 'runs-all', 'sort-newest', 'sort-oldest',
   'filter', 'scope-filter', 'project-filter', 'do-search', 'scope-summary', 'type-summary',
   'memory-list', 'memory-detail', 'memory-footer', 'memory-scope-note',
   'turn-filter', 'turn-count', 'turn-rows', 'turn-detail',

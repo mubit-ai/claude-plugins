@@ -703,6 +703,7 @@ export function turnRow(turn, opts = {}) {
   return {
     promptId: String(t.prompt_id || ''),
     sessionId: String(t.session_id || ''),
+    turnNumber: num(t.turn_number),
     startedAt,
     endedAt,
     turnMs: startedAt && endedAt ? endedAt - startedAt : 0,

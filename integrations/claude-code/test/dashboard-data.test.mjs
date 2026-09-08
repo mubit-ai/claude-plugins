@@ -330,9 +330,10 @@ test('turns: outcomeState collapses the five outcome keys to one word', async (t
 test('turns: a turn carrying only the five required fields still produces a full row', async (t) => {
   const { mod } = await setup(t);
   const row = mod.turnRow(turnFixture());
-  for (const k of ['promptId', 'sessionId', 'startedAt', 'tok', 'chars', 'ptr', 'rung', 'recalledCount']) {
+  for (const k of ['promptId', 'sessionId', 'startedAt', 'tok', 'chars', 'ptr', 'rung', 'recalledCount', 'turnNumber']) {
     assert.ok(k in row, `turnRow must always emit ${k}`);
   }
+  assert.equal(mod.turnRow(turnFixture({ turn_number: 23 })).turnNumber, 23, 'the ordinal is what "turn 23" on the page reads');
   assert.equal(row.tok, 0, 'an absent recall block reads as zero cost, not as NaN');
   assert.equal(row.endedAt, 0, 'a turn still open has no ended_at, and that is normal');
 });

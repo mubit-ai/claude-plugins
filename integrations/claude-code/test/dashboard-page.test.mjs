@@ -48,14 +48,17 @@ const REGION_EXPORTS = [
 const IDENTITY_EXPORTS = [
   'strategyLabel', 'scopeSentences', 'pathParts', 'parentRunId', 'runIdentity', 'sessionLabel',
   'shortSession', 'relativeTime', 'runStateTone', 'identitySignature',
+  'plainRunId', 'baseRunId', 'runLabel', 'groupRunsByDirectory', 'familyIds',
 ];
 const LESSON_EXPORTS = [
   'scopeTone', 'reachSentence', 'scopeCounts', 'typeCounts', 'dayKey', 'groupByDay', 'sortRows',
-  'clockOf', 'storedLine', 'shortId', 'listEmptyMessage', 'footerParts', 'scopeNoteText',
+  'clockOf', 'shortId', 'listEmptyMessage', 'footerParts', 'scopeNoteText',
+  'placement', 'placementCounts', 'matchesView', 'originOf', 'attributeTurn', 'provenanceLines',
 ];
 const TURN_EXPORTS = [
   'turnMatches', 'rungText', 'usedCell', 'fmtInt', 'pct', 'tileSpecs', 'analyticsNote',
   'healthTileSpecs', 'healthNote',
+  'turnAgentsText', 'groupTurnsBySession', 'lessonsInTurn', 'entrySummary', 'durationText',
 ];
 
 /** One region's source, sliced out of the page by its markers. */
@@ -104,7 +107,8 @@ function loadRegion(names = 'scope-predicate', exports = REGION_EXPORTS) {
 const plain = (v) => JSON.parse(JSON.stringify(v));
 
 const identity = () => loadRegion(['scope-predicate', 'identity-model'], [...REGION_EXPORTS, ...IDENTITY_EXPORTS]);
-const lessons = () => loadRegion(['scope-predicate', 'lesson-view'], [...REGION_EXPORTS, ...LESSON_EXPORTS]);
+// The lesson view folds run ids and shortens session ids, so it builds on the identity model too.
+const lessons = () => loadRegion(['scope-predicate', 'identity-model', 'lesson-view'], [...REGION_EXPORTS, ...IDENTITY_EXPORTS, ...LESSON_EXPORTS]);
 const turns = () => loadRegion(['turn-view'], TURN_EXPORTS);
 
 /**
@@ -330,14 +334,16 @@ test('scope: the shipped page offers the whole vocabulary and claims no scope it
     'the badge should go through one helper, so "always rendered" is enforced in one place',
   );
 
-  // D1. The lessons fetch must be able to ask for every run, and `currentRun` is a rendering
-  // context rather than a filter, so it is sent separately and always.
+  // D1. The lessons fetch always asks for every run — an empty run is the only spelling of
+  // "every run" upstream, and the three views are a client-side filter over what came back, so
+  // changing directory or view never refetches. `currentRun` is a rendering context rather
+  // than a filter, so it is sent separately and always.
   assert.ok(
-    src.includes("'run=' + encodeURIComponent(state.allRuns ? '' : state.run)"),
-    'the Memory fetch must send an empty run when All runs is selected — an empty run is the '
-    + 'only way upstream returns lessons other runs wrote',
+    src.includes("'run=&currentRun=' + encodeURIComponent(state.run)"),
+    'the Memory fetch must send an empty run and the current run — the views filter what is loaded',
   );
-  assert.ok(src.includes('currentRun='), 'currentRun must be sent for fromOtherRun to mean anything');
+  assert.doesNotMatch(src, /state\.allRuns/, 'the run toggle is gone; the view is the filter');
+  assert.ok(src.includes('>Everything stored<'), 'Activity mode is relabelled "Everything stored"');
 
   // D7. A failed fetch and an empty instance must not render the same sentence.
   assert.ok(src.includes('Could not load lessons from the instance.'));
@@ -346,7 +352,7 @@ test('scope: the shipped page offers the whole vocabulary and claims no scope it
   // Every control added for this work is reachable without sight. The two segment buttons carry
   // aria-pressed because they are toggles; the two selects carry aria-label because their only
   // visible label is the option text.
-  for (const id of ['runs-this', 'runs-all']) {
+  for (const id of ['runs-this', 'runs-reach', 'runs-all']) {
     const tagText = src.slice(src.indexOf(`id="${id}"`));
     assert.match(
       tagText.slice(0, tagText.indexOf('>')), /aria-pressed=/,
@@ -598,14 +604,6 @@ test('lessons: scopeCounts and typeCounts count what the list will show', () => 
   assert.equal(r.scopeTone({}), 'unknown');
   assert.equal(r.scopeTone({ scope: 'run', scopeKnown: false }), 'unknown');
 
-  const line = r.storedLine({ createdAt: '2026-09-05T10:11:12.000Z', sourceRunId: 'cc-a-1', source: 'reflection', scope: 'session' }, 'cc-b-2');
-  assert.match(line, /^Stored /);
-  assert.ok(line.includes('2026-09-05T10:11:12.000Z'), 'the ISO stamp is there for the person who wants it exact');
-  assert.ok(line.includes('by run cc-a-1 (not the selected run)'), line);
-  assert.ok(line.includes('via reflection at session scope (recorded)'), line);
-  const bare = r.storedLine({}, 'cc-b-2');
-  assert.ok(bare.includes('did not record') && bare.includes('at run scope (defaulted)'), bare);
-
   assert.equal(r.reachSentence({ scope: 'global' }).length > 20, true);
   assert.ok(r.reachSentence({}).includes('default'), 'an unrecorded scope says it is the default');
 
@@ -613,23 +611,340 @@ test('lessons: scopeCounts and typeCounts count what the list will show', () => 
   assert.equal(r.listEmptyMessage({ mode: 'lessons', error: 'boom' }).detail, 'boom');
   assert.equal(r.listEmptyMessage({ mode: 'lessons', loaded: false }).kind, 'loading');
   assert.match(r.listEmptyMessage({ mode: 'lessons', loaded: true, total: 7 }).text, /7 loaded/);
-  assert.match(r.listEmptyMessage({ mode: 'lessons', loaded: true, total: 0, allRuns: true }).text, /any run/);
-  assert.match(r.listEmptyMessage({ mode: 'activity', loaded: true, total: 0, allRuns: false }).text, /activity.*this run/);
+  assert.match(r.listEmptyMessage({ mode: 'lessons', loaded: true, total: 0, view: 'here' }).text, /this directory/);
+  assert.match(r.listEmptyMessage({ mode: 'lessons', loaded: true, total: 0, view: 'all' }).text, /anywhere on the instance/);
+  assert.match(r.listEmptyMessage({ mode: 'activity', loaded: true, total: 0, view: 'reach' }).text, /activity.*this directory/);
 
   const parts = r.footerParts({
     shown: 1, hidden: 2, mode: 'lessons', search: false,
     census: { totalVisible: 40, source: 'activity', truncated: true, pages: 2, truncatedReason: 'deadline', unknownScope: 3 },
   });
-  assert.equal(parts[0], '1 result');
+  assert.equal(parts[0], '1 shown');
   assert.ok(parts.includes('2 hidden by the scope filter'));
-  assert.ok(parts.includes('40 visible to this instance'));
+  assert.ok(parts.includes('40 on the instance'));
   assert.ok(parts.some((p) => p.includes('stopped after 2 pages (deadline)')), JSON.stringify(parts));
   assert.ok(parts.includes('3 with no recorded scope'));
   const searching = r.footerParts({ shown: 2, mode: 'lessons', search: true, searchQuery: 'mirror', census: { totalVisible: 40 } });
-  assert.ok(!searching.some((p) => p.includes('visible to this instance')), 'a search answer is not a census');
+  assert.ok(!searching.some((p) => p.includes('on the instance')), 'a search answer is not a census');
   assert.ok(searching.some((p) => p.includes('mirror')));
-  assert.match(r.scopeNoteText({ mode: 'lessons', allRuns: true }), /every run/);
-  assert.match(r.scopeNoteText({ mode: 'lessons', allRuns: false, joinError: 'x' }), /selected in the rail.*x/s);
+  assert.match(r.scopeNoteText({ mode: 'lessons', view: 'all' }), /[Ee]very lesson on the instance/);
+  assert.match(r.scopeNoteText({ mode: 'lessons', view: 'here' }), /this directory/);
+  assert.match(r.scopeNoteText({ mode: 'lessons', view: 'reach' }), /reach here/);
+  assert.match(r.scopeNoteText({ mode: 'activity', view: 'here' }), /[Ee]ntries.*this directory/);
+  assert.match(r.scopeNoteText({ mode: 'lessons', view: 'here', joinError: 'x' }), /this directory.*x/s);
+});
+
+// ---------------------------------------------------------------------------
+// Families — one directory, several run ids
+// ---------------------------------------------------------------------------
+
+/** Every shape a run id arrives in. The same table `test/dashboard-data.test.mjs` pins. */
+const RUN_ID_SHAPES = [
+  'cc-pre-main-af449e06', 'cc-pre-main-feat-x-af449e06', 'cc-pre-main-af449e06-c1',
+  'cc-pre-main-af449e06-c12', 'cc-pre-main-af449e06-sub-a06e2764eaae',
+  'cc-pre-main-af449e06-c1-sub-abc123', 'state::01234::cc-pre-main-af449e06-c1',
+  'my-pinned-run-c1', 'my-pinned-run', '11111111-2222-4333-8444-555555555555', '',
+];
+
+/**
+ * The drift guard for the directory key. The server folds ids for the family routes and the
+ * page folds them for placement; the two are the same function in two languages of the same
+ * codebase, and only this test notices when one of them moves.
+ */
+test('identity: baseRunId and plainRunId agree with lib/dashboard-data.mjs on every shape of run id', async () => {
+  const r = identity();
+  const d = await lib('dashboard-data.mjs');
+  for (const id of RUN_ID_SHAPES) {
+    assert.equal(r.baseRunId(id), d.baseRunId(id), `baseRunId(${JSON.stringify(id)}) differs between the page and the server`);
+    assert.equal(r.plainRunId(id), d.plainRunId(id), `plainRunId(${JSON.stringify(id)}) differs between the page and the server`);
+  }
+  assert.equal(r.baseRunId('cc-pre-main-af449e06-c1'), 'cc-pre-main-af449e06');
+  assert.equal(r.baseRunId('state::01234::cc-pre-main-af449e06-c1-sub-abc'), 'cc-pre-main-af449e06');
+  assert.equal(r.baseRunId('my-pinned-run-c1'), 'my-pinned-run-c1', 'a static id is not a directory key');
+  assert.equal(r.plainRunId('state::01234::x'), 'x');
+  assert.equal(r.baseRunId(undefined), '');
+});
+
+test('identity: groupRunsByDirectory folds a directory\'s runs together and names the current one', () => {
+  const r = identity();
+  const runs = [
+    { runId: 'cc-here-00000001-c1', lastWrite: 300, turnCount: 3, projectDir: '/home/user/proj', projectRoot: '/home/user/proj', sessions: [{ sessionId: 's2', runId: 'cc-here-00000001-c1', lastSeenAt: 300, agentId: 'claude-code' }] },
+    { runId: 'cc-here-00000001', lastWrite: 100, turnCount: 12, projectDir: '/home/user/proj', projectRoot: '/home/user/proj', sessions: [{ sessionId: 's1', runId: 'cc-here-00000001', lastSeenAt: 100, agentId: 'claude-code' }] },
+    { runId: 'cc-here-00000001-sub-abc', lastWrite: 200, turnCount: 0, sessions: [] },
+    { runId: 'pinned', lastWrite: 250, turnCount: 1, projectDir: '/home/user/proj/sub', projectRoot: '/home/user/proj', sessions: [{ sessionId: 's3', runId: 'pinned', lastSeenAt: 250, agentId: 'codex' }] },
+    { runId: 'cc-else-00000002', lastWrite: 400, turnCount: 1, projectDir: '/home/user/other', projectRoot: '/home/user/other', sessions: [{ sessionId: 's4', runId: 'cc-else-00000002', lastSeenAt: 400, agentId: 'claude-code' }] },
+    { runId: 'cc-orphan-0000003', lastWrite: 50, turnCount: 0, sessions: [] },
+  ];
+  const groups = r.groupRunsByDirectory(runs);
+  assert.deepEqual(plain(groups.map((g) => g.runs.map((x) => x.runId))), [
+    ['cc-else-00000002'],
+    ['cc-here-00000001-c1', 'pinned', 'cc-here-00000001-sub-abc', 'cc-here-00000001'],
+    ['cc-orphan-0000003'],
+  ], 'families newest first; runs inside a family newest first');
+
+  const here = groups[1];
+  assert.equal(here.projectDir, '/home/user/proj', 'the directory of the newest session in the family');
+  assert.equal(here.projectRoot, '/home/user/proj');
+  assert.equal(here.current, 'cc-here-00000001-c1', 'the run the newest session maps to');
+  assert.deepEqual(plain(here.runs.map((x) => x.label)), ['current', 'earlier', 'subagent', 'before /clear']);
+  assert.deepEqual(plain(here.bases.slice().sort()), ['cc-here-00000001', 'pinned']);
+  assert.equal(here.subagentRuns, 1);
+  assert.equal(here.turnCount, 16);
+  assert.equal(here.lastWrite, 300);
+  assert.equal(here.agentIds.join(','), 'claude-code,codex');
+
+  assert.equal(groups[2].projectDir, '', 'no session record, no directory — guessing one would be worse than blank');
+  assert.equal(groups[2].current, 'cc-orphan-0000003');
+  assert.deepEqual(plain(groups[2].runs.map((x) => x.label)), ['current']);
+
+  assert.equal(r.runLabel('cc-here-00000001-c1', here), 'current');
+  assert.equal(r.runLabel('cc-here-00000001', here), 'before /clear');
+  assert.equal(r.runLabel('cc-here-00000001-sub-abc', here), 'subagent');
+  assert.equal(r.runLabel('pinned', here), 'earlier');
+  assert.equal(r.runLabel('cc-here-00000001-c12', { ...here, current: 'x' }), 'after /clear ×12');
+
+  assert.deepEqual(plain(r.familyIds(runs, 'cc-here-00000001')).sort(), plain(here.runs.map((x) => x.runId)).sort());
+  assert.deepEqual(plain(r.familyIds(runs, 'pinned')).sort(), plain(here.runs.map((x) => x.runId)).sort(), 'asked by any member, the same family');
+  assert.deepEqual(plain(r.familyIds(runs, 'cc-nope-00000009')), ['cc-nope-00000009'], 'an unknown run is a family of one');
+  assert.deepEqual(plain(r.groupRunsByDirectory([])), []);
+  assert.deepEqual(plain(r.groupRunsByDirectory(null)), []);
+});
+
+// ---------------------------------------------------------------------------
+// Placement — here, shared, elsewhere
+// ---------------------------------------------------------------------------
+
+/**
+ * The view is a client-side filter over what is loaded, and this is the predicate. `here`
+ * folds every spelling of the directory's runs — the feed's `state::` prefix, a `-c1`, a
+ * subagent — back to the directory key; `shared` is what other directories saved at a scope
+ * that reaches here at recall; `elsewhere` is everything else.
+ */
+test('lessons: placement and matchesView decide here, shared and elsewhere against the selected directory', () => {
+  const r = lessons();
+  const bases = ['cc-here-00000001'];
+  const rows = {
+    hereRun: { scope: 'run', sourceRunId: 'cc-here-00000001' },
+    hereCleared: { scope: 'session', sourceRunId: 'state::u::cc-here-00000001-c1' },
+    hereSub: { scope: 'run', run_id: 'cc-here-00000001-sub-abc' },
+    hereBare: { runId: 'cc-here-00000001-c3' },
+    sharedGlobal: { scope: 'global', sourceRunId: 'cc-else-00000002' },
+    sharedSession: { scope: 'session', run_id: 'state::u::cc-else-00000002-c3' },
+    elsewhere: { scope: 'run', sourceRunId: 'cc-else-00000002' },
+    elsewhereBare: { sourceRunId: 'cc-else-00000002' },
+    noRun: { scope: 'global' },
+  };
+  const P = {
+    hereRun: 'here', hereCleared: 'here', hereSub: 'here', hereBare: 'here',
+    sharedGlobal: 'shared', sharedSession: 'shared',
+    elsewhere: 'elsewhere', elsewhereBare: 'elsewhere', noRun: 'here',
+  };
+  for (const [k, row] of Object.entries(rows)) {
+    assert.equal(r.placement(row, bases), P[k], `placement(${k})`);
+  }
+  const V = {
+    here: Object.keys(P).filter((k) => P[k] === 'here'),
+    reach: Object.keys(P).filter((k) => P[k] !== 'elsewhere'),
+    all: Object.keys(P),
+  };
+  for (const [view, kept] of Object.entries(V)) {
+    for (const [k, row] of Object.entries(rows)) {
+      assert.equal(r.matchesView(row, view, bases), kept.includes(k), `matchesView(${k}, '${view}')`);
+    }
+  }
+  assert.deepEqual(plain(r.placementCounts(Object.values(rows), bases)), { here: 5, reach: 7, all: 9 });
+  assert.equal(r.placement(rows.hereRun, []), 'elsewhere', 'with no directory selected, nothing is here');
+  assert.equal(r.placement(rows.noRun, []), 'shared', 'a row with no run and a wide scope still reaches');
+  assert.equal(r.matchesView(rows.elsewhere, 'nonsense', bases), true, 'an unknown view hides nothing');
+});
+
+// ---------------------------------------------------------------------------
+// Attribution — which session, which prompt, and how the page knows
+// ---------------------------------------------------------------------------
+
+const T0 = 1_700_000_000_000;
+const isoAt = (ms) => new Date(ms).toISOString();
+
+/** Three turns: two in one session (the second still open), one in another session and run. */
+const TURNS = [
+  { runId: 'cc-here-00000001', promptId: 'p1', sessionId: 's1', startedAt: T0, endedAt: T0 + 100_000, turnNumber: 1, promptPreview: 'first prompt' },
+  { runId: 'cc-here-00000001', promptId: 'p2', sessionId: 's1', startedAt: T0 + 300_000, endedAt: 0, turnNumber: 2, promptPreview: 'second, still open' },
+  { runId: 'cc-here-00000001-c1', promptId: 'p3', sessionId: 's2', startedAt: T0 + 30_000, endedAt: T0 + 50_000, turnNumber: 1, promptPreview: 'other session' },
+];
+
+test('lessons: originOf reads the four origins, and attributeTurn says recorded, by time, or nothing', () => {
+  const r = lessons();
+  assert.equal(r.originOf({ origin: 'agent' }), 'agent', 'the server\'s word wins when it sent one');
+  assert.equal(r.originOf({ source: 'mcp-agent' }), 'agent');
+  assert.equal(r.originOf({ source: 'agent' }), 'agent');
+  assert.equal(r.originOf({ source: 'auto-reflect:end' }), 'auto-reflection');
+  assert.equal(r.originOf({ source: 'reflection', autoReflection: true }), 'auto-reflection');
+  assert.equal(r.originOf({ source: 'reflection:session-end' }), 'reflection');
+  assert.equal(r.originOf({ entry_type: 'trace', source: 'agent' }), 'hook', 'the capture hooks stamp source: agent on a trace');
+  assert.equal(r.originOf({ entryType: 'trace' }), 'hook');
+  assert.equal(r.originOf({}), '');
+  assert.equal(r.originOf(null), '');
+
+  const stamped = r.attributeTurn({ promptId: 'p1', sessionId: 's1', createdAt: isoAt(T0 + 20_000) }, TURNS);
+  assert.equal(stamped.how, 'recorded');
+  assert.equal(stamped.turn.promptId, 'p1');
+  const pruned = r.attributeTurn({ promptId: 'p9', createdAt: isoAt(T0 + 20_000) }, TURNS);
+  assert.equal(pruned.how, 'recorded', 'stamped is stamped, even when the turn file has been pruned');
+  assert.equal(pruned.turn, null);
+
+  const byTime = r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 + 40_000) }, TURNS);
+  assert.equal(byTime.how, 'by time');
+  assert.equal(byTime.turn.promptId, 'p1', 'the same session — not the other session\'s turn at the same moment');
+  const noSession = r.attributeTurn({ createdAt: isoAt(T0 + 40_000) }, TURNS);
+  assert.equal(noSession.how, 'by time');
+  assert.equal(noSession.turn.promptId, 'p3', 'without a session, the latest window that contains the time');
+  const open = r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 + 900_000) }, TURNS);
+  assert.equal(open.how, 'by time');
+  assert.equal(open.turn.promptId, 'p2', 'an open turn\'s window has no end');
+  const grace = r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 + 130_000) }, TURNS);
+  assert.equal(grace.turn.promptId, 'p1', 'an ingest that lands shortly after the turn closed still belongs to it');
+
+  assert.equal(r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 - 5_000) }, TURNS).how, '', 'before every window');
+  assert.equal(r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 + 200_000) }, TURNS).how, '', 'between two turns is outside every window');
+  const reflection = r.attributeTurn({ source: 'reflection:x', sessionId: 's1', createdAt: isoAt(T0 + 20_000) }, TURNS);
+  assert.equal(reflection.how, '', 'a reflection is never attributed to a prompt');
+  assert.equal(reflection.turn, null);
+  assert.equal(r.attributeTurn({ createdAt: '' }, TURNS).how, '');
+  assert.equal(r.attributeTurn(null, null).how, '');
+  assert.equal(r.attributeTurn({ createdAt: isoAt(T0 + 20_000) }, []).how, '');
+});
+
+test('lessons: provenanceLines says where, which session, which prompt, and how it knows', () => {
+  const r = lessons();
+  const families = [{
+    key: 'cc-here-00000001', projectDir: '/home/user/proj', bases: ['cc-here-00000001'], current: 'cc-here-00000001-c1',
+    runs: [{ runId: 'cc-here-00000001-c1', label: 'current' }, { runId: 'cc-here-00000001', label: 'before /clear' }],
+  }];
+  const sid = '01a08f3e-1111-2222-3333-444444444e11';
+  const turns = [{
+    runId: 'cc-here-00000001', promptId: 'p1', sessionId: sid, startedAt: T0, endedAt: T0 + 100_000, turnNumber: 23,
+    promptPreview: 'Give me the commands to start the daemon and check its logs afterwards please',
+  }];
+  const row = {
+    id: 'l1', createdAt: isoAt(T0 + 20_000), source: 'mcp-agent', origin: 'agent', scope: 'session',
+    sourceRunId: 'cc-here-00000001', sessionId: sid, promptId: 'p1', turnNumber: 23,
+  };
+  const find = (lines, key) => lines.find((l) => l.key === key);
+
+  const lines = r.provenanceLines(row, { families, turns });
+  assert.deepEqual(plain(lines.map((l) => l.key)), ['saved', 'directory', 'session', 'prompt', 'reach']);
+  assert.match(find(lines, 'saved').text, /^Saved /);
+  assert.ok(find(lines, 'saved').text.includes('by the agent (mubit_learned)'), find(lines, 'saved').text);
+  assert.equal(find(lines, 'directory').text, 'Directory /home/user/proj · run cc-here-00000001 (before /clear)');
+  assert.equal(find(lines, 'session').text, 'Session 01a08…e11 · recorded');
+  assert.equal(find(lines, 'session').how, 'recorded');
+  assert.match(find(lines, 'prompt').text, /^Prompt “Give me the commands to start/);
+  assert.ok(find(lines, 'prompt').text.includes('turn 23') && find(lines, 'prompt').text.endsWith('· recorded'), find(lines, 'prompt').text);
+  assert.equal(find(lines, 'prompt').turn.promptId, 'p1');
+  assert.equal(find(lines, 'prompt').how, 'recorded');
+  assert.match(find(lines, 'reach').text, /^Reach: /);
+
+  const byTime = r.provenanceLines({ ...row, sessionId: '', promptId: '', turnNumber: 0 }, { families, turns });
+  assert.equal(find(byTime, 'session').text, 'Session 01a08…e11 · by time');
+  assert.ok(find(byTime, 'prompt').text.endsWith('· by time'), find(byTime, 'prompt').text);
+  assert.equal(find(byTime, 'prompt').how, 'by time');
+
+  const reflection = r.provenanceLines({ createdAt: isoAt(T0 + 20_000), source: 'reflection:x', sourceRunId: 'cc-here-00000001', scope: 'session' }, { families, turns });
+  assert.equal(find(reflection, 'prompt'), undefined, 'a reflection gets a session by time but never a prompt');
+  assert.equal(find(reflection, 'session').text, 'Session 01a08…e11 · by time');
+  assert.ok(find(reflection, 'saved').text.includes('by reflection'), find(reflection, 'saved').text);
+  const auto = r.provenanceLines({ createdAt: isoAt(T0 + 20_000), source: 'auto-reflect:end', sourceRunId: 'cc-here-00000001' }, { families, turns });
+  assert.ok(find(auto, 'saved').text.includes('by auto-reflection'), find(auto, 'saved').text);
+
+  const pruned = r.provenanceLines({ ...row, promptId: 'p9' }, { families, turns });
+  assert.match(find(pruned, 'prompt').text, /turn file pruned/);
+  assert.equal(find(pruned, 'prompt').how, 'recorded');
+  assert.equal(find(pruned, 'prompt').turn, null);
+
+  const nowhere = r.provenanceLines({ ...row, sessionId: '', promptId: '', createdAt: isoAt(T0 - 5_000) }, { families, turns });
+  assert.equal(find(nowhere, 'session').text, 'Session not recorded');
+  assert.equal(find(nowhere, 'prompt').text, 'Prompt not recorded');
+  assert.equal(find(nowhere, 'prompt').how, '');
+
+  const other = r.provenanceLines({ ...row, sourceRunId: 'cc-else-00000002', sessionId: '', promptId: '' }, { families, turns });
+  assert.ok(find(other, 'directory').text.includes('cc-else-00000002') && !find(other, 'directory').text.includes('/home/user/proj'), find(other, 'directory').text);
+  assert.match(find(other, 'directory').text, /not in this data directory/);
+  assert.equal(find(other, 'prompt'), undefined, 'another directory\'s turns are not on this page');
+
+  const hook = r.provenanceLines({
+    entryType: 'trace', tool: 'Edit', hookEvent: 'PostToolUse', sessionId: sid, promptId: 'p1',
+    createdAt: isoAt(T0 + 1_000), run_id: 'state::u::cc-here-00000001', source: 'agent',
+  }, { families, turns });
+  assert.ok(find(hook, 'saved').text.includes('hook capture') && find(hook, 'saved').text.includes('Edit'), find(hook, 'saved').text);
+  assert.ok(find(hook, 'saved').text.includes('PostToolUse'));
+
+  const sub = r.provenanceLines({ ...row, agentType: 'Explore' }, { families, turns });
+  assert.ok(find(sub, 'saved').text.includes('subagent Explore'), find(sub, 'saved').text);
+
+  const undated = r.provenanceLines({ source: 'mcp-agent' }, { families, turns });
+  assert.match(find(undated, 'saved').text, /^Saved at a time this instance did not record/);
+  assert.equal(find(undated, 'directory').text, 'Directory not recorded · run unknown');
+  assert.equal(r.provenanceLines(null, null).length, 5, 'a blank row still renders the five lines rather than throwing');
+});
+
+// ---------------------------------------------------------------------------
+// The turns table, with agents and sessions
+// ---------------------------------------------------------------------------
+
+test('turns: turnAgentsText, groupTurnsBySession, lessonsInTurn, entrySummary and durationText', () => {
+  const r = turns();
+  assert.equal(r.turnAgentsText({ subagentCount: 0 }), 'main');
+  assert.equal(r.turnAgentsText({ subagentCount: 2, subagentTypes: ['Explore', 'Plan'] }), 'main + 2 sub (Explore, Plan)');
+  assert.equal(r.turnAgentsText({ subagentCount: 3, subagentTypes: ['Explore', 'Explore', 'Explore'] }), 'main + 3 sub (Explore)');
+  assert.equal(r.turnAgentsText({ subagentCount: 1, subagentTypes: [''] }), 'main + 1 sub');
+  assert.equal(r.turnAgentsText(undefined), 'main');
+
+  const rows = [{ promptId: 'a', sessionId: 's2' }, { promptId: 'b', sessionId: 's1' }, { promptId: 'c', sessionId: 's2' }, { promptId: 'd' }];
+  const groups = r.groupTurnsBySession(rows);
+  assert.deepEqual(plain(groups.map((g) => [g.sessionId, g.rows.map((x) => x.promptId)])),
+    [['s2', ['a', 'c']], ['s1', ['b']], ['', ['d']]], 'sessions in first-seen order, rows in the order given');
+  assert.deepEqual(plain(r.groupTurnsBySession([])), []);
+
+  const turn = { promptId: 'p1', sessionId: 's1', startedAt: T0, endedAt: T0 + 60_000 };
+  const lessons = [
+    { id: 'stamped', promptId: 'p1', createdAt: isoAt(T0 + 900_000) },
+    { id: 'inWindow', createdAt: isoAt(T0 + 30_000), sessionId: 's1' },
+    { id: 'otherSession', createdAt: isoAt(T0 + 30_000), sessionId: 's9' },
+    { id: 'outside', createdAt: isoAt(T0 + 600_000) },
+    { id: 'otherPrompt', promptId: 'p2', createdAt: isoAt(T0 + 30_000) },
+    { id: 'reflection', source: 'reflection:x', createdAt: isoAt(T0 + 30_000) },
+    { id: 'autoReflection', origin: 'auto-reflection', createdAt: isoAt(T0 + 30_000) },
+  ];
+  assert.deepEqual(plain(r.lessonsInTurn(turn, lessons).map((l) => l.id)), ['stamped', 'inWindow'],
+    'a stamped prompt id first, then the window; another session, another prompt and a reflection never');
+  assert.deepEqual(plain(r.lessonsInTurn({ promptId: 'p1', sessionId: 's1', startedAt: T0, endedAt: 0 }, lessons).map((l) => l.id)),
+    ['stamped', 'inWindow', 'outside'], 'an open turn has no end');
+  assert.deepEqual(plain(r.lessonsInTurn(null, lessons)), []);
+  assert.deepEqual(plain(r.lessonsInTurn(turn, null)), []);
+
+  const two = (n) => (n < 10 ? '0' : '') + n;
+  const d = new Date(T0);
+  const clock = two(d.getHours()) + ':' + two(d.getMinutes());
+  const e = r.entrySummary({ entryType: 'trace', tool: 'Edit', content: 'Edit lib/x.mjs '.repeat(20), createdAt: isoAt(T0), origin: 'hook', runId: 'state::u::cc-else-00000002' });
+  assert.equal(e.type, 'trace');
+  assert.equal(e.tool, 'Edit');
+  assert.ok(e.preview.length <= 140 && e.preview.endsWith('…'), e.preview);
+  assert.equal(e.origin, 'hook');
+  assert.equal(e.clock, clock);
+  const l = r.entrySummary({ lessonType: 'rule', content: 'short', timestamp: isoAt(T0) });
+  assert.equal(l.type, 'rule');
+  assert.equal(l.preview, 'short');
+  assert.equal(l.tool, '');
+  assert.equal(l.clock, clock, 'timestamp is the fallback when created_at is absent');
+  assert.equal(r.entrySummary(null).type, 'entry');
+  assert.equal(r.entrySummary({}).clock, '—');
+
+  assert.equal(r.durationText(T0, T0 + 12_000), '12s');
+  assert.equal(r.durationText(T0, T0 + 185_000), '3m 05s');
+  assert.equal(r.durationText(T0, T0 + 3_720_000), '1h 02m');
+  assert.equal(r.durationText(T0, 0), '');
+  assert.equal(r.durationText(0, T0), '');
+  assert.equal(r.durationText(T0, T0 - 5), '');
 });
 
 // ---------------------------------------------------------------------------

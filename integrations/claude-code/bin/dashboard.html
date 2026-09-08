@@ -194,6 +194,20 @@ select, input[type="text"], input[type="search"] {
 .run .meta { font-size: 11px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; }
 .run .meta .proj { font-family: var(--mono); }
 
+/* One entry per directory: the full path, then its runs as small rows under it. */
+.dir { margin-bottom: var(--space-2); }
+.dirhead {
+  display: block; width: 100%; text-align: left; cursor: pointer; color: inherit;
+  background: none; border: 0; border-left: 2px solid transparent; padding: 6px 8px;
+}
+.dirhead:hover { background: var(--surface-hover); }
+.dirhead[aria-current="true"] { background: var(--surface-hover); border-left-color: var(--accent); }
+.dirhead .path { font: 12px/17px var(--mono); overflow-wrap: anywhere; }
+.dirhead .meta { font-size: 11px; color: var(--muted); }
+.dir .run { padding: 3px 8px 3px 18px; margin-bottom: 0; }
+.dir .run .id { font-size: 11px; }
+.dir .subs { font-size: 11px; color: var(--muted); padding: 2px 8px 2px 18px; }
+
 /* ---- tabs ------------------------------------------------------------ */
 nav.tabs { display: flex; gap: var(--space-5); padding: 0 var(--space-5); border-bottom: 1px solid var(--hair); }
 nav.tabs button {
@@ -284,12 +298,31 @@ select:disabled { opacity: 0.45; cursor: not-allowed; }
 .tag.bad { color: var(--danger); border-color: var(--danger); }
 .tag.unknown { border-style: dashed; }
 .tag.type { text-transform: none; }
+/* A fact the page inferred rather than read — "by time", or a subagent it could only guess. */
+.tag.sub { border-style: dashed; }
+/* In a row's meta line: a fact that was inferred, and a row that came from another directory. */
+.item .m .sub { border-bottom: 1px dashed var(--hair-strong); }
+.item .m .from { color: var(--accent-ink); }
+.item .m .prompt { font-family: var(--sans); font-style: italic; }
 
 /* ---- detail ---------------------------------------------------------- */
 .detail { padding: var(--space-4); }
 .detail h2 { font: 500 16px/22px var(--sans); margin: 0 0 var(--space-2); }
 .detail .reach { margin: 0 0 var(--space-3); }
-.detail .stored { font: 11px/17px var(--mono); color: var(--muted); overflow-wrap: anywhere; margin: 0 0 var(--space-3); }
+/* The provenance block: one line per fact, no paragraphs. */
+.detail .prov { font: 12px/18px var(--mono); color: var(--muted); margin: 0 0 var(--space-3); }
+.detail .prov div { overflow-wrap: anywhere; }
+.detail .prov .btn.link { font: inherit; margin-left: 6px; }
+.detail .prov b { font-weight: 500; color: var(--text); }
+/* Injected memories and subagents under a turn. */
+.injected { margin: 0; padding: 0; list-style: none; }
+.injected li { padding: 6px 0; border-bottom: 1px solid var(--hair); }
+.injected li:last-child { border-bottom: 0; }
+.injected .c { font: 13px/19px var(--sans); overflow-wrap: anywhere; margin-top: 2px; }
+.injected .m { font: 11px/16px var(--mono); color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; }
+.subagent { border-top: 1px solid var(--hair); padding: 4px 0; }
+.subagent summary { cursor: pointer; font: 12px/18px var(--mono); }
+.subagent .injected { margin-left: var(--space-3); }
 .detail .eyebrow { margin: var(--space-4) 0 var(--space-1); }
 .detail dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 14px; margin: var(--space-3) 0 0; }
 .detail dt { color: var(--muted); font-size: 12px; }
@@ -311,6 +344,15 @@ td.prompt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-
   position: sticky; left: 0; z-index: 1; background: var(--panel);
   box-shadow: inset -1px 0 0 var(--hair);
 }
+/* A session header inside the table, when the directory's turns span more than one session. */
+tr.sesshead td {
+  font: 600 11px/16px var(--mono); text-transform: uppercase; letter-spacing: var(--track);
+  color: var(--muted); background: var(--panel-2); white-space: normal; cursor: default;
+}
+tr.sesshead:hover td { background: var(--panel-2); }
+/* The run column is shown only when the family has more than one run; `hidden` must win over
+   the card-row rule below, which sets every cell to display: block. */
+#panel-turns [hidden] { display: none; }
 tbody tr { cursor: pointer; }
 tbody tr:hover td { background: var(--surface-hover); }
 tbody tr[aria-current="true"] td { background: var(--accent-dim); }
@@ -401,22 +443,22 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     <code id="banner-code"></code>
   </div>
 
-  <!-- Which run, for which directory, shared by which sessions, writing and reading at what
-       scope. The session map has held the first three all along; this is the first place the
-       page has said any of it. -->
-  <section id="identity" aria-label="Current run">
+  <!-- Everything on the page is anchored on the selected directory: its family of run ids,
+       the run the newest session maps to, the sessions that share it, and what it writes at
+       and reads from. -->
+  <section id="identity" aria-label="Selected directory">
     <div class="identity-grid">
-      <div class="cell">
-        <div class="eyebrow">Run</div>
-        <div id="id-run">—</div>
-        <div id="id-run-state"></div>
-        <div id="id-run-note"></div>
-      </div>
       <div class="cell">
         <div class="eyebrow">Directory</div>
         <div id="id-path">—</div>
         <div id="id-root"></div>
         <div id="id-datadir"></div>
+      </div>
+      <div class="cell">
+        <div class="eyebrow">Run</div>
+        <div id="id-run">—</div>
+        <div id="id-run-state"></div>
+        <div id="id-run-note"></div>
       </div>
       <div class="cell">
         <div class="eyebrow">Sessions</div>
@@ -425,7 +467,7 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
           <summary>every session</summary>
           <div class="sessions"></div>
         </details>
-        <button class="btn" id="rail-toggle" aria-expanded="false" aria-controls="rail">Change run</button>
+        <button class="btn" id="rail-toggle" aria-expanded="false" aria-controls="rail">Change directory</button>
       </div>
       <div class="cell">
         <div class="eyebrow">Scope</div>
@@ -435,11 +477,11 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
   </section>
 
   <div class="body" id="body">
-    <aside id="rail" aria-label="Data directories and runs">
+    <aside id="rail" aria-label="Data directories and project directories">
       <div class="eyebrow">Data directory</div>
       <select id="dirs" aria-label="Data directory"></select>
 
-      <div class="eyebrow">Runs</div>
+      <div class="eyebrow">Directories</div>
       <div id="runs"></div>
     </aside>
 
@@ -456,11 +498,15 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
           <div class="toolbar">
             <span class="seg" role="group" aria-label="Source">
               <button id="mode-lessons" aria-pressed="true">Lessons</button>
-              <button id="mode-activity" aria-pressed="false">Activity</button>
+              <button id="mode-activity" aria-pressed="false">Everything stored</button>
             </span>
-            <span class="seg" role="group" aria-label="Runs">
-              <button id="runs-this" aria-pressed="false">This run</button>
-              <button id="runs-all" aria-pressed="true">All runs</button>
+            <!-- Three views over one load. The fetch always asks for every run; these filter
+                 what came back, so switching directory or view is instant and the counts are
+                 the truth about the list under them. -->
+            <span class="seg" role="group" aria-label="View">
+              <button id="runs-this" aria-pressed="true" title="Lessons this directory's runs saved">Written here <b>0</b></button>
+              <button id="runs-reach" aria-pressed="false" title="Plus session and global lessons other directories saved, which reach here at recall">+ shared <b>0</b></button>
+              <button id="runs-all" aria-pressed="false" title="Every lesson on the instance">Everything <b>0</b></button>
             </span>
             <span class="seg" role="group" aria-label="Order">
               <button id="sort-newest" aria-pressed="true">Newest first</button>
@@ -507,32 +553,27 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
         <div class="panel-inner">
           <div class="toolbar">
             <input class="grow" type="search" id="turn-filter" placeholder="Filter prompts" aria-label="Filter turns">
-            <span class="pill"><span id="turn-count">0</span>&nbsp;turns on disk</span>
+            <span class="pill" title="Turn files are pruned six hours after they are written, so this is the recent past only. There is no per-prompt latency column because none is recorded: the timing on the status marker describes the last prompt, not each one."><span id="turn-count">0</span>&nbsp;turns on disk</span>
           </div>
           <div class="split wide">
             <div class="card scroll-x">
               <table>
                 <thead><tr>
-                  <th>time</th><th>Prompt</th><th class="num">rung</th><th class="num">src</th>
-                  <th class="num">tok</th><th class="num">ptr</th><th>used</th><th>outcome</th>
+                  <th>time</th><th>Prompt</th><th id="turn-run-head" hidden>run</th><th>agents</th>
+                  <th class="num">injected</th><th class="num">tok</th><th>used</th><th>outcome</th>
                 </tr></thead>
                 <tbody id="turn-rows"></tbody>
               </table>
             </div>
             <div class="card detail" id="turn-detail"><p class="empty">Select a turn.</p></div>
           </div>
-          <p class="note">
-            Turn files are pruned six hours after they are written, so this table is the recent
-            past only. There is no per-prompt latency column because per-prompt latency is not
-            recorded anywhere: the timing on the status marker describes the last prompt, not each one.
-          </p>
         </div>
       </section>
 
       <!-- ---------------- Analytics ---------------- -->
       <section class="tabpanel" id="panel-analytics" role="tabpanel" aria-labelledby="tab-analytics">
         <div class="panel-inner">
-          <div class="eyebrow section-label">Recall, per prompt</div>
+          <div class="eyebrow section-label">Recall, per prompt, across this directory's runs</div>
           <div class="tiles" id="tiles"></div>
           <p class="note" id="analytics-note"></p>
 
@@ -564,26 +605,32 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
   const state = {
     meta: null,
     dir: '',
+    // The concrete run every write route, search and remote health names. It is the run the
+    // selected directory's newest session maps to, or the one the user picked in the rail.
     run: '',
     runs: [],
-    // Memory-only, and it does not touch `state.run`. An empty `run=` upstream means *every*
-    // run, which is the only way the scope question can be asked at all — but /api/search,
-    // /api/outcome, /api/archive and /api/health/remote all refuse an empty run, and the Turns
-    // and Analytics tabs read a run's files off local disk. So the rail keeps naming one
-    // concrete run and this flag re-points one fetch. It defaults on because the tab's whole
-    // claim is "what does this instance remember", not "what did this session write".
-    allRuns: true,
+    // Every directory in the data dir, as families of run ids (`groupRunsByDirectory`).
+    families: [],
+    // The selected directory: its family's ids and directory keys. Everything the page shows
+    // is anchored on this, and it is what the Memory views filter against.
+    family: { key: '', ids: [], bases: [], projectDir: '', current: '' },
+    // `here` (written by this directory's runs), `reach` (plus what other directories saved
+    // at a scope that reaches here), `all`. A client-side filter over one load: the fetch
+    // always asks for every run, so changing directory or view never refetches.
+    view: 'here',
     mode: 'lessons',
     tab: 'memory',
     sort: 'newest',
     lessons: [],
     activity: [],
     turns: [],
+    turnsSig: '',
     scope: '',
     project: '',
     type: '',
     selectedEntry: null,
     selectedTurn: null,
+    selectedTurnDetail: null,
     searchResults: null,
     searchQuery: '',
     lastRemoteAt: 0,
@@ -599,15 +646,19 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     // The census the server counted before paging, which is the only number that can tell a
     // person their filter matched nothing rather than their instance holding nothing.
     census: null,
-    // A slow all-runs fetch started before a fast this-run one must not land after it and
-    // repaint the older answer. Every render path checks the sequence it was issued under.
+    // A slow fetch started before a fast one must not land after it and repaint the older
+    // answer. Every render path checks the sequence it was issued under.
     reqSeq: 0,
-    // What the identity strip last rendered, so the one-second poll rewrites it only when
-    // something in it changed — a rebuild every tick would close the session list and steal
-    // focus from the toggle.
+    // What the identity strip and the rail last rendered, so the one-second poll rewrites
+    // them only when something in them changed — a rebuild every tick would close the session
+    // list and steal focus from whatever was pressed.
     identitySig: '',
-    runsSig: '',
+    railSig: '',
     railOpen: false,
+    // Entries resolved by id through /api/entry, keyed by id. A resolved entry is the same
+    // whichever turn or row asked for it, and the injected-memories list asks in bursts.
+    entryCache: new Map(),
+    entryInflight: new Map(),
   };
 
   async function api(path, init) {
@@ -631,6 +682,7 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
   }
 
   const post = (path, payload) => api(path, { method: 'POST', body: JSON.stringify(payload) });
+  const enc = encodeURIComponent;
 
   // -------------------------------------------------------------------------
   // Rendering helpers
@@ -838,10 +890,46 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
 
   // #region identity-model
   /*
-   * The identity strip's arithmetic: which run, whose sessions, which directory, in what words.
-   * Pure for the same reason as the region above — the test slices it out and runs it with a
-   * fixed clock, so every "ago" and every fallback is a table rather than a screenshot.
+   * The identity strip's arithmetic: which directory, which runs belong to it, whose sessions,
+   * in what words. Pure for the same reason as the region above — the test slices it out and
+   * runs it with a fixed clock, so every "ago" and every fallback is a table rather than a
+   * screenshot.
+   *
+   * A directory's memory is spread over several run ids: `cc-<slug>-<hash8>` at first, `-c<N>`
+   * after each `/clear`, `-sub-<id>` for every subagent, and the activity feed spells the same
+   * run `state::<uid>::cc-…`. `plainRunId` and `baseRunId` fold those back to one directory
+   * key. `lib/dashboard-data.mjs` carries the same two functions and the test pins the copies
+   * to each other.
    */
+
+  const FEED_PREFIX = /^state::[^:]*::/;
+  const SUB_SUFFIX = /-sub-[a-z0-9]+$/;
+  const CLEAR_SUFFIX = /-c(\d+)$/;
+  /** A `-c<N>` is stripped only when what is left still looks like a directory key: a `static` id may end in `-c1` itself. */
+  const DIRECTORY_KEY = /^cc-.+-[0-9a-f]{8}$/;
+
+  function plainRunId(id) {
+    return String(id || '').replace(FEED_PREFIX, '');
+  }
+
+  function baseRunId(id) {
+    const s = plainRunId(id).replace(SUB_SUFFIX, '');
+    const m = CLEAR_SUFFIX.exec(s);
+    if (!m) return s;
+    const head = s.slice(0, m.index);
+    return DIRECTORY_KEY.test(head) ? head : s;
+  }
+
+  function isSubRun(id) {
+    return SUB_SUFFIX.test(plainRunId(id));
+  }
+
+  /** `N` from a `-c<N>` that `baseRunId` strips, else 0. */
+  function clearIndexOf(id) {
+    const s = plainRunId(id).replace(SUB_SUFFIX, '');
+    const m = CLEAR_SUFFIX.exec(s);
+    return m && baseRunId(id) === s.slice(0, m.index) ? Number(m[1]) : 0;
+  }
 
   const STRATEGY_LABEL = {
     'per-directory': 'one run per directory',
@@ -981,12 +1069,105 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
       x.runId, x.isLaunchRun, x.state, x.mode, x.sessionCount, x.clearTotal, x.projectDir, x.projectRoot,
     ].concat((x.sessions || []).map((s) => s.sessionId + ':' + s.lastSeenAt + ':' + s.clearCount)).join('|');
   }
+
+  /**
+   * Run rows grouped into families, to a fixpoint: two runs belong together when they share a
+   * directory key, or when their session records share a project root. The first rule folds
+   * `cc-x-<hash>` with its `/clear` and subagent ids; the second is what groups a `static` or
+   * `per-conversation` run with the directory it was used in, without guessing from the id.
+   */
+  function familiesOf(runs) {
+    const rows = (Array.isArray(runs) ? runs : []).filter((r) => r && r.runId);
+    const groups = [];
+    rows.forEach((r) => {
+      const base = baseRunId(r.runId);
+      const root = String(r.projectRoot || '');
+      const hits = groups.filter((g) => g.bases.has(base) || (root && g.roots.has(root)));
+      let g = hits[0];
+      if (!g) {
+        g = { rows: [], bases: new Set(), roots: new Set() };
+        groups.push(g);
+      }
+      hits.slice(1).forEach((h) => {
+        h.rows.forEach((x) => g.rows.push(x));
+        h.bases.forEach((b) => g.bases.add(b));
+        h.roots.forEach((x) => g.roots.add(x));
+        groups.splice(groups.indexOf(h), 1);
+      });
+      g.rows.push(r);
+      g.bases.add(base);
+      if (root) g.roots.add(root);
+    });
+    return groups;
+  }
+
+  /** What a run is to its family: the one the newest session maps to, an earlier one, a clear, a subagent. */
+  function runLabel(id, fam) {
+    const f = fam && typeof fam === 'object' ? fam : {};
+    const rid = String(id || '');
+    if (isSubRun(rid)) return 'subagent';
+    if (rid === String(f.current || '')) return 'current';
+    const n = clearIndexOf(rid);
+    if (n > 0) return 'after /clear ×' + n;
+    const base = baseRunId(rid);
+    const cleared = (f.runs || []).some((r) => r && baseRunId(r.runId) === base && clearIndexOf(r.runId) > 0);
+    return cleared ? 'before /clear' : 'earlier';
+  }
+
+  /**
+   * One entry per directory, newest first, each with its runs newest first and labelled. The
+   * directory is the one the family's newest session names; `current` is the run that session
+   * maps to, which is the id every write route on the page uses.
+   */
+  function groupRunsByDirectory(runs) {
+    return familiesOf(runs).map((g) => {
+      const sorted = g.rows.slice().sort((a, b) => (Number(b.lastWrite) || 0) - (Number(a.lastWrite) || 0));
+      let newest = null;
+      const agents = [];
+      sorted.forEach((r) => (Array.isArray(r.sessions) ? r.sessions : []).forEach((s) => {
+        if (!s) return;
+        if (!newest || (Number(s.lastSeenAt) || 0) > (Number(newest.lastSeenAt) || 0)) {
+          newest = { sessionId: s.sessionId, lastSeenAt: s.lastSeenAt, runId: s.runId || r.runId, agentId: s.agentId };
+        }
+        const a = String(s.agentId || '');
+        if (a && agents.indexOf(a) < 0) agents.push(a);
+      }));
+      const current = String((newest && newest.runId) || sorted[0].runId);
+      const currentRow = sorted.find((r) => r.runId === current) || sorted[0];
+      const withDir = currentRow.projectDir ? currentRow : sorted.find((r) => r.projectDir);
+      const fam = {
+        key: Array.from(g.bases).sort().join('|'),
+        projectDir: String((withDir && withDir.projectDir) || ''),
+        projectRoot: String((withDir && withDir.projectRoot) || Array.from(g.roots)[0] || ''),
+        bases: Array.from(g.bases),
+        current: current,
+        newestSession: newest,
+        agentIds: agents.sort(),
+        lastWrite: sorted.reduce((m, r) => Math.max(m, Number(r.lastWrite) || 0), 0),
+        turnCount: sorted.reduce((m, r) => m + (Number(r.turnCount) || 0), 0),
+        subagentRuns: sorted.filter((r) => isSubRun(r.runId)).length,
+        // The label of one run depends on its siblings ("before /clear" needs a clear to
+        // exist), so the family is complete before any run is labelled.
+        runs: sorted,
+      };
+      fam.runs = sorted.map((r) => Object.assign({}, r, { label: runLabel(r.runId, fam) }));
+      return fam;
+    }).sort((a, b) => b.lastWrite - a.lastWrite);
+  }
+
+  /** Every run id in `runs` that belongs with `runId`; a family of one when nothing does. */
+  function familyIds(runs, runId) {
+    const id = String(runId || '');
+    const g = familiesOf(runs).find((x) => x.rows.some((r) => String(r.runId) === id));
+    return g ? g.rows.map((r) => String(r.runId)) : [id];
+  }
   // #endregion identity-model
 
   // #region lesson-view
   /*
-   * The lesson list's arithmetic: order, day groups, counts and sentences. Depends on the
-   * scope predicate above and on nothing in the page.
+   * The lesson list's arithmetic: order, day groups, counts, placement, attribution and the
+   * provenance lines. Depends on the scope predicate and the identity model above, and on
+   * nothing in the page.
    */
 
   function scopeTone(row) {
@@ -1020,7 +1201,7 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
   }
 
   function typeOf(row) {
-    return String((row && (row.lessonType || row.entry_type)) || 'entry');
+    return String((row && (row.lessonType || row.entryType || row.entry_type)) || 'entry');
   }
 
   function matchesType(row, filter) {
@@ -1035,8 +1216,9 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
       .sort((a, b) => b.count - a.count || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   }
 
+  /** The row's time as ISO: the feed's `created_at`, else the stamp its own metadata carried. */
   function isoOf(row) {
-    return String((row && (row.createdAt || row.created_at)) || '');
+    return String((row && (row.createdAt || row.created_at || row.timestamp)) || '');
   }
 
   function timeOf(row) {
@@ -1098,21 +1280,211 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     return ymd(new Date(t)) + ' ' + clockOf(iso);
   }
 
-  /** One sentence that answers "when, by whom, through what, at what scope". */
-  function storedLine(row, currentRun) {
-    const iso = isoOf(row);
-    const when = iso
-      ? localStamp(iso) + ' (' + iso + ')'
-      : 'at a time this instance did not record';
-    const by = String((row && (row.sourceRunId || row.run_id)) || '');
-    return 'Stored ' + when + ' by run ' + (by || 'unknown')
-      + (fromOtherRun(row, currentRun) ? ' (not the selected run)' : '')
-      + ' via ' + String((row && row.source) || 'an unrecorded source')
-      + ' at ' + scopeOf(row) + ' scope (' + (scopeKnown(row) ? 'recorded' : 'defaulted') + ').';
-  }
-
   function shortId(id, n) {
     return id ? String(id).slice(0, n || 8) : '—';
+  }
+
+  /** The run a row was written by, in whichever of the three spellings it arrived. */
+  function rowRunId(row) {
+    return String((row && (row.sourceRunId || row.run_id || row.runId)) || '');
+  }
+
+  /**
+   * Where a row stands against the selected directory. `here`: written by one of its runs,
+   * under any spelling of their ids. `shared`: written elsewhere at a scope that reaches here
+   * at recall. `elsewhere`: everything else. A row that names no run at all is taken as here
+   * when a directory is selected — a search result borrows the reader's position — and as
+   * whatever its scope says when none is.
+   */
+  function placement(row, bases) {
+    const list = Array.isArray(bases) ? bases : [];
+    const run = rowRunId(row);
+    if (run && list.indexOf(baseRunId(run)) >= 0) return 'here';
+    if (!run && list.length) return 'here';
+    return leaksScope(row) ? 'shared' : 'elsewhere';
+  }
+
+  function matchesView(row, view, bases) {
+    if (view === 'here') return placement(row, bases) === 'here';
+    if (view === 'reach') return placement(row, bases) !== 'elsewhere';
+    return true;
+  }
+
+  /** The three numbers on the view buttons, counted the way the views keep rows. */
+  function placementCounts(rows, bases) {
+    const out = { here: 0, reach: 0, all: 0 };
+    (rows || []).forEach((r) => {
+      const p = placement(r, bases);
+      out.all += 1;
+      if (p !== 'elsewhere') out.reach += 1;
+      if (p === 'here') out.here += 1;
+    });
+    return out;
+  }
+
+  /**
+   * Who wrote a row, in four words. The server's `origin` wins when it sent one; otherwise
+   * the type comes first — the capture hooks stamp `source: 'agent'` on what they ingest, and
+   * a trace is a hook capture whatever its source says — then the source. A `mubit_learned`
+   * call from a subagent is indistinguishable from the main agent's (one MCP process), so the
+   * word is "agent" and no more.
+   */
+  function originOf(row) {
+    const r = row && typeof row === 'object' ? row : {};
+    if (r.origin) return String(r.origin);
+    const s = String(r.source || '');
+    const t = String(r.entryType || r.entry_type || '');
+    if (t === 'trace' || t === 'tool_output' || t === 'capture') return 'hook';
+    if (r.autoReflection === true || /^auto[-_]?reflect/i.test(s)) return 'auto-reflection';
+    if (/^reflect/i.test(s)) return 'reflection';
+    if (s === 'agent' || s === 'mcp-agent') return 'agent';
+    if (/hook/i.test(s)) return 'hook';
+    return '';
+  }
+
+  const ORIGIN_WORD = {
+    agent: 'agent', 'auto-reflection': 'auto-reflection', reflection: 'reflection', hook: 'hook capture',
+  };
+
+  function isReflection(row) {
+    const o = originOf(row);
+    return o === 'reflection' || o === 'auto-reflection';
+  }
+
+  /**
+   * An ingest can land a moment after the turn that produced it closed: the write is posted
+   * during the turn and the instance stamps it when the job completes. Sixty seconds after
+   * `ended_at` still belongs to the turn; the same grace the egress guard allows itself.
+   */
+  const ATTRIBUTION_GRACE_MS = 60000;
+
+  function windowContains(turn, t) {
+    const start = Number(turn && turn.startedAt) || 0;
+    if (!start || t < start) return false;
+    const end = Number(turn.endedAt) || 0;
+    return !end || t <= end + ATTRIBUTION_GRACE_MS;
+  }
+
+  /** The turn whose window holds the row's time, in the row's session when it names one. */
+  function turnByTime(row, turns) {
+    const t = timeOf(row);
+    if (!t) return null;
+    const sid = String((row && row.sessionId) || '');
+    let best = null;
+    (Array.isArray(turns) ? turns : []).forEach((turn) => {
+      if (!turn) return;
+      if (sid && String(turn.sessionId || '') !== sid) return;
+      if (!windowContains(turn, t)) return;
+      if (!best || (Number(turn.startedAt) || 0) > (Number(best.startedAt) || 0)) best = turn;
+    });
+    return best;
+  }
+
+  /**
+   * Which prompt a row belongs to, and how the page knows. `recorded` when the write was
+   * stamped with a prompt id — even if the turn file has since been pruned, the fact stands.
+   * `by time` when the row's time falls inside a turn's window. Nothing for a reflection,
+   * which the instance writes at session end and never for a prompt, and nothing for a time
+   * outside every window.
+   */
+  function attributeTurn(row, turns) {
+    const none = { turn: null, how: '' };
+    if (!row || typeof row !== 'object') return none;
+    if (isReflection(row)) return none;
+    const pid = String(row.promptId || '');
+    if (pid) {
+      const hit = (Array.isArray(turns) ? turns : []).find((x) => x && String(x.promptId || '') === pid) || null;
+      return { turn: hit, how: 'recorded' };
+    }
+    const hit = turnByTime(row, turns);
+    return hit ? { turn: hit, how: 'by time' } : none;
+  }
+
+  function familyOfRow(row, families) {
+    const run = rowRunId(row);
+    if (!run) return null;
+    const base = baseRunId(run);
+    return (Array.isArray(families) ? families : []).find((f) => f && (f.bases || []).indexOf(base) >= 0) || null;
+  }
+
+  const PROMPT_WORDS = 60;
+
+  function promptWords(text) {
+    const s = String(text || '').replace(/\s+/g, ' ').trim();
+    return s.length > PROMPT_WORDS ? s.slice(0, PROMPT_WORDS) + '…' : s;
+  }
+
+  /**
+   * The provenance block, one line per fact: when and by whom, which directory and run, which
+   * session, which prompt, and how far it reaches. Each line says whether the page read the
+   * fact or inferred it. A blank row still renders the five lines, each saying "not recorded".
+   */
+  function provenanceLines(row, ctx) {
+    const r = row && typeof row === 'object' ? row : {};
+    const c = ctx && typeof ctx === 'object' ? ctx : {};
+    const families = Array.isArray(c.families) ? c.families : [];
+    const turns = Array.isArray(c.turns) ? c.turns : [];
+    const lines = [];
+
+    const iso = isoOf(r);
+    const origin = originOf(r);
+    let by;
+    if (origin === 'agent') by = 'by the agent (mubit_learned)';
+    else if (origin === 'auto-reflection') by = 'by auto-reflection (session end)';
+    else if (origin === 'reflection') by = 'by reflection';
+    else if (origin === 'hook') {
+      by = 'hook capture' + (r.tool ? ' (' + r.tool + ')' : '') + (r.hookEvent ? ' · ' + r.hookEvent : '');
+    } else by = 'by ' + (r.source ? String(r.source) : 'an unrecorded source');
+    if (r.agentType) by += ' · subagent ' + r.agentType;
+    lines.push({
+      key: 'saved',
+      text: 'Saved ' + (iso ? localStamp(iso) : 'at a time this instance did not record') + ' · ' + by,
+      iso: iso,
+    });
+
+    const run = rowRunId(r);
+    const fam = familyOfRow(r, families);
+    if (!run) {
+      lines.push({ key: 'directory', text: 'Directory not recorded · run unknown' });
+    } else if (fam) {
+      const member = (fam.runs || []).find((x) => x && String(x.runId) === plainRunId(run));
+      lines.push({
+        key: 'directory',
+        text: 'Directory ' + (fam.projectDir || 'not recorded') + ' · run ' + plainRunId(run)
+          + (member && member.label ? ' (' + member.label + ')' : ''),
+        family: fam,
+      });
+    } else {
+      lines.push({ key: 'directory', text: 'Directory not in this data directory · run ' + plainRunId(run) });
+    }
+
+    const sid = String(r.sessionId || '');
+    const byTime = sid ? null : turnByTime(r, turns);
+    if (sid) lines.push({ key: 'session', text: 'Session ' + shortSession(sid) + ' · recorded', how: 'recorded', sessionId: sid });
+    else if (byTime && byTime.sessionId) {
+      lines.push({ key: 'session', text: 'Session ' + shortSession(byTime.sessionId) + ' · by time', how: 'by time', sessionId: String(byTime.sessionId) });
+    } else lines.push({ key: 'session', text: 'Session not recorded', how: '' });
+
+    // Another directory's turns are not on this page, so its prompts cannot be named.
+    const foreign = !!run && !fam;
+    if (!isReflection(r) && !foreign) {
+      const attr = attributeTurn(r, turns);
+      if (attr.how === 'recorded' && !attr.turn) {
+        lines.push({ key: 'prompt', text: 'Prompt recorded · turn file pruned (6 h)', how: 'recorded', turn: null });
+      } else if (attr.turn) {
+        const n = Number(attr.turn.turnNumber) || Number(r.turnNumber) || 0;
+        lines.push({
+          key: 'prompt',
+          text: 'Prompt “' + promptWords(attr.turn.promptPreview || attr.turn.prompt) + '”'
+            + (n ? ' · turn ' + n : '') + ' · ' + attr.how,
+          how: attr.how,
+          turn: attr.turn,
+        });
+      } else lines.push({ key: 'prompt', text: 'Prompt not recorded', how: '', turn: null });
+    }
+
+    lines.push({ key: 'reach', text: 'Reach: ' + reachSentence(r) });
+    return lines;
   }
 
   /**
@@ -1132,25 +1504,25 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     }
     if (!c.loaded) return { kind: 'loading', text: 'Loading…', detail: '' };
     if (c.total) {
-      return { kind: 'filtered', text: 'No entry in the ' + c.total + ' loaded matches these filters.', detail: '' };
+      return { kind: 'filtered', text: 'No entry in the ' + c.total + ' loaded matches this view and these filters.', detail: '' };
     }
     return {
       kind: 'empty',
       text: 'This instance returned no ' + (lessons ? 'lessons' : 'activity') + ' for '
-        + (c.allRuns ? 'any run.' : 'this run.'),
+        + (c.view === 'all' ? 'any run anywhere on the instance.' : 'this directory.'),
       detail: '',
     };
   }
 
-  /** The footer's clauses. The census numbers are what make "0 results" legible. */
+  /** The footer's clauses. The census numbers are what make "0 shown" legible. */
   function footerParts(ctx) {
     const c = ctx && typeof ctx === 'object' ? ctx : {};
     const shown = Number(c.shown) || 0;
-    const parts = [shown + (shown === 1 ? ' result' : ' results')];
+    const parts = [shown + ' shown'];
     if (c.hidden) parts.push(c.hidden + ' hidden by the scope filter');
     const cen = c.census;
     if (c.mode === 'lessons' && !c.search && cen) {
-      parts.push(cen.totalVisible + ' visible to this instance');
+      parts.push(cen.totalVisible + ' on the instance');
       if (cen.source) parts.push('answered by ' + cen.source);
       if (cen.truncated) {
         parts.push('the census stopped after ' + cen.pages + (cen.pages === 1 ? ' page' : ' pages')
@@ -1162,17 +1534,20 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     return parts;
   }
 
+  /** One sentence per view, saying what the list under it is. */
   function scopeNoteText(ctx) {
     const c = ctx && typeof ctx === 'object' ? ctx : {};
-    const what = c.mode === 'lessons' ? 'lessons' : 'entries';
-    const bits = [c.allRuns
-      ? 'Showing ' + what + ' from every run this instance holds. Worked / Did not work / '
-        + 'Archive / delete still attribute to the run selected in the rail, because those '
-        + 'routes need a concrete run.'
-      : 'Showing only ' + what + ' the run selected in the rail wrote, so anything a previous '
-        + 'session saved at global scope is out of view.'];
-    if (c.joinError) bits.push('Creation dates are missing: the activity join failed — ' + c.joinError);
-    return bits.join(' ');
+    const lessons = c.mode === 'lessons';
+    const what = lessons ? 'Lessons' : 'Entries';
+    const these = lessons ? 'lessons' : 'entries';
+    let s;
+    if (c.view === 'all') s = 'Every ' + (lessons ? 'lesson' : 'entry') + ' on the instance.';
+    else if (c.view === 'reach') {
+      s = what + ' this directory’s runs saved, plus session and global ' + these
+        + ' other directories saved, which reach here at recall.';
+    } else s = what + ' this directory’s runs saved.';
+    if (c.joinError) s += ' Creation dates are missing: the activity join failed — ' + c.joinError;
+    return s;
   }
   // #endregion lesson-view
 
@@ -1223,14 +1598,100 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     return Math.round((Number(x) || 0) * 100) + '%';
   }
 
-  /** `YYYY-MM-DD HH:MM`, local. Its own zero-pad: this region evaluates on its own. */
+  /** Its own zero-pad: this region evaluates on its own. */
+  const two = (n) => (n < 10 ? '0' : '') + n;
+
+  /** `YYYY-MM-DD HH:MM`, local. */
   function stampMs(ms) {
     const t = Number(ms) || 0;
     if (!t) return '—';
     const d = new Date(t);
-    const two = (n) => (n < 10 ? '0' : '') + n;
     return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate())
       + ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
+  }
+
+  /** `main`, or `main + N sub (types)`: the agents that ran inside one prompt. */
+  function turnAgentsText(t) {
+    const x = t && typeof t === 'object' ? t : {};
+    const n = Number(x.subagentCount) || 0;
+    if (!n) return 'main';
+    const types = [];
+    (Array.isArray(x.subagentTypes) ? x.subagentTypes : []).forEach((s) => {
+      const v = String(s || '');
+      if (v && types.indexOf(v) < 0) types.push(v);
+    });
+    return 'main + ' + n + ' sub' + (types.length ? ' (' + types.join(', ') + ')' : '');
+  }
+
+  /** Rows under their session, sessions in the order they were first seen, rows as given. */
+  function groupTurnsBySession(rows) {
+    const groups = [];
+    const byKey = new Map();
+    (Array.isArray(rows) ? rows : []).forEach((t) => {
+      const k = String((t && t.sessionId) || '');
+      let g = byKey.get(k);
+      if (!g) { g = { sessionId: k, rows: [] }; byKey.set(k, g); groups.push(g); }
+      g.rows.push(t);
+    });
+    return groups;
+  }
+
+  function reflectionRow(l) {
+    const o = String((l && l.origin) || '');
+    if (o) return o === 'reflection' || o === 'auto-reflection';
+    return /^(auto[-_]?)?reflect/i.test(String((l && l.source) || ''));
+  }
+
+  /**
+   * The lessons saved during one turn: by a stamped prompt id first, then by time inside the
+   * turn's window and the turn's session. A reflection is never one of them, and a lesson
+   * stamped with another prompt is not either, whatever its time says.
+   */
+  function lessonsInTurn(turn, lessons) {
+    if (!turn || typeof turn !== 'object' || !Array.isArray(lessons)) return [];
+    const pid = String(turn.promptId || '');
+    const sid = String(turn.sessionId || '');
+    const start = Number(turn.startedAt) || 0;
+    const end = Number(turn.endedAt) || 0;
+    return lessons.filter((l) => {
+      if (!l || typeof l !== 'object') return false;
+      if (reflectionRow(l)) return false;
+      const lp = String(l.promptId || '');
+      if (lp) return !!pid && lp === pid;
+      if (sid && l.sessionId && String(l.sessionId) !== sid) return false;
+      const t = Date.parse(String(l.createdAt || l.created_at || l.timestamp || ''));
+      if (isNaN(t) || !start) return false;
+      return t >= start && (!end || t <= end + 60000);
+    });
+  }
+
+  /** One resolved entry as the four things a list line shows: type, when, a preview, its origin. */
+  function entrySummary(e) {
+    const x = e && typeof e === 'object' ? e : {};
+    const content = String(x.content || '');
+    const iso = String(x.createdAt || x.created_at || x.timestamp || '');
+    const t = iso ? Date.parse(iso) : NaN;
+    const d = isNaN(t) ? null : new Date(t);
+    return {
+      type: String(x.entryType || x.entry_type || x.lessonType || 'entry'),
+      tool: String(x.tool || ''),
+      preview: content.length > 140 ? content.slice(0, 139) + '…' : content,
+      origin: String(x.origin || ''),
+      clock: d ? two(d.getHours()) + ':' + two(d.getMinutes()) : '—',
+      runId: String(x.runId || x.run_id || x.sourceRunId || ''),
+    };
+  }
+
+  /** `12s`, `3m 05s`, `1h 02m`; nothing when either end is missing. */
+  function durationText(startedAt, endedAt) {
+    const a = Number(startedAt) || 0;
+    const b = Number(endedAt) || 0;
+    if (!a || !b || b < a) return '';
+    const s = Math.round((b - a) / 1000);
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ' + two(s % 60) + 's';
+    return Math.floor(m / 60) + 'h ' + two(m % 60) + 'm';
   }
 
   function tileSpecs(a) {
@@ -1251,9 +1712,11 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
   function analyticsNote(a) {
     const x = a && typeof a === 'object' ? a : {};
     const n = Number(x.points) || 0;
+    const runs = Array.isArray(x.runIds) ? x.runIds.length : 0;
     return n
       ? 'The series covers ' + n + (n === 1 ? ' prompt' : ' prompts') + ' recorded since '
-        + stampMs(x.firstSampleAt) + '. It is the dashboard’s own rollup rather than the raw '
+        + stampMs(x.firstSampleAt) + (runs > 1 ? ' across ' + runs + ' runs of this directory' : '')
+        + '. It is the dashboard’s own rollup rather than the raw '
         + 'turn files, which are pruned after six hours — so it accrues from the first launch '
         + 'and cannot reconstruct anything from before that.'
       : 'Nothing recorded yet. The rollup starts empty and grows one row per prompt while this '
@@ -1275,7 +1738,8 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
         method: String(b.state || 'ready') + (Number(b.cooldownLeftMs) > 0
           ? ' · ' + Math.ceil(Number(b.cooldownLeftMs) / 1000) + 's left' : ''), series: [] },
       { key: 'Run state', value: String(marker.state || 'unknown'), unit: '',
-        method: marker.mode ? marker.mode + ' · updated ' + stampMs(marker.updated_at) : '', series: [] },
+        method: (h.runId ? 'run ' + h.runId + ' · ' : '')
+          + (marker.mode ? marker.mode + ' · updated ' + stampMs(marker.updated_at) : ''), series: [] },
     ];
   }
 
@@ -1285,7 +1749,8 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     const reflect = marker.reflect || {};
     const recall = marker.recall || {};
     const n = (v) => Number(v) || 0;
-    return 'Last recall on the marker: ' + n(recall.sources) + ' memories, ' + n(recall.tokens)
+    return (h.runId ? 'These tiles describe run ' + h.runId + ' only. ' : '')
+      + 'Last recall on the marker: ' + n(recall.sources) + ' memories, ' + n(recall.tokens)
       + ' tok, rung ' + n(recall.rung)
       + (recall.empty_reason ? ', empty because ' + recall.empty_reason : '')
       + ', dry streak ' + n(recall.dry_streak) + '. '
@@ -1296,12 +1761,49 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
   // #endregion turn-view
 
   // -------------------------------------------------------------------------
-  // Identity strip
+  // Families and selection
   // -------------------------------------------------------------------------
+
+  function currentFamily() {
+    return state.families.find((f) => f.key === state.family.key) || null;
+  }
 
   function currentRunRow() {
     return state.runs.find((r) => r.runId === state.run) || (state.run ? { runId: state.run } : null);
   }
+
+  /** Point the page at a family. Memory is not refetched: the view is a filter over one load. */
+  function adoptFamily(fam, runId) {
+    state.family = {
+      key: fam.key,
+      ids: fam.runs.map((r) => r.runId),
+      bases: fam.bases.slice(),
+      projectDir: fam.projectDir,
+      current: fam.current,
+    };
+    if (runId) state.run = runId;
+    else if (state.family.ids.indexOf(state.run) < 0) state.run = fam.current;
+  }
+
+  function selectFamily(fam, runId) {
+    adoptFamily(fam, runId || fam.current);
+    state.selectedEntry = null;
+    state.selectedTurn = null;
+    state.selectedTurnDetail = null;
+    state.searchResults = null;
+    state.railOpen = false;
+    syncRail();
+    renderRail();
+    renderIdentity();
+    renderMemory();
+    renderTurnDetail(null);
+    refreshLocal();
+    refreshAnalytics();
+  }
+
+  // -------------------------------------------------------------------------
+  // Identity strip
+  // -------------------------------------------------------------------------
 
   function dirNameOf(path) {
     const dirs = (state.meta && state.meta.dirs) || [];
@@ -1311,9 +1813,15 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
 
   function renderIdentity() {
     const now = Date.now();
+    const fam = currentFamily();
     const id = runIdentity(currentRunRow(), state.meta, state.runs);
     const meta = state.meta || {};
     const scope = meta.scope || {};
+    const famSessions = fam
+      ? fam.runs.reduce((acc, r) => acc.concat(Array.isArray(r.sessions) ? r.sessions : []), [])
+        .sort((a, b) => (Number(b.lastSeenAt) || 0) - (Number(a.lastSeenAt) || 0))
+      : id.sessions;
+    const newest = famSessions[0] || null;
 
     // The parts that tick: cheap text nodes, rewritten every poll.
     const st = $('id-run-state');
@@ -1323,34 +1831,43 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
       st.appendChild(document.createTextNode(
         id.state + (id.mode ? ' · ' + id.mode : '') + ' · updated ' + relativeTime(id.lastWrite, now)));
     }
-    $('id-sessions').textContent = !id.runId ? '—' : id.sessionCount
-      ? (id.sessionCount + (id.sessionCount === 1 ? ' session is mapped to' : ' sessions share') + ' this run'
-        + ' · newest ' + shortSession(id.newest.sessionId) + ' seen ' + relativeTime(id.newest.lastSeenAt, now)
-        + ' · ' + strategyLabel((id.newest && id.newest.strategy) || scope.strategy))
-      : 'No session record maps to this run yet · ' + strategyLabel(scope.strategy);
+    $('id-sessions').textContent = !id.runId ? '—' : famSessions.length
+      ? (famSessions.length + (famSessions.length === 1 ? ' session' : ' sessions') + ' in this directory'
+        + ' · newest ' + shortSession(newest.sessionId) + ' (' + (newest.agentId || 'agent unknown') + ') seen '
+        + relativeTime(newest.lastSeenAt, now)
+        + ' · ' + strategyLabel((newest && newest.strategy) || scope.strategy))
+      : 'No session record maps to this directory yet · ' + strategyLabel(scope.strategy);
 
     // The parts that do not: rewritten only when something in them changed, so the session
     // list stays open and the toggle keeps focus across the one-second poll.
-    const sig = identitySignature(id) + '|' + (meta.dir || '') + '|' + JSON.stringify(scope);
+    const famSig = fam ? fam.key + ':' + fam.runs.map((r) => r.runId + '=' + r.label).join(',') : '';
+    const sig = identitySignature(id) + '|' + famSig + '|' + (meta.dir || '') + '|' + JSON.stringify(scope);
     if (sig === state.identitySig) return;
     state.identitySig = sig;
 
-    $('id-run').textContent = id.runId || '—';
-    $('id-run-note').textContent = id.isLaunchRun ? '(the run this dashboard was launched in)' : '';
-
-    $('id-path').textContent = id.projectDir || (id.runId ? 'no directory recorded for this run' : '—');
-    $('id-root').textContent = id.projectRoot && id.projectRoot !== id.projectDir
-      ? 'git root ' + id.projectRoot : '';
+    const projectDir = (fam && fam.projectDir) || id.projectDir;
+    const projectRoot = (fam && fam.projectRoot) || id.projectRoot;
+    $('id-path').textContent = projectDir || (id.runId ? 'no directory recorded for this run' : '—');
+    $('id-root').textContent = projectRoot && projectRoot !== projectDir ? 'git root ' + projectRoot : '';
     $('id-datadir').textContent = meta.dir ? 'data directory ' + dirNameOf(meta.dir) : '';
+
+    $('id-run').textContent = id.runId || '—';
+    const member = fam ? fam.runs.find((r) => r.runId === id.runId) : null;
+    const notes = [];
+    if (member) notes.push(member.label);
+    if (fam && fam.runs.length > 1) notes.push(fam.runs.length + ' runs in this directory');
+    if (id.isLaunchRun) notes.push('this dashboard was launched here');
+    $('id-run-note').textContent = notes.join(' · ');
 
     const list = $('id-session-list');
     const box = list.querySelector('.sessions');
     clear(box);
-    list.querySelector('summary').textContent = id.sessionCount
-      ? 'every session (' + id.sessionCount + (id.clearTotal ? ', cleared ' + id.clearTotal + '× in total' : '') + ')'
+    const clearTotal = famSessions.reduce((a, s) => a + (Number(s && s.clearCount) || 0), 0);
+    list.querySelector('summary').textContent = famSessions.length
+      ? 'every session (' + famSessions.length + (clearTotal ? ', cleared ' + clearTotal + '× in total' : '') + ')'
       : 'no sessions';
-    id.sessions.forEach((s) => {
-      const row = el('div', 'session', sessionLabel(s, now));
+    famSessions.forEach((s) => {
+      const row = el('div', 'session', sessionLabel(s, now) + (s.runId && s.runId !== id.runId ? ' · run ' + s.runId : ''));
       row.title = s.sessionId + (s.projectDir ? ' · ' + s.projectDir : '');
       box.appendChild(row);
     });
@@ -1365,7 +1882,7 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
   function syncRail() {
     $('body').classList.toggle('rail-open', state.railOpen);
     $('rail-toggle').setAttribute('aria-expanded', String(state.railOpen));
-    $('rail-toggle').textContent = state.railOpen ? 'Hide runs' : 'Change run';
+    $('rail-toggle').textContent = state.railOpen ? 'Hide directories' : 'Change directory';
   }
   $('rail-toggle').addEventListener('click', () => { state.railOpen = !state.railOpen; syncRail(); });
 
@@ -1386,68 +1903,76 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     sel.value = state.dir;
   }
 
-  function selectRun(runId) {
-    state.run = runId;
-    state.selectedEntry = null;
-    state.selectedTurn = null;
-    state.searchResults = null;
-    state.lastRemoteAt = 0;
-    state.railOpen = false;
-    syncRail();
-    renderRuns(state.runs);
-    renderIdentity();
-    refreshLocal();
-    refreshAnalytics();
-    refreshRemote();
-  }
-
   function runMeta(r, now) {
-    return r.state + ' · ' + r.turnCount + (r.turnCount === 1 ? ' turn' : ' turns') + ' · '
+    return r.label + ' · ' + r.turnCount + (r.turnCount === 1 ? ' turn' : ' turns') + ' · '
       + relativeTime(r.lastWrite, now);
   }
 
+  function familyMeta(f, now) {
+    const runs = f.runs.filter((r) => r.label !== 'subagent').length;
+    return runs + (runs === 1 ? ' run' : ' runs') + ' · ' + f.turnCount + (f.turnCount === 1 ? ' turn' : ' turns')
+      + (f.agentIds.length ? ' · ' + f.agentIds.join(', ') : '') + ' · ' + relativeTime(f.lastWrite, now);
+  }
+
   /**
-   * Rebuilt only when the set of runs changes; otherwise the rows are patched in place. The
-   * one-second poll would otherwise rebuild the list under a focused button every tick.
+   * One entry per directory, its runs under it. Rebuilt only when the set of families or
+   * their labels change; otherwise the rows are patched in place, so the one-second poll does
+   * not rebuild the list under a focused button.
    */
-  function renderRuns(runs) {
-    state.runs = runs;
+  function renderRail() {
     const now = Date.now();
     const box = $('runs');
-    const sig = runs.map((r) => r.runId + ':' + (r.projectDir || '')).join('|');
+    const fams = state.families;
+    const sig = fams.map((f) => f.key + ':' + f.runs.map((r) => r.runId + '=' + r.label).join(',')).join('|');
 
-    if (sig === state.runsSig && box.children.length === runs.length && runs.length) {
-      runs.forEach((r, i) => {
-        const b = box.children[i];
-        b.setAttribute('aria-current', String(r.runId === state.run));
-        b.querySelector('.state-dot').className = 'state-dot ' + runStateTone(r.state);
-        b.querySelector('.txt').textContent = runMeta(r, now);
+    if (sig === state.railSig && box.children.length === fams.length && fams.length) {
+      fams.forEach((f, i) => {
+        const node = box.children[i];
+        const head = node.querySelector('.dirhead');
+        head.setAttribute('aria-current', String(f.key === state.family.key));
+        head.querySelector('.meta').textContent = familyMeta(f, now);
+        const rows = node.querySelectorAll('.run');
+        f.runs.filter((r) => r.label !== 'subagent').forEach((r, j) => {
+          const b = rows[j];
+          if (!b) return;
+          b.setAttribute('aria-current', String(r.runId === state.run));
+          b.querySelector('.state-dot').className = 'state-dot ' + runStateTone(r.state);
+          b.querySelector('.txt').textContent = runMeta(r, now);
+        });
       });
       return;
     }
-    state.runsSig = sig;
+    state.railSig = sig;
     clear(box);
-    if (!runs.length) {
-      box.appendChild(el('p', 'empty', 'No runs in this directory yet.'));
+    if (!fams.length) {
+      box.appendChild(el('p', 'empty', 'No runs in this data directory yet.'));
       return;
     }
-    runs.forEach((r) => {
-      const b = el('button', 'run');
-      b.setAttribute('aria-current', String(r.runId === state.run));
-      b.appendChild(el('div', 'id', r.runId));
-      const meta = el('div', 'meta');
-      const dot = el('span', 'state-dot ' + runStateTone(r.state));
-      meta.appendChild(dot);
-      meta.appendChild(el('span', 'txt', runMeta(r, now)));
-      const proj = pathParts(r.projectDir || '').tail;
-      if (proj) {
-        const p = el('span', 'proj', proj);
-        p.title = r.projectDir;
-        meta.appendChild(p);
+    fams.forEach((f) => {
+      const node = el('div', 'dir');
+      const head = el('button', 'dirhead');
+      head.setAttribute('aria-current', String(f.key === state.family.key));
+      head.appendChild(el('div', 'path', f.projectDir || f.bases[0]));
+      head.title = f.projectDir ? f.projectDir : 'no session record names a directory; shown by run id';
+      head.appendChild(el('div', 'meta', familyMeta(f, now)));
+      head.addEventListener('click', () => selectFamily(f));
+      node.appendChild(head);
+      f.runs.filter((r) => r.label !== 'subagent').forEach((r) => {
+        const b = el('button', 'run');
+        b.setAttribute('aria-current', String(r.runId === state.run));
+        b.appendChild(el('div', 'id', r.runId));
+        const meta = el('div', 'meta');
+        meta.appendChild(el('span', 'state-dot ' + runStateTone(r.state)));
+        meta.appendChild(el('span', 'txt', runMeta(r, now)));
+        b.appendChild(meta);
+        b.title = 'Make ' + r.runId + ' the run that writes, searches and health name. Turns and analytics still show the whole directory.';
+        b.addEventListener('click', () => selectFamily(f, r.runId));
+        node.appendChild(b);
+      });
+      if (f.subagentRuns) {
+        node.appendChild(el('div', 'subs', f.subagentRuns + (f.subagentRuns === 1 ? ' subagent run' : ' subagent runs')));
       }
-      b.appendChild(meta);
-      b.addEventListener('click', () => selectRun(r.runId));
-      box.appendChild(b);
+      box.appendChild(node);
     });
   }
 
@@ -1467,8 +1992,7 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
    * the server *overwrites* `metadata_json` with `{entry_type, created_at}`, so scope is not
    * merely missing from those rows, it has been discarded upstream. Asking for a full
    * projection over a feed that is overwhelmingly traces would pull megabytes to answer a
-   * question about lessons. So in activity mode the facets are switched off and say why,
-   * which is the honest version of the silent empty list they used to produce.
+   * question about lessons. So in activity mode the facets are switched off and say why.
    */
   function facetsApply() {
     return state.mode === 'lessons' || !!state.searchResults;
@@ -1488,11 +2012,16 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
    */
   const activeText = () => (state.searchResults ? '' : $('filter').value.trim().toLowerCase());
 
+  /** Search results are the instance's answer, not this directory's: the view does not apply. */
+  const activeView = () => (state.searchResults ? 'all' : state.view);
+
   function filteredEntries() {
     const q = activeText();
     const scope = activeScope();
     const project = activeProject();
-    return currentEntries().filter((e) => matchesScope(e, scope)
+    const view = activeView();
+    const bases = state.family.bases;
+    return currentEntries().filter((e) => matchesView(e, view, bases) && matchesScope(e, scope)
       && matchesProject(e, project) && matchesType(e, state.type) && matchesText(e, q));
   }
 
@@ -1502,13 +2031,31 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     if (!scope) return 0;
     const q = activeText();
     const project = activeProject();
-    return currentEntries().filter((e) => matchesProject(e, project) && matchesType(e, state.type)
-      && matchesText(e, q) && !matchesScope(e, scope)).length;
+    const view = activeView();
+    const bases = state.family.bases;
+    return currentEntries().filter((e) => matchesView(e, view, bases) && matchesProject(e, project)
+      && matchesType(e, state.type) && matchesText(e, q) && !matchesScope(e, scope)).length;
   }
 
   const FACET_OFF = 'The activity feed is fetched with the compact projection, which the instance '
     + 'returns with the scope metadata stripped out — so no scope or project filter can say '
     + 'anything true about these rows. Switch to Lessons to filter by scope.';
+
+  const PROJECT_NOTE = 'Only the hook capture paths write a project tag. A lesson saved through the '
+    + 'mubit_learned tool, or written by reflection, carries none — so "no project tag" means '
+    + 'unattributed, never that this entry belongs to the project you are in.';
+
+  const LEAK_NOTE = 'Above run scope, so visible to runs other than the one that wrote it. By design '
+    + 'for a rule meant to follow you; a surprise for anything that was only ever about one project.';
+
+  /** The three view buttons carry the counts of the list under them. */
+  function renderViewCounts() {
+    const c = placementCounts(currentEntries(), state.family.bases);
+    const put = (node, n) => { const b = node.querySelector('b'); if (b) b.textContent = String(n); };
+    put($('runs-this'), c.here);
+    put($('runs-reach'), c.reach);
+    put($('runs-all'), c.all);
+  }
 
   /** The loaded window, counted by scope. A chip is the scope filter with a number on it. */
   function renderScopeChips() {
@@ -1565,7 +2112,7 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     if (err || !rows.length) {
       const msg = listEmptyMessage({
         mode: state.mode, error: err, loaded: state.loaded,
-        total: currentEntries().length, allRuns: state.allRuns,
+        total: currentEntries().length, view: activeView(),
       });
       box.appendChild(el('p', 'empty', msg.text));
       if (msg.detail) box.appendChild(el('p', 'note', msg.detail));
@@ -1587,7 +2134,15 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     }
   }
 
-  /** Time first, scope first among the badges, then the content: the order the question is asked in. */
+  /** The directory a foreign row came from, by name; its run id when no directory is known. */
+  function fromText(e) {
+    const fam = familyOfRow(e, state.families);
+    if (fam && fam.projectDir) return pathParts(fam.projectDir).tail;
+    const run = plainRunId(rowRunId(e));
+    return run ? shortId(run, 24) : 'unknown';
+  }
+
+  /** Time first, scope first among the badges, then the content, then where it came from. */
   function memoryRow(e) {
     const b = el('button', 'item');
     b.setAttribute('aria-current', String(state.selectedEntry && state.selectedEntry.id === e.id));
@@ -1607,18 +2162,35 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     main.appendChild(el('div', 'c', e.content || '(no content)'));
 
     const m = el('div', 'm');
-    const by = e.sourceRunId || e.run_id || '';
-    if (by) {
-      const who = el('span', null, 'by ' + shortId(by, 12) + (by.length > 12 ? '…' : ''));
-      who.title = 'Written by ' + by;
-      m.appendChild(who);
-    }
-    if (fromOtherRun(e, state.run)) {
-      const o = el('span', null, 'other run');
-      o.title = 'Written by ' + by + ', not by the run selected in the rail. Where it is visible '
-        + 'is the scope badge; this only says who wrote it.';
+    const origin = originOf(e);
+    if (origin) {
+      const o = el('span', null, ORIGIN_WORD[origin] || origin + (e.tool ? ' (' + e.tool + ')' : ''));
+      if (origin === 'hook' && e.tool) o.textContent = 'hook capture (' + e.tool + ')';
       m.appendChild(o);
     }
+    const lines = provenanceLines(e, { families: state.families, turns: state.turns });
+    const session = lines.find((l) => l.key === 'session');
+    if (session && session.sessionId) {
+      const s = el('span', session.how === 'by time' ? 'sub' : null, 'session ' + shortSession(session.sessionId));
+      s.title = session.sessionId + (session.how === 'by time' ? ' — inferred from the time, not recorded on the write' : '');
+      m.appendChild(s);
+    }
+    const prompt = lines.find((l) => l.key === 'prompt');
+    if (prompt && prompt.turn) {
+      const p = el('span', 'prompt' + (prompt.how === 'by time' ? ' sub' : ''),
+        '↳ “' + promptWords(prompt.turn.promptPreview || prompt.turn.prompt) + '”');
+      p.title = (prompt.turn.promptPreview || '') + (prompt.how === 'by time' ? ' — inferred from the time' : '');
+      m.appendChild(p);
+    }
+    const where = placement(e, state.family.bases);
+    if (where !== 'here') {
+      const f = el('span', where === 'shared' ? 'from' : null, 'from ' + fromText(e));
+      f.title = where === 'shared'
+        ? 'Saved by another directory at a scope that reaches here at recall.'
+        : 'Saved by another directory, at run scope: it does not reach here.';
+      m.appendChild(f);
+    }
+    if (e.agentType) m.appendChild(tag('subagent ' + e.agentType, 'sub'));
     if (e.project) m.appendChild(el('span', null, e.project));
     main.appendChild(m);
     b.appendChild(main);
@@ -1662,30 +2234,64 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     return b;
   }
 
+  /**
+   * Resolve one entry by id through /api/entry, once. A compact activity row and an injected
+   * memory id both carry less than the instance knows; this is where the rest comes from.
+   */
+  function loadEntry(id) {
+    const key = String(id || '');
+    if (!key) return Promise.reject(new Error('no id'));
+    if (state.entryCache.has(key)) return Promise.resolve(state.entryCache.get(key));
+    if (state.entryInflight.has(key)) return state.entryInflight.get(key);
+    const p = api('/api/entry?dir=' + enc(state.dir) + '&run=' + enc(state.run) + '&id=' + enc(key))
+      .then((body) => {
+        const entry = body && body.entry ? body.entry : null;
+        state.entryCache.set(key, entry);
+        return entry;
+      })
+      .finally(() => { state.entryInflight.delete(key); });
+    state.entryInflight.set(key, p);
+    return p;
+  }
+
+  /** The selected entry with everything the instance knows about it merged in, once fetched. */
+  function resolvedEntry(e) {
+    const hit = e && e.id ? state.entryCache.get(String(e.id)) : null;
+    return hit ? Object.assign({}, e, hit, { scope: e.scope !== undefined ? e.scope : hit.scope, scopeKnown: e.scopeKnown !== undefined ? e.scopeKnown : hit.scopeKnown }) : e;
+  }
+
   function renderMemoryDetail() {
     const box = $('memory-detail');
     clear(box);
-    const e = state.selectedEntry;
-    if (!e) {
+    const selected = state.selectedEntry;
+    if (!selected) {
       box.appendChild(el('p', 'empty', 'Select an entry.'));
       return;
     }
+    const e = resolvedEntry(selected);
+
+    // A compact row says little; the instance says the rest. Fetch once, then re-render.
+    if (selected.id && !state.entryCache.has(String(selected.id)) && (state.mode !== 'lessons' || !selected.lessonType)) {
+      loadEntry(selected.id).then(() => {
+        if (state.selectedEntry === selected) renderMemoryDetail();
+      }).catch(() => { state.entryCache.set(String(selected.id), null); });
+    }
 
     box.appendChild(el('h2', null, typeOf(e)));
-    // The bucket name is jargon and the question a person came here with is "who else sees
-    // this". Spelling the answer out is the whole reason the row exists — and it comes first.
-    box.appendChild(el('p', 'reach', reachSentence(e)));
-    box.appendChild(el('p', 'stored', storedLine(e, state.run)));
-    box.appendChild(el('p', 'prose', e.content || ''));
-
-    if (e.rationale) {
-      box.appendChild(el('div', 'eyebrow', 'Rationale'));
-      box.appendChild(el('p', 'prose', e.rationale));
-    }
-    if (e.conditions && e.conditions.length) {
-      box.appendChild(el('div', 'eyebrow', 'Conditions'));
-      box.appendChild(el('p', 'prose', e.conditions.join(', ')));
-    }
+    const prov = el('div', 'prov');
+    provenanceLines(e, { families: state.families, turns: state.turns }).forEach((line) => {
+      const div = el('div', null, line.text);
+      if (line.key === 'saved' && line.iso) div.title = line.iso;
+      if (line.key === 'reach' && leaksScope(e)) div.title = LEAK_NOTE;
+      if (line.key === 'prompt' && line.turn) {
+        const link = el('button', 'btn link', 'Show turn');
+        link.setAttribute('aria-label', 'Show this prompt on the Turns tab');
+        link.addEventListener('click', () => showTurn(line.turn));
+        div.appendChild(link);
+      }
+      prov.appendChild(div);
+    });
+    box.appendChild(prov);
 
     const dl = el('dl');
     const pair = (k, v) => {
@@ -1694,25 +2300,22 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
       dl.appendChild(dd);
       return dd;
     };
-    pair('project', e.project || 'no project tag');
-    pair('importance', e.importance || '—');
+    if (e.importance) pair('importance', e.importance);
+    const proj = pair('project', e.project || 'no project tag');
+    if (!e.project) proj.title = PROJECT_NOTE;
     pair('scope', scopeKnown(e) ? scopeOf(e) : scopeOf(e) + ' (not recorded)');
     const idRow = pair('id', e.id || '—');
     if (e.id) idRow.appendChild(copyButton(e.id));
     box.appendChild(dl);
 
-    if (!e.project) {
-      box.appendChild(el('p', 'note',
-        'Only the hook capture paths write a project tag. A lesson saved through the '
-        + 'mubit_learned tool, or written by reflection, carries none — so "no project tag" '
-        + 'means unattributed, and never that this entry belongs to the project you are in.'));
+    box.appendChild(el('p', 'prose', e.content || ''));
+    if (e.rationale) {
+      box.appendChild(el('div', 'eyebrow', 'Rationale'));
+      box.appendChild(el('p', 'prose', e.rationale));
     }
-
-    if (leaksScope(e)) {
-      box.appendChild(el('p', 'note',
-        'This entry is above run scope, so it is visible to runs other than the one that wrote '
-        + 'it. That is by design for a rule meant to follow you; it is a surprise for anything '
-        + 'that was only ever about one project.'));
+    if (e.conditions && e.conditions.length) {
+      box.appendChild(el('div', 'eyebrow', 'Conditions'));
+      box.appendChild(el('p', 'prose', e.conditions.join(', ')));
     }
 
     if (state.mode !== 'lessons' || !e.id) return;
@@ -1832,6 +2435,7 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     slugs.forEach((p) => {
       const o = el('option', null, (p === NO_PROJECT ? 'No project tag (unattributed)' : p)
         + '  (' + counts.get(p) + ')');
+      if (p === NO_PROJECT) o.title = PROJECT_NOTE;
       o.value = p;
       sel.appendChild(o);
     });
@@ -1854,7 +2458,7 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
    * The line that makes a filter matching nothing legible.
    *
    * Everything above this is a view over the loaded window; the census numbers are the
-   * server's count over the whole instance before paging. Without them, "0 results" and "your
+   * server's count over the whole instance before paging. Without them, "0 shown" and "your
    * instance is empty" are the same pixels.
    */
   function renderMemoryFooter() {
@@ -1884,20 +2488,37 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
       foot.appendChild(b);
     }
 
-    $('memory-scope-note').textContent = scopeNoteText({
-      mode: state.mode, allRuns: state.allRuns, joinError: state.joinError,
-    });
+    $('memory-scope-note').textContent = state.searchResults
+      ? 'Search results are the instance’s answer over every run; the view does not apply to them.'
+      : scopeNoteText({ mode: state.mode, view: state.view, joinError: state.joinError });
   }
 
   function renderMemory() {
     syncScopeVocabulary();
     syncFacetAvailability();
     renderProjectFacet();
+    renderViewCounts();
     renderScopeChips();
     renderTypeChips();
     renderMemoryList();
     renderMemoryDetail();
     renderMemoryFooter();
+  }
+
+  /** Select an entry on the Memory tab, from anywhere else on the page. */
+  function openInMemory(entry) {
+    const id = String((entry && entry.id) || '');
+    const inLessons = id ? state.lessons.find((l) => l.id === id) : null;
+    const inActivity = id ? state.activity.find((l) => l.id === id) : null;
+    if (inLessons) { state.mode = 'lessons'; state.selectedEntry = inLessons; }
+    else if (inActivity) { state.mode = 'activity'; state.selectedEntry = inActivity; }
+    else { state.selectedEntry = entry; }
+    state.searchResults = null;
+    $('mode-lessons').setAttribute('aria-pressed', String(state.mode === 'lessons'));
+    $('mode-activity').setAttribute('aria-pressed', String(state.mode === 'activity'));
+    selectTab('memory');
+    renderMemory();
+    $('memory-detail').scrollIntoView({ block: 'nearest' });
   }
 
   // -------------------------------------------------------------------------
@@ -1906,11 +2527,25 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
 
   const clockMs = (ms) => (ms ? clockOf(new Date(ms).toISOString()) : '—');
 
+  function agentOfSession(sessionId) {
+    for (const r of state.runs) {
+      const hit = (Array.isArray(r.sessions) ? r.sessions : []).find((s) => s && s.sessionId === sessionId);
+      if (hit) return hit.agentId || '';
+    }
+    return '';
+  }
+
   function renderTurns() {
     const q = $('turn-filter').value.trim().toLowerCase();
     const rows = state.turns.filter((t) => turnMatches(t, q));
 
     $('turn-count').textContent = String(state.turns.length);
+
+    const runIds = [];
+    state.turns.forEach((t) => { if (t.runId && runIds.indexOf(t.runId) < 0) runIds.push(t.runId); });
+    const multiRun = runIds.length > 1;
+    $('turn-run-head').hidden = !multiRun;
+    const fam = currentFamily();
 
     const body = $('turn-rows');
     clear(body);
@@ -1918,7 +2553,7 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
       const tr = el('tr');
       const td = el('td', 'empty', state.turns.length
         ? 'No turn matches the filter.'
-        : 'No turns on disk for this run. They are pruned after six hours.');
+        : 'No turns on disk for this directory. They are pruned after six hours.');
       td.colSpan = 8;
       tr.appendChild(td);
       body.appendChild(tr);
@@ -1931,47 +2566,127 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
       return td;
     };
 
-    rows.forEach((t) => {
-      const tr = el('tr');
-      tr.setAttribute('aria-current', String(state.selectedTurn && state.selectedTurn.promptId === t.promptId));
+    const sessions = groupTurnsBySession(rows);
+    sessions.forEach((g) => {
+      if (sessions.length > 1) {
+        const tr = el('tr', 'sesshead');
+        const td = el('td', null, 'session ' + shortSession(g.sessionId)
+          + (agentOfSession(g.sessionId) ? ' · ' + agentOfSession(g.sessionId) : '')
+          + ' · ' + g.rows.length + (g.rows.length === 1 ? ' turn' : ' turns'));
+        td.colSpan = 8;
+        td.title = g.sessionId || 'no session recorded';
+        tr.appendChild(td);
+        body.appendChild(tr);
+      }
+      g.rows.forEach((t) => {
+        const tr = el('tr');
+        tr.setAttribute('aria-current', String(state.selectedTurn && state.selectedTurn.promptId === t.promptId));
 
-      const time = cell('time', clockMs(t.startedAt), 'time');
-      time.title = t.startedAt ? new Date(t.startedAt).toISOString() : '';
-      tr.appendChild(time);
+        const time = cell('time', clockMs(t.startedAt), 'time');
+        time.title = t.startedAt ? new Date(t.startedAt).toISOString() : '';
+        tr.appendChild(time);
 
-      const prompt = cell('prompt', t.promptPreview || '(empty prompt)', 'prompt');
-      prompt.title = t.promptPreview || '';
-      tr.appendChild(prompt);
-      tr.appendChild(cell('num', rungText(t.rung), 'rung'));
-      tr.appendChild(cell('num', t.sources, 'src'));
-      tr.appendChild(cell('num', t.tok, 'tok'));
-      tr.appendChild(cell('num', t.ptr, 'ptr'));
+        const prompt = cell('prompt', t.promptPreview || '(empty prompt)', 'prompt');
+        prompt.title = t.promptPreview || '';
+        tr.appendChild(prompt);
 
-      const u = usedCell(t.used);
-      const used = cell(null, null, 'used');
-      const ut = tag(u.text, u.tone === 'ok' ? 'ok' : u.tone === 'unknown' ? 'unknown' : null);
-      ut.title = u.title;
-      used.appendChild(ut);
-      tr.appendChild(used);
+        const member = fam ? fam.runs.find((r) => r.runId === t.runId) : null;
+        const run = cell(null, member ? member.label : shortId(t.runId, 20), 'run');
+        run.title = t.runId || '';
+        run.hidden = !multiRun;
+        tr.appendChild(run);
 
-      tr.appendChild(cell(null, t.outcomeState || '—', 'outcome'));
-      tr.addEventListener('click', () => selectTurn(t));
-      body.appendChild(tr);
+        tr.appendChild(cell(null, turnAgentsText(t), 'agents'));
+        tr.appendChild(cell('num', t.sources, 'injected'));
+        tr.appendChild(cell('num', t.tok, 'tok'));
+
+        const u = usedCell(t.used);
+        const used = cell(null, null, 'used');
+        const ut = tag(u.text, u.tone === 'ok' ? 'ok' : u.tone === 'unknown' ? 'unknown' : null);
+        ut.title = u.title;
+        used.appendChild(ut);
+        tr.appendChild(used);
+
+        tr.appendChild(cell(null, t.outcomeState || '—', 'outcome'));
+        tr.addEventListener('click', () => selectTurn(t));
+        body.appendChild(tr);
+      });
     });
   }
 
   async function selectTurn(t) {
     state.selectedTurn = t;
+    state.selectedTurnDetail = null;
     renderTurns();
+    renderTurnDetail(t);
     try {
-      const body = await api('/api/turn?dir=' + encodeURIComponent(state.dir)
-        + '&run=' + encodeURIComponent(state.run)
-        + '&prompt=' + encodeURIComponent(t.promptId));
-      renderTurnDetail(body.turn);
+      const body = await api('/api/turn?dir=' + enc(state.dir)
+        + '&run=' + enc(t.runId || state.run)
+        + '&prompt=' + enc(t.promptId));
+      if (state.selectedTurn !== t) return;
+      state.selectedTurnDetail = Object.assign({}, t, body.turn);
+      renderTurnDetail(state.selectedTurnDetail);
     } catch (err) {
-      renderTurnDetail(t);
+      if (state.selectedTurn === t) renderTurnDetail(t);
     }
     if (narrow('(max-width: 64rem)')) $('turn-detail').scrollIntoView({ block: 'nearest' });
+  }
+
+  /** Jump to a turn from the Memory tab. */
+  function showTurn(turn) {
+    const hit = state.turns.find((t) => t.promptId === turn.promptId) || turn;
+    selectTab('turns');
+    selectTurn(hit);
+  }
+
+  /**
+   * Resolve a list of ids through /api/entry, four in flight at a time, rendering each line as
+   * it lands. The list is the injected memories of a turn or of one of its subagents.
+   */
+  function renderInjected(box, ids) {
+    const ul = el('ul', 'injected');
+    box.appendChild(ul);
+    const lines = new Map();
+    ids.forEach((id) => {
+      const li = el('li');
+      li.appendChild(el('div', 'm', shortId(id, 36) + ' · resolving…'));
+      ul.appendChild(li);
+      lines.set(id, li);
+    });
+    const queue = ids.slice();
+    const next = () => {
+      const id = queue.shift();
+      if (!id) return;
+      loadEntry(id).then((entry) => {
+        const li = lines.get(id);
+        clear(li);
+        if (!entry) {
+          li.appendChild(el('div', 'm', shortId(id, 36) + ' · not on the instance'));
+          return;
+        }
+        const s = entrySummary(entry);
+        const m = el('div', 'm');
+        m.appendChild(tag(s.type, 'type'));
+        if (s.tool) m.appendChild(el('span', null, s.tool));
+        m.appendChild(el('span', null, 'created ' + s.clock));
+        if (s.origin) m.appendChild(el('span', null, ORIGIN_WORD[s.origin] || s.origin));
+        const where = placement(entry, state.family.bases);
+        if (where !== 'here') {
+          const f = el('span', where === 'shared' ? 'from' : null, 'from ' + fromText(entry));
+          m.appendChild(f);
+        }
+        const open = el('button', 'btn link', 'Open in Memory');
+        open.addEventListener('click', () => openInMemory(entry));
+        m.appendChild(open);
+        li.appendChild(m);
+        li.appendChild(el('div', 'c', s.preview || '(no content)'));
+      }).catch((err) => {
+        const li = lines.get(id);
+        clear(li);
+        li.appendChild(el('div', 'm', shortId(id, 36) + ' · ' + (err && err.code === 'not_found' ? 'not on the instance' : 'could not be resolved')));
+      }).finally(next);
+    };
+    for (let i = 0; i < 4; i += 1) next();
   }
 
   function renderTurnDetail(t) {
@@ -1981,35 +2696,81 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
       box.appendChild(el('p', 'empty', 'Select a turn.'));
       return;
     }
-    box.appendChild(el('h2', null, 'Prompt ' + shortId(t.promptId, 8)));
+    const fam = currentFamily();
+    box.appendChild(el('h2', null, 'Prompt ' + shortId(t.promptId, 8) + (t.turnNumber ? ' · turn ' + t.turnNumber : '')));
     box.appendChild(el('p', 'prose', t.prompt || t.promptPreview || ''));
 
     const dl = el('dl');
-    const pair = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, v)); };
-    pair('started', t.startedAt ? stampMs(t.startedAt) + ' (' + new Date(t.startedAt).toISOString() + ')' : '—');
-    pair('recall', t.sources + ' memories · ' + t.tok + ' tok · ' + t.chars + ' chars');
-    pair('repeats', t.ptr + ' rendered as a pointer');
-    pair('rung', rungText(t.rung)); // Same as the table: zero means unrecorded, not a rung.
+    const pair = (k, v) => { dl.appendChild(el('dt', null, k)); const dd = el('dd', null, v); dl.appendChild(dd); return dd; };
+    const started = pair('started', t.startedAt ? stampMs(t.startedAt) : '—');
+    if (t.startedAt) started.title = new Date(t.startedAt).toISOString();
+    pair('ended', t.endedAt ? stampMs(t.endedAt) + (durationText(t.startedAt, t.endedAt) ? ' · ' + durationText(t.startedAt, t.endedAt) : '') : 'still open, or never closed');
+    const agent = agentOfSession(t.sessionId);
+    const session = pair('session', shortSession(t.sessionId) + (agent ? ' · ' + agent : ''));
+    session.title = t.sessionId || '';
+    const member = fam ? fam.runs.find((r) => r.runId === t.runId) : null;
+    pair('run', (t.runId || state.run) + (member ? ' (' + member.label + ')' : ''));
+    pair('recall', t.sources + ' memories · ' + t.tok + ' tok · ' + t.chars + ' chars · ' + t.ptr
+      + ' as a pointer · rung ' + rungText(t.rung));
     if (t.emptyReason) pair('empty because', t.emptyReason);
     pair('outcome', t.outcomeState || '—');
-    pair('session', shortId(t.sessionId, 8));
     box.appendChild(dl);
 
-    if (t.recalled && t.recalled.length) {
-      box.appendChild(el('div', 'eyebrow', 'Injected memories'));
-      const ul = el('div', 'row');
-      t.recalled.forEach((id) => ul.appendChild(tag(id)));
-      box.appendChild(ul);
+    const recalled = Array.isArray(t.recalled) ? t.recalled : [];
+    box.appendChild(el('div', 'eyebrow', 'Injected memories (' + recalled.length + ')'));
+    if (recalled.length) renderInjected(box, recalled);
+    else box.appendChild(el('p', 'note', 'Nothing was injected into this prompt.'));
+
+    const subs = Array.isArray(t.subagents) ? t.subagents : [];
+    box.appendChild(el('div', 'eyebrow', 'Subagents (' + subs.length + ')'));
+    if (!subs.length) {
+      box.appendChild(el('p', 'note', state.selectedTurnDetail === t
+        ? 'No subagent ran under this prompt.' : 'Loading…'));
     }
+    subs.forEach((s) => {
+      const d = el('details', 'subagent');
+      const r = s.recall || {};
+      const n = Number(s.recalledCount) || 0;
+      d.appendChild(el('summary', null, (s.agentType || 'subagent') + ' · started ' + clockMs(s.at)
+        + ' · ' + n + (n === 1 ? ' memory' : ' memories') + ' injected · ' + (Number(r.tokens) || 0) + ' tok'
+        + (s.subRunId ? ' · ' + s.subRunId : '')));
+      let opened = false;
+      d.addEventListener('toggle', () => {
+        if (!d.open || opened) return;
+        opened = true;
+        if (n) renderInjected(d, s.recalled || []);
+        else d.appendChild(el('p', 'note', 'Nothing was injected into this subagent.'));
+      });
+      box.appendChild(d);
+    });
+
+    const here = state.lessons.filter((l) => placement(l, state.family.bases) === 'here');
+    const saved = lessonsInTurn(t, here);
+    box.appendChild(el('div', 'eyebrow', 'Saved during this turn (' + saved.length + ')'));
+    if (saved.length) {
+      const ul = el('ul', 'injected');
+      saved.forEach((l) => {
+        const li = el('li');
+        const m = el('div', 'm');
+        m.appendChild(scopeBadge(l));
+        if (l.lessonType) m.appendChild(tag(l.lessonType, 'type'));
+        m.appendChild(el('span', l.promptId ? null : 'sub', l.promptId ? 'recorded' : 'by time'));
+        const open = el('button', 'btn link', 'Open in Memory');
+        open.addEventListener('click', () => openInMemory(l));
+        m.appendChild(open);
+        li.appendChild(m);
+        li.appendChild(el('div', 'c', l.content || ''));
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    } else box.appendChild(el('p', 'note', 'No lesson from this directory is stamped with, or dated inside, this turn.'));
 
     const u = t.used || {};
     box.appendChild(el('div', 'eyebrow', 'Used signal'));
     box.appendChild(el('p', 'note', u.used === null || u.used === undefined
-      ? 'Not measurable for this turn' + (u.reason ? ' (' + u.reason + ')' : '')
-      + '. A blank here is not "unused".'
-      : u.label + ' — a term-echo proxy: it asks whether the reply carried vocabulary from the '
-      + 'injected block that was not already in the prompt. False negatives dominate, so treat '
-      + 'a "no" as weak evidence and a "yes" as strong.'));
+      ? 'Not measurable for this turn' + (u.reason ? ' (' + u.reason + ')' : '') + '. A blank here is not "unused".'
+      : u.label + ' — term echo: did the reply carry vocabulary from the injected block that was not '
+      + 'already in the prompt. False negatives dominate; a "no" is weak, a "yes" is strong.'));
   }
 
   // -------------------------------------------------------------------------
@@ -2035,34 +2796,47 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
 
   async function refreshLocal() {
     try {
-      const meta = await api('/api/meta?dir=' + encodeURIComponent(state.dir)
-        + '&run=' + encodeURIComponent(state.run));
+      const meta = await api('/api/meta?dir=' + enc(state.dir) + '&run=' + enc(state.run));
       state.meta = meta;
       if (!state.dir) state.dir = meta.dir;
       $('endpoint').textContent = meta.configured ? meta.endpoint : 'no endpoint configured';
       renderDirs(meta.dirs || []);
 
-      const q0 = 'dir=' + encodeURIComponent(state.dir);
+      const q0 = 'dir=' + enc(state.dir);
+      const runs = await api('/api/runs?' + q0);
+      state.runs = runs.runs || [];
+      state.families = groupRunsByDirectory(state.runs);
+
       if (!state.run) {
-        // First arrival, or a directory change. The run this page opens on is the one it was
-        // launched in when that run is in the directory, and the newest one otherwise — a
-        // machine with two sessions open would otherwise open on whichever prompted last.
-        const first = await api('/api/runs?' + q0);
-        const ids = (first.runs || []).map((r) => r.runId);
+        // First arrival, or a directory change. The page opens on the directory it was
+        // launched in when that run is here, and on the newest directory otherwise.
         const launch = meta.launch && meta.launch.run;
-        state.run = (launch && ids.indexOf(launch) >= 0) ? launch : (meta.run || '');
+        const fam = state.families.find((f) => f.runs.some((r) => r.runId === launch)) || state.families[0] || null;
+        if (fam) adoptFamily(fam, fam.current);
+        else state.run = meta.run || '';
+      } else {
+        // Membership can grow under the page: a /clear mints a new id in the same directory.
+        const fam = state.families.find((f) => f.runs.some((r) => r.runId === state.run));
+        if (fam) adoptFamily(fam);
       }
 
-      const q = q0 + '&run=' + encodeURIComponent(state.run);
-      const [runs, turns] = await Promise.all([
-        api('/api/runs?' + q),
-        api('/api/turns?' + q + '&limit=100'),
-      ]);
-
-      renderRuns(runs.runs || []);
+      renderRail();
       renderIdentity();
-      state.turns = turns.turns || [];
+
+      if (state.dir && state.run) {
+        const turns = await api('/api/turns?' + q0 + '&run=' + enc(state.run) + '&family=1&limit=100');
+        state.turns = turns.turns || [];
+      } else {
+        state.turns = [];
+      }
       renderTurns();
+      // Attribution reads the turns, so the Memory tab is repainted when they change — and
+      // only then, or the one-second poll would rebuild the list under a focused row.
+      const sig = state.turns.map((t) => t.promptId + ':' + t.endedAt + ':' + t.subagentCount).join('|') + '|' + state.family.key;
+      if (sig !== state.turnsSig) {
+        state.turnsSig = sig;
+        renderMemory();
+      }
       if (bannerCode === 'unauthorized') hideBanner();
     } catch (err) {
       if (err.status === 401) showBanner('unauthorized', err.message);
@@ -2080,9 +2854,9 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
   async function refreshAnalytics() {
     if (!state.dir || !state.run) return;
     try {
-      const q = 'dir=' + encodeURIComponent(state.dir) + '&run=' + encodeURIComponent(state.run);
+      const q = 'dir=' + enc(state.dir) + '&run=' + enc(state.run);
       const [analytics, health] = await Promise.all([
-        api('/api/analytics?' + q),
+        api('/api/analytics?' + q + '&family=1'),
         api('/api/health/local?' + q),
       ]);
       renderAnalytics(analytics, health);
@@ -2109,15 +2883,14 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     // remote cadence. Counting the gap from the request going out meant the next poll fired
     // while the first was still in the air, superseded it, and left the page reading "Loading…"
     // forever: every answer arrived stale, so none of them was ever rendered. A forced refresh
-    // still cuts in, because that is somebody toggling the run selector and waiting.
+    // still cuts in, because that is somebody who asked and is waiting.
     if (!force) {
       if (state.remoteBusy) return;
       if (Date.now() - state.lastRemoteAt < (state.meta.pollMs || {}).remote) return;
     }
 
-    // An all-runs census is a scan and a single-run one is not, so the two race whenever
-    // somebody toggles the segment. Whoever was issued last wins; anything older lands into a
-    // stale sequence and is dropped rather than repainting the answer to the previous question.
+    // Whoever was issued last wins; anything older lands into a stale sequence and is dropped
+    // rather than repainting the answer to the previous question.
     const seq = ++state.reqSeq;
     const stale = () => seq !== state.reqSeq;
     state.remoteBusy += 1;
@@ -2132,15 +2905,14 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
 
   /** The two instance calls the Memory tab is built from. @param {() => boolean} stale */
   async function remoteFetch(stale) {
-    // The empty `run` *is* the fix: upstream reads it as "every run". `currentRun` never
-    // filters anything — it is the run `fromOtherRun` is rendered against.
+    // The empty `run` *is* the point: upstream reads it as "every run", and the three views
+    // filter what came back — so a directory change never refetches. `currentRun` filters
+    // nothing; it is the run `fromOtherRun` is rendered against.
     // `limit` is the census's *page* size, not a cap on the answer, and 500 is the largest the
     // route serves. On this route the cheapest way to finish a scan inside its budget is to ask
     // for fewer, bigger pages: at 200 a seven-hundred-lesson instance ran out of wall clock on
     // page three and reported itself truncated, where two pages of 500 complete.
-    const q = 'run=' + encodeURIComponent(state.allRuns ? '' : state.run)
-      + '&currentRun=' + encodeURIComponent(state.run)
-      + '&limit=500';
+    const q = 'run=&currentRun=' + encodeURIComponent(state.run) + '&limit=500';
 
     try {
       const body = await api('/api/lessons?' + q);
@@ -2198,8 +2970,8 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
     btn.disabled = true;
     btn.textContent = 'searching…';
     try {
-      // `/api/search` refuses an empty run, which is why this one call keeps naming the local
-      // run even when the tab is showing every run's lessons.
+      // `/api/search` refuses an empty run, which is why this one call keeps naming the
+      // concrete run even though the tab is showing every run's lessons.
       const body = await post('/api/search', { run: state.run, query: q, limit: 30 });
       // Search evidence carries no scope of its own. Stamping a literal onto it was the bug:
       // every result read as run-scoped, so any active scope filter emptied the list and the
@@ -2224,6 +2996,10 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
           run_id: e.run_id || '',
           sourceRunId: hit ? hit.sourceRunId : (e.run_id || ''),
           createdAt: hit ? hit.createdAt : '',
+          origin: hit ? hit.origin : '',
+          sessionId: hit ? hit.sessionId : '',
+          promptId: hit ? hit.promptId : '',
+          turnNumber: hit ? hit.turnNumber : 0,
         };
       });
       state.searchQuery = q;
@@ -2266,20 +3042,19 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
   $('mode-lessons').addEventListener('click', () => setMode('lessons'));
   $('mode-activity').addEventListener('click', () => setMode('activity'));
 
-  // The run segment re-points the Memory fetch only; `state.run` is left alone so the rail,
-  // the Turns tab and every write route keep naming one concrete run.
-  function setAllRuns(all) {
-    if (state.allRuns === all) return;
-    state.allRuns = all;
-    state.searchResults = null;
+  // The view is a filter over what is loaded, so this is instant and refetches nothing.
+  function setView(view) {
+    if (state.view === view) return;
+    state.view = view;
     state.selectedEntry = null;
-    $('runs-all').setAttribute('aria-pressed', String(all));
-    $('runs-this').setAttribute('aria-pressed', String(!all));
+    $('runs-this').setAttribute('aria-pressed', String(view === 'here'));
+    $('runs-reach').setAttribute('aria-pressed', String(view === 'reach'));
+    $('runs-all').setAttribute('aria-pressed', String(view === 'all'));
     renderMemory();
-    refreshRemote(true);
   }
-  $('runs-all').addEventListener('click', () => setAllRuns(true));
-  $('runs-this').addEventListener('click', () => setAllRuns(false));
+  $('runs-this').addEventListener('click', () => setView('here'));
+  $('runs-reach').addEventListener('click', () => setView('reach'));
+  $('runs-all').addEventListener('click', () => setView('all'));
 
   function setSort(order) {
     state.sort = order;
@@ -2322,7 +3097,10 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
   $('dirs').addEventListener('change', (e) => {
     state.dir = e.target.value;
     state.run = '';
+    state.family = { key: '', ids: [], bases: [], projectDir: '', current: '' };
     state.selectedTurn = null;
+    state.selectedTurnDetail = null;
+    state.entryCache = new Map();
     state.lastRemoteAt = 0;
     refreshLocal().then(() => { refreshAnalytics(); refreshRemote(true); });
   });

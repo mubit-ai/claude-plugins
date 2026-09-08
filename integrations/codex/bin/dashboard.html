@@ -2933,9 +2933,13 @@ tbody tr[aria-current="true"] td { background: var(--accent-dim); }
       };
       // `joined` says the activity call worked; `dated` says it produced timestamps. They come
       // apart on an instance that stores lessons without a creation time, and a green light
-      // over a column of dashes is the version of that a user reads as a bug in this page.
+      // over a column of dashes is the version of that a user reads as a bug in this page. A
+      // write's own stamp is the fallback date, and an instance that has only those says so.
+      const stamped = state.lessons.some((l) => !l.createdAt && l.timestamp);
       const dated = state.lessons.length === 0 || body.dated > 0;
-      setConn(true, dated ? 'connected' : 'connected · this instance records no lesson dates');
+      setConn(true, dated ? 'connected'
+        : stamped ? 'connected · lesson dates come from the write stamps'
+          : 'connected · this instance records no lesson dates');
       hideBanner();
     } catch (err) {
       if (stale()) return;

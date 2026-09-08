@@ -105,7 +105,7 @@ export function dataDirFlag(v) {
  *   4. **The bare name.** A machine with no Claude Code install at all wants a directory
  *      rather than an error.
  *
- * Rungs 2–4 are the same algorithm as `claudeCodeDataDir()` in
+ * All four rungs are the same algorithm as `claudeCodeDataDir()` in
  * `integrations/codex/lib/boot.mjs`, deliberately copied rather than shared: that module is
  * loaded unbundled at runtime by the codex integration's `scripts/setup.mjs`, and the codex
  * package ships only its own `lib/`, so importing across integrations there would be a dead

@@ -241,6 +241,42 @@ test('MUBIT_CC_DATA_DIR still outranks everything, exactly as it does under Clau
   });
 });
 
+test('the pin setup wrote into $CODEX_HOME/hooks.json outranks the search', async () => {
+  // § The search is a guess about which install is live; the pin is the answer setup
+  //   recorded and the directory the hooks are actually using. `liveDataDir()` next door
+  //   reads it as its first rung; this copy did not, so a shimmed command-line bundle — which
+  //   resolves CLAUDE_PLUGIN_DATA from here before `dataDir()` ever reaches `liveDataDir()`
+  //   — could land in a different store than the hooks of the very session it was run from.
+  const home = tempDir('codex-pinned-home-');
+  const codexHome = tempDir('codex-pinned-codex-home-');
+  const root = join(home, '.claude', 'plugins', 'data');
+  mkdirSync(join(root, 'mubit-memory-mubit'), { recursive: true });
+  writeFileSync(join(root, 'mubit-memory-mubit', 'credentials.json'), '{"apiKey":"mbt_x"}');
+  const pinned = join(root, 'mubit-memory-inline');
+  mkdirSync(pinned, { recursive: true });
+  writeFileSync(join(codexHome, 'hooks.json'), JSON.stringify({
+    hooks: { SessionStart: [{ hooks: [{
+      type: 'command',
+      command: `MUBIT_CC_DATA_DIR=${JSON.stringify(pinned)} node /somewhere/hooks/dist/session-start.mjs`,
+    }] }] },
+  }));
+
+  await withEnv(codexEnv({ HOME: home, CODEX_HOME: codexHome }), async () => {
+    const { applyCodexEnv, claudeCodeDataDir } = await codexMod('lib/boot.mjs');
+    assert.equal(claudeCodeDataDir({ HOME: home, CODEX_HOME: codexHome }), pinned,
+      'the pin is the directory every hook of this install writes to. Preferring the '
+      + 'credentials search over it sends a shimmed CLI to a store the hooks never touch.');
+    const env = { HOME: home, CODEX_HOME: codexHome };
+    applyCodexEnv(env, { cwd: '/tmp/some/project' });
+    assert.equal(env.CLAUDE_PLUGIN_DATA, pinned);
+
+    // And with no pin to read, the search still answers — the rung is additive.
+    const bare = tempDir('codex-unpinned-codex-home-');
+    assert.equal(claudeCodeDataDir({ HOME: home, CODEX_HOME: bare }), join(root, 'mubit-memory-mubit'),
+      'with no hooks.json the credentials search must still decide, exactly as before.');
+  });
+});
+
 // ===========================================================================
 // The host marker
 // ===========================================================================
@@ -308,44 +344,62 @@ test('an explicit statusLine still wins under Codex, and the Claude Code default
 // Ordering — the property the whole file is named after
 // ===========================================================================
 
-test('every hook entry point imports the shim before it imports anything shared', async () => {
-  const { readFileSync, readdirSync, existsSync } = await import('node:fs');
-  const dir = join(CODEX_ROOT, 'hooks', 'src');
-  assert.ok(existsSync(dir), `${dir} does not exist yet — the entry points are the port.`);
-  const entries = readdirSync(dir).filter((f) => f.endsWith('.mjs'));
-  assert.ok(entries.length >= 10, `expected the shared hook set under ${dir}, found ${entries.length}.`);
+/**
+ * The two directories of entry points, and the shared body each one loads.
+ *
+ * `hooks/src/<name>.mjs` is what a registration in `hooks.json` names; `cli/<name>.mjs` is
+ * what every `bin/<name>.mjs` bundle is built from. Both have exactly the same job — shim,
+ * then body — and the second set exists because the first was not enough: a bin bundle built
+ * straight from the shared source ran with no shim at all, and `bin/handoff.mjs` on a Codex
+ * machine filed every note as sent by a Claude Code session.
+ */
+const ENTRY_SETS = [
+  { dir: 'hooks/src', shared: 'claude-code/hooks/src/', min: 10, what: 'the shared hook set' },
+  { dir: 'cli', shared: 'claude-code/bin/', min: 7, what: 'the seven command-line bundles' },
+];
 
-  for (const file of entries) {
-    const src = readFileSync(join(dir, file), 'utf8');
-    const bootAt = src.indexOf('boot.mjs');
-    const sharedAt = src.indexOf('claude-code/hooks/src/');
-    // § This is the whole contract in two indices. The shared module resolves its config at
-    //   module scope, so an import that lands first wins — and a reordering here fails
-    //   *silently*: the hook still runs, still exits 0, and writes its state into whatever
-    //   directory the unset defaults happened to name.
-    assert.ok(bootAt >= 0, `hooks/src/${file} does not import lib/boot.mjs at all.`);
-    assert.ok(sharedAt >= 0, `hooks/src/${file} does not import a shared hook body.`);
-    assert.ok(bootAt < sharedAt,
-      `hooks/src/${file} imports the shared body before the shim. The shared modules capture `
-      + 'CLAUDE_PROJECT_DIR and CLAUDE_PLUGIN_DATA at module scope, so this ordering is a '
-      + 'correctness property, not a style: reversed, the hook silently uses the wrong '
-      + 'project directory and the wrong data directory.');
+test('every entry point imports the shim before it imports anything shared', async () => {
+  const { readFileSync, readdirSync, existsSync } = await import('node:fs');
+  for (const set of ENTRY_SETS) {
+    const dir = join(CODEX_ROOT, ...set.dir.split('/'));
+    assert.ok(existsSync(dir), `${dir} does not exist yet — the entry points are the port.`);
+    const entries = readdirSync(dir).filter((f) => f.endsWith('.mjs'));
+    assert.ok(entries.length >= set.min, `expected ${set.what} under ${dir}, found ${entries.length}.`);
+
+    for (const file of entries) {
+      const src = readFileSync(join(dir, file), 'utf8');
+      const bootAt = src.indexOf('boot.mjs');
+      const sharedAt = src.indexOf(set.shared);
+      // § This is the whole contract in two indices. The shared module resolves its config at
+      //   module scope, so an import that lands first wins — and a reordering here fails
+      //   *silently*: the hook still runs, still exits 0, and writes its state into whatever
+      //   directory the unset defaults happened to name.
+      assert.ok(bootAt >= 0, `${set.dir}/${file} does not import lib/boot.mjs at all.`);
+      assert.ok(sharedAt >= 0, `${set.dir}/${file} does not import a shared body.`);
+      assert.ok(bootAt < sharedAt,
+        `${set.dir}/${file} imports the shared body before the shim. The shared modules capture `
+        + 'CLAUDE_PROJECT_DIR and CLAUDE_PLUGIN_DATA at module scope, so this ordering is a '
+        + 'correctness property, not a style: reversed, the entry point silently uses the wrong '
+        + 'project directory and the wrong data directory — and, for a bin, the wrong host.');
+    }
   }
 });
 
 test('the shared body is loaded by dynamic import, so the shim is not merely hoisted past', async () => {
   const { readFileSync, readdirSync } = await import('node:fs');
-  const dir = join(CODEX_ROOT, 'hooks', 'src');
-  for (const file of readdirSync(dir).filter((f) => f.endsWith('.mjs'))) {
-    const src = readFileSync(join(dir, file), 'utf8');
-    // § ESM hoists every static `import` above all statements, so two static imports in
-    //   "the right order" are still evaluated in graph order — which for a shared body that
-    //   imports lib/config.mjs is not the order this needs. `await import()` is the one form
-    //   that runs after the statements above it, which is exactly why mcp/src/launch.mjs uses
-    //   it for `./server.js` and why test/launch.test.mjs guards the same shape there.
-    assert.match(src, /await import\(/,
-      `hooks/src/${file} must load the shared body with \`await import(...)\`. A second static `
-      + 'import would be hoisted and evaluated before the shim`s side effects ran, which is '
-      + 'the failure this shim exists to prevent.');
+  for (const set of ENTRY_SETS) {
+    const dir = join(CODEX_ROOT, ...set.dir.split('/'));
+    for (const file of readdirSync(dir).filter((f) => f.endsWith('.mjs'))) {
+      const src = readFileSync(join(dir, file), 'utf8');
+      // § ESM hoists every static `import` above all statements, so two static imports in
+      //   "the right order" are still evaluated in graph order — which for a shared body that
+      //   imports lib/config.mjs is not the order this needs. `await import()` is the one form
+      //   that runs after the statements above it, which is exactly why mcp/src/launch.mjs uses
+      //   it for `./server.js` and why test/launch.test.mjs guards the same shape there.
+      assert.match(src, /await import\(/,
+        `${set.dir}/${file} must load the shared body with \`await import(...)\`. A second static `
+        + 'import would be hoisted and evaluated before the shim`s side effects ran, which is '
+        + 'the failure this shim exists to prevent.');
+    }
   }
 });

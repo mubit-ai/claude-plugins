@@ -14,6 +14,11 @@
  * process, so the test plays the browser by reading the authorize URL off stderr — and
  * `PATH` points at an empty directory so the real `open(1)` can never be found. A test
  * suite that opens browser tabs on the developer's machine is itself a defect.
+ *
+ * The bundle is built from `cli/auth.mjs`, so importing it in-process (the inert-on-import
+ * test) runs `lib/boot.mjs` against this test process's environment — filling in
+ * `MUBIT_CC_HOST` and the `CLAUDE_*` names where they are unset, never overwriting one.
+ * Harmless here, because every spawn below passes an explicit environment of its own.
  */
 
 import test from 'node:test';

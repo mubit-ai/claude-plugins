@@ -663,3 +663,256 @@ test('the module has no network surface at all', async () => {
       `lib/dashboard-data.mjs must stay offline; found ${forbidden}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Sessions — the map from host session to run
+// ---------------------------------------------------------------------------
+
+/**
+ * One `sessions/<sessionId>.json` record, in the shape `lib/runid.mjs` writes it.
+ *
+ * The path is a placeholder home on purpose: the leak check refuses a real account name in
+ * any tracked file, and a fixture is a tracked file.
+ */
+function writeSession(dataDir, sid, patch = {}) {
+  const dir = join(dataDir, 'sessions');
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, `${sid}.json`);
+  writeFileSync(p, JSON.stringify({
+    run_id: 'cc-alpha-00000001', agent_id: 'claude-code', strategy: 'per-directory',
+    project_dir: '/home/user/proj', project_root: '/home/user/proj',
+    created_at: 1_700_000_000_000, last_seen_at: 1_700_000_000_000,
+    mode: 'hosted', clear_count: 0, endpoint_hash: 'abc', ...patch,
+  }));
+  return p;
+}
+
+// The session map is what ties a run id to the host sessions that share it, and it is the
+// only place the plugin records which directory a run is for. The dashboard has never read it.
+test('sessions: every sessions/*.json is read, camel-cased, and sorted newest last-seen first', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeSession(dataDir, 'aaaaaaaa-0000-4000-8000-000000000001', { last_seen_at: 1000, clear_count: 2 });
+  writeSession(dataDir, 'aaaaaaaa-0000-4000-8000-000000000002', { last_seen_at: 3000 });
+  writeSession(dataDir, 'aaaaaaaa-0000-4000-8000-000000000003', { last_seen_at: 2000 });
+
+  const rows = mod.readSessionMap(dataDir);
+  assert.deepEqual(rows.map((r) => r.sessionId), [
+    'aaaaaaaa-0000-4000-8000-000000000002',
+    'aaaaaaaa-0000-4000-8000-000000000003',
+    'aaaaaaaa-0000-4000-8000-000000000001',
+  ]);
+  const oldest = rows[2];
+  assert.equal(oldest.runId, 'cc-alpha-00000001');
+  assert.equal(oldest.agentId, 'claude-code');
+  assert.equal(oldest.strategy, 'per-directory');
+  assert.equal(oldest.projectDir, '/home/user/proj');
+  assert.equal(oldest.projectRoot, '/home/user/proj');
+  assert.equal(oldest.createdAt, 1_700_000_000_000);
+  assert.equal(oldest.lastSeenAt, 1000);
+  assert.equal(oldest.mode, 'hosted');
+  assert.equal(oldest.clearCount, 2);
+  assert.equal(oldest.endpointHash, 'abc');
+  for (const k of Object.keys(oldest)) {
+    assert.ok(!k.includes('_'), `session rows are camel-cased for the page; found ${k}`);
+  }
+});
+
+// `project_root` was added after the first records were written. An absent one reads as
+// "unknown", which is an empty string — never as a path and never as a throw.
+test('sessions: a record written before project_root existed reads as an empty projectRoot', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  const sid = 'bbbbbbbb-0000-4000-8000-000000000001';
+  const p = writeSession(dataDir, sid);
+  const rec = JSON.parse(readFileSync(p, 'utf8'));
+  delete rec.project_root;
+  writeFileSync(p, JSON.stringify(rec));
+
+  const [row] = mod.readSessionMap(dataDir);
+  assert.equal(row.sessionId, sid);
+  assert.equal(row.projectRoot, '');
+  assert.equal(row.projectDir, '/home/user/proj', 'the directory is still known');
+});
+
+// A torn write, a hand edit, or a file from a future version must cost exactly itself.
+test('sessions: a malformed session file is skipped and the rest still read', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeSession(dataDir, 'cccccccc-0000-4000-8000-000000000001');
+  writeFileSync(join(dataDir, 'sessions', 'torn.json'), '{ "run_id": ');
+  writeFileSync(join(dataDir, 'sessions', 'list.json'), '[1, 2, 3]');
+  writeFileSync(join(dataDir, 'sessions', 'notes.txt'), 'not a session');
+
+  const rows = mod.readSessionMap(dataDir);
+  assert.deepEqual(rows.map((r) => r.sessionId), ['cccccccc-0000-4000-8000-000000000001']);
+});
+
+test('sessions: sessionsForRun returns only the sessions mapped to that run', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeSession(dataDir, 'dddddddd-0000-4000-8000-000000000001', { run_id: 'cc-one-00000001', last_seen_at: 1 });
+  writeSession(dataDir, 'dddddddd-0000-4000-8000-000000000002', { run_id: 'cc-two-00000002', last_seen_at: 2 });
+  writeSession(dataDir, 'dddddddd-0000-4000-8000-000000000003', { run_id: 'cc-one-00000001', last_seen_at: 3 });
+
+  assert.deepEqual(mod.sessionsForRun(dataDir, 'cc-one-00000001').map((r) => r.sessionId), [
+    'dddddddd-0000-4000-8000-000000000003',
+    'dddddddd-0000-4000-8000-000000000001',
+  ]);
+  assert.deepEqual(mod.sessionsForRun(dataDir, 'cc-three-0000003'), []);
+  assert.deepEqual(mod.sessionsForRun(dataDir, ''), [], 'no run is no sessions, not every session');
+  // A run id from a query string is flattened before it is compared, so a traversal names a
+  // run that does not exist rather than matching a record it should not.
+  assert.deepEqual(mod.sessionsForRun(dataDir, '../../etc'), []);
+});
+
+// `makeDataDir` pre-creates `sessions/`; a data dir written by an older plugin, or one that
+// has only ever recalled, may not have it at all.
+test('sessions: a missing sessions/ directory is an empty list, never a throw', async (t) => {
+  const { mod } = await setup(t);
+  const bare = tempDir('mubit-cc-bare-');
+  assert.deepEqual(mod.readSessionMap(bare), []);
+  assert.deepEqual(mod.sessionsForRun(bare, 'cc-any-000000001'), []);
+  assert.equal(mod.launchRunFor(bare, '/home/user/proj'), '');
+});
+
+// The run row is what the rail and the identity strip render from, so the join lives here
+// rather than in the page. Grouped in one read of the map, not one per run.
+test('sessions: run rows carry their sessions, a count, and the newest session\'s project dir and root', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-shared-000001', { updated_at: 2000 });
+  writeMarker(dataDir, 'cc-lonely-000002', { updated_at: 1000 });
+  writeSession(dataDir, 'eeeeeeee-0000-4000-8000-000000000001', {
+    run_id: 'cc-shared-000001', last_seen_at: 100, project_dir: '/home/user/old', project_root: '/home/user/old',
+  });
+  writeSession(dataDir, 'eeeeeeee-0000-4000-8000-000000000002', {
+    run_id: 'cc-shared-000001', last_seen_at: 300, project_dir: '/home/user/proj/sub', project_root: '/home/user/proj',
+  });
+  writeSession(dataDir, 'eeeeeeee-0000-4000-8000-000000000003', {
+    run_id: 'cc-shared-000001', last_seen_at: 200,
+  });
+
+  const runs = mod.runsIn(dataDir, { sessions: true });
+  const shared = runs.find((r) => r.runId === 'cc-shared-000001');
+  assert.equal(shared.sessionCount, 3);
+  assert.deepEqual(shared.sessions.map((s) => s.sessionId), [
+    'eeeeeeee-0000-4000-8000-000000000002',
+    'eeeeeeee-0000-4000-8000-000000000003',
+    'eeeeeeee-0000-4000-8000-000000000001',
+  ], 'newest last-seen first, so sessions[0] is the one the strip names');
+  assert.equal(shared.projectDir, '/home/user/proj/sub', 'the newest session\'s directory');
+  assert.equal(shared.projectRoot, '/home/user/proj');
+
+  // Without the flag the row is the cheap one `newestRun` polls for: no map read at all.
+  const cheap = mod.runsIn(dataDir);
+  assert.ok(!('sessions' in cheap[0]), 'the default row carries no sessions key');
+  assert.ok(!('sessionCount' in cheap[0]));
+});
+
+test('sessions: a run with no session record has an empty list and no project dir', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-orphan-000001');
+  const [row] = mod.runsIn(dataDir, { sessions: true });
+  assert.deepEqual(row.sessions, []);
+  assert.equal(row.sessionCount, 0);
+  assert.equal(row.projectDir, '');
+  assert.equal(row.projectRoot, '');
+  const all = mod.listRuns([{ path: dataDir }], { sessions: true });
+  assert.equal(all[0].sessionCount, 0, 'listRuns forwards the option');
+});
+
+/**
+ * The trap this section exists for.
+ *
+ * `lib/runid.mjs` exports `loadSessionMap`, and it resolves `dataDir({})` — the *ambient*
+ * data dir from `process.env` — because every caller there is a hook that already has the
+ * environment. The dashboard is not a hook: it serves whichever directory `?dir=` selected,
+ * and a reader built on that helper would show one directory's runs with another's sessions.
+ */
+test('sessions: the directory asked for is read, never the ambient data dir', async (t) => {
+  const { dataDir: dirA, mod } = await setup(t);
+  const dirB = makeDataDir();
+  writeSession(dirA, 'ffffffff-0000-4000-8000-00000000000a', { run_id: 'cc-in-a-00000001' });
+  writeSession(dirB, 'ffffffff-0000-4000-8000-00000000000b', { run_id: 'cc-in-b-00000002' });
+
+  const { withEnv } = await import('./helpers/harness.mjs');
+  const rows = withEnv({ MUBIT_CC_DATA_DIR: dirA, CLAUDE_PLUGIN_DATA: dirA, HOME: dirA },
+    () => mod.readSessionMap(dirB));
+  assert.deepEqual(rows.map((r) => r.runId), ['cc-in-b-00000002']);
+});
+
+// The dashboard is launched from a session, and that session has a directory. The run whose
+// records name that directory is the one the page should open on — not the one written to most
+// recently, which on a machine with two sessions open is a coin flip.
+test('sessions: launchRunFor picks the newest session whose project matches the launch directory', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeSession(dataDir, '11111111-0000-4000-8000-000000000001', {
+    run_id: 'cc-here-old-0001', last_seen_at: 100, project_dir: '/home/user/proj', project_root: '/home/user/proj',
+  });
+  writeSession(dataDir, '11111111-0000-4000-8000-000000000002', {
+    run_id: 'cc-there-0000002', last_seen_at: 300, project_dir: '/home/user/other', project_root: '/home/user/other',
+  });
+  writeSession(dataDir, '11111111-0000-4000-8000-000000000003', {
+    run_id: 'cc-here-new-0003', last_seen_at: 200, project_dir: '/home/user/proj/sub', project_root: '/home/user/proj',
+  });
+
+  assert.equal(mod.launchRunFor(dataDir, '/home/user/proj'), 'cc-here-new-0003',
+    'a root match counts: the sub-directory session is for the same project');
+  assert.equal(mod.launchRunFor(dataDir, '/home/user/proj/sub'), 'cc-here-new-0003',
+    'and so does an exact project_dir match');
+  assert.equal(mod.launchRunFor(dataDir, '/home/user/other'), 'cc-there-0000002');
+  assert.equal(mod.launchRunFor(dataDir, '/home/user/nowhere'), '');
+  assert.equal(mod.launchRunFor(dataDir, ''), '', 'no directory matches nothing');
+});
+
+// ---------------------------------------------------------------------------
+// Scope, in words
+// ---------------------------------------------------------------------------
+
+// The page never said what scope a run writes at or reads from. The three settings that decide
+// it are in `cfg`, and the sentences are built here so the page and the config cannot drift.
+test('scope: describeRunScope reports strategy, write ceiling and cross-run setting from cfg', async (t) => {
+  const { cfg, mod } = await setup(t);
+  const s = mod.describeRunScope(cfg);
+  assert.equal(s.strategy, 'per-directory');
+  assert.equal(s.writesAt, 'session');
+  assert.equal(s.readsAcrossRuns, 'auto');
+  for (const k of ['strategyText', 'writesAtText', 'readsAcrossRunsText']) {
+    assert.equal(typeof s[k], 'string');
+    assert.ok(s[k].length > 10, `${k} must be a sentence, got ${JSON.stringify(s[k])}`);
+  }
+  assert.match(s.strategyText, /directory/);
+  assert.match(s.writesAtText, /later sessions/);
+  assert.match(s.readsAcrossRunsText, /3 s/);
+});
+
+test('scope: describeRunScope reflects MUBIT_MCP_LESSON_SCOPE and MUBIT_CC_RECALL_CROSS_RUN through loadConfig', async (t) => {
+  const { cfg, mod } = await setup(t, {
+    extra: { MUBIT_MCP_LESSON_SCOPE: 'run', MUBIT_CC_RECALL_CROSS_RUN: 'off', MUBIT_CC_RUN_STRATEGY: 'git-branch' },
+  });
+  const s = mod.describeRunScope(cfg);
+  assert.equal(s.strategy, 'git-branch');
+  assert.equal(s.writesAt, 'run');
+  assert.equal(s.readsAcrossRuns, 'off');
+  assert.match(s.writesAtText, /inside this run/);
+  assert.match(s.readsAcrossRunsText, /never/);
+});
+
+// A sentence shared between two values is a setting the page cannot show, so every value of
+// every setting has to render differently — and an unknown value must still say something.
+test('scope: describeRunScope has a distinct sentence for every value of each setting', async (t) => {
+  const { mod } = await setup(t);
+  const distinct = (key, values, text) => {
+    const seen = new Set(values.map((v) => mod.describeRunScope({ [key]: v })[text]));
+    assert.equal(seen.size, values.length, `${key}: ${JSON.stringify([...seen])}`);
+  };
+  distinct('runStrategy', ['per-directory', 'git-branch', 'per-conversation', 'static'], 'strategyText');
+  distinct('mcpLessonScope', ['run', 'session', 'global'], 'writesAtText');
+  distinct('recallCrossRun', ['auto', 'on', 'off'], 'readsAcrossRunsText');
+
+  const odd = mod.describeRunScope({ runStrategy: 'custom-thing', mcpLessonScope: 'org', recallCrossRun: 'maybe' });
+  assert.equal(odd.strategy, 'custom-thing');
+  assert.ok(odd.strategyText.includes('custom-thing'), 'an unknown strategy is named, not blanked');
+  assert.ok(odd.writesAtText.length > 0 && odd.readsAcrossRunsText.length > 0);
+
+  const empty = mod.describeRunScope({});
+  assert.equal(empty.strategy, 'per-directory', 'the config default');
+  assert.equal(empty.writesAt, 'session');
+  assert.equal(empty.readsAcrossRuns, 'auto');
+});

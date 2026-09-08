@@ -231,6 +231,55 @@ export function resolveDirParam(wanted, dirs) {
 }
 
 // ---------------------------------------------------------------------------
+// Run identity — one directory, several run ids
+// ---------------------------------------------------------------------------
+
+/*
+ * A directory's memory is spread over several ids. `per-directory` mints `cc-<slug>-<hash8>`
+ * and `git-branch` mints `cc-<slug>-<branch>-<hash8>`; every `/clear` appends `-c<N>`
+ * (`lib/runid.mjs`); every subagent gets `<parent>-sub-<id>`; and the activity feed spells
+ * the same run `state::<uid>::cc-…`. Nothing on the page could say "this directory" until
+ * those were folded back to one key. `bin/dashboard.html` carries the same two functions, and
+ * `test/dashboard-page.test.mjs` pins the two copies to each other.
+ */
+
+/** The `state::<uid>::` namespace the activity feed and dereference put in front of a run. */
+const FEED_PREFIX = /^state::[^:]*::/;
+
+/** A subagent's marker suffix. */
+const SUB_SUFFIX = /-sub-[a-z0-9]+$/;
+
+/** A `/clear` counter. */
+const CLEAR_SUFFIX = /-c(\d+)$/;
+
+/**
+ * The shape a `-c<N>` may be stripped from. A `static` id is a user string that may itself end
+ * in `-c1`, so the counter goes only when what is left still looks like a directory key.
+ */
+const DIRECTORY_KEY = /^cc-.+-[0-9a-f]{8}$/;
+
+/** @param {any} id @returns {string} the bare run id, without the feed's namespace */
+export function plainRunId(id) {
+  return String(id || '').replace(FEED_PREFIX, '');
+}
+
+/** @param {any} id @returns {string} the directory key every run of one directory shares */
+export function baseRunId(id) {
+  const s = plainRunId(id).replace(SUB_SUFFIX, '');
+  const m = CLEAR_SUFFIX.exec(s);
+  if (!m) return s;
+  const head = s.slice(0, m.index);
+  return DIRECTORY_KEY.test(head) ? head : s;
+}
+
+/** `N` from a `-c<N>` that `baseRunId` stripped, else 0. @param {string} id */
+function clearIndexOf(id) {
+  const s = plainRunId(id).replace(SUB_SUFFIX, '');
+  const m = CLEAR_SUFFIX.exec(s);
+  return m && baseRunId(id) === s.slice(0, m.index) ? Number(m[1]) : 0;
+}
+
+// ---------------------------------------------------------------------------
 // Runs
 // ---------------------------------------------------------------------------
 
@@ -270,6 +319,9 @@ export function runsIn(dir, opts = {}) {
         sessionCount: sessions.length,
         projectDir: firstNonEmpty(sessions, 'projectDir'),
         projectRoot: firstNonEmpty(sessions, 'projectRoot'),
+        baseRunId: baseRunId(runId),
+        clearIndex: clearIndexOf(runId),
+        subagentCount: lsDir(join(rd, 'subagents')).filter((n) => n.endsWith('.json')).length,
       });
     }
     return row;
@@ -404,6 +456,121 @@ function firstNonEmpty(rows, key) {
   for (const r of rows) if (r[key]) return r[key];
   return '';
 }
+
+// ---------------------------------------------------------------------------
+// Families
+// ---------------------------------------------------------------------------
+
+/**
+ * Every run id in a directory that belongs with `runId`, newest first.
+ *
+ * Two rules, applied to a fixpoint. A run joins when its `baseRunId` matches a member's — that
+ * is what groups `cc-x-<hash>`, its `-c<N>` clears and its `-sub-<id>` subagents. And a run
+ * joins when a session record maps it to the same `projectRoot` as a member — that is what
+ * groups a `static` or `per-conversation` run with the directory it was actually used in,
+ * without guessing anything from the id. The asked id is a member even with no marker: a run
+ * whose marker has aged out still has a family, and the caller still has a run.
+ *
+ * An id that would need flattening is not a run id, and gets an empty family rather than a
+ * family for whatever it flattened to.
+ *
+ * @param {string} dir
+ * @param {string} runId
+ * @returns {{base: string, projectRoot: string, runIds: string[]}}
+ */
+export function familyOf(dir, runId) {
+  const id = safeSegment(runId);
+  if (!id || id !== String(runId)) return { base: '', projectRoot: '', runIds: [] };
+
+  const known = new Map(runsIn(dir).map((r) => [String(r.runId), r]));
+  if (!known.has(id)) known.set(id, { runId: id, lastWrite: 0 });
+  const byRun = groupSessions(readSessionMap(dir));
+  const rootOf = (rid) => firstNonEmpty(byRun.get(rid) ?? [], 'projectRoot');
+
+  const members = new Set([id]);
+  const bases = new Set([baseRunId(id)]);
+  const roots = new Set([rootOf(id)].filter(Boolean));
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const rid of known.keys()) {
+      if (members.has(rid)) continue;
+      const root = rootOf(rid);
+      if (!bases.has(baseRunId(rid)) && !(root && roots.has(root))) continue;
+      members.add(rid);
+      bases.add(baseRunId(rid));
+      if (root) roots.add(root);
+      grew = true;
+    }
+  }
+
+  const runIds = [...members]
+    .map((rid) => known.get(rid))
+    .sort((a, b) => num(b.lastWrite) - num(a.lastWrite))
+    .map((r) => String(r.runId));
+  return { base: baseRunId(id), projectRoot: [...roots][0] ?? '', runIds };
+}
+
+// ---------------------------------------------------------------------------
+// Subagents — runs/<run_id>/subagents/<sub_run_id>.json
+// ---------------------------------------------------------------------------
+
+/**
+ * Every subagent record under a run, oldest first.
+ *
+ * `subagent-start.mjs` writes one per spawn, and nothing ever removes them — the directory is
+ * outside `lib/state.mjs`'s TTL table — so a long-lived run holds every subagent it ever ran.
+ * `since` bounds the read by mtime, which a caller attaching records to a window of turns
+ * must pass: the records that matter were written after the oldest turn on the page started.
+ *
+ * Whitelisted, like the session record: a field nobody decided to serve is not served.
+ *
+ * @param {string} dir
+ * @param {string} runId
+ * @param {{since?: number}} [opts] epoch ms; records last written before this are skipped
+ * @returns {Array<Record<string, any>>}
+ */
+export function readSubagents(dir, runId, opts = {}) {
+  const id = safeSegment(runId);
+  if (!id) return [];
+  const sdir = join(runDir({ dataDir: dir }, id), 'subagents');
+  const since = num(opts && opts.since);
+  /** @type {Array<Record<string, any>>} */
+  const out = [];
+  for (const f of lsDir(sdir)) {
+    if (!f.endsWith('.json')) continue;
+    const p = join(sdir, f);
+    if (since > 0 && mtimeOf(p) < since) continue;
+    const rec = readJson(p, null);
+    if (!rec || typeof rec !== 'object' || Array.isArray(rec)) continue;
+    const r = (rec.recall && typeof rec.recall === 'object') ? rec.recall : {};
+    const recalled = Array.isArray(rec.recalled) ? rec.recalled.map(String) : [];
+    out.push({
+      subRunId: String(rec.sub_run_id || f.slice(0, -5)),
+      parentRunId: String(rec.parent_run_id || id),
+      agentId: String(rec.agent_id || ''),
+      mubitAgentId: String(rec.mubit_agent_id || ''),
+      agentType: String(rec.agent_type || ''),
+      sessionId: String(rec.session_id || ''),
+      promptId: String(rec.prompt_id || ''),
+      at: num(rec.at),
+      recall: {
+        rung: num(r.rung),
+        sources: num(r.sources),
+        tokens: num(r.tokens),
+        chars: num(r.chars),
+        pointers: num(r.pointers),
+        ms: num(r.ms),
+      },
+      recalled,
+      recalledCount: recalled.length,
+    });
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+/** Clock skew allowed between a turn's `started_at` and the mtime of a record written under it. */
+const SUBAGENT_SLACK_MS = 60_000;
 
 // ---------------------------------------------------------------------------
 // Scope, in words
@@ -564,18 +731,49 @@ export function turnRow(turn, opts = {}) {
 }
 
 /**
- * Turn rows for one run, newest first.
+ * Turn rows for one run — or, with `family`, for every run of its directory — newest first.
+ *
+ * Each row says which run it came from and which subagents fanned out under its prompt. The
+ * subagent read is bounded to the window of turns returned, never the whole directory.
+ *
  * @param {string} dir
  * @param {string} runId
- * @param {{limit?: number}} [opts]
+ * @param {{limit?: number, family?: boolean}} [opts]
  * @returns {Array<Record<string, any>>}
  */
 export function turnRows(dir, runId, opts = {}) {
   const limit = clampInt(opts.limit, 1, 1000, 100);
-  return rawTurns(dir, runId, limit)
-    .sort((a, b) => num(b.started_at) - num(a.started_at))
-    .slice(0, limit)
-    .map((t) => turnRow(t));
+  const ids = opts.family === true
+    ? familyOf(dir, runId).runIds
+    : [safeSegment(runId)].filter(Boolean);
+
+  /** @type {Array<{id: string, t: Record<string, any>}>} */
+  const raw = [];
+  for (const id of ids) for (const t of rawTurns(dir, id, limit)) raw.push({ id, t });
+  const kept = raw
+    .sort((a, b) => num(b.t.started_at) - num(a.t.started_at))
+    .slice(0, limit);
+
+  let oldest = Infinity;
+  for (const k of kept) if (num(k.t.started_at) > 0) oldest = Math.min(oldest, num(k.t.started_at));
+  const since = Number.isFinite(oldest) ? oldest - SUBAGENT_SLACK_MS : 0;
+  /** @type {Map<string, Array<Record<string, any>>>} */
+  const subs = new Map();
+  const subsOf = (id) => {
+    if (!subs.has(id)) subs.set(id, readSubagents(dir, id, { since }));
+    return subs.get(id) ?? [];
+  };
+
+  return kept.map(({ id, t }) => {
+    const row = turnRow(t);
+    const mine = subsOf(id).filter((s) => s.promptId === row.promptId);
+    return {
+      ...row,
+      runId: id,
+      subagentCount: mine.length,
+      subagentTypes: mine.map((s) => s.agentType),
+    };
+  });
 }
 
 /**
@@ -638,8 +836,12 @@ export function turnDetail(dir, runId, promptId) {
   const recall = (t.recall && typeof t.recall === 'object') ? t.recall : null;
   const used = (t.used_evidence && typeof t.used_evidence === 'object') ? t.used_evidence : null;
 
+  const startedAt = num(t.started_at);
   return {
     ...turnRow(t, { previewBytes: DETAIL_BYTES }),
+    runId: safeSegment(runId),
+    subagents: readSubagents(dir, runId, { since: startedAt > 0 ? startedAt - SUBAGENT_SLACK_MS : 0 })
+      .filter((s) => s.promptId === id),
     prompt: prompt.text,
     promptTruncated: prompt.truncated || t.prompt_truncated === true,
     recall: recall ? { ...recall, terms: redactTerms(recall.terms) } : null,
@@ -902,13 +1104,22 @@ export function readRollup(dir, runId, since = 0) {
  * anywhere on disk — the honest thing is to omit it rather than to plot the last prompt's
  * number against every prompt.
  *
+ * With `family`, the series is every run of the directory's rollups concatenated by time: a
+ * `/clear` moves the hooks to a new run id, and a trend that restarted at every clear would
+ * be a trend of nothing.
+ *
  * @param {string} dir
  * @param {string} runId
- * @param {{since?: number}} [opts]
+ * @param {{since?: number, family?: boolean}} [opts]
  * @returns {Record<string, any>}
  */
 export function analytics(dir, runId, opts = {}) {
-  const series = readRollup(dir, runId, num(opts.since));
+  const ids = opts.family === true
+    ? familyOf(dir, runId).runIds
+    : [safeSegment(runId)].filter(Boolean);
+  const series = ids
+    .flatMap((id) => readRollup(dir, id, num(opts.since)))
+    .sort((a, b) => num(a.at) - num(b.at));
   const n = series.length;
   const sum = (k) => series.reduce((acc, row) => acc + num(row[k]), 0);
   const last = n ? series[n - 1] : null;
@@ -917,6 +1128,7 @@ export function analytics(dir, runId, opts = {}) {
   return {
     dir,
     runId: safeSegment(runId),
+    runIds: ids,
     series,
     points: n,
     totals: {

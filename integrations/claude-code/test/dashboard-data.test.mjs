@@ -916,3 +916,202 @@ test('scope: describeRunScope has a distinct sentence for every value of each se
   assert.equal(empty.writesAt, 'session');
   assert.equal(empty.readsAcrossRuns, 'auto');
 });
+
+// ---------------------------------------------------------------------------
+// Families — one directory, several run ids
+// ---------------------------------------------------------------------------
+
+/**
+ * A directory's memory is spread over several run ids: `cc-<slug>-<hash8>` at first,
+ * `-c<N>` after each `/clear`, and `-sub-<id>` for every subagent. The activity feed spells
+ * the same id `state::<uid>::cc-…` on top of that. Nothing on the page could say "this
+ * directory" until the ids were folded back together, and this is the fold.
+ */
+const BASE_TABLE = [
+  ['cc-pre-main-af449e06', 'cc-pre-main-af449e06', 'a per-directory id is its own base'],
+  ['cc-pre-main-feat-x-af449e06', 'cc-pre-main-feat-x-af449e06', 'a git-branch id too'],
+  ['cc-pre-main-af449e06-c1', 'cc-pre-main-af449e06', 'one /clear'],
+  ['cc-pre-main-af449e06-c12', 'cc-pre-main-af449e06', 'twelve /clears'],
+  ['cc-pre-main-af449e06-sub-a06e2764eaae', 'cc-pre-main-af449e06', 'a subagent of the base'],
+  ['cc-pre-main-af449e06-c1-sub-abc123', 'cc-pre-main-af449e06', 'a subagent after a /clear'],
+  ['state::01234::cc-pre-main-af449e06-c1', 'cc-pre-main-af449e06', 'the activity feed spelling'],
+  ['my-pinned-run-c1', 'my-pinned-run-c1', 'a static id that happens to end in -c1 is left alone'],
+  ['my-pinned-run', 'my-pinned-run', 'a static id'],
+  ['11111111-2222-4333-8444-555555555555', '11111111-2222-4333-8444-555555555555', 'a per-conversation uuid'],
+  ['', '', 'nothing'],
+];
+
+test('families: baseRunId folds /clear and subagent suffixes and the feed prefix back to the directory key', async (t) => {
+  const { mod } = await setup(t);
+  for (const [id, base, why] of BASE_TABLE) {
+    assert.equal(mod.baseRunId(id), base, `${why}: baseRunId(${JSON.stringify(id)})`);
+  }
+  assert.equal(mod.plainRunId('state::01234::cc-a-00000001'), 'cc-a-00000001');
+  assert.equal(mod.plainRunId('cc-a-00000001'), 'cc-a-00000001');
+  assert.equal(mod.plainRunId(''), '');
+  assert.equal(mod.plainRunId(undefined), '');
+  assert.equal(mod.baseRunId(undefined), '');
+});
+
+/** One `runs/<run>/subagents/<sub>.json`, in the shape `subagent-start.mjs` writes it. */
+function writeSubagent(dataDir, runId, subId, patch = {}) {
+  const dir = join(dataDir, 'runs', runId, 'subagents');
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, `${runId}-sub-${subId}.json`);
+  writeFileSync(p, JSON.stringify({
+    sub_run_id: `${runId}-sub-${subId}`,
+    parent_run_id: runId,
+    agent_id: subId,
+    mubit_agent_id: `claude-code-sub-${subId}`,
+    agent_type: 'Explore',
+    session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    prompt_id: '11111111-2222-3333-4444-555555555555',
+    at: 1_700_000_010_000,
+    recall: { rung: 1, sources: 1, tokens: 504, chars: 2013, dropped: 0, pointers: 0, empty_reason: '', ms: 384 },
+    recalled: ['05c404d7-c1f4-4d91-95a1-e70c55c5d3ff'],
+    linked: false,
+    ...patch,
+  }));
+  return p;
+}
+
+test('subagents: readSubagents maps every record through a whitelist, sorted by time, and never throws', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-subs-00000001');
+  writeSubagent(dataDir, 'cc-subs-00000001', 'bbb', { at: 1_700_000_020_000, agent_type: 'Plan' });
+  writeSubagent(dataDir, 'cc-subs-00000001', 'aaa', { at: 1_700_000_010_000, secret_field: 'must not be served' });
+  writeFileSync(join(dataDir, 'runs', 'cc-subs-00000001', 'subagents', 'torn.json'), '{ "sub_run_id": ');
+  writeFileSync(join(dataDir, 'runs', 'cc-subs-00000001', 'subagents', 'list.json'), '[1]');
+
+  const rows = mod.readSubagents(dataDir, 'cc-subs-00000001');
+  assert.deepEqual(rows.map((r) => r.agentType), ['Explore', 'Plan'], 'oldest first');
+  const first = rows[0];
+  assert.equal(first.subRunId, 'cc-subs-00000001-sub-aaa');
+  assert.equal(first.parentRunId, 'cc-subs-00000001');
+  assert.equal(first.agentId, 'aaa');
+  assert.equal(first.mubitAgentId, 'claude-code-sub-aaa');
+  assert.equal(first.sessionId, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  assert.equal(first.promptId, '11111111-2222-3333-4444-555555555555');
+  assert.equal(first.at, 1_700_000_010_000);
+  assert.deepEqual(first.recall, { rung: 1, sources: 1, tokens: 504, chars: 2013, pointers: 0, ms: 384 });
+  assert.deepEqual(first.recalled, ['05c404d7-c1f4-4d91-95a1-e70c55c5d3ff']);
+  assert.equal(first.recalledCount, 1);
+  assert.ok(!JSON.stringify(rows).includes('must not be served'), 'unknown fields are dropped');
+  for (const k of Object.keys(first)) assert.ok(!k.includes('_'), `camel-cased for the page; found ${k}`);
+
+  assert.deepEqual(mod.readSubagents(dataDir, 'cc-none-00000002'), []);
+  assert.deepEqual(mod.readSubagents(dataDir, '../../etc'), []);
+  assert.deepEqual(mod.readSubagents(tempDir('mubit-cc-bare-'), 'cc-subs-00000001'), []);
+});
+
+// The subagents directory is outside the TTL table, so a long-lived run accumulates records
+// for ever. A reader bounded by the turns it is attaching to must not open all of them.
+test('subagents: a since bound skips records older than the window', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-old-00000001');
+  const old = writeSubagent(dataDir, 'cc-old-00000001', 'old', { at: 1_600_000_000_000 });
+  const { utimesSync } = await import('node:fs');
+  utimesSync(old, new Date(1_600_000_000_000), new Date(1_600_000_000_000));
+  writeSubagent(dataDir, 'cc-old-00000001', 'new', { at: Date.now() });
+
+  const rows = mod.readSubagents(dataDir, 'cc-old-00000001', { since: Date.now() - 3_600_000 });
+  assert.deepEqual(rows.map((r) => r.agentId), ['new']);
+  assert.equal(mod.readSubagents(dataDir, 'cc-old-00000001').length, 2, 'without a bound, every record');
+});
+
+test('families: familyOf unions the runs sharing a base with the runs whose sessions share the directory', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-fam-00000001', { updated_at: 1000 });
+  writeMarker(dataDir, 'cc-fam-00000001-c1', { updated_at: 3000 });
+  writeMarker(dataDir, 'cc-fam-00000001-sub-abc', { updated_at: 2000 });
+  writeMarker(dataDir, 'pinned-run', { updated_at: 2500 });
+  writeMarker(dataDir, 'cc-other-00000002', { updated_at: 4000 });
+  writeSession(dataDir, 'aaaaaaaa-0000-4000-8000-00000000000a', { run_id: 'cc-fam-00000001-c1', last_seen_at: 3000 });
+  writeSession(dataDir, 'aaaaaaaa-0000-4000-8000-00000000000b', { run_id: 'pinned-run', last_seen_at: 2500 });
+  writeSession(dataDir, 'aaaaaaaa-0000-4000-8000-00000000000c', {
+    run_id: 'cc-other-00000002', last_seen_at: 4000, project_dir: '/home/user/other', project_root: '/home/user/other',
+  });
+
+  const fam = mod.familyOf(dataDir, 'cc-fam-00000001');
+  assert.equal(fam.base, 'cc-fam-00000001');
+  assert.equal(fam.projectRoot, '/home/user/proj');
+  assert.deepEqual(fam.runIds, ['cc-fam-00000001-c1', 'pinned-run', 'cc-fam-00000001-sub-abc', 'cc-fam-00000001'],
+    'newest first; the pinned run joins through its session\'s project root; the other directory does not');
+
+  // Asked by any member, the same family.
+  assert.deepEqual(mod.familyOf(dataDir, 'cc-fam-00000001-c1').runIds, fam.runIds);
+  assert.deepEqual(mod.familyOf(dataDir, 'pinned-run').runIds, fam.runIds);
+
+  // A run with no marker and no session is still a family of one, never a throw.
+  const lone = mod.familyOf(dataDir, 'cc-lone-00000009');
+  assert.deepEqual(lone.runIds, ['cc-lone-00000009']);
+  assert.equal(lone.projectRoot, '');
+  assert.deepEqual(mod.familyOf(dataDir, '').runIds, []);
+  assert.deepEqual(mod.familyOf(dataDir, '../../etc').runIds, []);
+});
+
+test('families: run rows carry baseRunId, clearIndex and subagentCount', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-row-00000001-c2');
+  writeSubagent(dataDir, 'cc-row-00000001-c2', 'aaa');
+  writeSubagent(dataDir, 'cc-row-00000001-c2', 'bbb');
+  writeMarker(dataDir, 'cc-row-00000001');
+
+  const rows = mod.runsIn(dataDir, { sessions: true });
+  const cleared = rows.find((r) => r.runId === 'cc-row-00000001-c2');
+  assert.equal(cleared.baseRunId, 'cc-row-00000001');
+  assert.equal(cleared.clearIndex, 2);
+  assert.equal(cleared.subagentCount, 2);
+  const base = rows.find((r) => r.runId === 'cc-row-00000001');
+  assert.equal(base.baseRunId, 'cc-row-00000001');
+  assert.equal(base.clearIndex, 0);
+  assert.equal(base.subagentCount, 0);
+});
+
+test('turns: a family turn row says which run it came from, and which subagents ran under it', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-ft-00000001');
+  writeMarker(dataDir, 'cc-ft-00000001-c1');
+  writeTurn(dataDir, 'cc-ft-00000001', turnFixture({ started_at: 1_700_000_000_000 }));
+  writeTurn(dataDir, 'cc-ft-00000001-c1', turnFixture({
+    prompt_id: '22222222-2222-3333-4444-555555555555', started_at: 1_700_000_100_000,
+  }));
+  writeSubagent(dataDir, 'cc-ft-00000001-c1', 'aaa', { prompt_id: '22222222-2222-3333-4444-555555555555', at: 1_700_000_100_500 });
+  writeSubagent(dataDir, 'cc-ft-00000001-c1', 'bbb', { prompt_id: '22222222-2222-3333-4444-555555555555', at: 1_700_000_100_600, agent_type: 'Plan' });
+
+  const rows = mod.turnRows(dataDir, 'cc-ft-00000001', { family: true });
+  assert.deepEqual(rows.map((r) => r.runId), ['cc-ft-00000001-c1', 'cc-ft-00000001'], 'newest first across the family');
+  assert.equal(rows[0].subagentCount, 2);
+  assert.deepEqual(rows[0].subagentTypes, ['Explore', 'Plan']);
+  assert.equal(rows[1].subagentCount, 0);
+  assert.deepEqual(rows[1].subagentTypes, []);
+
+  // Without the flag, one run — and the row still says which.
+  const one = mod.turnRows(dataDir, 'cc-ft-00000001');
+  assert.deepEqual(one.map((r) => r.runId), ['cc-ft-00000001']);
+
+  const detail = mod.turnDetail(dataDir, 'cc-ft-00000001-c1', '22222222-2222-3333-4444-555555555555');
+  assert.equal(detail.runId, 'cc-ft-00000001-c1');
+  assert.deepEqual(detail.subagents.map((s) => s.agentType), ['Explore', 'Plan']);
+  assert.equal(detail.subagents[0].recalledCount, 1);
+  const other = mod.turnDetail(dataDir, 'cc-ft-00000001', turnFixture().prompt_id);
+  assert.deepEqual(other.subagents, [], 'a subagent is attached to its own prompt only');
+});
+
+test('analytics: the family form concatenates every run\'s rollup by time', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-fa-00000001');
+  writeMarker(dataDir, 'cc-fa-00000001-c1');
+  mkdirSync(join(dataDir, 'dashboard'), { recursive: true });
+  writeFileSync(mod.rollupPath(dataDir, 'cc-fa-00000001'),
+    [{ at: 100, tok: 10, sources: 1 }, { at: 300, tok: 30, sources: 1 }].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  writeFileSync(mod.rollupPath(dataDir, 'cc-fa-00000001-c1'),
+    [{ at: 200, tok: 20, sources: 1 }].map((r) => JSON.stringify(r)).join('\n') + '\n');
+
+  const a = mod.analytics(dataDir, 'cc-fa-00000001', { family: true });
+  assert.deepEqual(a.series.map((r) => r.at), [100, 200, 300]);
+  assert.equal(a.points, 3);
+  assert.equal(a.averages.tok, 20);
+  assert.deepEqual(a.runIds, ['cc-fa-00000001-c1', 'cc-fa-00000001']);
+  assert.equal(mod.analytics(dataDir, 'cc-fa-00000001').points, 2, 'without the flag, one run');
+});

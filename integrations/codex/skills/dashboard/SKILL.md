@@ -45,25 +45,43 @@ when the result is going to be parsed rather than read.
 
 ## What it shows
 
-An identity strip, then three tabs joining two sources that have never been joined before:
+Everything on the page is anchored on one **directory**. The rail lists every project
+directory the data directory has seen, each with its runs under it — the current one, the one
+before `/clear`, how many subagent runs — because a directory's memory is spread over several
+run ids (`cc-<slug>-<hash>`, `-c<N>` after each `/clear`, `-sub-<id>` per subagent) and the
+page folds them back together.
 
-- **Current run** — the strip across the top says which run the page is looking at, the full
-  directory it is for, every host session that shares it (with when each was last seen), and
-  what the run writes at and reads from, in words: the lesson-scope cap and the cross-run
-  recall setting as sentences rather than as `session` and `auto`. It marks the run the
-  dashboard was launched in; *Change run* opens the run rail on a narrow window.
-- **Memory** — every lesson the instance holds, filterable instantly and searchable properly.
-  The list is grouped by day and sorted newest or oldest first, each row leading with its time
-  and its scope badge, so "what was stored, when, at what scope" reads top to bottom. Chip rows
-  count the loaded window by scope and by type and double as filters. There is a filter for
-  the entries **visible outside the run that wrote them**, which is the question nothing else
-  in the plugin answers, and the detail pane opens with the reach sentence and a stored-by
-  line: when, by which run, through what, at what scope. One-click `Worked` / `Did not work`
-  sends an outcome; deletion requires typing the lesson id.
-- **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
-  they cost in tokens, and how many were repeats rendered as a pointer. This is the local half,
-  read from `runs/<run_id>/turns/`.
-- **Analytics** — the same numbers as a trend, plus spool depth, ingest counts and breaker state.
+- **Selected directory** — the strip across the top says the full directory, the run every
+  write on the page names (marked when it is the one the dashboard was launched in), every
+  host session in the directory with its agent and when it was last seen, and what the run
+  writes at and reads from as one sentence each: the lesson-scope cap and the cross-run recall
+  setting as words rather than as `session` and `auto`.
+- **Memory** — three views over one load. *Written here* (the default) is the lessons this
+  directory's runs saved; *+ shared* adds the session and global lessons other directories
+  saved, which reach here at recall; *Everything* is every lesson on the instance. Switching
+  directory or view is instant, and the counts on the buttons are the counts of the list.
+  Every row says who wrote it (agent, reflection, auto-reflection, hook capture), which
+  session and which prompt — `recorded` when the write was stamped with them, dashed *by time*
+  when the page inferred them from the turn window — and `from <directory>` when it came from
+  elsewhere. The detail pane is one provenance block: saved when and by whom, directory and
+  run, session, prompt with a *Show turn* link, reach. *Everything stored* is the raw feed;
+  selecting a row resolves it by id, so a trace says which hook and which tool. The scope and
+  project facets switch off there and say why. One-click `Worked` / `Did not work` sends an
+  outcome; deletion requires typing the lesson id.
+- **Turns** — one row per prompt across the directory's runs, grouped under a session header
+  when there is more than one session: time, prompt, agents (`main`, or `main + 3 sub`), how
+  many memories were injected, what they cost in tokens, whether the reply used them, and the
+  outcome. The detail resolves every injected memory to its content with *Open in Memory*,
+  lists the subagents that ran under the prompt and what each was given, and the lessons saved
+  during the turn. Read from `runs/<run_id>/turns/` and `runs/<run_id>/subagents/`.
+- **Analytics** — the same numbers as a trend across the directory's runs, plus spool depth,
+  ingest counts and breaker state for the concrete run.
+
+Three limits it states rather than papers over. A `mubit_learned` call from a subagent is
+indistinguishable from the main agent's — one MCP process — so a lesson says "agent" and only a
+subagent's own recall record or a SubagentStop note says "subagent". A reflection lesson gets
+a session by time but never a prompt. Turn files are pruned after six hours, so a *by time*
+link exists only for a recent lesson; a write stamped with its session and prompt keeps them.
 
 ## Three things to say when asked about a number on it
 

@@ -380,25 +380,30 @@ prefer letting outcome attribution down-weight it.
 ```
 
 Opens a page on `127.0.0.1` — a random port, a token minted for that launch, and nothing on
-your network can reach it. A strip across the top, then three tabs:
+your network can reach it. Everything on it is anchored on one **directory**: the rail lists
+every project directory the plugin has seen, with its runs under it (the current one, the one
+before `/clear`, how many subagent runs), because one directory's memory is spread over
+several run ids and the page folds them back together. A strip across the top, then three tabs:
 
-- **Current run** — which run you are looking at, the full directory it belongs to, every
-  session that shares it and when each was last seen, and what the run writes at and reads from
-  as two plain sentences. It marks the run the dashboard was launched in, and it is the first
-  place the plugin has said any of this out loud.
-- **Memory** — every lesson your instance holds, across **every run** unless you switch to
-  *This run*. Rows are grouped by day (*Today*, *Yesterday*, then dates) and sorted newest or
-  oldest first; each leads with its time and its scope badge, and the chip rows above the list
-  count what is loaded by scope and by type and filter on a click. Filter instantly, or press
-  *Search instance* to ask it properly. There is a filter for lessons **visible outside the run
-  that wrote them**, which is the question nothing else here answers: a rule saved at global
-  scope follows you into every project, and one saved at run scope dies with the session.
-  `session` and `global` are separately selectable, and *scope not recorded* is its own bucket
-  rather than being folded into `run`.
-- **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
-  they cost, and how many were repeats rendered as a one-line pointer. This is read from disk,
-  so it works with the network off.
-- **Analytics** — those numbers as a trend, plus spool depth, ingest counts and breaker state.
+- **Selected directory** — the full directory, the run every write on the page names, every
+  session in the directory with its agent and when it was last seen, and what the run writes
+  at and reads from as one sentence each. It marks the run the dashboard was launched in.
+- **Memory** — three views over one load. *Written here* is the lessons this directory's runs
+  saved; *+ shared* adds the session and global lessons other directories saved, which reach
+  here at recall; *Everything* is every lesson on the instance. Every row says who wrote it
+  (agent, reflection, auto-reflection, hook capture), which session and which prompt —
+  `recorded` when the write was stamped with them, *by time* when the page inferred them from
+  the turn window — and `from <directory>` when it came from elsewhere. The detail is one
+  provenance block with a *Show turn* link. Filter instantly, or press *Search instance* to
+  ask it properly; *Everything stored* is the raw feed, and selecting a row there resolves it
+  by id so a trace says which hook and which tool.
+- **Turns** — one row per prompt across the directory's runs, grouped by session: time,
+  prompt, agents (`main` or `main + 3 sub`), memories injected, tokens, whether the reply
+  used them, outcome. The detail resolves every injected memory to its content with *Open in
+  Memory*, lists the subagents that ran under the prompt and what each was given, and the
+  lessons saved during the turn. Read from disk, so it works with the network off.
+- **Analytics** — those numbers as a trend across the directory's runs, plus spool depth,
+  ingest counts and breaker state.
 
 Four things it deliberately does not claim:
 
@@ -406,6 +411,11 @@ Four things it deliberately does not claim:
   capture hooks; a lesson you saved through `/mubit-memory:remember`, and every lesson reflection
   writes, carries none. Those land in *No project tag*, which is a large bucket and is never
   shown as belonging to the project you have open.
+- **"Agent" means the tool path, not which agent.** A `mubit_learned` call from a subagent is
+  indistinguishable from the main agent's — they share one MCP process — so a lesson says
+  "agent" and only a subagent's own recall record says "subagent". A reflection lesson gets a
+  session by time but never a prompt, and a *by time* link needs the turn file, which is
+  pruned after six hours; a write stamped with its session and prompt keeps them for good.
 - **No per-prompt latency.** The recall timing on the status marker is last-write-wins — it
   describes the most recent prompt, not each one — so there is no honest per-prompt series to
   plot and the page does not invent one.

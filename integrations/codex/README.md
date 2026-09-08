@@ -476,4 +476,4 @@ they are. Read it before assuming a Codex behaviour matches Claude Code's.
 - User guide, from nothing installed to memory that survives a session: [`docs/user-guide.md`](docs/user-guide.md)
 - Documentation: <https://docs.mubit.ai/integrations/codex>
 - Source: <https://github.com/mubit-ai/claude-plugins>
-- License: Apache-2.0 — [`LICENSE`](LICENSE)
+- License: Apache-2.0 — [`LICENSE`](LICENSE); third-party code bundled into the MCP server is attributed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), the same file the Claude Code plugin ships, because the bundle is the same

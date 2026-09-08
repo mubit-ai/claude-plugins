@@ -462,7 +462,7 @@ bundle — two independently installable plugins cannot share a path, and the bu
 rather than regenerating it.
 
 Every change to `../claude-code/lib` or `../claude-code/hooks/src` changes both plugins. Run
-both suites: this one, and the 1847 next door.
+both suites: this one, and the 1864 next door.
 
 [`test/fixtures/observed/`](test/fixtures/observed/README.md) is the record of what Codex
 actually does — payloads the host wrote to a recorder hook during a real session, and its

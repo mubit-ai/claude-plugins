@@ -29,7 +29,7 @@ no `CLAUDE_*` — because that is what a skill-run command gets. They never impo
 `../claude-code` and are shared, so anything touching them has to be green in both:
 
 ```bash
-cd ../claude-code && npm test    # 1847
+cd ../claude-code && npm test    # 1864
 cd ../codex       && npm test    # 434
 ```
 

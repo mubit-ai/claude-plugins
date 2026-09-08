@@ -76,7 +76,7 @@ import { join } from 'node:path';
 import { readActor } from '../../lib/actor.mjs';
 import { clearCarry } from '../../lib/carry.mjs';
 import { classifyTurn } from '../../lib/classify.mjs';
-import { envTags } from '../../lib/config.mjs';
+import { envTags, host } from '../../lib/config.mjs';
 import { runHook } from '../../lib/hook.mjs';
 import { postCheckpoint } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
@@ -546,7 +546,7 @@ function spoolSummary(cfg, runId, payload, snap, label) {
     // follows the new repo, and `repo:`/`branch:` have to follow it or the item lands in the
     // right run wearing the wrong labels.
     env_tags: attempt(
-      () => envTags(cfg, resolveProjectDir(cfg, payload)), ['tool:claude-code']),
+      () => envTags(cfg, resolveProjectDir(cfg, payload)), [`tool:${host()}`]),
     metadata_json: safeJson({
       hook_event: str(payload.hook_event_name) || 'PreCompact',
       source: 'PreCompact',

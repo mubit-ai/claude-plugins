@@ -544,3 +544,50 @@ test('.gitignore re-includes the committed artifact directories', () => {
       `.gitignore must re-include ${dir}/ — a Codex install copies files, it does not build them.`);
   }
 });
+
+// ===========================================================================
+// Package hygiene — what the published tarball says about itself
+// ===========================================================================
+
+// § `mcp/dist/server.js` bundles third-party code with its license comments stripped
+//   (`legalComments: 'none'`), and MIT and Apache-2.0 both condition redistribution on the
+//   notices accompanying the work. The sibling carries them in THIRD_PARTY_NOTICES.md; this
+//   plugin ships a byte-identical copy of that bundle (`codex-mcp.test.mjs` asserts it) and
+//   so owes the same file, byte for byte, on its published list.
+test('THIRD_PARTY_NOTICES.md ships, byte-identical to the sibling`s, and is on the files list', () => {
+  const mine = join(CODEX_ROOT, 'THIRD_PARTY_NOTICES.md');
+  const theirs = join(SHARED_ROOT, 'THIRD_PARTY_NOTICES.md');
+  assert.ok(existsSync(theirs), 'the sibling`s notices file is the source of truth and must exist.');
+  assert.ok(existsSync(mine),
+    'integrations/codex/THIRD_PARTY_NOTICES.md does not exist. The vendored server ships here '
+    + 'too, with the same stripped license comments, and owes the same attributions.');
+  assert.equal(readFileSync(mine, 'utf8'), readFileSync(theirs, 'utf8'),
+    'the two notices files have drifted. They document one bundle, copied byte for byte; the '
+    + 'attributions cannot differ.');
+  const pkg = readJsonOrFail(P.pkg, 'the Codex package manifest.');
+  assert.ok((pkg.files ?? []).includes('THIRD_PARTY_NOTICES.md'),
+    'package.json `files` must list THIRD_PARTY_NOTICES.md, or the tarball ships the bundle '
+    + 'without the notices the licenses require.');
+});
+
+test('package.json carries the license and the verify/clean/prepack scripts, in the sibling`s shape', () => {
+  const pkg = readJsonOrFail(P.pkg, 'the Codex package manifest.');
+  const cc = readJsonOrFail(P.ccPkg, 'the Claude Code package manifest.');
+  assert.equal(pkg.license, 'Apache-2.0', 'the package manifest must state the license the plugin manifest states.');
+  assert.equal(pkg.license, cc.license, 'one source tree, one license.');
+
+  const scripts = pkg.scripts ?? {};
+  assert.equal(scripts.prepack, 'npm run build', 'a pack must build first, as the sibling`s does.');
+  assert.equal(scripts.verify,
+    'npm run clean && npm run build && npm test && npm run test:dist && node ../claude-code/scripts/verify-manifests.mjs',
+    'verify is the whole gate in one command: clean, build, both test targets, the manifest check.');
+  // § Never `mcp/dist` whole. `server.js` is the copy the build takes from the sibling, and
+  //   the sibling`s own `clean` deletes its copy — which cannot be rebuilt in this checkout —
+  //   so a clean here that removed the server would leave nothing to copy back.
+  assert.equal(scripts.clean, 'rm -rf hooks/dist bin mcp/dist/index.js',
+    'clean removes exactly what the build regenerates: the hook bundles, bin/, and the MCP launcher.');
+  assert.ok(!/\bmcp\/dist(?:\s|$)/.test(scripts.clean),
+    'clean must not delete mcp/dist whole: server.js is vendored and unrecoverable here.');
+  assert.equal(scripts['context-cost'], undefined,
+    'contextCost is a Claude Code marketplace concept; the Codex marketplace has no such key.');
+});

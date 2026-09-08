@@ -20,12 +20,17 @@ node --test test/codex-payload.test.mjs   # one gate
 npm run test:dist                         # everything, against the committed bundles
 ```
 
+The six `codex-*-cli.test.mjs` files spawn the **committed** `bin/<name>.mjs` through
+`test/helpers/codex-cli.mjs`, with an environment built from nothing — no `MUBIT_CC_HOST`,
+no `CLAUDE_*` — because that is what a skill-run command gets. They never import the shared
+`bin/*.src.mjs` in-process: that path cannot go red on a bundle that boots without the shim.
+
 **Both suites are one change.** `lib/`, `hooks/src/` and `mcp/src/` live in
 `../claude-code` and are shared, so anything touching them has to be green in both:
 
 ```bash
-cd ../claude-code && npm test    # 1067
-cd ../codex       && npm test    # 243
+cd ../claude-code && npm test    # 1829
+cd ../codex       && npm test    # 434
 ```
 
 ## The load-bearing trick
@@ -67,6 +72,12 @@ why it is a script you run deliberately rather than something the suite does.
 | `codex-skills.test.mjs` | Codex frontmatter (`name`, `description`, and none of the keys Codex does not read), `mcp__mubit__` prefixes, and the content guards |
 | `codex-mcp.test.mjs` | real stdio `tools/list` against the committed bundle, the `instructions` frame, and that the two copies of the vendored server are byte-identical |
 | `codex-failure.test.mjs` | unparseable stdin, absent env, unwritable data dir, a misbehaving endpoint, hostile payloads, the three-second SessionEnd → exit 0, a JSON object on stdout, **never exit 2** |
+| `codex-file-change.test.mjs` | the structured file-change lane on a real `apply_patch`: add/update/delete from the markers, the merged per-run index, a `.env` patch dropped whole, no `files` on a shell command, and the ingest body after `Stop` |
+| `codex-handoff-cli.test.mjs` | the committed `bin/handoff.mjs`, spawned with no host in its environment: the sender is `codex`, the default action, the client-side open join, feedback, and the three refusals by name |
+| `codex-import-cli.test.mjs` | the committed `bin/import.mjs`: the default source is the Codex rollouts, a dry run dials nothing, `--send` tags `tool:codex` with the live item id, a re-run sends nothing, both sources, and the reviewer thread and injected preamble skipped |
+| `codex-pin-cli.test.mjs` | the committed `bin/pin.mjs`: the `variables/*` bodies, the cache the hooks read, a failed write leaving nothing, the run from the marker or `--run`, never the key, and the store setup pinned found with nothing on the command line |
+| `codex-activity-cli.test.mjs` | the committed `bin/activity.mjs`: rows on stdout and the summary on stderr, `--jsonl`, an export that owns stdout and writes no file, `--run`, and never the key |
+| `codex-admin-cli.test.mjs` | the committed `bin/admin.mjs`: the census through `/activity` and never the lessons route, a checkpoint verbatim, the SessionEnd reflect body, exit 2 without dialling, and an unconfigured install told to run `auth` |
 
 ## `codex-failure.test.mjs` is the important one
 

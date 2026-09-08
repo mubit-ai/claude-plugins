@@ -503,3 +503,59 @@ test('pin: states the caps and why a pin is expensive', () => {
   assert.match(body, /never\s+(attempt\s+to\s+)?install|do not install|don't install/i,
     'a memory plugin running installers is a trust failure.');
 });
+
+// ===========================================================================
+// import
+// ===========================================================================
+
+// § The one skill that moves months of somebody's transcripts onto a server. Under Claude
+//   Code `disable-model-invocation: true` keeps the model from running it unasked; Codex
+//   reads no such key, so every one of these sentences is the whole control.
+test('import: resolves the binary the Codex way, and keeps the rules Codex cannot enforce', () => {
+  const { body, fenced } = read('import');
+  assert.ok(!fenced.includes('${CLAUDE_PLUGIN_ROOT}'),
+    'a fenced command carrying ${CLAUDE_PLUGIN_ROOT} runs as `node /bin/import.mjs` under Codex.');
+  assert.match(body, /plugin-root/i, 'the skill must tell the model how to find its own binary.');
+  assert.match(fenced, /bin\/import\.mjs/, 'and the commands have to name it.');
+  assert.match(body, /own initiative/i, 'Codex reads no disable-model-invocation key; this paragraph is the control.');
+  assert.match(body, /do not pass `--send` unless/i, 'sending is the user\'s decision, stated as an instruction.');
+  assert.match(body, /default is `--source codex`/,
+    'the skill states the default the bundle actually applies — codex-import-cli.test.mjs holds the bundle to it.');
+  assert.match(body, /`denied`/, '`denied` is the answer to "did this upload my .env", and the model has to relay it.');
+});
+
+// ===========================================================================
+// handoff
+// ===========================================================================
+
+test('handoff: resolves the binary the Codex way, and names every action, verdict and scope rule', () => {
+  const { body, fenced } = read('handoff');
+  assert.match(fenced, /bin\/handoff\.mjs/, 'the commands have to name the binary.');
+  assert.ok(!fenced.includes('CLAUDE_PLUGIN_ROOT'),
+    'a fenced command carrying ${CLAUDE_PLUGIN_ROOT} runs as `node /bin/handoff.mjs` under Codex.');
+  assert.match(body, /plugin-root/i);
+  // § The binary refuses an unknown action or verdict before dialling, so a skill that names
+  //   the wrong set sends the model into a refusal loop with a person waiting.
+  for (const action of ['review', 'continue', 'approve', 'execute']) {
+    assert.ok(body.includes('`' + action + '`'), 'the action ' + action + ' is not named.');
+  }
+  for (const verdict of ['approve', 'request_changes', 'block', 'acknowledge']) {
+    assert.ok(body.includes('`' + verdict + '`'), 'the verdict ' + verdict + ' is not named.');
+  }
+  assert.match(body, /--run/, 'two live sessions on one machine refuse by name; the model has to know the flag.');
+  assert.match(body, /not cross-run/i, 'a handoff lives in one run id, and the skill has to say so.');
+});
+
+// ===========================================================================
+// The README keeps up
+// ===========================================================================
+
+// § A skill the README's table does not list is a skill a person reading the README does not
+//   know exists. `import` and `handoff` shipped without rows; this is what would have said so.
+test('every skill has a row in the README skills table', () => {
+  const readme = readFileSync(join(CODEX_ROOT, 'README.md'), 'utf8');
+  for (const skill of SKILLS) {
+    assert.ok(readme.includes('| `' + skill + '` |'),
+      'README.md has no `| ' + skill + ' |` row in its skills table.');
+  }
+});

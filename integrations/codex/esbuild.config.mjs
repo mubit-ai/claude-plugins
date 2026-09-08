@@ -5,10 +5,11 @@
 // from one source tree and CI rebuilds both and runs `git diff --exit-code`. Where this file
 // differs from its sibling, the difference is a fact about Codex and is commented as one.
 //
-// What every target here has in common: the entry point is a two-line file under
-// `hooks/src/`, and what it pulls in is `../claude-code/hooks/src/<name>.mjs` and the whole
-// of `../claude-code/lib/`. esbuild inlines all of it, so a shipped Codex bundle contains no
-// reference to a sibling directory that a marketplace install would not have copied.
+// What every target here has in common: the entry point is a two-line file — under
+// `hooks/src/` for a hook, under `cli/` for a command-line bundle — and what it pulls in is
+// `lib/boot.mjs`, then `../claude-code/hooks/src/<name>.mjs` or `../claude-code/bin/<name>.src.mjs`,
+// and the whole of `../claude-code/lib/`. esbuild inlines all of it, so a shipped Codex bundle
+// contains no reference to a sibling directory that a marketplace install would not have copied.
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -82,6 +83,9 @@ const HOOKS = [
   'session-start', 'prompt-recall', 'stage-prompt', 'pre-tool', 'subagent-start',
   'capture', 'checkpoint', 'session-end', 'drain', 'recall-refresh', 'session-resume',
 ];
+
+/** The command-line bundles; `cli/<name>.mjs` is the entry point and `bin/<name>.mjs` the output. */
+const BINS = ['auth', 'activity', 'pin', 'admin', 'import', 'handoff', 'dashboard'];
 
 /**
  * The vendored MCP server bundle, copied rather than rebuilt.
@@ -182,35 +186,23 @@ const targets = [
   ...HOOKS.map((n) => launcherTarget(
     launcher(`./impl/${n}.mjs`, `hook ${n}`), `${n}.launcher.mjs`, `hooks/dist/${n}.mjs`,
   )),
-  // The auth binary. `/mubit-memory:auth` is the one skill that calls no MCP tool — it runs
-  // this to obtain the credential every other tool needs — so a Codex plugin without it has
-  // no first-run story at all.
-  { entryPoints: [resolve(SHARED, 'bin', 'auth.src.mjs')], outfile: out('bin/auth.mjs'), ...shared },
-  // The activity binary. The `activity` skill ships under both hosts and its only instruction
-  // is to run this file, so without the target the Codex copy of the skill names a path that
-  // does not exist — the same first-run dead end `auth` would have.
-  { entryPoints: [resolve(SHARED, 'bin', 'activity.src.mjs')], outfile: out('bin/activity.mjs'), ...shared },
-  // The pin binary, from the same shared source as the Claude Code copy. `/mubit-memory:pin`
-  // is the second skill that calls no MCP tool — the vendored server has no variables tool to
-  // call — so without this the skill on this host names a binary that does not exist.
-  { entryPoints: [resolve(SHARED, 'bin', 'pin.src.mjs')], outfile: out('bin/pin.mjs'), ...shared },
-  // The admin binary, from the same shared source. The four skills that call it ship under
-  // both hosts, so without this target the Codex copies name a path that does not exist.
-  { entryPoints: [resolve(SHARED, 'bin', 'admin.src.mjs')], outfile: out('bin/admin.mjs'), ...shared },
-  // `/mubit-memory:import`, the transcript backfill. Shared source, same as every other
-  // binary here: the transcripts it reads are Claude Code's, and a Codex user with both
-  // installed has the same history to import.
-  { entryPoints: [resolve(SHARED, 'bin', 'import.src.mjs')], outfile: out('bin/import.mjs'), ...shared },
-  // `/mubit-memory:handoff`, from the same shared source; the Codex skill names this path.
-  { entryPoints: [resolve(SHARED, 'bin', 'handoff.src.mjs')], outfile: out('bin/handoff.mjs'), ...shared },
-  // The dashboard binary, built from the same shared source as the Claude Code copy. Two
-  // installable plugins cannot share a path — the same reason this tree carries its own
-  // `mcp/dist/server.js` — so the bundle is emitted here rather than referenced across.
+  // The seven command-line bundles, one per skill that runs a binary rather than an MCP tool.
+  // Each is built from `cli/<name>.mjs` — the shim, then the shared `bin/<name>.src.mjs` —
+  // and not from the shared source directly: a bundle without the shim runs as a Claude Code
+  // process, and `bin/handoff.mjs` on a Codex machine filed every note as sent by one.
   //
-  // `bin/dashboard.html` is *not* an entry point: the server reads it at runtime as a sibling
-  // of the bundle, which keeps `bin/dashboard.src.mjs` loadable by Node for the suite and keeps
-  // 42 KB of markup out of the inline sourcemap. It ships as the tracked copy in this `bin/`.
-  { entryPoints: [resolve(SHARED, 'bin', 'dashboard.src.mjs')], outfile: out('bin/dashboard.mjs'), ...shared },
+  //   auth       the credential every other tool needs; without it there is no first-run story
+  //   activity   the audit question, and the JSONL export
+  //   pin        the run's standing constraints; the vendored server has no variables tool
+  //   admin      the four administrative verbs that left the MCP surface
+  //   import     the backfill of the rollouts and transcripts already on the machine
+  //   handoff    notes between agents inside a run, and the verdicts that answer them
+  //   dashboard  the local page; `bin/dashboard.html` is copied beside it below, not bundled,
+  //              because the server reads it at runtime as a sibling of the bundle
+  //
+  // Two installable plugins cannot share a path — the same reason this tree carries its own
+  // `mcp/dist/server.js` — so every one is emitted here rather than referenced across.
+  ...BINS.map((n) => ({ entryPoints: [resolve(ROOT, 'cli', `${n}.mjs`)], outfile: out(`bin/${n}.mjs`), ...shared })),
   // No status line target. Codex's status line is a declarative list of built-in item ids:
   // there is no command hook and nothing scriptable to render into, so `bin/statusline.mjs`
   // here would be dead weight in every marketplace bundle. `lib/config.mjs` defaults

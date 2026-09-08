@@ -1,6 +1,6 @@
 {
   "name": "@mubit-ai/codex-plugin",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "type": "module",
   "description": "Mubit memory plugin for OpenAI Codex CLI — involuntary capture, pre-prompt recall, and outcome attribution.",
   "license": "Apache-2.0",

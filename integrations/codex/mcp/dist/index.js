@@ -2940,7 +2940,7 @@ var BRIDGED = [
   ["MUBIT_CC_DATA_DIR", "CLAUDE_PLUGIN_DATA"]
 ];
 var UNEXPANDED = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
-var SERVER_VERSION = true ? "0.13.0" : "";
+var SERVER_VERSION = true ? "0.13.1" : "";
 if (prepare(process.env)) {
   await import("./server.js");
 }

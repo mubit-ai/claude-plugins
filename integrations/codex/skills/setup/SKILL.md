@@ -175,10 +175,10 @@ whole ladder. Do not send a Codex user to a `/plugin` configure screen; it does 
 
 **If either value is missing, run `node <root>/scripts/login.mjs`.** It prompts for a key
 without echoing it, checks it against the instance, and writes it to the directory Step 3
-pinned as `MUBIT_CC_DATA_DIR` — which is the point. `mubit-memory:auth` shares its bundle with
-the Claude Code build and resolves the data directory by search, so a hand-run auth can store
-a valid key in a directory these hooks never read: no error anywhere, and memory simply stays
-unauthenticated.
+pinned as `MUBIT_CC_DATA_DIR` — and prints which directory that was and how it decided.
+`mubit-memory:auth` runs `bin/auth.mjs`, which resolves the same directory the same way — the
+pin in `$CODEX_HOME/hooks.json` first, then a search — so the two agree on a set-up install; the
+script is the one that says so out loud, which is what you want when the answer might be wrong.
 
 ```
 node <root>/scripts/login.mjs            # prompts; add --status to check without dialing

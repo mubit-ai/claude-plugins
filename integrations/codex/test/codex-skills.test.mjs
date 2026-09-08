@@ -545,3 +545,17 @@ test('handoff: resolves the binary the Codex way, and names every action, verdic
   assert.match(body, /--run/, 'two live sessions on one machine refuse by name; the model has to know the flag.');
   assert.match(body, /not cross-run/i, 'a handoff lives in one run id, and the skill has to say so.');
 });
+
+// ===========================================================================
+// The README keeps up
+// ===========================================================================
+
+// § A skill the README's table does not list is a skill a person reading the README does not
+//   know exists. `import` and `handoff` shipped without rows; this is what would have said so.
+test('every skill has a row in the README skills table', () => {
+  const readme = readFileSync(join(CODEX_ROOT, 'README.md'), 'utf8');
+  for (const skill of SKILLS) {
+    assert.ok(readme.includes('| `' + skill + '` |'),
+      'README.md has no `| ' + skill + ' |` row in its skills table.');
+  }
+});

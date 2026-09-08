@@ -710,6 +710,7 @@ test('proxy: the four unnamed routes are dialled at exactly the documented paths
       'POST /v2/control/archive': { json: { success: true } },
       'POST /v2/control/lessons/delete': { json: { success: true } },
       'GET /v2/control/runs': { json: { runs: [] } },
+      'POST /v2/control/dereference': { json: { found: true, evidence: { id: 'i', content: 'c' } } },
     },
   });
 
@@ -718,6 +719,7 @@ test('proxy: the four unnamed routes are dialled at exactly the documented paths
   await mod.sendArchive(cfg, { run: 'r', content: 'c' });
   await mod.deleteLesson(cfg, { lessonId: 'i', confirm: 'i' });
   await mod.fetchRemoteRuns(cfg, {});
+  await mod.fetchEntry(cfg, { run: 'r', id: 'i' });
 
   for (const [method, path] of [
     ['POST', '/v2/control/activity'],
@@ -725,9 +727,200 @@ test('proxy: the four unnamed routes are dialled at exactly the documented paths
     ['POST', '/v2/control/archive'],
     ['POST', '/v2/control/lessons/delete'],
     ['GET', '/v2/control/runs'],
+    ['POST', '/v2/control/dereference'],
   ]) {
     server.assertCalled(method, path, 1);
   }
-  assert.equal(server.requests.filter((r) => r.path.startsWith('/v2/control/')).length, 5,
+  assert.equal(server.requests.filter((r) => r.path.startsWith('/v2/control/')).length, 6,
     `the dashboard called something it should not have: ${server.summary()}`);
+});
+
+// ---------------------------------------------------------------------------
+// Provenance — which session, which prompt, and who wrote it
+// ---------------------------------------------------------------------------
+
+const SID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+const PID = '11111111-2222-4333-8444-555555555555';
+
+/**
+ * The stamp the egress guard puts on an MCP write, read back off the feed. A row that carries
+ * it can be attributed to a prompt exactly; a row that does not is left blank, never guessed.
+ */
+test('lessons: a stamped lesson carries its session, prompt, turn and origin off the feed', async (t) => {
+  const { mod } = await setup(t);
+
+  const stamped = mod.normalizeActivityLesson(activityEntry({
+    source: 'mcp-agent',
+    metadata_json: JSON.stringify({
+      scope: 'session', session_id: SID, prompt_id: PID, turn_number: 7, verified_in_production: true,
+    }),
+  }));
+  assert.equal(stamped.sessionId, SID);
+  assert.equal(stamped.promptId, PID);
+  assert.equal(stamped.turnNumber, 7);
+  assert.equal(stamped.origin, 'agent', 'mcp-agent is the tool path, and the page calls it the agent');
+  assert.equal(stamped.autoReflection, false);
+  assert.equal(stamped.timestamp, '2026-08-19T15:03:18Z', 'created_at is the timestamp when the feed has one');
+  assert.equal(stamped.scope, 'session', 'and nothing the stamp added disturbs the keys already pinned');
+
+  const bare = mod.normalizeActivityLesson(activityEntry({ metadata_json: '{}' }));
+  assert.equal(bare.sessionId, '', 'absent means absent — a session is never invented');
+  assert.equal(bare.promptId, '');
+  assert.equal(bare.turnNumber, 0);
+  assert.equal(bare.origin, 'reflection', 'the fixture source is "reflection"');
+
+  // The four origins, from `source` and from the metadata flag.
+  const originOf = (over, meta = {}) => mod.normalizeActivityLesson(
+    activityEntry({ ...over, metadata_json: JSON.stringify(meta) })).origin;
+  assert.equal(originOf({ source: 'mcp-agent' }), 'agent');
+  assert.equal(originOf({ source: 'agent' }), 'agent');
+  assert.equal(originOf({ source: 'reflection:session-end' }), 'reflection');
+  assert.equal(originOf({ source: 'auto-reflect:end' }), 'auto-reflection');
+  assert.equal(originOf({ source: 'reflection' }, { auto_reflection: true }), 'auto-reflection',
+    'the metadata flag wins over a source that says only "reflection"');
+  assert.equal(mod.normalizeActivityLesson(activityEntry({ metadata_json: JSON.stringify({ auto_reflection: true }) })).autoReflection, true);
+  assert.equal(originOf({ source: 'hook' }), 'hook');
+  assert.equal(originOf({ source: '' }), '', 'no source is no origin, not a guess');
+
+  // A lesson the feed dated only in its metadata: epoch seconds become ISO.
+  const dated = mod.normalizeActivityLesson(activityEntry({
+    created_at: '', metadata_json: JSON.stringify({ timestamp: 1_700_000_000 }),
+  }));
+  assert.equal(dated.createdAt, '', 'createdAt stays what the feed said');
+  assert.equal(dated.timestamp, '2023-11-14T22:13:20.000Z');
+  const ingested = mod.normalizeActivityLesson(activityEntry({
+    created_at: '', metadata_json: JSON.stringify({ ingested_at: '2026-01-02T03:04:05Z' }),
+  }));
+  assert.equal(ingested.timestamp, '2026-01-02T03:04:05Z');
+  assert.equal(mod.normalizeActivityLesson(activityEntry({ created_at: '', metadata_json: '{}' })).timestamp, '');
+
+  // The lessons-route shape has no metadata at all, so it carries the keys empty.
+  const fromRoute = mod.normalizeLesson(lessonEntry({ source: 'mcp-agent' }));
+  assert.equal(fromRoute.sessionId, '');
+  assert.equal(fromRoute.promptId, '');
+  assert.equal(fromRoute.turnNumber, 0);
+  assert.equal(fromRoute.origin, 'agent');
+  assert.equal(fromRoute.autoReflection, false);
+  assert.equal(fromRoute.timestamp, '');
+});
+
+/** The `evidence` half of a dereference answer, for a hook capture. */
+function traceEvidence(over = {}, meta = {}) {
+  return {
+    id: 'e-trace-1',
+    reference_id: 'ref_trace_1',
+    run_id: 'state::01234::cc-here-00000001',
+    entry_type: 'trace',
+    content: 'Edit lib/dashboard-data.mjs',
+    source: 'hook',
+    created_at: '2026-08-19T15:03:18Z',
+    ...over,
+    metadata_json: JSON.stringify({
+      session_id: SID,
+      prompt_id: PID,
+      hook_event: 'PostToolUse',
+      tool: 'Edit',
+      occurrence_time: '2026-08-19T15:03:17Z',
+      env_tags: ['repo:github.com/mubit-ai/x'],
+      agent_type: 'Explore',
+      mubit_agent_id: 'claude-code-sub-abc',
+      ...meta,
+    }),
+  };
+}
+
+// A dereferenced entry is the one shape that carries everything the instance recorded about a
+// write: a trace says which hook and which tool, a SubagentStop note says which agent. The
+// same keys as a lesson row, plus those.
+test('entry: normalizeEvidence maps a trace and a lesson to the same keys, inventing nothing', async (t) => {
+  const { mod } = await setup(t);
+
+  const trace = mod.normalizeEvidence(traceEvidence());
+  assert.equal(trace.id, 'ref_trace_1', 'reference_id wins, as everywhere else');
+  assert.equal(trace.entryType, 'trace');
+  assert.equal(trace.content, 'Edit lib/dashboard-data.mjs');
+  assert.equal(trace.runId, 'state::01234::cc-here-00000001', 'the run id is carried as spelled; the page folds it');
+  assert.equal(trace.sessionId, SID);
+  assert.equal(trace.promptId, PID);
+  assert.equal(trace.hookEvent, 'PostToolUse');
+  assert.equal(trace.tool, 'Edit');
+  assert.equal(trace.agentType, 'Explore');
+  assert.equal(trace.mubitAgentId, 'claude-code-sub-abc');
+  assert.equal(trace.occurrenceAt, '2026-08-19T15:03:17Z');
+  assert.equal(trace.project, 'github.com/mubit-ai/x');
+  assert.equal(trace.origin, 'hook');
+  assert.equal(trace.createdAt, '2026-08-19T15:03:18Z');
+  assert.equal(trace.timestamp, '2026-08-19T15:03:18Z');
+  assert.equal(trace.scope, 'run', 'a trace has no scope; it reads as run, unrecorded');
+  assert.equal(trace.scopeKnown, false);
+
+  const lesson = mod.normalizeEvidence({
+    id: 'e-lesson-1', reference_id: 'ref_lesson_1', run_id: 'cc-here-00000001', entry_type: 'lesson',
+    content: 'Run the migration first.', source: 'mcp-agent', created_at: '2026-08-19T15:03:18Z',
+    metadata_json: JSON.stringify({ scope: 'global', lesson_type: 'rule', importance: 'high' }),
+  });
+  assert.equal(lesson.entryType, 'lesson');
+  assert.equal(lesson.lessonType, 'rule');
+  assert.equal(lesson.scope, 'global');
+  assert.equal(lesson.scopeKnown, true);
+  assert.equal(lesson.leaksScope, true);
+  assert.equal(lesson.importance, 'high');
+  assert.equal(lesson.origin, 'agent');
+  for (const k of ['sessionId', 'promptId', 'hookEvent', 'tool', 'agentType', 'mubitAgentId', 'occurrenceAt', 'project']) {
+    assert.equal(lesson[k], '', `${k} must be empty when the entry did not record it, never invented`);
+  }
+  assert.equal(lesson.turnNumber, 0);
+
+  assert.equal(mod.normalizeEvidence(null).id, '', 'a null evidence block does not throw');
+  assert.equal(mod.normalizeEvidence({}).entryType, '');
+});
+
+/**
+ * `POST /v2/control/dereference` is the one route that can answer "what is this id" for any
+ * entry type, which is what the injected-memories list and the Everything-stored detail are
+ * built on. Its body is exactly two fields; a page polling it must not be able to open the
+ * hooks' breaker; and "not found" is the caller's 404, not a 200 with nothing in it.
+ */
+test('entry: fetchEntry posts exactly {run_id, reference_id}, maps not-found to 404, and refuses without either', async (t) => {
+  const { server, cfg, mod } = await setup(t, {
+    routes: {
+      'POST /v2/control/dereference': (req) => (req.body.reference_id === 'ref_trace_1'
+        ? { json: { found: true, evidence: traceEvidence() } }
+        : { json: { found: false } }),
+    },
+  });
+
+  const r = await mod.fetchEntry(cfg, { run: 'cc-here-00000001', id: 'ref_trace_1' });
+  assert.equal(r.ok, true);
+  assert.equal(r.data.entry.id, 'ref_trace_1');
+  assert.equal(r.data.entry.tool, 'Edit');
+  assert.deepEqual(server.lastCall('POST', '/v2/control/dereference')?.body,
+    { run_id: 'cc-here-00000001', reference_id: 'ref_trace_1' },
+    'exactly two fields: a user_id or agent_id here becomes a retrieval filter nobody asked for');
+
+  const missing = await mod.fetchEntry(cfg, { run: 'cc-here-00000001', id: 'ref_nope' });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.status, 404);
+  assert.equal(missing.code, 'not_found');
+
+  server.reset();
+  assert.equal((await mod.fetchEntry(cfg, { run: 'cc-here-00000001', id: '' })).code, 'bad_request');
+  assert.equal((await mod.fetchEntry(cfg, { run: '', id: 'ref_trace_1' })).code, 'bad_request');
+  server.assertNotCalled('POST', '/v2/control/dereference');
+});
+
+test('entry: a failing dereference records nothing in the breaker and a 401 reads as auth_failed', async (t) => {
+  const { dataDir, cfg, mod } = await setup(t, {
+    routes: { 'POST /v2/control/dereference': { status: 500, json: { error: 'boom' } } },
+  });
+  for (let i = 0; i < 6; i++) await mod.fetchEntry(cfg, { run: 'cc-here-00000001', id: 'x' });
+  assert.deepEqual(readdirSync(join(dataDir, 'breaker')), [],
+    'six failed lookups from a page must leave the hooks\' breaker exactly as it was');
+
+  const { cfg: cfg2, mod: mod2 } = await setup(t, {
+    routes: { 'POST /v2/control/dereference': { status: 401, json: { error: 'nope' } } },
+  });
+  const r = await mod2.fetchEntry(cfg2, { run: 'cc-here-00000001', id: 'x' });
+  assert.equal(r.code, 'auth_failed');
+  assert.equal(r.status, 502);
 });

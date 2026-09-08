@@ -1070,8 +1070,8 @@ test('families: run rows carry baseRunId, clearIndex and subagentCount', async (
 
 test('turns: a family turn row says which run it came from, and which subagents ran under it', async (t) => {
   const { dataDir, mod } = await setup(t);
-  writeMarker(dataDir, 'cc-ft-00000001');
-  writeMarker(dataDir, 'cc-ft-00000001-c1');
+  writeMarker(dataDir, 'cc-ft-00000001', { updated_at: 1000 });
+  writeMarker(dataDir, 'cc-ft-00000001-c1', { updated_at: 2000 });
   writeTurn(dataDir, 'cc-ft-00000001', turnFixture({ started_at: 1_700_000_000_000 }));
   writeTurn(dataDir, 'cc-ft-00000001-c1', turnFixture({
     prompt_id: '22222222-2222-3333-4444-555555555555', started_at: 1_700_000_100_000,
@@ -1100,8 +1100,8 @@ test('turns: a family turn row says which run it came from, and which subagents 
 
 test('analytics: the family form concatenates every run\'s rollup by time', async (t) => {
   const { dataDir, mod } = await setup(t);
-  writeMarker(dataDir, 'cc-fa-00000001');
-  writeMarker(dataDir, 'cc-fa-00000001-c1');
+  writeMarker(dataDir, 'cc-fa-00000001', { updated_at: 1000 });
+  writeMarker(dataDir, 'cc-fa-00000001-c1', { updated_at: 2000 });
   mkdirSync(join(dataDir, 'dashboard'), { recursive: true });
   writeFileSync(mod.rollupPath(dataDir, 'cc-fa-00000001'),
     [{ at: 100, tok: 10, sources: 1 }, { at: 300, tok: 30, sources: 1 }].map((r) => JSON.stringify(r)).join('\n') + '\n');

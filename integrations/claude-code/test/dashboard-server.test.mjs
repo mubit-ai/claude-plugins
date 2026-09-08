@@ -108,8 +108,27 @@ function writeSession(dataDir, sid, patch = {}) {
   }));
 }
 
+/** One subagent record under `RUN`, in the shape `subagent-start.mjs` writes it. */
+function writeSubagent(dataDir, runId, subId, patch = {}) {
+  const dir = join(dataDir, 'runs', runId, 'subagents');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${runId}-sub-${subId}.json`), JSON.stringify({
+    sub_run_id: `${runId}-sub-${subId}`, parent_run_id: runId, agent_id: subId,
+    mubit_agent_id: `claude-code-sub-${subId}`, agent_type: 'Explore', session_id: SESSION,
+    prompt_id: PROMPT, at: 1_700_000_005_000,
+    recall: { rung: 1, sources: 1, tokens: 504, chars: 2013, dropped: 0, pointers: 0, empty_reason: '', ms: 384 },
+    recalled: ['ref_lesson_1'], linked: false, ...patch,
+  }));
+}
+
+/** The run `RUN` becomes after one `/clear`: same directory, a second id. */
+const RUN_C1 = `${RUN}-c1`;
+const PROMPT_C1 = '22222222-2222-3333-4444-555555555555';
+
 // Every sweep below runs over a run that has a session record, so a field added to the
 // session row is covered by the key sweep and the redaction sweep without a second fixture.
+// The seed also holds one subagent and one post-/clear sibling, so the family routes have
+// something to union; the sibling's marker is old, so `RUN` stays the newest run.
 function seedRun(dataDir, over = {}) {
   writeMarker(dataDir, RUN);
   writeSession(dataDir, SESSION);
@@ -122,6 +141,15 @@ function seedRun(dataDir, over = {}) {
     recall: { tokens: 120, chars: 480, sources: 3, pointers: 1, rung: 1 },
     ...over,
   });
+  writeSubagent(dataDir, RUN, 'abc');
+  writeMarker(dataDir, RUN_C1, { updated_at: 1_700_000_000_000 });
+  writeTurn(dataDir, RUN_C1, {
+    prompt: 'and again after the clear',
+    prompt_id: PROMPT_C1,
+    session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    started_at: 1_700_000_100_000,
+    recalled: [],
+  });
 }
 
 /** Every GET route the server answers, for the cross-cutting sweeps. */
@@ -129,6 +157,7 @@ const GET_ROUTES = [
   '/', '/api/ping', '/api/meta', '/api/datadirs', '/api/runs', '/api/turns',
   `/api/turn?run=${RUN}&prompt=${PROMPT}`, '/api/health/local', '/api/analytics',
   '/api/lessons', '/api/activity', `/api/health/remote?run=${RUN}`, '/api/remote-runs',
+  `/api/entry?run=${RUN}&id=ref_lesson_1`,
 ];
 
 /** Every POST route, with a body that is valid enough to get past the guards. */
@@ -255,7 +284,8 @@ test('offline: every local route answers 200 with no instance reachable, and the
     assert.equal(res.status, 200, `local route ${path} answered ${res.status} with the network down`);
   }
 
-  for (const path of ['/api/lessons', '/api/activity', `/api/health/remote?run=${RUN}`, '/api/remote-runs']) {
+  for (const path of ['/api/lessons', '/api/activity', `/api/health/remote?run=${RUN}`, '/api/remote-runs',
+    `/api/entry?run=${RUN}&id=ref_lesson_1`]) {
     const res = await call(path);
     assert.equal(res.status, 503, `${path} should degrade, not succeed`);
     const body = await res.json();
@@ -325,6 +355,7 @@ test('secrets: the API key appears in no response from any route', async (t) => 
       'POST /v2/control/outcome': echo,
       'POST /v2/control/archive': echo,
       'POST /v2/control/lessons/delete': echo,
+      'POST /v2/control/dereference': echo,
     },
   });
   seedRun(dataDir);
@@ -813,6 +844,109 @@ test('routing: a POST body that is not JSON is a 400 rather than a 500', async (
   assert.equal(res.status, 400);
   assert.equal((await res.json()).error.code, 'bad_request');
   upstream.assertNotCalled('POST', '/v2/control/query');
+});
+
+// ---------------------------------------------------------------------------
+// Provenance — families, subagents and lookup by id
+// ---------------------------------------------------------------------------
+
+/** The `evidence` half of a dereference answer, as the instance serialises a lesson. */
+function lessonEvidence(id = 'ref_lesson_1') {
+  return {
+    id: 'e-1', reference_id: id, run_id: `state::01234::${RUN}`, entry_type: 'lesson',
+    content: 'Run the migration first.', source: 'mcp-agent', created_at: '2026-08-19T15:03:18Z',
+    metadata_json: JSON.stringify({ scope: 'session', lesson_type: 'rule', session_id: SESSION, prompt_id: PROMPT, turn_number: 3 }),
+  };
+}
+
+test('turn: /api/turn lists the subagents that ran under that prompt', async (t) => {
+  const { dataDir, call } = await setup(t);
+  seedRun(dataDir);
+  const body = await (await call(`/api/turn?run=${RUN}&prompt=${PROMPT}`)).json();
+  assert.equal(body.turn.runId, RUN);
+  assert.equal(body.turn.subagents.length, 1);
+  assert.equal(body.turn.subagents[0].agentType, 'Explore');
+  assert.equal(body.turn.subagents[0].promptId, PROMPT);
+  assert.equal(body.turn.subagents[0].recalledCount, 1);
+  assert.deepEqual(body.turn.subagents[0].recalled, ['ref_lesson_1']);
+
+  const other = await (await call(`/api/turn?run=${RUN_C1}&prompt=${PROMPT_C1}`)).json();
+  assert.deepEqual(other.turn.subagents, [], 'a subagent is attached to its own prompt only');
+});
+
+test('turns: ?family=1 unions RUN and RUN-c1 and says which run each turn came from', async (t) => {
+  const { dataDir, call } = await setup(t);
+  seedRun(dataDir);
+
+  const one = await (await call(`/api/turns?run=${RUN}`)).json();
+  assert.deepEqual(one.turns.map((x) => x.runId), [RUN], 'without the flag, one run, and the row still names it');
+  assert.equal(one.turns[0].subagentCount, 1);
+  assert.deepEqual(one.turns[0].subagentTypes, ['Explore']);
+
+  const fam = await (await call(`/api/turns?run=${RUN}&family=1`)).json();
+  assert.deepEqual(fam.turns.map((x) => x.runId), [RUN_C1, RUN], 'newest first across the family');
+  assert.equal(fam.turns[1].subagentCount, 1);
+  assert.equal(fam.turns[0].subagentCount, 0);
+
+  await call(`/api/turns?run=${RUN_C1}`);
+  const analytics = await (await call(`/api/analytics?run=${RUN}&family=1`)).json();
+  assert.deepEqual(analytics.runIds, [RUN, RUN_C1]);
+  assert.equal(analytics.points, 2, 'both runs\' rollups, one row each');
+});
+
+test('runs: rows carry baseRunId, clearIndex and subagentCount', async (t) => {
+  const { dataDir, call } = await setup(t);
+  seedRun(dataDir);
+  const body = await (await call('/api/runs')).json();
+  const main = body.runs.find((r) => r.runId === RUN);
+  assert.equal(main.baseRunId, RUN);
+  assert.equal(main.clearIndex, 0);
+  assert.equal(main.subagentCount, 1);
+  const cleared = body.runs.find((r) => r.runId === RUN_C1);
+  assert.equal(cleared.baseRunId, RUN, 'a post-/clear run folds to the same directory key');
+  assert.equal(cleared.clearIndex, 1);
+  assert.equal(cleared.subagentCount, 0);
+});
+
+test('entry: /api/entry proxies dereference with {run_id, reference_id} and never the key', async (t) => {
+  const { dataDir, cfg, call, upstream } = await setup(t, {
+    routes: { 'POST /v2/control/dereference': { json: { found: true, evidence: lessonEvidence() } } },
+  });
+  seedRun(dataDir);
+
+  const res = await call(`/api/entry?run=${RUN}&id=ref_lesson_1`);
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  assert.ok(!text.includes(cfg.apiKey));
+  const body = JSON.parse(text);
+  assert.equal(body.entry.id, 'ref_lesson_1');
+  assert.equal(body.entry.entryType, 'lesson');
+  assert.equal(body.entry.sessionId, SESSION);
+  assert.equal(body.entry.promptId, PROMPT);
+  assert.equal(body.entry.turnNumber, 3);
+  assert.equal(body.entry.origin, 'agent');
+  assert.deepEqual(upstream.lastCall('POST', '/v2/control/dereference')?.body,
+    { run_id: RUN, reference_id: 'ref_lesson_1' });
+
+  // `?run=` resolves like every other route: absent, it is the newest run in the directory.
+  await call('/api/entry?id=ref_lesson_1');
+  assert.equal(upstream.lastCall('POST', '/v2/control/dereference')?.body.run_id, RUN);
+});
+
+test('entry: a missing id is 400, an unknown id is 404 not_found', async (t) => {
+  const { dataDir, call, upstream } = await setup(t, {
+    routes: { 'POST /v2/control/dereference': { json: { found: false } } },
+  });
+  seedRun(dataDir);
+
+  const missing = await call(`/api/entry?run=${RUN}`);
+  assert.equal(missing.status, 400);
+  assert.equal((await missing.json()).error.code, 'bad_request');
+  upstream.assertNotCalled('POST', '/v2/control/dereference');
+
+  const unknown = await call(`/api/entry?run=${RUN}&id=ref_nope`);
+  assert.equal(unknown.status, 404);
+  assert.equal((await unknown.json()).error.code, 'not_found');
 });
 
 // ---------------------------------------------------------------------------

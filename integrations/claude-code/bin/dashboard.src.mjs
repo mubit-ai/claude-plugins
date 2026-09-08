@@ -52,7 +52,7 @@ import { fileURLToPath } from 'node:url';
 import { lessonCensus } from '../lib/activity.mjs';
 import { isConfigured, loadConfig } from '../lib/config.mjs';
 import {
-  deleteLesson, fetchActivity, fetchLessons, fetchMemoryHealth, fetchRemoteRuns,
+  deleteLesson, fetchActivity, fetchEntry, fetchLessons, fetchMemoryHealth, fetchRemoteRuns,
   normalizeActivityLesson, ok, runSearch, sendArchive, sendOutcome,
 } from '../lib/dashboard-api.mjs';
 import {
@@ -403,6 +403,11 @@ function scope(ctx, url) {
   return { dir, run, dirs };
 }
 
+/** `?family=1`: read every run of the directory `?run=` belongs to. @param {URL} url */
+function familyParam(url) {
+  return String(url.searchParams.get('family') ?? '') === '1';
+}
+
 // ---------------------------------------------------------------------------
 // The lesson census
 // ---------------------------------------------------------------------------
@@ -635,11 +640,14 @@ async function getRoute(ctx, res, path, url) {
   if (path === '/api/turns') {
     const { dir, run } = scope(ctx, url);
     const limit = Number(url.searchParams.get('limit') ?? 100);
+    // `family=1` widens the read to every run of the directory `run` belongs to — the ids a
+    // `/clear` and every subagent minted beside it. The concrete run still names the rollup.
+    const family = familyParam(url);
     // The disk poll is also when the rollup grows. Turn files are pruned at six hours, so a
     // trend line has to be accumulated as it happens or it cannot exist at all.
     if (dir && run) appendRollup(dir, run, sampleFor(dir, run));
     return sendJson(res, 200, {
-      dir, run, turns: dir && run ? turnRows(dir, run, { limit }) : [],
+      dir, run, family, turns: dir && run ? turnRows(dir, run, { limit, family }) : [],
     }, cfg);
   }
 
@@ -659,10 +667,11 @@ async function getRoute(ctx, res, path, url) {
   if (path === '/api/analytics') {
     const { dir, run } = scope(ctx, url);
     const since = Number(url.searchParams.get('since') ?? 0);
+    const family = familyParam(url);
     if (dir && run) appendRollup(dir, run, sampleFor(dir, run));
     return sendJson(res, 200, dir && run
-      ? analytics(dir, run, { since })
-      : { dir, runId: run, series: [], points: 0 }, cfg);
+      ? analytics(dir, run, { since, family })
+      : { dir, runId: run, runIds: [], series: [], points: 0 }, cfg);
   }
 
   // --- proxied. These need the instance, and degrade with a banner. --------
@@ -712,6 +721,16 @@ async function getRoute(ctx, res, path, url) {
     return upstream(res, cfg, await fetchRemoteRuns(cfg, {
       limit: Number(url.searchParams.get('limit') ?? 25),
     }));
+  }
+
+  // One entry by id, of any type: what an injected-memory id or an activity row resolves to.
+  // Read-only like every other proxied route, so a page resolving forty ids against a dead
+  // instance cannot open the hooks' breaker.
+  if (path === '/api/entry') {
+    const { run } = scope(ctx, url);
+    const id = String(url.searchParams.get('id') ?? '').trim();
+    if (!id) return sendError(res, 400, 'bad_request', 'entry requires an id', cfg);
+    return upstream(res, cfg, await fetchEntry(cfg, { run, id }));
   }
 
   return sendError(res, 404, 'not_found', `GET ${path} is not a dashboard route`, cfg);

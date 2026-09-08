@@ -56,8 +56,8 @@ import {
   normalizeActivityLesson, ok, runSearch, sendArchive, sendOutcome,
 } from '../lib/dashboard-api.mjs';
 import {
-  analytics, appendRollup, listDataDirs, listRuns, localHealth, newestRun,
-  resolveDirParam, runsIn, sampleFor, turnDetail, turnRows,
+  analytics, appendRollup, describeRunScope, launchRunFor, listDataDirs, listRuns, localHealth,
+  newestRun, resolveDirParam, runsIn, sampleFor, turnDetail, turnRows,
 } from '../lib/dashboard-data.mjs';
 import { ensureDir, readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../lib/state.mjs';
 
@@ -601,6 +601,18 @@ async function getRoute(ctx, res, path, url) {
       dirs,
       dir,
       run,
+      // Where this page was opened from, and which run that directory maps to. `run` above
+      // stays the newest run in the directory — that is the contract every local route
+      // resolves `?run=` against — so this is the page's way of saying "and this is the one you
+      // were sitting in", which on a machine with two sessions open is not the same run.
+      launch: {
+        cwd: safeCwd(),
+        projectDir: String(cfg.projectDir ?? ''),
+        run: dir ? launchRunFor(dir, String(cfg.projectDir ?? '')) : '',
+      },
+      // What the run writes at and reads from, in words. Built server-side from the live
+      // config so the page and the settings that decide it cannot drift.
+      scope: describeRunScope(cfg),
       pollMs: POLL_MS,
       startedAt: ctx.startedAt,
     }, cfg);
@@ -613,7 +625,11 @@ async function getRoute(ctx, res, path, url) {
   if (path === '/api/runs') {
     const { dir, dirs } = scope(ctx, url);
     const all = String(url.searchParams.get('all') ?? '') === '1';
-    return sendJson(res, 200, { dir, runs: all ? listRuns(dirs) : runsIn(dir) }, cfg);
+    // With their sessions: the rail and the identity strip render from this row, and one read
+    // of the session map per poll is cheaper than a route per run.
+    return sendJson(res, 200, {
+      dir, runs: all ? listRuns(dirs, { sessions: true }) : runsIn(dir, { sessions: true }),
+    }, cfg);
   }
 
   if (path === '/api/turns') {
@@ -818,6 +834,10 @@ export async function probe(state, fetchImpl = fetch) {
   } catch {
     return { alive: false };
   }
+}
+
+function safeCwd() {
+  try { return process.cwd(); } catch { return ''; }
 }
 
 /** @param {string} url */

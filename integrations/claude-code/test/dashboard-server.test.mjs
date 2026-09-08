@@ -44,9 +44,13 @@ const STUB_HTML = '<!doctype html><title>stub</title><p>stub page';
  *
  * `idleMs: 0` disables the shutdown timer for every test but the two that exercise it.
  *
+ * `extra` reaches `loadConfig` as environment, which is how the scope settings are set for the
+ * `/api/meta` tests — through the same path a real user would use.
+ *
  * @param {import('node:test').TestContext} t
  * @param {{routes?: Record<string, any>, endpoint?: string, idleMs?: number,
- *          onShutdown?: (r: string) => void}} [o]
+ *          onShutdown?: (r: string) => void, extra?: Record<string, string>,
+ *          projectDir?: string}} [o]
  */
 async function setup(t, o = {}) {
   const dataDir = makeDataDir();
@@ -54,7 +58,7 @@ async function setup(t, o = {}) {
   t.after(() => upstream.close());
 
   const { loadConfig } = await lib('config.mjs');
-  const env = baseEnv({ dataDir, endpoint: o.endpoint ?? upstream.url });
+  const env = baseEnv({ dataDir, endpoint: o.endpoint ?? upstream.url, extra: o.extra, projectDir: o.projectDir });
   const cfg = loadConfig(env);
   const dash = await mod('bin/dashboard.src.mjs');
 
@@ -89,9 +93,26 @@ function writeTurn(dataDir, runId, turn) {
 
 const RUN = 'cc-dash-00000001';
 const PROMPT = '11111111-2222-3333-4444-555555555555';
+const SESSION = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
+/** The host session mapped to `RUN`. A placeholder home, because fixtures are tracked files. */
+const PROJECT = '/home/user/proj';
+
+function writeSession(dataDir, sid, patch = {}) {
+  mkdirSync(join(dataDir, 'sessions'), { recursive: true });
+  writeFileSync(join(dataDir, 'sessions', `${sid}.json`), JSON.stringify({
+    run_id: RUN, agent_id: 'claude-code', strategy: 'per-directory',
+    project_dir: PROJECT, project_root: PROJECT,
+    created_at: 1_700_000_000_000, last_seen_at: 1_700_000_000_000,
+    mode: 'hosted', clear_count: 0, endpoint_hash: 'abc', ...patch,
+  }));
+}
+
+// Every sweep below runs over a run that has a session record, so a field added to the
+// session row is covered by the key sweep and the redaction sweep without a second fixture.
 function seedRun(dataDir, over = {}) {
   writeMarker(dataDir, RUN);
+  writeSession(dataDir, SESSION);
   writeTurn(dataDir, RUN, {
     prompt: 'rebuild the bundle',
     prompt_id: PROMPT,
@@ -371,6 +392,109 @@ test('paths: an arbitrary ?dir= resolves to a real data dir or to nothing', asyn
   seedRun(dataDir);
   const body = await (await call('/api/runs?dir=/etc')).json();
   assert.equal(body.dir, dataDir, 'an unknown directory falls back to the default');
+});
+
+// ---------------------------------------------------------------------------
+// Identity — which sessions, which directory, which scope
+// ---------------------------------------------------------------------------
+
+// The page never said which host sessions a run belongs to or what directory it is for. The
+// session map has held both all along; the run row is where the page reads them from.
+test('runs: each row carries the host sessions mapped to it, with their project dir and git root', async (t) => {
+  const { dataDir, call } = await setup(t);
+  seedRun(dataDir);
+  writeSession(dataDir, 'bbbbbbbb-0000-4000-8000-000000000002', {
+    last_seen_at: 1_700_000_005_000, project_dir: `${PROJECT}/sub`, clear_count: 1,
+  });
+
+  const body = await (await call(`/api/runs?run=${RUN}`)).json();
+  const row = body.runs.find((r) => r.runId === RUN);
+  assert.equal(row.sessionCount, 2);
+  assert.equal(row.sessions[0].sessionId, 'bbbbbbbb-0000-4000-8000-000000000002', 'newest first');
+  assert.equal(row.sessions[0].clearCount, 1);
+  assert.equal(row.sessions[1].sessionId, SESSION);
+  assert.equal(row.projectDir, `${PROJECT}/sub`, 'the newest session\'s directory');
+  assert.equal(row.projectRoot, PROJECT);
+
+  const all = await (await call('/api/runs?all=1')).json();
+  assert.equal(all.runs.find((r) => r.runId === RUN).sessionCount, 2, 'the all-directories form joins too');
+});
+
+// The session join must go through the same `?dir=` resolution as everything else: a directory
+// the process did not find on disk is the default, never a path to read `sessions/` under.
+test('runs: an unknown ?dir= still serves the default directory\'s sessions, never a path', async (t) => {
+  const { dataDir, call } = await setup(t);
+  seedRun(dataDir);
+  for (const attempt of ['/etc', '../../etc', 'mubit-memory-nope']) {
+    const body = await (await call(`/api/runs?dir=${encodeURIComponent(attempt)}`)).json();
+    assert.equal(body.dir, dataDir);
+    assert.equal(body.runs[0].sessionCount, 1, `?dir=${attempt} must join the default directory\'s sessions`);
+  }
+});
+
+// "Which run is this page about" was answered by "the most recently written one", which on a
+// machine with two sessions open is whichever prompted last. `/api/meta` now says where the
+// dashboard was launched from and which run that directory maps to, and what that run writes
+// at and reads from — in words, because `session` and `auto` are not answers a person can use.
+test('meta: /api/meta reports where the dashboard was launched from and the run\'s scope in words', async (t) => {
+  const { dataDir, call } = await setup(t, { projectDir: PROJECT });
+  seedRun(dataDir);
+
+  const body = await (await call('/api/meta')).json();
+  assert.equal(body.launch.projectDir, PROJECT);
+  assert.equal(typeof body.launch.cwd, 'string');
+  assert.equal(body.launch.run, RUN);
+
+  assert.equal(body.scope.strategy, 'per-directory');
+  assert.equal(body.scope.writesAt, 'session');
+  assert.equal(body.scope.readsAcrossRuns, 'auto');
+  for (const k of ['strategyText', 'writesAtText', 'readsAcrossRunsText']) {
+    assert.ok(body.scope[k].length > 10, `scope.${k} must be a sentence`);
+  }
+});
+
+test('meta: the launch run is the one whose session records name the launch directory', async (t) => {
+  const { dataDir, call } = await setup(t, { projectDir: PROJECT });
+  seedRun(dataDir);
+  // A busier run, written later, for a different directory. It is the newest run and it is not
+  // the one this page was opened for.
+  writeMarker(dataDir, 'cc-elsewhere-0002', { updated_at: Date.now() + 60_000 });
+  writeSession(dataDir, 'cccccccc-0000-4000-8000-000000000003', {
+    run_id: 'cc-elsewhere-0002', last_seen_at: Date.now() + 60_000,
+    project_dir: '/home/user/other', project_root: '/home/user/other',
+  });
+
+  const body = await (await call('/api/meta')).json();
+  assert.equal(body.run, 'cc-elsewhere-0002', 'the default run is still the newest — that contract is unchanged');
+  assert.equal(body.launch.run, RUN, 'but the page can now say which one it was launched in');
+
+  const none = await (await call('/api/meta?dir=' + encodeURIComponent(dataDir))).json();
+  assert.equal(none.launch.run, RUN, 'and the answer is per directory, not per request');
+});
+
+test('meta: the scope block reflects MUBIT_MCP_LESSON_SCOPE=run and MUBIT_CC_RECALL_CROSS_RUN=off', async (t) => {
+  const { dataDir, call } = await setup(t, {
+    extra: { MUBIT_MCP_LESSON_SCOPE: 'run', MUBIT_CC_RECALL_CROSS_RUN: 'off' },
+  });
+  seedRun(dataDir);
+  const body = await (await call('/api/meta')).json();
+  assert.equal(body.scope.writesAt, 'run');
+  assert.equal(body.scope.readsAcrossRuns, 'off');
+  assert.match(body.scope.writesAtText, /inside this run/);
+  assert.match(body.scope.readsAcrossRunsText, /never/);
+});
+
+// The session record is the one file in the data dir a future version might grow a field
+// into. It is read through a whitelist, so a field nobody decided to serve is not served.
+test('secrets: a session record carrying a key does not put it in /api/runs', async (t) => {
+  const { dataDir, call } = await setup(t);
+  seedRun(dataDir);
+  writeSession(dataDir, SESSION, { api_key: SECRETS.mubitKey, note: 'should not be served' });
+
+  const text = await (await call(`/api/runs?run=${RUN}`)).text();
+  assert.ok(!text.includes(SECRETS.mubitKey), `the key reached the browser: ${text}`);
+  assert.doesNotMatch(text, /apiKey|api_key/i, 'not even the field name');
+  assert.ok(!text.includes('should not be served'), 'unknown fields are dropped, not forwarded');
 });
 
 // ---------------------------------------------------------------------------

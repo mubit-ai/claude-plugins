@@ -244,14 +244,16 @@ export function resolveDirParam(wanted, dirs) {
  * @param {string} dir
  * @returns {Array<Record<string, any>>}
  */
-export function runsIn(dir) {
+export function runsIn(dir, opts = {}) {
+  // Read once and grouped, not once per run: the rail polls this every second.
+  const byRun = opts && opts.sessions === true ? groupSessions(readSessionMap(dir)) : null;
   return lsDir(join(dir, 'status')).filter(isRunMarker).map((f) => {
     const runId = f.slice(0, -5);
     const cfg = { dataDir: dir };
     const marker = readMarker(cfg, runId);
     const rd = runDir(cfg, runId);
     const turns = lsDir(join(rd, 'turns')).filter((n) => n.endsWith('.json'));
-    return {
+    const row = {
       runId,
       dir,
       dirName: basename(dir),
@@ -261,17 +263,28 @@ export function runsIn(dir) {
       state: String(marker.state || 'unknown'),
       mode: String(marker.mode || ''),
     };
+    if (byRun) {
+      const sessions = byRun.get(runId) ?? [];
+      Object.assign(row, {
+        sessions,
+        sessionCount: sessions.length,
+        projectDir: firstNonEmpty(sessions, 'projectDir'),
+        projectRoot: firstNonEmpty(sessions, 'projectRoot'),
+      });
+    }
+    return row;
   }).sort((a, b) => b.lastWrite - a.lastWrite);
 }
 
 /**
  * Every run across every given directory, newest first.
  * @param {Array<{path: string}>} dirs
+ * @param {{sessions?: boolean}} [opts]
  * @returns {Array<Record<string, any>>}
  */
-export function listRuns(dirs) {
+export function listRuns(dirs, opts = {}) {
   return (Array.isArray(dirs) ? dirs : [])
-    .flatMap((d) => runsIn(d.path))
+    .flatMap((d) => runsIn(d.path, opts))
     .sort((a, b) => b.lastWrite - a.lastWrite);
 }
 
@@ -283,6 +296,163 @@ export function listRuns(dirs) {
 export function newestRun(dir) {
   const runs = runsIn(dir);
   return runs.length ? String(runs[0].runId) : '';
+}
+
+// ---------------------------------------------------------------------------
+// Sessions — sessions/<host_session_id>.json
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} SessionRow
+ * @property {string} sessionId
+ * @property {string} runId
+ * @property {string} agentId
+ * @property {string} strategy
+ * @property {string} projectDir
+ * @property {string} projectRoot  `''` on a record written before the field existed
+ * @property {number} createdAt
+ * @property {number} lastSeenAt
+ * @property {string} mode
+ * @property {number} clearCount
+ * @property {string} endpointHash
+ */
+
+/**
+ * Every host session recorded in a data dir, newest `last_seen_at` first.
+ *
+ * Deliberately not `loadSessionMap` from `lib/runid.mjs`: that one resolves the *ambient* data
+ * dir from `process.env`, because every caller there is a hook. The dashboard serves whichever
+ * directory `?dir=` selected, and a reader built on the hook helper would show one directory's
+ * runs beside another directory's sessions.
+ *
+ * The record is mapped through a whitelist rather than spread. It is the one file in the data
+ * dir that a future version might grow a field into, and a field this function has not heard
+ * of is a field that reaches a browser without anyone deciding it should.
+ *
+ * @param {string} dir
+ * @returns {SessionRow[]}
+ */
+export function readSessionMap(dir) {
+  const sdir = join(dir, 'sessions');
+  /** @type {SessionRow[]} */
+  const out = [];
+  for (const f of lsDir(sdir)) {
+    if (!f.endsWith('.json')) continue;
+    const rec = readJson(join(sdir, f), null);
+    if (!rec || typeof rec !== 'object' || Array.isArray(rec)) continue;
+    out.push({
+      sessionId: f.slice(0, -5),
+      runId: String(rec.run_id || ''),
+      agentId: String(rec.agent_id || ''),
+      strategy: String(rec.strategy || ''),
+      projectDir: String(rec.project_dir || ''),
+      projectRoot: String(rec.project_root || ''),
+      createdAt: num(rec.created_at),
+      lastSeenAt: num(rec.last_seen_at),
+      mode: String(rec.mode || ''),
+      clearCount: num(rec.clear_count),
+      endpointHash: String(rec.endpoint_hash || ''),
+    });
+  }
+  return out.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+}
+
+/**
+ * The sessions mapped to one run, newest first. The id is flattened first because it can
+ * arrive from a query string, and an empty one matches nothing rather than everything.
+ *
+ * @param {string} dir
+ * @param {string} runId
+ * @returns {SessionRow[]}
+ */
+export function sessionsForRun(dir, runId) {
+  const id = safeSegment(runId);
+  if (!id) return [];
+  return readSessionMap(dir).filter((s) => s.runId === id);
+}
+
+/**
+ * The run the dashboard was launched *for*: the newest session whose project is the launch
+ * directory, by git root or by exact directory. `''` when no session names it.
+ *
+ * @param {string} dir
+ * @param {string} projectDir
+ * @returns {string}
+ */
+export function launchRunFor(dir, projectDir) {
+  const want = typeof projectDir === 'string' ? projectDir : '';
+  if (!want) return '';
+  const hit = readSessionMap(dir).find((s) => s.runId
+    && (s.projectRoot === want || s.projectDir === want));
+  return hit ? hit.runId : '';
+}
+
+/** @param {SessionRow[]} rows @returns {Map<string, SessionRow[]>} */
+function groupSessions(rows) {
+  /** @type {Map<string, SessionRow[]>} */
+  const byRun = new Map();
+  for (const s of rows) {
+    if (!s.runId) continue;
+    const list = byRun.get(s.runId);
+    if (list) list.push(s); else byRun.set(s.runId, [s]);
+  }
+  return byRun;
+}
+
+/** The first non-empty value of `key` in a newest-first list. */
+function firstNonEmpty(rows, key) {
+  for (const r of rows) if (r[key]) return r[key];
+  return '';
+}
+
+// ---------------------------------------------------------------------------
+// Scope, in words
+// ---------------------------------------------------------------------------
+
+const STRATEGY_TEXT = {
+  'per-directory': 'one run per directory; every session opened here shares it',
+  'git-branch': 'one run per git branch',
+  'per-conversation': 'one run per host session',
+  static: 'a fixed run id from MUBIT_CC_RUN_ID',
+};
+
+const WRITES_AT_TEXT = {
+  run: 'lessons an agent saves stay inside this run',
+  session: 'lessons an agent saves can surface in later sessions of this project',
+  global: 'lessons an agent saves are visible to every run on this instance',
+};
+
+// The 3 s figure is `CROSS_RUN_MIN_BUDGET_MS` in `lib/recall.mjs`, restated rather than
+// imported: this module stays free of the recall path so it cannot be pulled into a hook.
+const READS_ACROSS_TEXT = {
+  auto: 'recall consults other runs when at least 3 s of budget remains',
+  on: 'every recall consults other runs',
+  off: 'recall never consults other runs; only the session-start briefing does',
+};
+
+/**
+ * What this run writes at and reads from, as the three settings that decide it and one plain
+ * sentence for each. The defaults are the config's own, so a bare `{}` describes a default
+ * install rather than nothing.
+ *
+ * @param {Record<string, any>} cfg
+ * @returns {{strategy: string, strategyText: string, writesAt: string, writesAtText: string,
+ *            readsAcrossRuns: string, readsAcrossRunsText: string}}
+ */
+export function describeRunScope(cfg) {
+  const c = cfg && typeof cfg === 'object' ? cfg : {};
+  const strategy = String(c.runStrategy || 'per-directory');
+  const writesAt = String(c.mcpLessonScope || 'session');
+  const readsAcrossRuns = String(c.recallCrossRun || 'auto');
+  return {
+    strategy,
+    strategyText: STRATEGY_TEXT[strategy] || `runs are keyed by the "${strategy}" strategy`,
+    writesAt,
+    writesAtText: WRITES_AT_TEXT[writesAt] || `lessons an agent saves are capped at "${writesAt}" scope`,
+    readsAcrossRuns,
+    readsAcrossRunsText: READS_ACROSS_TEXT[readsAcrossRuns]
+      || `cross-run recall is set to "${readsAcrossRuns}"`,
+  };
 }
 
 // ---------------------------------------------------------------------------

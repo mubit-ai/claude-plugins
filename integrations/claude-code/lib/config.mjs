@@ -227,7 +227,12 @@ const LANG_FILES = [
 export function envTags(cfg, projectDir = '') {
   const dir = projectDir || cfg?.projectDir || process.cwd();
   /** @type {string[]} */
-  const tags = [`tool:${cfg?.host === 'codex' ? 'codex' : host()}`];
+  // The config's host when it names one, else the process's. A caller that overrides
+  // `cfg.host`  `lib/import.mjs` tagging a Claude Code transcript read under Codex  has
+  // to win in both directions; honouring only `codex` let a Codex process stamp
+  // `tool:codex` on the other harness's history.
+  const tool = (cfg?.host === 'codex' || cfg?.host === 'claude-code') ? cfg.host : host();
+  const tags = [`tool:${tool}`];
 
   const root = gitToplevel(dir) || dir;
   const slug = sanitiseTag(basename(root));

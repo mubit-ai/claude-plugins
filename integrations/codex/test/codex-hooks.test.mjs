@@ -30,6 +30,7 @@ import {
   runHook, baseEnv, makeDataDir, makeProjectDir, fakeMubit,
   assertHookContract, spoolFiles, readJsonDir, waitFor,
 } from './helpers/codex-fixtures.mjs';
+import { cliEnv, runBundle } from './helpers/codex-cli.mjs';
 
 const RUN_ID = 'codex-hooks-test';
 
@@ -379,6 +380,33 @@ test('SubagentStart injects under its own event name', async (t) => {
     'the envelope must name SubagentStart; subagent-start.command.output validates it.');
   assert.ok(typeof hso.additionalContext === 'string' && hso.additionalContext.trim(),
     'the envelope is there and carries no context.');
+});
+
+test('SubagentStart puts the parent run`s pins above the recalled block', async (t) => {
+  const { server, dataDir, projectDir } = await harness(t);
+  server.route('POST /v2/control/variables/list', { json: { variables: [] } });
+  server.route('POST /v2/control/variables/set', { json: { success: true } });
+  const e = env(dataDir, projectDir, server.url);
+  await runHook('stage-prompt', userPromptSubmit(), { env: e });
+
+  // The pin, written the way the skill writes it: the committed bundle, from a shell that
+  // knows nothing but the store and the run. `pin add` caches to `runs/<run>/pins.json` only
+  // after the instance confirmed, stamped with the endpoint the hook must match.
+  const pin = await runBundle('pin', ['--run', RUN_ID, 'add', 'do not touch the vendored server'],
+    cliEnv({ dataDir, endpoint: server.url }));
+  assert.equal(pin.code, 0, pin.out + pin.err);
+
+  const r = await runHook('subagent-start', subagentStart(), { env: e });
+  assertHookContract(r);
+  const ctx = String(r.json?.hookSpecificOutput?.additionalContext ?? '');
+  // § A subagent has no other window on the run: it never saw the user type the constraint.
+  //   The pins come first and say what they are, so the one line that is not negotiable is
+  //   not buried in a list of equally provisional recalled facts.
+  assert.match(ctx, /<mubit-memory[^>]*pins="1"/, `the envelope does not count the pin:\n${ctx.slice(0, 200)}`);
+  assert.match(ctx, /## Pinned for this run/);
+  assert.ok(ctx.includes('do not touch the vendored server'), 'the pin text must reach the subagent verbatim');
+  assert.ok(ctx.indexOf('do not touch the vendored server') < ctx.indexOf('Recalled from memory'),
+    'the pin must render above the recalled block, not inside it');
 });
 
 test('SubagentStop attributes the result to the subagent, not to the parent', async (t) => {

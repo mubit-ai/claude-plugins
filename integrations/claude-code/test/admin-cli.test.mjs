@@ -387,6 +387,17 @@ test('--run names the run every command acts on', async (t) => {
   assert.equal(server.lastCall('POST', '/v2/control/strategies').body.run_id, 'cc-named-run');
 });
 
+test('an unconfigured install is told to run /mubit-memory:auth, and dials nothing', async (t) => {
+  const { run, stderr, server } = await cli(t);
+  // § The HTTP layer already refuses an empty endpoint; what it says by the time it reaches
+  //   this script is "no reply", which sends a user who has not signed in to debug a
+  //   connection. `pin` and `handoff` say the sentence; this is the same sentence.
+  assert.equal(await run(['reflect'], { MUBIT_ENDPOINT: '' }), 1);
+  assert.match(stderr(), /mubit-memory:auth/);
+  assert.ok(!stderr().includes('no reply'), stderr());
+  assert.equal(server.requests.length, 0, server.summary());
+});
+
 test('with no run to observe and none named, every command refuses before dialling', async (t) => {
   const { run, stderr, server } = await cli(t, { extra: { MUBIT_CC_RUN_STRATEGY: 'per-directory', MUBIT_CC_RUN_ID: '' } });
   assert.equal(await run(['reflect']), 1);

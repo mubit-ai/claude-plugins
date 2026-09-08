@@ -33,7 +33,7 @@ import { join } from 'node:path';
 
 import {
   assertHookContract, baseEnv, fakeMubit, lib, makeDataDir, makeProjectDir, readJsonDir,
-  runHook, spoolFiles,
+  runHook, spoolFiles, withEnv,
 } from './helpers/harness.mjs';
 import * as fx from './helpers/fixtures.mjs';
 
@@ -208,7 +208,13 @@ describe('the tool_use / tool_result join', () => {
       },
     });
 
-    const r = importItems(cfg, join(root, '-r-app', `${SESSION}.jsonl`), { roots: ['/r/app'] });
+    // § With the host in the *process* environment too, which is what the Codex bundle has:
+    //   its boot shim sets MUBIT_CC_HOST before anything loads. `envTags` honoured a
+    //   `cfg.host` override only when it said `codex` and fell through to the process's host
+    //   otherwise, so a Codex process tagged the other harness's history `tool:codex` on the
+    //   wire while this test, with a clean process environment, stayed green.
+    const r = withEnv({ MUBIT_CC_HOST: 'codex' },
+      () => importItems(cfg, join(root, '-r-app', `${SESSION}.jsonl`), { roots: ['/r/app'] }));
     assert.equal(r.items.length, 2, 'one tool item and one turn');
     for (const i of r.items) {
       assert.equal(i.item.env_tags[0], 'tool:claude-code', `${i.item.item_id}: [${i.item.env_tags.join(', ')}]`);

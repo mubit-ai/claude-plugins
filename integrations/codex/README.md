@@ -244,7 +244,7 @@ repeat to a pointer, and `bin/admin.mjs` renders in full on every host.
 ## Development
 
 ```bash
-npm test                                    # 243 gates
+npm test                                    # 431 gates
 MUBIT_CC_TEST_TARGET=dist npm test          # the same, against the committed bundles
 npm run build                               # rebuild hooks/dist, bin/, mcp/dist
 node ../claude-code/scripts/verify-manifests.mjs
@@ -257,7 +257,7 @@ bundle — two independently installable plugins cannot share a path, and the bu
 rather than regenerating it.
 
 Every change to `../claude-code/lib` or `../claude-code/hooks/src` changes both plugins. Run
-both suites: this one, and the 1067 next door.
+both suites: this one, and the 1829 next door.
 
 [`test/fixtures/observed/`](test/fixtures/observed/README.md) is the record of what Codex
 actually does — payloads the host wrote to a recorder hook during a real session, and its

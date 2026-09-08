@@ -53,7 +53,7 @@ import { fileURLToPath } from 'node:url';
 
 import { lessonCensus } from '../lib/activity.mjs';
 import { estimateTokens } from '../lib/assemble.mjs';
-import { loadConfig } from '../lib/config.mjs';
+import { loadConfig, isConfigured } from '../lib/config.mjs';
 import { deleteLesson } from '../lib/dashboard-api.mjs';
 import { postCheckpoint, request, ROUTES } from '../lib/http.mjs';
 import { pickRun } from '../lib/runpick.mjs';
@@ -183,6 +183,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
     cfg = loadConfig(args.dataDir ? { ...env, MUBIT_CC_DATA_DIR: args.dataDir } : env);
   } catch (err) {
     stderr(`could not resolve configuration: ${messageOf(err)}\n`);
+    return 1;
+  }
+
+  // Ahead of the run pick, as `pin` and `handoff` do: without this the HTTP layer's refusal
+  // to dial an empty endpoint surfaces here as "reflect failed: no reply", which describes a
+  // dead instance rather than an install nobody has signed in to.
+  if (!isConfigured(cfg)) {
+    stderr('No Mubit endpoint is configured, so there is nothing to administer. Run /mubit-memory:auth.\n');
     return 1;
   }
 

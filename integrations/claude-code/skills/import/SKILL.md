@@ -35,6 +35,15 @@ is not.
 node "${CLAUDE_PLUGIN_ROOT}/bin/import.mjs" --send
 ```
 
+## When it says `ingest failed`
+
+The counts line is followed by the reason — `ingest failed (<state>): <message>`, the same
+sentence the plugin logs. `unreachable` with "no network access" means the shell the command
+ran in has no network: Codex's sandbox does this to an unapproved command, and the fix there
+is to run it with escalated permissions, never to change the endpoint. `auth_failed` is the
+key, which is `/mubit-memory:auth`. `server_error` is the instance. Relay the sentence, not
+the count: "failed 1" is not an answer to "why".
+
 ## Scope
 
 The default is **the project you are in, plus every git worktree linked to it**. A worktree is

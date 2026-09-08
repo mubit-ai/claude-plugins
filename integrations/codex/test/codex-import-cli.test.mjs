@@ -164,6 +164,29 @@ test('a second --send over unchanged rollouts sends nothing', async (t) => {
   assert.equal(server.requests.length, 0, `a re-run dialled: ${server.summary()}`);
 });
 
+// ---------------------------------------------------------------------------
+// The sandbox — where every Codex `--send` runs first
+// ---------------------------------------------------------------------------
+
+// § Codex runs an unapproved command inside seatbelt with the network off and says so in the
+//   environment. A `--send` from there read every rollout, failed on its first batch, and
+//   printed `failed 1` with the reason in a log this shell does not keep at that level. The
+//   skill tells the model to escalate; this holds the bundle to refusing first and saying why.
+test('--send inside the Codex sandbox is refused before a rollout is opened, and the terminal says why', async (t) => {
+  const { server, projectDir, env } = await harness(t);
+  const sandboxed = { ...env, CODEX_SANDBOX: 'seatbelt', CODEX_SANDBOX_NETWORK_DISABLED: '1' };
+
+  const r = await runBundle('import', ['--project', projectDir, '--pace', '0', '--send'], sandboxed, { cwd: projectDir });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /ingest failed \(unreachable\): this process has no network access/);
+  assert.match(r.err, /Codex ran it inside its sandbox/);
+  assert.equal(server.requests.length, 0, `dialled from inside the sandbox: ${server.summary()}`);
+
+  const dry = await runBundle('import', ['--project', projectDir, '--pace', '0', '--json'], sandboxed, { cwd: projectDir });
+  assert.equal(dry.code, 0, dry.err);
+  assert.equal(JSON.parse(dry.out).sources.codex.items, 1, 'a dry run only reads, and reading is allowed in there');
+});
+
 test('--source claude-code reads the transcript root and tags tool:claude-code; --source all reads both', async (t) => {
   const { server, run } = await harness(t);
   const cc = await run(['--source', 'claude-code', '--send', '--json']);

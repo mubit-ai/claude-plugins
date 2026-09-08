@@ -522,6 +522,8 @@ test('import: resolves the binary the Codex way, and keeps the rules Codex canno
   assert.match(body, /default is `--source codex`/,
     'the skill states the default the bundle actually applies — codex-import-cli.test.mjs holds the bundle to it.');
   assert.match(body, /`denied`/, '`denied` is the answer to "did this upload my .env", and the model has to relay it.');
+  assert.match(body, /escalat/i, 'a Codex `--send` runs in a sandbox with no network; the skill has to say to escalate.');
+  assert.match(body, /no network access/, 'and name the line the bundle prints from there, so the model recognises it.');
 });
 
 // ===========================================================================

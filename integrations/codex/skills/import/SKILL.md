@@ -49,6 +49,24 @@ is not.
 node <plugin-root>/bin/import.mjs --send
 ```
 
+## `--send` needs the network, and the sandbox has none
+
+Codex runs an unapproved command inside its sandbox with the network switched off, and marks
+the process with `CODEX_SANDBOX_NETWORK_DISABLED=1`. The dry run only reads, so it works in
+there. A `--send` does not — and rather than read every rollout and fail on the first batch,
+it refuses before opening one, exits 1, and prints:
+
+```
+ingest failed (unreachable): this process has no network access — Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine
+```
+
+That sentence is about the shell, not the endpoint or the key. **Run the `--send` with
+escalated permissions** — the shell tool's escalation option (`sandbox_permissions:
+"require_escalated"` on current Codex builds, `with_escalated_permissions: true` on older
+ones) with a one-line `justification` naming the import and the instance — so the person
+approves the network once, for that one command. Do not retry it sandboxed, and do not go
+looking for a configuration problem: nothing in the environment has changed.
+
 ## Two sources
 
 Under this host the default is `--source codex`: the rollouts Codex writes under

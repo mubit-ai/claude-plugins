@@ -164,7 +164,7 @@ Fifteen skills, identical on both hosts. `/mubit-memory:<name>` in Claude Code,
 | `recall` | Search memory for detail beyond what was injected this turn. |
 | `pin` | Pin a constraint for the rest of this run — "don't touch the vendored server". |
 | `forget` | Delete a lesson, or down-weight one that is merely wrong. |
-| `dashboard` | A local page over everything: browse lessons, see recall cost per prompt, watch ingest health. Loopback only, bearer-token gated. |
+| `dashboard` | A local page over the record: every turn, what memory was injected into it, what that earned, and each lesson's history. Loopback only, bearer-token gated. |
 | `doctor` | Diagnose connectivity and memory health, cheapest check first. |
 | `setup` | Confirm the endpoint and key are set and the instance answers. |
 | `import` | Backfill memory from transcripts already on this machine, so an install made after the work still knows about it. Sends nothing without `--send`. |

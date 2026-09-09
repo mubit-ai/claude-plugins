@@ -156,6 +156,7 @@ export function lessonsRoute(entries) {
   for (const e of entries) for (const k of [e.id, e.reference_id]) if (k) byId.set(String(k), e);
   return {
     'POST /v2/control/activity': activityPage(entries),
+    'POST /v2/control/lessons/delete': { json: { success: true } },
     'POST /v2/control/dereference': (rec) => {
       const id = String((rec.body && rec.body.reference_id) || '');
       const hit = byId.get(id);

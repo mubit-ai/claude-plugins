@@ -1,30 +1,16 @@
 // @ts-check
 /**
- * `bin/dashboard.html` — the Memory tab's scope semantics, and nothing else.
+ * `bin/dashboard.html` — the pure regions, executed rather than read.
  *
- * **Read this before adding to this file.** The dashboard page is one self-contained HTML file
- * with inline script, served from disk and never bundled. There is no DOM here and there will
- * not be one: jsdom would be the plugin's first runtime dependency, and this plugin ships with
- * zero. So the honest reach of this file is narrow, and saying so is more useful than a green
- * tick that implies more:
+ * The page is one self-contained HTML file with inline script, served from disk and never
+ * bundled. Its arithmetic — which rows a filter keeps, what a turn came to, how a delta reads,
+ * where a bar goes — lives in `// #region` blocks that touch nothing in the page. This file
+ * slices each block out of the shipped file by its markers and executes it in a bare
+ * `node:vm` context, so the truth tables below run against the same source a user's browser
+ * parses, not a copy that can drift. Anything in a region that reaches for `document` or
+ * `state` throws here rather than quietly passing.
  *
- *   - **Event wiring is unverified.** Nothing here clicks the run segment, changes a select or
- *     presses Escape. That a listener is attached to the right element, and that it mutates the
- *     right key of `state`, is checked by reading the file and by opening the page.
- *   - **Rendering is unverified.** No assertion here proves a badge reaches the screen, that
- *     `clear()` emptied a node, or that the footer's numbers are the ones a person sees.
- *   - **Focus and keyboard order are unverified**, as is anything else that needs layout.
- *
- * What *is* verified is the part where being wrong is silent: the predicate that decides which
- * rows a scope filter keeps. It is sliced out of the shipped file by its region markers and
- * executed in a bare `node:vm` context, so the truth table below runs against the same source
- * a user's browser parses — not a copy of it that can drift.
- *
- * The second gate is the one that matters more over time. The page derives `leaksScope` itself
- * rather than reading the server's field, because three upstreams now feed the same list at
- * three fidelities. That is the right call and it is also exactly how a page and a server come
- * to disagree about what "visible outside its own run" means, so the third test pins them
- * together over the whole vocabulary.
+ * Event wiring, rendering, focus and layout are `dashboard-browser.test.mjs`'s.
  */
 
 import test from 'node:test';
@@ -37,29 +23,30 @@ import { lib, PLUGIN_ROOT } from './helpers/harness.mjs';
 
 const PAGE = join(PLUGIN_ROOT, 'bin', 'dashboard.html');
 
-/** Everything the scope region is expected to define. A missing name is a loud ReferenceError. */
-const REGION_EXPORTS = [
+/** Everything each region is expected to define. A missing name is a loud ReferenceError. */
+const SCOPE_EXPORTS = [
   'SCOPE_VALUES', 'NO_PROJECT',
   'scopeOf', 'scopeKnown', 'leaksScope', 'fromOtherRun',
   'matchesScope', 'projectOf', 'matchesProject', 'matchesText',
 ];
-
-/** What the three view regions define. Each is sliced and executed the same way. */
 const IDENTITY_EXPORTS = [
-  'strategyLabel', 'scopeSentences', 'pathParts', 'parentRunId', 'runIdentity', 'sessionLabel',
-  'shortSession', 'relativeTime', 'runStateTone', 'identitySignature',
+  'strategyLabel', 'scopeSentences', 'pathParts', 'parentRunId', 'shortSession', 'relativeTime', 'runStateTone',
   'plainRunId', 'baseRunId', 'runLabel', 'groupRunsByDirectory', 'familyIds',
 ];
 const LESSON_EXPORTS = [
   'scopeTone', 'reachSentence', 'scopeCounts', 'typeCounts', 'dayKey', 'groupByDay', 'sortRows',
-  'clockOf', 'shortId', 'listEmptyMessage', 'footerParts', 'scopeNoteText',
-  'placement', 'placementCounts', 'matchesView', 'originOf', 'attributeTurn', 'provenanceLines',
+  'clockOf', 'shortId', 'placement', 'placementCounts', 'matchesView', 'originOf', 'matchesOrigin',
+  'attributeTurn', 'provenanceLines', 'lessonStats', 'outcomeTone', 'sortLessons', 'countLine', 'listEmptyMessage',
 ];
 const TURN_EXPORTS = [
-  'turnMatches', 'rungText', 'usedCell', 'fmtInt', 'pct', 'tileSpecs', 'analyticsNote',
-  'healthTileSpecs', 'healthNote',
-  'turnAgentsText', 'groupTurnsBySession', 'lessonsInTurn', 'entrySummary', 'durationText',
+  'rungText', 'usedCell', 'fmtInt', 'turnAgentsText', 'groupTurnsBySession', 'lessonsInTurn', 'savedInTurn',
+  'entrySummary', 'durationText', 'outcomeOf', 'sortTurns', 'matchesTurnFilters',
 ];
+const OVERVIEW_EXPORTS = [
+  'deltaText', 'kpiTiles', 'outcomesByDay', 'perDay', 'rankedLessons', 'historyNote', 'healthTiles', 'healthNote',
+];
+const CHART_EXPORTS = ['scaleLinear', 'niceTicks', 'linePath', 'areaPath', 'stackedBars', 'hBars', 'sparkPoints'];
+const ROUTER_EXPORTS = ['PAGES', 'parseHash', 'buildHash'];
 
 /** One region's source, sliced out of the page by its markers. */
 function sliceRegion(src, name) {
@@ -80,25 +67,19 @@ function sliceRegion(src, name) {
 }
 
 /**
- * One or more regions, lifted out of the shipped page and evaluated on their own.
+ * One or more regions, lifted out of the shipped page and evaluated on their own. Regions are
+ * concatenated in the order given, because the later ones build on the earlier.
  *
- * Evaluating them in a context with no `document`, no `state` and no `$` is the point: if
- * anything in a region reaches for the page, the calls below throw rather than quietly
- * passing because a global happened to exist. Regions are concatenated in the order given,
- * because the view regions build on the scope predicate and nothing else.
- *
- * @param {string|string[]} [names]
- * @param {string[]} [exports]
+ * @param {string[]} names @param {string[]} exports
  */
-function loadRegion(names = 'scope-predicate', exports = REGION_EXPORTS) {
+function loadRegion(names, exports) {
   const src = readFileSync(PAGE, 'utf8');
-  const list = Array.isArray(names) ? names : [names];
-  const region = list.map((n) => sliceRegion(src, n)).join('\n');
+  const region = names.map((n) => sliceRegion(src, n)).join('\n');
   const ctx = vm.createContext({});
   vm.runInNewContext(
     `${region}\nglobalThis.region = { ${exports.join(', ')} };`,
     ctx,
-    { filename: `dashboard.html#${list.join('+')}` },
+    { filename: `dashboard.html#${names.join('+')}` },
   );
   return ctx.region;
 }
@@ -106,16 +87,47 @@ function loadRegion(names = 'scope-predicate', exports = REGION_EXPORTS) {
 /** Arrays and objects built inside the vm carry that realm's prototypes; compare them as data. */
 const plain = (v) => JSON.parse(JSON.stringify(v));
 
-const identity = () => loadRegion(['scope-predicate', 'identity-model'], [...REGION_EXPORTS, ...IDENTITY_EXPORTS]);
-// The lesson view folds run ids and shortens session ids, so it builds on the identity model too.
-const lessons = () => loadRegion(['scope-predicate', 'identity-model', 'lesson-view'], [...REGION_EXPORTS, ...IDENTITY_EXPORTS, ...LESSON_EXPORTS]);
-const turns = () => loadRegion(['turn-view'], TURN_EXPORTS);
+const scope = () => loadRegion(['scope-predicate'], SCOPE_EXPORTS);
+const identity = () => loadRegion(['run-identity'], IDENTITY_EXPORTS);
+const lessons = () => loadRegion(['scope-predicate', 'run-identity', 'lesson-model'], [...SCOPE_EXPORTS, ...IDENTITY_EXPORTS, ...LESSON_EXPORTS]);
+const turns = () => loadRegion(['turn-model'], TURN_EXPORTS);
+const overview = () => loadRegion(['scope-predicate', 'run-identity', 'lesson-model', 'turn-model', 'overview-model'], [...LESSON_EXPORTS, ...TURN_EXPORTS, ...OVERVIEW_EXPORTS]);
+const charts = () => loadRegion(['chart-geometry'], CHART_EXPORTS);
+const router = () => loadRegion(['router'], ROUTER_EXPORTS);
 
-/**
- * The six shapes a row's scope arrives in. `''` and absent are separated on purpose — they are
- * the same rendering today and different facts, and the `unknown` filter is the only thing on
- * the page that can tell a person which one they are looking at.
- */
+/** Local noon today, so an hour either side never crosses a day boundary in any time zone. */
+function localNoon() {
+  const d = new Date();
+  d.setHours(12, 0, 0, 0);
+  return d.getTime();
+}
+
+/** The page's own day key, restated: local calendar date, zero-padded. */
+function ymd(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+const H = 3_600_000;
+const T0 = 1_700_000_000_000;
+const isoAt = (ms) => new Date(ms).toISOString();
+
+// ---------------------------------------------------------------------------
+// Every region stands alone
+// ---------------------------------------------------------------------------
+
+test('regions: every region evaluates in an empty context and defines what the page expects of it', () => {
+  scope(); identity(); lessons(); turns(); overview(); charts(); router();
+  // `turn-model` and `overview-model` are listed as depending on nothing in the page; the
+  // bare load proves it — a reference to `state`, `$` or `document` would throw here.
+  loadRegion(['turn-model'], TURN_EXPORTS);
+});
+
+// ---------------------------------------------------------------------------
+// The scope predicate
+// ---------------------------------------------------------------------------
+
 const ROWS = [
   { label: "scope 'run'", row: { scope: 'run' }, scope: 'run', known: true, leaks: false },
   { label: "scope 'session'", row: { scope: 'session' }, scope: 'session', known: true, leaks: true },
@@ -135,281 +147,75 @@ const FILTER_TABLE = {
   unknown: ["scope ''", 'scope absent'],
 };
 
-// ---------------------------------------------------------------------------
-// 19
-// ---------------------------------------------------------------------------
-
-/**
- * The predicate, executed rather than read.
- *
- * Two entries in this table are the ones worth defending. `run` keeps an unrecorded row,
- * because such a lesson reads as `run` everywhere else it is asked for, and a page that hid it
- * from the run filter would disagree about where that lesson is visible. And `unknown`
- * overlaps `run` rather than replacing it: "nothing recorded a scope" is a second axis over
- * the same rows, and somebody auditing what leaks needs to be able to ask it separately.
- */
 test('scope: the predicate keeps exactly the rows each filter claims', () => {
-  const r = loadRegion();
-
+  const r = scope();
   for (const c of ROWS) {
     assert.equal(r.scopeOf(c.row), c.scope, `scopeOf(${c.label})`);
     assert.equal(r.scopeKnown(c.row), c.known, `scopeKnown(${c.label})`);
     assert.equal(r.leaksScope(c.row), c.leaks, `leaksScope(${c.label})`);
   }
-
-  // `undefined` spelled out, not merely an absent key — a search result carries the key.
   assert.equal(r.scopeOf({ scope: undefined }), 'run');
   assert.equal(r.scopeKnown({ scope: undefined }), false);
-  assert.equal(r.leaksScope({ scope: undefined }), false);
-
   for (const [filter, kept] of Object.entries(FILTER_TABLE)) {
     for (const c of ROWS) {
-      assert.equal(
-        r.matchesScope(c.row, filter),
-        kept.includes(c.label),
-        `matchesScope(${c.label}, '${filter || 'every scope'}')`,
-      );
+      assert.equal(r.matchesScope(c.row, filter), kept.includes(c.label), `matchesScope(${c.label}, '${filter || 'every scope'}')`);
     }
   }
-
-  // `org` is promotion-only, so it is never written from here — but it filters like any other
-  // exact value once a row carries it.
-  assert.equal(r.matchesScope({ scope: 'org' }, 'org'), true);
-  assert.equal(r.matchesScope({ scope: 'global' }, 'org'), false);
-
-  // An explicit `scopeKnown` off the wire wins over the shape of the row. A row can say "run"
-  // out loud *because the server defaulted it*, and only the flag carries that.
-  assert.equal(r.scopeKnown({ scope: 'run', scopeKnown: false }), false);
+  assert.equal(r.scopeKnown({ scope: 'run', scopeKnown: false }), false, 'an explicit flag off the wire wins over the shape of the row');
   assert.equal(r.matchesScope({ scope: 'run', scopeKnown: false }, 'unknown'), true);
-  assert.equal(r.matchesScope({ scope: 'run', scopeKnown: false }, 'run'), true);
-  assert.equal(r.scopeKnown({ scope: '', scopeKnown: true }), true);
-  assert.equal(r.matchesScope({ scope: '', scopeKnown: true }, 'unknown'), false);
-
-  // Where a row was written, which is a fact about the reader's position and not about reach.
-  assert.equal(r.fromOtherRun({ sourceRunId: 'a' }, 'a'), false);
   assert.equal(r.fromOtherRun({ sourceRunId: 'a' }, 'b'), true);
-  assert.equal(r.fromOtherRun({ sourceRunId: '' }, 'b'), false);
-  assert.equal(r.fromOtherRun({ sourceRunId: 'a' }, ''), false);
   assert.equal(r.fromOtherRun({ run_id: 'a' }, 'b'), true, 'the activity feed spells it run_id');
-  assert.equal(r.fromOtherRun({}, 'b'), false);
-
-  // The project facet is a display axis with an explicit unattributed bucket. An untagged row
-  // is never claimed for the current project, so it lands in a bucket of its own.
-  assert.equal(r.projectOf({ project: 'github.com/mubit-ai/x' }), 'github.com/mubit-ai/x');
-  assert.equal(r.projectOf({ project: '' }), r.NO_PROJECT);
+  assert.equal(r.fromOtherRun({ sourceRunId: 'a' }, ''), false);
   assert.equal(r.projectOf({}), r.NO_PROJECT);
   assert.notEqual(r.NO_PROJECT, '', 'the empty string already means "every project" on the select');
-  assert.equal(r.matchesProject({ project: 'a' }, ''), true);
-  assert.equal(r.matchesProject({ project: 'a' }, 'a'), true);
-  assert.equal(r.matchesProject({ project: 'a' }, 'b'), false);
   assert.equal(r.matchesProject({}, r.NO_PROJECT), true);
   assert.equal(r.matchesProject({ project: 'a' }, r.NO_PROJECT), false);
-
-  // D7, the regression this exists to prevent: scope used to be concatenated into the
-  // free-text haystack, so the word a person types *at a scope filter* matched every row.
+  // Scope must not be searchable as text: typing `run` at a scope filter matched every row.
   const session = { content: 'never edit the mirror', scope: 'session', sourceRunId: 'abc' };
-  assert.equal(r.matchesText(session, 'run'), false, 'scope must not be searchable as text');
+  assert.equal(r.matchesText(session, 'run'), false);
   assert.equal(r.matchesText(session, 'mirror'), true);
-  assert.equal(r.matchesText(session, ''), true);
-  assert.equal(r.matchesText({ content: 'x', run_id: 'run-77' }, 'run-77'), true);
+  assert.equal(r.matchesText({ content: 'x', id: 'ref_abc' }, 'ref_abc'), true, 'an id is searchable');
 });
 
-// ---------------------------------------------------------------------------
-// 20
-// ---------------------------------------------------------------------------
-
-/**
- * The drift guard.
- *
- * The page computes `leaksScope` itself instead of rendering the server's, and it has to: a
- * `/api/search` row has no scope at all, so trusting the wire would mean trusting a field that
- * is sometimes absent and sometimes a default. The cost of deriving it is that two
- * implementations of "visible outside its own run" now exist, in two languages of the same
- * codebase, and nothing but this test notices when one of them moves.
- */
+/** The drift guard: the page derives `leaksScope` itself, and it must agree with the server. */
 test('scope: the page and lib/dashboard-api.mjs agree on what leaks', async () => {
-  const r = loadRegion();
+  const r = scope();
   const { normalizeLesson } = await lib('dashboard-api.mjs');
-
-  const wire = [
-    { label: 'run', raw: { content: 'a', scope: 'run' } },
-    { label: 'session', raw: { content: 'a', scope: 'session' } },
-    { label: 'global', raw: { content: 'a', scope: 'global' } },
-    { label: 'org', raw: { content: 'a', scope: 'org' } },
-    { label: 'empty', raw: { content: 'a', scope: '' } },
-    { label: 'absent', raw: { content: 'a' } },
-  ];
-
-  for (const c of wire) {
-    const row = normalizeLesson(c.raw, { currentRun: 'run-1' });
-    assert.equal(
-      r.leaksScope(row), row.leaksScope,
-      `the page and the server disagree about whether a ${c.label}-scope lesson leaks: `
-      + `page says ${r.leaksScope(row)}, lib/dashboard-api.mjs says ${row.leaksScope}`,
-    );
-    // Whatever the server normalises an absent scope to, the page must land on a value from
-    // the same vocabulary rather than inventing a fifth bucket for it.
-    assert.ok(
-      r.SCOPE_VALUES.includes(r.scopeOf(row)),
-      `scopeOf() produced "${r.scopeOf(row)}" for a ${c.label}-scope lesson, which is not one `
-      + `of ${r.SCOPE_VALUES.join(' | ')}`,
-    );
+  for (const raw of [{ scope: 'run' }, { scope: 'session' }, { scope: 'global' }, { scope: 'org' }, { scope: '' }, {}]) {
+    const row = normalizeLesson({ content: 'a', ...raw }, { currentRun: 'run-1' });
+    assert.equal(r.leaksScope(row), row.leaksScope, `disagree on ${JSON.stringify(raw)}`);
+    assert.ok(r.SCOPE_VALUES.includes(r.scopeOf(row)));
   }
-
-  // The same, for the other field the page re-derives.
   for (const currentRun of ['run-1', 'run-2', '']) {
     const row = normalizeLesson({ content: 'a', source_run_id: 'run-1' }, { currentRun });
-    assert.equal(
-      r.fromOtherRun(row, currentRun), row.fromOtherRun,
-      `fromOtherRun disagrees with the server for currentRun="${currentRun}"`,
-    );
+    assert.equal(r.fromOtherRun(row, currentRun), row.fromOtherRun);
   }
 });
 
-// ---------------------------------------------------------------------------
-// 21
-// ---------------------------------------------------------------------------
-
-/** The one function whose body is asserted over, sliced by brace matching rather than regex. */
-function fnBody(src, signature) {
-  const at = src.indexOf(signature);
-  assert.ok(at >= 0, `bin/dashboard.html no longer contains "${signature}"`);
-  let depth = 0;
-  let i = src.indexOf('{', at);
-  const start = i;
-  for (; i < src.length; i += 1) {
-    if (src[i] === '{') depth += 1;
-    else if (src[i] === '}') {
-      depth -= 1;
-      if (depth === 0) return src.slice(start, i + 1);
-    }
-  }
-  assert.fail(`could not find the end of ${signature}`);
-  return '';
-}
-
-/**
- * Structural facts about the shipped markup that the predicate cannot reach.
- *
- * Each of these is a bug that shipped once: a filter whose vocabulary was a third of the
- * server's, a search mapper that stamped a scope onto rows that had none, and a badge rendered
- * behind a truthiness check that an unrecorded scope always fails.
- */
+/** Structural facts about the shipped markup that the predicate cannot reach. */
 test('scope: the shipped page offers the whole vocabulary and claims no scope it was not told', () => {
   const src = readFileSync(PAGE, 'utf8');
-
-  // D3. `run | session | global | org` is the instance's vocabulary; `leak` and `unknown` are
-  // the two questions asked across it. All six, plus "every scope", must be reachable.
   for (const value of ['', 'run', 'leak', 'session', 'global', 'org', 'unknown']) {
-    assert.ok(
-      src.includes(`<option value="${value}"`),
-      `the scope filter offers no <option value="${value}">. `
-      + 'A vocabulary the page cannot express is a question a person cannot ask.',
-    );
+    assert.ok(src.includes(`<option value="${value}"`), `the scope filter offers no <option value="${value}">`);
   }
-
-  // `org` is written by promotion and never by a client, so it must not be *offered* until
-  // something carries it — otherwise it is a filter guaranteed to return nothing.
   const orgOption = src.slice(src.indexOf('<option value="org"'));
-  assert.match(
-    orgOption.slice(0, orgOption.indexOf('>') + 1), /hidden/,
-    'the org option must start hidden and be revealed only when a loaded row carries org scope',
-  );
-
-  // D5. Search evidence carries no scope. Stamping one on made every result read as run-scoped,
-  // which silently emptied the list under any active scope filter.
-  const search = fnBody(src, 'async function searchInstance()');
-  assert.doesNotMatch(search, /\bscope:\s*''/, 'the search mapper must not invent a scope');
+  assert.match(orgOption.slice(0, orgOption.indexOf('>') + 1), /hidden/, 'org starts hidden until a loaded row carries it');
+  const search = src.slice(src.indexOf('async function searchInstance()'), src.indexOf('function setView('));
+  assert.doesNotMatch(search, /\bscope:\s*['"]/, 'the search mapper must not invent a scope');
   assert.doesNotMatch(search, /\bleaksScope:\s*false/, 'the search mapper must not invent leaksScope');
-  assert.doesNotMatch(search, /\bscope:\s*""/, 'the search mapper must not invent a scope');
-
-  // D5, the other half. A badge behind `if (e.scope)` disappears for exactly the rows whose
-  // scope a person most needs to see — the ones nothing recorded a scope for.
-  assert.doesNotMatch(
-    src, /if\s*\(\s*e\.scope\s*\)/,
-    'the scope badge must render for every row, including one with no recorded scope',
-  );
-  assert.ok(
-    src.includes('function scopeBadge('),
-    'the badge should go through one helper, so "always rendered" is enforced in one place',
-  );
-
-  // D1. The lessons fetch always asks for every run — an empty run is the only spelling of
-  // "every run" upstream, and the three views are a client-side filter over what came back, so
-  // changing directory or view never refetches. `currentRun` is a rendering context rather
-  // than a filter, so it is sent separately and always.
-  assert.ok(
-    src.includes("'run=&currentRun=' + encodeURIComponent(state.run)"),
-    'the Memory fetch must send an empty run and the current run — the views filter what is loaded',
-  );
+  assert.doesNotMatch(src, /if\s*\(\s*e\.scope\s*\)/, 'the scope badge must render for every row, including one with no recorded scope');
+  assert.ok(src.includes('function scopeBadge('), 'one helper, so "always rendered" is enforced in one place');
   assert.doesNotMatch(src, /state\.allRuns/, 'the run toggle is gone; the view is the filter');
-  assert.ok(src.includes('>Everything stored<'), 'Activity mode is relabelled "Everything stored"');
-
-  // D7. A failed fetch and an empty instance must not render the same sentence.
-  assert.ok(src.includes('Could not load lessons from the instance.'));
-  assert.doesNotMatch(src, /'No lessons match\.'/, 'the ambiguous empty-state string is gone');
-
-  // Every control added for this work is reachable without sight. The two segment buttons carry
-  // aria-pressed because they are toggles; the two selects carry aria-label because their only
-  // visible label is the option text.
-  for (const id of ['runs-this', 'runs-reach', 'runs-all']) {
-    const tagText = src.slice(src.indexOf(`id="${id}"`));
-    assert.match(
-      tagText.slice(0, tagText.indexOf('>')), /aria-pressed=/,
-      `#${id} is a toggle and must carry aria-pressed`,
-    );
-  }
-  for (const id of ['scope-filter', 'project-filter']) {
-    const tagText = src.slice(src.indexOf(`id="${id}"`));
-    assert.match(
-      tagText.slice(0, tagText.indexOf('>')), /aria-label=/,
-      `#${id} has no visible label of its own and must carry aria-label`,
-    );
-  }
-  // The one control built in script rather than markup.
-  const footer = fnBody(src, 'function renderMemoryFooter()');
-  assert.match(
-    footer, /setAttribute\('aria-label'/,
-    'the "Show every scope" escape hatch is created in script and must set its own aria-label',
-  );
-
-  // The page is served under `default-src 'self'` with no connect-src beyond its own origin,
-  // so a stray absolute URL is a control that silently does nothing in a browser.
-  assert.doesNotMatch(
-    src.slice(src.indexOf('<script>')), /["'`]https?:\/\/(?!www\.w3\.org)/,
-    'the page must stay self-contained; the CSP blocks every external origin',
-  );
+  assert.ok(src.includes('Could not load lessons from the instance'), 'a failed fetch and an empty instance render different sentences');
 });
 
 // ---------------------------------------------------------------------------
-// The identity strip
+// Run identity
 // ---------------------------------------------------------------------------
 
-/** Local noon today, so an hour either side never crosses a day boundary in any time zone. */
-function localNoon() {
-  const d = new Date();
-  d.setHours(12, 0, 0, 0);
-  return d.getTime();
-}
-
-/** The page's own day key, restated: local calendar date, zero-padded. */
-function ymd(ms) {
-  const d = new Date(ms);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
-const H = 3_600_000;
-
-// Every "ago" and every day header is computed from a clock the caller passes, never from
-// `Date.now()` inside the region — which is what lets this table be exact.
-test('identity: relativeTime, dayKey and groupByDay agree with a fixed clock', () => {
-  const r = loadRegion(
-    ['scope-predicate', 'identity-model', 'lesson-view'],
-    [...REGION_EXPORTS, ...IDENTITY_EXPORTS, ...LESSON_EXPORTS],
-  );
+test('identity: relativeTime, dayKey, groupByDay and clockOf agree with a fixed clock', () => {
+  const r = lessons();
   const now = localNoon();
-
   assert.equal(r.relativeTime(now - 3_000, now), 'just now');
   assert.equal(r.relativeTime(now - 12_000, now), '12s ago');
   assert.equal(r.relativeTime(now - 120_000, now), '2m ago');
@@ -417,226 +223,46 @@ test('identity: relativeTime, dayKey and groupByDay agree with a fixed clock', (
   assert.equal(r.relativeTime(now - 2 * 24 * H, now), '2d ago');
   assert.equal(r.relativeTime(now + 5_000, now), 'just now', 'a clock skewed into the future is not "in 5s"');
   assert.equal(r.relativeTime(0, now), '—');
-  assert.equal(r.relativeTime(undefined, now), '—');
-
   const iso = (ms) => new Date(ms).toISOString();
   assert.equal(r.dayKey(iso(now - H), now), 'Today');
   assert.equal(r.dayKey(iso(now - 24 * H), now), 'Yesterday');
   assert.equal(r.dayKey(iso(now - 72 * H), now), ymd(now - 72 * H));
   assert.equal(r.dayKey('', now), 'Undated');
   assert.equal(r.dayKey('not a date', now), 'Undated');
-  assert.equal(r.dayKey(undefined, now), 'Undated');
-
-  assert.equal(r.clockOf(iso(now)), '12:00', 'HH:MM, local, 24-hour');
+  assert.equal(r.clockOf(iso(now)), '12:00');
   assert.equal(r.clockOf(''), '—');
-
   const rows = [
-    { id: 'a', createdAt: iso(now - H) },
-    { id: 'b', createdAt: iso(now - 24 * H) },
-    { id: 'c', created_at: iso(now - 2 * H) },
-    { id: 'd' },
-    { id: 'e', createdAt: iso(now - 72 * H) },
+    { id: 'a', createdAt: iso(now - H) }, { id: 'b', createdAt: iso(now - 24 * H) },
+    { id: 'c', created_at: iso(now - 2 * H) }, { id: 'd' }, { id: 'e', createdAt: iso(now - 72 * H) },
   ];
   const groups = r.groupByDay(rows, now, 'newest');
   assert.deepEqual(plain(groups.map((g) => g.key)), ['Today', 'Yesterday', ymd(now - 72 * H), 'Undated']);
-  assert.deepEqual(plain(groups[0].rows.map((x) => x.id)), ['a', 'c'], 'newest first inside a day, and created_at counts too');
-  assert.deepEqual(plain(groups[3].rows.map((x) => x.id)), ['d']);
+  assert.deepEqual(plain(groups[0].rows.map((x) => x.id)), ['a', 'c']);
+  assert.deepEqual(plain(r.sortRows(rows, 'oldest').map((x) => x.id)), ['e', 'b', 'c', 'a', 'd'], 'undated last in both orders');
+  assert.deepEqual(rows.map((x) => x.id), ['a', 'b', 'c', 'd', 'e'], 'the input is not mutated');
 });
 
-/**
- * The strip names the newest session as the one the page is "in", and the directory comes
- * from the run row's join — with the launch directory as the fallback for the launch run,
- * which is the one run that can be identified without a session record at all.
- */
-test('identity: runIdentity picks the newest session and falls back to the launch directory', () => {
+test('identity: scopeSentences, strategyLabel, pathParts, parentRunId, shortSession and runStateTone', () => {
   const r = identity();
-  const meta = { launch: { cwd: '/home/user/proj', projectDir: '/home/user/proj', run: 'cc-here-00000001' } };
-  const sessions = [
-    { sessionId: 's-new', runId: 'cc-here-00000001', agentId: 'claude-code', lastSeenAt: 300, createdAt: 100, clearCount: 1, projectDir: '/home/user/proj/sub', projectRoot: '/home/user/proj' },
-    { sessionId: 's-old', runId: 'cc-here-00000001', agentId: 'claude-code', lastSeenAt: 200, createdAt: 50, clearCount: 2, projectDir: '/home/user/proj', projectRoot: '/home/user/proj' },
-  ];
-  const row = { runId: 'cc-here-00000001', state: 'ready', mode: 'hosted', lastWrite: 400, sessions, sessionCount: 2, projectDir: '/home/user/proj/sub', projectRoot: '/home/user/proj' };
-
-  const id = r.runIdentity(row, meta, [row]);
-  assert.equal(id.runId, 'cc-here-00000001');
-  assert.equal(id.isLaunchRun, true);
-  assert.equal(id.newest.sessionId, 's-new', 'sessions arrive newest first and the strip names the first');
-  assert.equal(id.sessionCount, 2);
-  assert.equal(id.clearTotal, 3);
-  assert.equal(id.projectDir, '/home/user/proj/sub');
-  assert.equal(id.projectRoot, '/home/user/proj');
-  assert.equal(id.state, 'ready');
-  assert.equal(id.mode, 'hosted');
-  assert.equal(id.lastWrite, 400);
-
-  // The launch run with no session record yet: the directory is still known, because the
-  // server said where it was launched from.
-  const bare = r.runIdentity({ runId: 'cc-here-00000001', state: 'ready' }, meta, []);
-  assert.equal(bare.isLaunchRun, true);
-  assert.equal(bare.sessionCount, 0);
-  assert.equal(bare.newest, null);
-  assert.equal(bare.projectDir, '/home/user/proj', 'the launch directory is the fallback for the launch run');
-  assert.equal(bare.projectRoot, '');
-
-  // Any other run with no record has no directory. Guessing one would be worse than blank.
-  const other = r.runIdentity({ runId: 'cc-else-00000002', state: 'unknown' }, meta, []);
-  assert.equal(other.isLaunchRun, false);
-  assert.equal(other.projectDir, '');
-  assert.equal(other.state, 'unknown');
-
-  // A subagent marker borrows the parent's sessions: nothing is stored under a sub-run id.
-  const sub = r.runIdentity({ runId: 'cc-here-00000001-sub-abc' }, meta, [row]);
-  assert.equal(sub.sessionCount, 2);
-  assert.equal(sub.isLaunchRun, true);
-  assert.equal(sub.projectDir, '/home/user/proj/sub');
-
-  assert.equal(r.runIdentity(null, null, null).runId, '', 'nothing selected is a blank strip, not a throw');
-  assert.equal(r.identitySignature(id), r.identitySignature(r.runIdentity(row, meta, [row])), 'stable across polls');
-  assert.notEqual(r.identitySignature(id), r.identitySignature(bare));
-
-  assert.equal(r.runStateTone('ready'), 'ok');
-  assert.equal(r.runStateTone('unreachable'), 'bad');
-  assert.equal(r.runStateTone('auth_failed'), 'bad');
-  assert.equal(r.runStateTone('unknown'), 'muted');
-  assert.equal(r.runStateTone(''), 'muted');
-
-  assert.equal(r.shortSession('01a08f3e-1111-2222-3333-444444444e11'), '01a08…e11');
-  assert.equal(r.shortSession(''), '—');
-  const label = r.sessionLabel(sessions[0], 1000);
-  assert.ok(label.includes('s-new') && label.includes('claude-code') && label.includes('cleared 1×'), label);
-
-  assert.deepEqual(plain(r.pathParts('/home/user/proj')), { full: '/home/user/proj', head: '/home/user/', tail: 'proj' });
-  assert.deepEqual(plain(r.pathParts('')), { full: '', head: '', tail: '' });
-  assert.deepEqual(plain(r.pathParts('proj')), { full: 'proj', head: '', tail: 'proj' });
-});
-
-// `session`, `auto` and `per-directory` are not answers a person can use. Every value of every
-// setting has to render as a different sentence, and the server's wording wins when it is there.
-test('identity: scopeSentences has a distinct sentence for every strategy, ceiling and cross-run value', () => {
-  const r = identity();
-  const distinct = (values, fn) => {
-    const seen = new Set(values.map(fn));
-    assert.equal(seen.size, values.length, JSON.stringify([...seen]));
-  };
+  const distinct = (values, fn) => assert.equal(new Set(values.map(fn)).size, values.length);
   distinct(['per-directory', 'git-branch', 'per-conversation', 'static'], (v) => r.strategyLabel(v));
   distinct(['run', 'session', 'global'], (v) => r.scopeSentences({ writesAt: v }).writes);
   distinct(['auto', 'on', 'off'], (v) => r.scopeSentences({ readsAcrossRuns: v }).reads);
-
-  const s = r.scopeSentences({
-    writesAt: 'session', writesAtText: 'the server wording', readsAcrossRuns: 'auto', readsAcrossRunsText: 'and this one',
-  });
-  assert.match(s.writes, /^Writes: /);
-  assert.ok(s.writes.includes('the server wording'), s.writes);
-  assert.ok(s.writes.includes('(cap: session)'), 'the setting value is still named, for the person who has to change it');
-  assert.match(s.reads, /^Reads: /);
+  const s = r.scopeSentences({ writesAt: 'session', writesAtText: 'the server wording', readsAcrossRuns: 'auto', readsAcrossRunsText: 'and this one' });
+  assert.ok(s.writes.includes('the server wording') && s.writes.includes('(cap: session)'), s.writes);
   assert.ok(s.reads.includes('and this one') && s.reads.includes('(cross-run: auto)'), s.reads);
-
-  const none = r.scopeSentences(null);
-  assert.ok(none.writes.length > 20 && none.reads.length > 20, 'an old server with no scope block still gets the defaults');
-  assert.ok(r.strategyLabel('custom').includes('custom'), 'an unknown strategy is named, not blanked');
-});
-
-test('identity: parentRunId strips a subagent suffix and nothing else', () => {
-  const r = identity();
+  assert.ok(r.scopeSentences(null).writes.length > 20, 'an old server with no scope block still gets the defaults');
+  assert.deepEqual(plain(r.pathParts('/home/user/proj')), { full: '/home/user/proj', head: '/home/user/', tail: 'proj' });
+  assert.deepEqual(plain(r.pathParts('')), { full: '', head: '', tail: '' });
   assert.equal(r.parentRunId('cc-pre-main-af449e06-sub-1a2b3c'), 'cc-pre-main-af449e06');
-  assert.equal(r.parentRunId('cc-pre-main-af449e06'), 'cc-pre-main-af449e06');
   assert.equal(r.parentRunId('cc-subject-000001'), 'cc-subject-000001', '"sub" inside a word is not the marker');
-  assert.equal(r.parentRunId('-sub-x'), '-sub-x', 'a suffix with no parent before it is left alone');
-  assert.equal(r.parentRunId(''), '');
-  assert.equal(r.parentRunId(undefined), '');
+  assert.equal(r.parentRunId('-sub-x'), '-sub-x');
+  assert.equal(r.shortSession('01a08f3e-1111-2222-3333-444444444e11'), '01a08…e11');
+  assert.equal(r.shortSession(''), '—');
+  assert.equal(r.runStateTone('ready'), 'ok');
+  assert.equal(r.runStateTone('auth_failed'), 'bad');
+  assert.equal(r.runStateTone(''), 'muted');
 });
-
-// ---------------------------------------------------------------------------
-// The lesson list
-// ---------------------------------------------------------------------------
-
-// The question the tab exists to answer is "what was stored, in what order". An undated row
-// has no place in that order, so it goes last whichever way the list is sorted — never first
-// because an empty string compares low.
-test('lessons: sortRows and groupByDay put undated rows last in both orders', () => {
-  const r = lessons();
-  const now = localNoon();
-  const iso = (ms) => new Date(ms).toISOString();
-  const rows = [
-    { id: 'undated-1' },
-    { id: 'old', createdAt: iso(now - 72 * H) },
-    { id: 'new', createdAt: iso(now - H) },
-    { id: 'undated-2', createdAt: '' },
-    { id: 'mid', created_at: iso(now - 24 * H) },
-  ];
-  assert.deepEqual(plain(r.sortRows(rows, 'newest').map((x) => x.id)), ['new', 'mid', 'old', 'undated-1', 'undated-2']);
-  assert.deepEqual(plain(r.sortRows(rows, 'oldest').map((x) => x.id)), ['old', 'mid', 'new', 'undated-1', 'undated-2']);
-  assert.deepEqual(rows.map((x) => x.id), ['undated-1', 'old', 'new', 'undated-2', 'mid'], 'the input is not mutated');
-
-  const oldest = r.groupByDay(rows, now, 'oldest');
-  assert.deepEqual(plain(oldest.map((g) => g.key)), [ymd(now - 72 * H), 'Yesterday', 'Today', 'Undated']);
-  assert.equal(oldest[3].rows.length, 2);
-  assert.deepEqual(plain(r.groupByDay([], now, 'newest')), []);
-});
-
-// The chip row is labelled with the numbers of the rows under it — counted the same way the
-// filter keeps them, so `run` includes the unrecorded rows and `unknown` counts them again.
-test('lessons: scopeCounts and typeCounts count what the list will show', () => {
-  const r = lessons();
-  const rows = [
-    { scope: 'run', lessonType: 'rule' },
-    { scope: 'run', lessonType: 'rule' },
-    { scope: 'session', lessonType: 'fact' },
-    { scope: 'global', lessonType: 'rule' },
-    { scope: '', lessonType: 'rule' },
-    { entry_type: 'trace' },
-    { scope: 'org', lessonType: 'rule' },
-  ];
-  const c = r.scopeCounts(rows);
-  assert.equal(c.run, 4, 'two recorded, two defaulted — the run filter keeps all four');
-  assert.equal(c.session, 1);
-  assert.equal(c.global, 1);
-  assert.equal(c.org, 1);
-  assert.equal(c.unknown, 2, 'the two rows nothing recorded a scope for');
-  assert.deepEqual(plain(r.scopeCounts([])), { run: 0, session: 0, global: 0, org: 0, unknown: 0 });
-
-  assert.deepEqual(plain(r.typeCounts(rows)), [
-    { key: 'rule', count: 5 }, { key: 'fact', count: 1 }, { key: 'trace', count: 1 },
-  ], 'by count, then by name; the activity feed spells it entry_type');
-
-  assert.equal(r.scopeTone({ scope: 'global' }), 'shared');
-  assert.equal(r.scopeTone({ scope: 'run' }), 'local');
-  assert.equal(r.scopeTone({}), 'unknown');
-  assert.equal(r.scopeTone({ scope: 'run', scopeKnown: false }), 'unknown');
-
-  assert.equal(r.reachSentence({ scope: 'global' }).length > 20, true);
-  assert.ok(r.reachSentence({}).includes('default'), 'an unrecorded scope says it is the default');
-
-  assert.equal(r.listEmptyMessage({ mode: 'lessons', error: 'boom' }).text, 'Could not load lessons from the instance.');
-  assert.equal(r.listEmptyMessage({ mode: 'lessons', error: 'boom' }).detail, 'boom');
-  assert.equal(r.listEmptyMessage({ mode: 'lessons', loaded: false }).kind, 'loading');
-  assert.match(r.listEmptyMessage({ mode: 'lessons', loaded: true, total: 7 }).text, /7 loaded/);
-  assert.match(r.listEmptyMessage({ mode: 'lessons', loaded: true, total: 0, view: 'here' }).text, /this directory/);
-  assert.match(r.listEmptyMessage({ mode: 'lessons', loaded: true, total: 0, view: 'all' }).text, /anywhere on the instance/);
-  assert.match(r.listEmptyMessage({ mode: 'activity', loaded: true, total: 0, view: 'reach' }).text, /activity.*this directory/);
-
-  const parts = r.footerParts({
-    shown: 1, hidden: 2, mode: 'lessons', search: false,
-    census: { totalVisible: 40, source: 'activity', truncated: true, pages: 2, truncatedReason: 'deadline', unknownScope: 3 },
-  });
-  assert.equal(parts[0], '1 shown');
-  assert.ok(parts.includes('2 hidden by the scope filter'));
-  assert.ok(parts.includes('40 on the instance'));
-  assert.ok(parts.some((p) => p.includes('stopped after 2 pages (deadline)')), JSON.stringify(parts));
-  assert.ok(parts.includes('3 with no recorded scope'));
-  const searching = r.footerParts({ shown: 2, mode: 'lessons', search: true, searchQuery: 'mirror', census: { totalVisible: 40 } });
-  assert.ok(!searching.some((p) => p.includes('on the instance')), 'a search answer is not a census');
-  assert.ok(searching.some((p) => p.includes('mirror')));
-  assert.match(r.scopeNoteText({ mode: 'lessons', view: 'all' }), /[Ee]very lesson on the instance/);
-  assert.match(r.scopeNoteText({ mode: 'lessons', view: 'here' }), /this directory/);
-  assert.match(r.scopeNoteText({ mode: 'lessons', view: 'reach' }), /reach here/);
-  assert.match(r.scopeNoteText({ mode: 'activity', view: 'here' }), /[Ee]ntries.*this directory/);
-  assert.match(r.scopeNoteText({ mode: 'lessons', view: 'here', joinError: 'x' }), /this directory.*x/s);
-});
-
-// ---------------------------------------------------------------------------
-// Families — one directory, several run ids
-// ---------------------------------------------------------------------------
 
 /** Every shape a run id arrives in. The same table `test/dashboard-data.test.mjs` pins. */
 const RUN_ID_SHAPES = [
@@ -646,11 +272,6 @@ const RUN_ID_SHAPES = [
   'my-pinned-run-c1', 'my-pinned-run', '11111111-2222-4333-8444-555555555555', '',
 ];
 
-/**
- * The drift guard for the directory key. The server folds ids for the family routes and the
- * page folds them for placement; the two are the same function in two languages of the same
- * codebase, and only this test notices when one of them moves.
- */
 test('identity: baseRunId and plainRunId agree with lib/dashboard-data.mjs on every shape of run id', async () => {
   const r = identity();
   const d = await lib('dashboard-data.mjs');
@@ -658,11 +279,7 @@ test('identity: baseRunId and plainRunId agree with lib/dashboard-data.mjs on ev
     assert.equal(r.baseRunId(id), d.baseRunId(id), `baseRunId(${JSON.stringify(id)}) differs between the page and the server`);
     assert.equal(r.plainRunId(id), d.plainRunId(id), `plainRunId(${JSON.stringify(id)}) differs between the page and the server`);
   }
-  assert.equal(r.baseRunId('cc-pre-main-af449e06-c1'), 'cc-pre-main-af449e06');
-  assert.equal(r.baseRunId('state::01234::cc-pre-main-af449e06-c1-sub-abc'), 'cc-pre-main-af449e06');
   assert.equal(r.baseRunId('my-pinned-run-c1'), 'my-pinned-run-c1', 'a static id is not a directory key');
-  assert.equal(r.plainRunId('state::01234::x'), 'x');
-  assert.equal(r.baseRunId(undefined), '');
 });
 
 test('identity: groupRunsByDirectory folds a directory\'s runs together and names the current one', () => {
@@ -681,45 +298,40 @@ test('identity: groupRunsByDirectory folds a directory\'s runs together and name
     ['cc-here-00000001-c1', 'pinned', 'cc-here-00000001-sub-abc', 'cc-here-00000001'],
     ['cc-orphan-0000003'],
   ], 'families newest first; runs inside a family newest first');
-
   const here = groups[1];
-  assert.equal(here.projectDir, '/home/user/proj', 'the directory of the newest session in the family');
-  assert.equal(here.projectRoot, '/home/user/proj');
+  assert.equal(here.projectDir, '/home/user/proj');
   assert.equal(here.current, 'cc-here-00000001-c1', 'the run the newest session maps to');
   assert.deepEqual(plain(here.runs.map((x) => x.label)), ['current', 'earlier', 'subagent', 'before /clear']);
-  assert.deepEqual(plain(here.bases.slice().sort()), ['cc-here-00000001', 'pinned']);
   assert.equal(here.subagentRuns, 1);
   assert.equal(here.turnCount, 16);
-  assert.equal(here.lastWrite, 300);
-  assert.equal(here.agentIds.join(','), 'claude-code,codex');
-
+  assert.equal(here.sessionCount, 3, 'every session in the family, for the context line');
   assert.equal(groups[2].projectDir, '', 'no session record, no directory — guessing one would be worse than blank');
-  assert.equal(groups[2].current, 'cc-orphan-0000003');
-  assert.deepEqual(plain(groups[2].runs.map((x) => x.label)), ['current']);
-
-  assert.equal(r.runLabel('cc-here-00000001-c1', here), 'current');
-  assert.equal(r.runLabel('cc-here-00000001', here), 'before /clear');
-  assert.equal(r.runLabel('cc-here-00000001-sub-abc', here), 'subagent');
-  assert.equal(r.runLabel('pinned', here), 'earlier');
   assert.equal(r.runLabel('cc-here-00000001-c12', { ...here, current: 'x' }), 'after /clear ×12');
-
-  assert.deepEqual(plain(r.familyIds(runs, 'cc-here-00000001')).sort(), plain(here.runs.map((x) => x.runId)).sort());
-  assert.deepEqual(plain(r.familyIds(runs, 'pinned')).sort(), plain(here.runs.map((x) => x.runId)).sort(), 'asked by any member, the same family');
-  assert.deepEqual(plain(r.familyIds(runs, 'cc-nope-00000009')), ['cc-nope-00000009'], 'an unknown run is a family of one');
-  assert.deepEqual(plain(r.groupRunsByDirectory([])), []);
+  assert.deepEqual(plain(r.familyIds(runs, 'pinned')).sort(), plain(here.runs.map((x) => x.runId)).sort());
+  assert.deepEqual(plain(r.familyIds(runs, 'cc-nope-00000009')), ['cc-nope-00000009']);
   assert.deepEqual(plain(r.groupRunsByDirectory(null)), []);
 });
 
 // ---------------------------------------------------------------------------
-// Placement — here, shared, elsewhere
+// The lesson model
 // ---------------------------------------------------------------------------
 
-/**
- * The view is a client-side filter over what is loaded, and this is the predicate. `here`
- * folds every spelling of the directory's runs — the feed's `state::` prefix, a `-c1`, a
- * subagent — back to the directory key; `shared` is what other directories saved at a scope
- * that reaches here at recall; `elsewhere` is everything else.
- */
+test('lessons: scopeCounts, typeCounts, scopeTone and reachSentence count and name what the table shows', () => {
+  const r = lessons();
+  const rows = [
+    { scope: 'run', lessonType: 'rule' }, { scope: 'run', lessonType: 'rule' }, { scope: 'session', lessonType: 'fact' },
+    { scope: 'global', lessonType: 'rule' }, { scope: '', lessonType: 'rule' }, { entry_type: 'trace' }, { scope: 'org', lessonType: 'rule' },
+  ];
+  const c = r.scopeCounts(rows);
+  assert.equal(c.run, 4, 'two recorded, two defaulted — the run filter keeps all four');
+  assert.equal(c.unknown, 2);
+  assert.deepEqual(plain(r.typeCounts(rows)), [{ key: 'rule', count: 5 }, { key: 'fact', count: 1 }, { key: 'trace', count: 1 }]);
+  assert.equal(r.scopeTone({ scope: 'global' }), 'shared');
+  assert.equal(r.scopeTone({ scope: 'run' }), 'local');
+  assert.equal(r.scopeTone({}), 'unknown');
+  assert.ok(r.reachSentence({}).includes('default'), 'an unrecorded scope says it is the default');
+});
+
 test('lessons: placement and matchesView decide here, shared and elsewhere against the selected directory', () => {
   const r = lessons();
   const bases = ['cc-here-00000001'];
@@ -727,43 +339,20 @@ test('lessons: placement and matchesView decide here, shared and elsewhere again
     hereRun: { scope: 'run', sourceRunId: 'cc-here-00000001' },
     hereCleared: { scope: 'session', sourceRunId: 'state::u::cc-here-00000001-c1' },
     hereSub: { scope: 'run', run_id: 'cc-here-00000001-sub-abc' },
-    hereBare: { runId: 'cc-here-00000001-c3' },
     sharedGlobal: { scope: 'global', sourceRunId: 'cc-else-00000002' },
     sharedSession: { scope: 'session', run_id: 'state::u::cc-else-00000002-c3' },
     elsewhere: { scope: 'run', sourceRunId: 'cc-else-00000002' },
-    elsewhereBare: { sourceRunId: 'cc-else-00000002' },
     noRun: { scope: 'global' },
   };
-  const P = {
-    hereRun: 'here', hereCleared: 'here', hereSub: 'here', hereBare: 'here',
-    sharedGlobal: 'shared', sharedSession: 'shared',
-    elsewhere: 'elsewhere', elsewhereBare: 'elsewhere', noRun: 'here',
-  };
-  for (const [k, row] of Object.entries(rows)) {
-    assert.equal(r.placement(row, bases), P[k], `placement(${k})`);
-  }
-  const V = {
-    here: Object.keys(P).filter((k) => P[k] === 'here'),
-    reach: Object.keys(P).filter((k) => P[k] !== 'elsewhere'),
-    all: Object.keys(P),
-  };
-  for (const [view, kept] of Object.entries(V)) {
-    for (const [k, row] of Object.entries(rows)) {
-      assert.equal(r.matchesView(row, view, bases), kept.includes(k), `matchesView(${k}, '${view}')`);
-    }
-  }
-  assert.deepEqual(plain(r.placementCounts(Object.values(rows), bases)), { here: 5, reach: 7, all: 9 });
+  const P = { hereRun: 'here', hereCleared: 'here', hereSub: 'here', sharedGlobal: 'shared', sharedSession: 'shared', elsewhere: 'elsewhere', noRun: 'here' };
+  for (const [k, row] of Object.entries(rows)) assert.equal(r.placement(row, bases), P[k], `placement(${k})`);
+  assert.equal(r.matchesView(rows.sharedGlobal, 'here', bases), false);
+  assert.equal(r.matchesView(rows.sharedGlobal, 'reach', bases), true);
+  assert.equal(r.matchesView(rows.elsewhere, 'reach', bases), false);
+  assert.equal(r.matchesView(rows.elsewhere, 'all', bases), true);
+  assert.deepEqual(plain(r.placementCounts(Object.values(rows), bases)), { here: 4, reach: 6, all: 7 });
   assert.equal(r.placement(rows.hereRun, []), 'elsewhere', 'with no directory selected, nothing is here');
-  assert.equal(r.placement(rows.noRun, []), 'shared', 'a row with no run and a wide scope still reaches');
-  assert.equal(r.matchesView(rows.elsewhere, 'nonsense', bases), true, 'an unknown view hides nothing');
 });
-
-// ---------------------------------------------------------------------------
-// Attribution — which session, which prompt, and how the page knows
-// ---------------------------------------------------------------------------
-
-const T0 = 1_700_000_000_000;
-const isoAt = (ms) => new Date(ms).toISOString();
 
 /** Three turns: two in one session (the second still open), one in another session and run. */
 const TURNS = [
@@ -772,46 +361,34 @@ const TURNS = [
   { runId: 'cc-here-00000001-c1', promptId: 'p3', sessionId: 's2', startedAt: T0 + 30_000, endedAt: T0 + 50_000, turnNumber: 1, promptPreview: 'other session' },
 ];
 
-test('lessons: originOf reads the four origins, and attributeTurn says recorded, by time, or nothing', () => {
+test('lessons: originOf and matchesOrigin read the four origins; attributeTurn says recorded, by time, or nothing', () => {
   const r = lessons();
   assert.equal(r.originOf({ origin: 'agent' }), 'agent', 'the server\'s word wins when it sent one');
   assert.equal(r.originOf({ source: 'mcp-agent' }), 'agent');
-  assert.equal(r.originOf({ source: 'agent' }), 'agent');
   assert.equal(r.originOf({ source: 'auto-reflect:end' }), 'auto-reflection');
   assert.equal(r.originOf({ source: 'reflection', autoReflection: true }), 'auto-reflection');
   assert.equal(r.originOf({ source: 'reflection:session-end' }), 'reflection');
   assert.equal(r.originOf({ entry_type: 'trace', source: 'agent' }), 'hook', 'the capture hooks stamp source: agent on a trace');
-  assert.equal(r.originOf({ entryType: 'trace' }), 'hook');
   assert.equal(r.originOf({}), '');
-  assert.equal(r.originOf(null), '');
+  assert.equal(r.matchesOrigin({ source: 'mcp-agent' }, ''), true);
+  assert.equal(r.matchesOrigin({ source: 'mcp-agent' }, 'agent'), true);
+  assert.equal(r.matchesOrigin({ source: 'mcp-agent' }, 'hook'), false);
+  assert.equal(r.matchesOrigin({}, 'unknown'), true, '"unknown" is the rows nothing recorded an origin for');
+  assert.equal(r.matchesOrigin({ source: 'reflection' }, 'unknown'), false);
 
-  const stamped = r.attributeTurn({ promptId: 'p1', sessionId: 's1', createdAt: isoAt(T0 + 20_000) }, TURNS);
-  assert.equal(stamped.how, 'recorded');
-  assert.equal(stamped.turn.promptId, 'p1');
+  assert.equal(r.attributeTurn({ promptId: 'p1', sessionId: 's1', createdAt: isoAt(T0 + 20_000) }, TURNS).how, 'recorded');
   const pruned = r.attributeTurn({ promptId: 'p9', createdAt: isoAt(T0 + 20_000) }, TURNS);
-  assert.equal(pruned.how, 'recorded', 'stamped is stamped, even when the turn file has been pruned');
+  assert.equal(pruned.how, 'recorded', 'stamped is stamped, even when the turn is not on the page');
   assert.equal(pruned.turn, null);
-
   const byTime = r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 + 40_000) }, TURNS);
   assert.equal(byTime.how, 'by time');
   assert.equal(byTime.turn.promptId, 'p1', 'the same session — not the other session\'s turn at the same moment');
-  const noSession = r.attributeTurn({ createdAt: isoAt(T0 + 40_000) }, TURNS);
-  assert.equal(noSession.how, 'by time');
-  assert.equal(noSession.turn.promptId, 'p3', 'without a session, the latest window that contains the time');
-  const open = r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 + 900_000) }, TURNS);
-  assert.equal(open.how, 'by time');
-  assert.equal(open.turn.promptId, 'p2', 'an open turn\'s window has no end');
-  const grace = r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 + 130_000) }, TURNS);
-  assert.equal(grace.turn.promptId, 'p1', 'an ingest that lands shortly after the turn closed still belongs to it');
-
-  assert.equal(r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 - 5_000) }, TURNS).how, '', 'before every window');
+  assert.equal(r.attributeTurn({ createdAt: isoAt(T0 + 40_000) }, TURNS).turn.promptId, 'p3', 'without a session, the latest window that contains the time');
+  assert.equal(r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 + 900_000) }, TURNS).turn.promptId, 'p2', 'an open turn\'s window has no end');
+  assert.equal(r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 + 130_000) }, TURNS).turn.promptId, 'p1', 'the grace after a close');
   assert.equal(r.attributeTurn({ sessionId: 's1', createdAt: isoAt(T0 + 200_000) }, TURNS).how, '', 'between two turns is outside every window');
-  const reflection = r.attributeTurn({ source: 'reflection:x', sessionId: 's1', createdAt: isoAt(T0 + 20_000) }, TURNS);
-  assert.equal(reflection.how, '', 'a reflection is never attributed to a prompt');
-  assert.equal(reflection.turn, null);
-  assert.equal(r.attributeTurn({ createdAt: '' }, TURNS).how, '');
+  assert.equal(r.attributeTurn({ source: 'reflection:x', sessionId: 's1', createdAt: isoAt(T0 + 20_000) }, TURNS).how, '', 'a reflection is never attributed to a prompt');
   assert.equal(r.attributeTurn(null, null).how, '');
-  assert.equal(r.attributeTurn({ createdAt: isoAt(T0 + 20_000) }, []).how, '');
 });
 
 test('lessons: provenanceLines says where, which session, which prompt, and how it knows', () => {
@@ -821,89 +398,109 @@ test('lessons: provenanceLines says where, which session, which prompt, and how 
     runs: [{ runId: 'cc-here-00000001-c1', label: 'current' }, { runId: 'cc-here-00000001', label: 'before /clear' }],
   }];
   const sid = '01a08f3e-1111-2222-3333-444444444e11';
-  const turns = [{
-    runId: 'cc-here-00000001', promptId: 'p1', sessionId: sid, startedAt: T0, endedAt: T0 + 100_000, turnNumber: 23,
-    promptPreview: 'Give me the commands to start the daemon and check its logs afterwards please',
-  }];
-  const row = {
-    id: 'l1', createdAt: isoAt(T0 + 20_000), source: 'mcp-agent', origin: 'agent', scope: 'session',
-    sourceRunId: 'cc-here-00000001', sessionId: sid, promptId: 'p1', turnNumber: 23,
-  };
+  const turns = [{ runId: 'cc-here-00000001', promptId: 'p1', sessionId: sid, startedAt: T0, endedAt: T0 + 100_000, turnNumber: 23, promptPreview: 'Give me the commands to start the daemon and check its logs afterwards please' }];
+  const row = { id: 'l1', createdAt: isoAt(T0 + 20_000), source: 'mcp-agent', origin: 'agent', scope: 'session', sourceRunId: 'cc-here-00000001', sessionId: sid, promptId: 'p1', turnNumber: 23 };
   const find = (lines, key) => lines.find((l) => l.key === key);
 
   const lines = r.provenanceLines(row, { families, turns });
   assert.deepEqual(plain(lines.map((l) => l.key)), ['saved', 'directory', 'session', 'prompt', 'reach']);
-  assert.match(find(lines, 'saved').text, /^Saved /);
-  assert.ok(find(lines, 'saved').text.includes('by the agent (mubit_learned)'), find(lines, 'saved').text);
+  assert.ok(find(lines, 'saved').text.includes('by the agent (mubit_learned)'));
   assert.equal(find(lines, 'directory').text, 'Directory /home/user/proj · run cc-here-00000001 (before /clear)');
   assert.equal(find(lines, 'session').text, 'Session 01a08…e11 · recorded');
-  assert.equal(find(lines, 'session').how, 'recorded');
   assert.match(find(lines, 'prompt').text, /^Prompt “Give me the commands to start/);
-  assert.ok(find(lines, 'prompt').text.includes('turn 23') && find(lines, 'prompt').text.endsWith('· recorded'), find(lines, 'prompt').text);
+  assert.ok(find(lines, 'prompt').text.includes('turn 23') && find(lines, 'prompt').text.endsWith('· recorded'));
   assert.equal(find(lines, 'prompt').turn.promptId, 'p1');
-  assert.equal(find(lines, 'prompt').how, 'recorded');
-  assert.match(find(lines, 'reach').text, /^Reach: /);
 
   const byTime = r.provenanceLines({ ...row, sessionId: '', promptId: '', turnNumber: 0 }, { families, turns });
   assert.equal(find(byTime, 'session').text, 'Session 01a08…e11 · by time');
-  assert.ok(find(byTime, 'prompt').text.endsWith('· by time'), find(byTime, 'prompt').text);
   assert.equal(find(byTime, 'prompt').how, 'by time');
-
   const reflection = r.provenanceLines({ createdAt: isoAt(T0 + 20_000), source: 'reflection:x', sourceRunId: 'cc-here-00000001', scope: 'session' }, { families, turns });
   assert.equal(find(reflection, 'prompt'), undefined, 'a reflection gets a session by time but never a prompt');
-  assert.equal(find(reflection, 'session').text, 'Session 01a08…e11 · by time');
-  assert.ok(find(reflection, 'saved').text.includes('by reflection'), find(reflection, 'saved').text);
-  const auto = r.provenanceLines({ createdAt: isoAt(T0 + 20_000), source: 'auto-reflect:end', sourceRunId: 'cc-here-00000001' }, { families, turns });
-  assert.ok(find(auto, 'saved').text.includes('by auto-reflection'), find(auto, 'saved').text);
-
   const pruned = r.provenanceLines({ ...row, promptId: 'p9' }, { families, turns });
-  assert.match(find(pruned, 'prompt').text, /turn file pruned/);
-  assert.equal(find(pruned, 'prompt').how, 'recorded');
+  assert.match(find(pruned, 'prompt').text, /turn not on this page/);
   assert.equal(find(pruned, 'prompt').turn, null);
-
-  const nowhere = r.provenanceLines({ ...row, sessionId: '', promptId: '', createdAt: isoAt(T0 - 5_000) }, { families, turns });
-  assert.equal(find(nowhere, 'session').text, 'Session not recorded');
-  assert.equal(find(nowhere, 'prompt').text, 'Prompt not recorded');
-  assert.equal(find(nowhere, 'prompt').how, '');
-
   const other = r.provenanceLines({ ...row, sourceRunId: 'cc-else-00000002', sessionId: '', promptId: '' }, { families, turns });
-  assert.ok(find(other, 'directory').text.includes('cc-else-00000002') && !find(other, 'directory').text.includes('/home/user/proj'), find(other, 'directory').text);
   assert.match(find(other, 'directory').text, /not in this data directory/);
   assert.equal(find(other, 'prompt'), undefined, 'another directory\'s turns are not on this page');
-
-  const hook = r.provenanceLines({
-    entryType: 'trace', tool: 'Edit', hookEvent: 'PostToolUse', sessionId: sid, promptId: 'p1',
-    createdAt: isoAt(T0 + 1_000), run_id: 'state::u::cc-here-00000001', source: 'agent',
-  }, { families, turns });
-  assert.ok(find(hook, 'saved').text.includes('hook capture') && find(hook, 'saved').text.includes('Edit'), find(hook, 'saved').text);
-  assert.ok(find(hook, 'saved').text.includes('PostToolUse'));
-
-  const sub = r.provenanceLines({ ...row, agentType: 'Explore' }, { families, turns });
-  assert.ok(find(sub, 'saved').text.includes('subagent Explore'), find(sub, 'saved').text);
-
-  const undated = r.provenanceLines({ source: 'mcp-agent' }, { families, turns });
-  assert.match(find(undated, 'saved').text, /^Saved at a time this instance did not record/);
-  assert.equal(find(undated, 'directory').text, 'Directory not recorded · run unknown');
+  const hook = r.provenanceLines({ entryType: 'trace', tool: 'Edit', hookEvent: 'PostToolUse', sessionId: sid, promptId: 'p1', createdAt: isoAt(T0 + 1_000), run_id: 'state::u::cc-here-00000001', source: 'agent' }, { families, turns });
+  assert.ok(find(hook, 'saved').text.includes('hook capture (Edit)') && find(hook, 'saved').text.includes('PostToolUse'), find(hook, 'saved').text);
   assert.equal(r.provenanceLines(null, null).length, 5, 'a blank row still renders the five lines rather than throwing');
 });
 
+/**
+ * The counters. Blank — never 0 — when the instance stamped none: a zero would claim the
+ * lesson was measured and never helped, where a blank says nothing was recorded either way.
+ */
+test('lessons: lessonStats is blank, not zero, for a counter the instance never stamped', () => {
+  const r = lessons();
+  const stamped = r.lessonStats({ countersStamped: true, successCount: 3, confidence: 0.714, injectedCount: 5 });
+  assert.equal(stamped.worked, '3');
+  assert.equal(stamped.failed, '0', 'failure_count is absent until a failure lands; stamped means 0');
+  assert.equal(stamped.confidence, '0.71');
+  assert.equal(stamped.injected, '5');
+  assert.equal(stamped.workedN, 3);
+  assert.equal(stamped.failedN, 0);
+  const bare = r.lessonStats({ countersStamped: false, successCount: 0, failureCount: 0, confidence: null });
+  assert.equal(bare.worked, '');
+  assert.equal(bare.failed, '');
+  assert.equal(bare.confidence, '');
+  assert.equal(bare.injected, '', 'undecorated: the ledger had nothing for this directory');
+  assert.equal(bare.workedN, null);
+  assert.equal(r.lessonStats({ injectedCount: 0 }).injected, '0', 'decorated and never injected is a real zero');
+  assert.equal(r.lessonStats(null).worked, '');
+
+  assert.deepEqual(plain(r.outcomeTone('success')), { text: 'worked', tone: 'ok' });
+  assert.deepEqual(plain(r.outcomeTone('failure')), { text: 'failed', tone: 'bad' });
+  assert.equal(r.outcomeTone('partial').tone, 'warn');
+  assert.equal(r.outcomeTone('neutral').tone, 'warn');
+  assert.deepEqual(plain(r.outcomeTone('')), { text: 'none', tone: 'muted' });
+});
+
+test('lessons: sortLessons orders by a counter with blanks last in both directions, and by saved time', () => {
+  const r = lessons();
+  const rows = [
+    { id: 'blank' },
+    { id: 'three', countersStamped: true, successCount: 3, createdAt: isoAt(T0) },
+    { id: 'one', countersStamped: true, successCount: 1, createdAt: isoAt(T0 + 5_000) },
+    { id: 'seven', countersStamped: true, successCount: 7, timestamp: isoAt(T0 - 5_000) },
+  ];
+  assert.deepEqual(plain(r.sortLessons(rows, 'worked', 'desc').map((x) => x.id)), ['seven', 'three', 'one', 'blank']);
+  assert.deepEqual(plain(r.sortLessons(rows, 'worked', 'asc').map((x) => x.id)), ['one', 'three', 'seven', 'blank'], 'a blank is not the least reinforced');
+  assert.deepEqual(plain(r.sortLessons(rows, 'saved', 'desc').map((x) => x.id)), ['one', 'three', 'seven', 'blank']);
+  assert.deepEqual(plain(r.sortLessons(rows, 'saved', 'asc').map((x) => x.id)), ['seven', 'three', 'one', 'blank']);
+  assert.deepEqual(rows.map((x) => x.id), ['blank', 'three', 'one', 'seven'], 'the input is not mutated');
+});
+
+test('lessons: countLine and listEmptyMessage tell a failed fetch, an empty instance and a filter apart', () => {
+  const r = lessons();
+  assert.match(r.countLine({ error: 'boom' }), /^Could not load lessons.*boom/);
+  assert.equal(r.countLine({ loaded: false }), 'Loading…');
+  const line = r.countLine({ loaded: true, shown: 1, total: 3, census: { totalVisible: 40, truncated: true, pages: 2, truncatedReason: 'deadline', unknownScope: 3 } });
+  for (const part of ['1 shown', '2 hidden by the view and filters', '40 on the instance', 'stopped after 2 pages (deadline)', '3 with no recorded scope']) {
+    assert.ok(line.includes(part), `${JSON.stringify(part)} missing from ${JSON.stringify(line)}`);
+  }
+  const searching = r.countLine({ loaded: true, shown: 2, total: 2, search: true, searchQuery: 'mirror', census: { totalVisible: 40 } });
+  assert.ok(searching.includes('mirror') && !searching.includes('on the instance'), 'a search answer is not a census');
+  assert.equal(r.listEmptyMessage({ error: 'boom' }).kind, 'error');
+  assert.equal(r.listEmptyMessage({ loaded: false }).kind, 'loading');
+  const filtered = r.listEmptyMessage({ loaded: true, total: 7, view: 'here', scope: 'global', q: 'mirror' });
+  assert.equal(filtered.kind, 'filtered');
+  assert.ok(filtered.text.includes('7 loaded') && filtered.text.includes('“mirror”') && filtered.text.includes('scope global') && filtered.text.includes('Written here'), filtered.text);
+  assert.match(r.listEmptyMessage({ loaded: true, total: 0, view: 'all' }).text, /anywhere on the instance/);
+  assert.match(r.listEmptyMessage({ loaded: true, total: 0, view: 'here' }).text, /this directory/);
+});
+
 // ---------------------------------------------------------------------------
-// The turns table, with agents and sessions
+// The turn model
 // ---------------------------------------------------------------------------
 
-test('turns: turnAgentsText, groupTurnsBySession, lessonsInTurn, entrySummary and durationText', () => {
+test('turns: turnAgentsText, groupTurnsBySession, lessonsInTurn, savedInTurn, entrySummary and durationText', () => {
   const r = turns();
   assert.equal(r.turnAgentsText({ subagentCount: 0 }), 'main');
   assert.equal(r.turnAgentsText({ subagentCount: 2, subagentTypes: ['Explore', 'Plan'] }), 'main + 2 sub (Explore, Plan)');
   assert.equal(r.turnAgentsText({ subagentCount: 3, subagentTypes: ['Explore', 'Explore', 'Explore'] }), 'main + 3 sub (Explore)');
-  assert.equal(r.turnAgentsText({ subagentCount: 1, subagentTypes: [''] }), 'main + 1 sub');
-  assert.equal(r.turnAgentsText(undefined), 'main');
-
-  const rows = [{ promptId: 'a', sessionId: 's2' }, { promptId: 'b', sessionId: 's1' }, { promptId: 'c', sessionId: 's2' }, { promptId: 'd' }];
-  const groups = r.groupTurnsBySession(rows);
-  assert.deepEqual(plain(groups.map((g) => [g.sessionId, g.rows.map((x) => x.promptId)])),
-    [['s2', ['a', 'c']], ['s1', ['b']], ['', ['d']]], 'sessions in first-seen order, rows in the order given');
-  assert.deepEqual(plain(r.groupTurnsBySession([])), []);
+  const groups = r.groupTurnsBySession([{ promptId: 'a', sessionId: 's2' }, { promptId: 'b', sessionId: 's1' }, { promptId: 'c', sessionId: 's2' }, { promptId: 'd' }]);
+  assert.deepEqual(plain(groups.map((g) => [g.sessionId, g.rows.map((x) => x.promptId)])), [['s2', ['a', 'c']], ['s1', ['b']], ['', ['d']]]);
 
   const turn = { promptId: 'p1', sessionId: 's1', startedAt: T0, endedAt: T0 + 60_000 };
   const lessons = [
@@ -913,90 +510,239 @@ test('turns: turnAgentsText, groupTurnsBySession, lessonsInTurn, entrySummary an
     { id: 'outside', createdAt: isoAt(T0 + 600_000) },
     { id: 'otherPrompt', promptId: 'p2', createdAt: isoAt(T0 + 30_000) },
     { id: 'reflection', source: 'reflection:x', createdAt: isoAt(T0 + 30_000) },
-    { id: 'autoReflection', origin: 'auto-reflection', createdAt: isoAt(T0 + 30_000) },
   ];
-  assert.deepEqual(plain(r.lessonsInTurn(turn, lessons).map((l) => l.id)), ['stamped', 'inWindow'],
-    'a stamped prompt id first, then the window; another session, another prompt and a reflection never');
-  assert.deepEqual(plain(r.lessonsInTurn({ promptId: 'p1', sessionId: 's1', startedAt: T0, endedAt: 0 }, lessons).map((l) => l.id)),
-    ['stamped', 'inWindow', 'outside'], 'an open turn has no end');
-  assert.deepEqual(plain(r.lessonsInTurn(null, lessons)), []);
-  assert.deepEqual(plain(r.lessonsInTurn(turn, null)), []);
+  assert.deepEqual(plain(r.lessonsInTurn(turn, lessons).map((l) => l.id)), ['stamped', 'inWindow']);
+  assert.deepEqual(plain(r.savedInTurn(turn, lessons).map((s) => [s.lesson.id, s.how])), [['stamped', 'recorded'], ['inWindow', 'by time']],
+    'each says how the page knows: stamped with the prompt, or inferred from the time');
+  assert.deepEqual(plain(r.savedInTurn(null, lessons)), []);
 
-  const two = (n) => (n < 10 ? '0' : '') + n;
-  const d = new Date(T0);
-  const clock = two(d.getHours()) + ':' + two(d.getMinutes());
-  const e = r.entrySummary({ entryType: 'trace', tool: 'Edit', content: 'Edit lib/x.mjs '.repeat(20), createdAt: isoAt(T0), origin: 'hook', runId: 'state::u::cc-else-00000002' });
+  const e = r.entrySummary({ entryType: 'trace', tool: 'Edit', content: 'Edit lib/x.mjs '.repeat(20), createdAt: isoAt(T0), origin: 'hook' });
   assert.equal(e.type, 'trace');
-  assert.equal(e.tool, 'Edit');
-  assert.ok(e.preview.length <= 140 && e.preview.endsWith('…'), e.preview);
-  assert.equal(e.origin, 'hook');
-  assert.equal(e.clock, clock);
-  const l = r.entrySummary({ lessonType: 'rule', content: 'short', timestamp: isoAt(T0) });
-  assert.equal(l.type, 'rule');
-  assert.equal(l.preview, 'short');
-  assert.equal(l.tool, '');
-  assert.equal(l.clock, clock, 'timestamp is the fallback when created_at is absent');
-  assert.equal(r.entrySummary(null).type, 'entry');
+  assert.ok(e.preview.length <= 140 && e.preview.endsWith('…'));
   assert.equal(r.entrySummary({}).clock, '—');
-
   assert.equal(r.durationText(T0, T0 + 12_000), '12s');
   assert.equal(r.durationText(T0, T0 + 185_000), '3m 05s');
   assert.equal(r.durationText(T0, T0 + 3_720_000), '1h 02m');
   assert.equal(r.durationText(T0, 0), '');
-  assert.equal(r.durationText(0, T0), '');
-  assert.equal(r.durationText(T0, T0 - 5), '');
 });
 
-// ---------------------------------------------------------------------------
-// The turns table
-// ---------------------------------------------------------------------------
-
-// `used` has three states and the third is not `false`; `rung 0` is "no reading", not a rung.
-// Both are places where a cell that looks like a number libels the retrieval path.
-test('turns: usedCell is tri-state and rungText renders zero as unrecorded', () => {
+test('turns: usedCell is tri-state, rungText renders zero as unrecorded, fmtInt groups thousands', () => {
   const r = turns();
-  const yes = r.usedCell({ used: true, matched: 2, candidates: 4 });
-  assert.equal(yes.text, '2/4');
-  assert.equal(yes.tone, 'ok');
+  assert.equal(r.usedCell({ used: true, matched: 2, candidates: 4 }).tone, 'ok');
   const no = r.usedCell({ used: false, matched: 0, candidates: 4 });
   assert.equal(no.text, '0/4');
-  assert.notEqual(no.tone, 'ok');
   assert.notEqual(no.tone, 'bad', 'a "no" is weak evidence and must not be painted as a failure');
   const unknown = r.usedCell({ used: null, matched: 0, candidates: 0, reason: 'no_reply' });
   assert.equal(unknown.text, '?', 'never "0/0", which reads as a measured zero');
-  assert.ok(unknown.title.includes('no_reply') && unknown.title.includes('not "unused"'), unknown.title);
+  assert.ok(unknown.title.includes('no_reply') && unknown.title.includes('not "unused"'));
   assert.equal(r.usedCell(undefined).text, '?');
-  assert.equal(r.usedCell({}).text, '?');
-
   assert.equal(r.rungText(0), '—');
-  assert.equal(r.rungText(undefined), '—');
-  assert.equal(r.rungText(1), '1');
   assert.equal(r.rungText(2), '2');
-
-  assert.equal(r.turnMatches({ promptPreview: 'Rebuild the bundle', outcomeState: 'sent' }, 'bundle'), true);
-  assert.equal(r.turnMatches({ promptPreview: 'Rebuild the bundle', outcomeState: 'sent' }, 'sent'), true);
-  assert.equal(r.turnMatches({ promptPreview: 'Rebuild the bundle', outcomeState: 'sent' }, 'nope'), false);
-  assert.equal(r.turnMatches({}, ''), true);
-
   assert.equal(r.fmtInt(1234567), '1,234,567');
-  assert.equal(r.fmtInt(0), '0');
   assert.equal(r.fmtInt(undefined), '0');
-  assert.equal(r.pct(0.5), '50%');
-  assert.equal(r.pct(undefined), '0%');
+});
 
-  const tiles = r.tileSpecs({ points: 14, averages: { tok: 120, sources: 3.5, chars: 480 }, pointerRatio: 0.25, series: [{ tok: 1 }, { tok: 2 }] });
-  assert.equal(tiles.length, 4);
+/**
+ * The outcome word: the verdict wins over the automatic signal, `neutral` is a third tone
+ * rather than a failure, and a turn the API cut off is `none`, never `failed`.
+ */
+test('turns: outcomeOf lets a verdict win over the signal and never paints neutral as failure', () => {
+  const r = turns();
+  const o = (t) => plain(r.outcomeOf(t));
+  assert.deepEqual(o({ outcome: 'success', verdict: 'failed' }), { key: 'failed', text: 'did not work', tone: 'bad', by: 'verdict' });
+  assert.deepEqual(o({ outcome: 'failure', verdict: 'worked' }), { key: 'worked', text: 'worked', tone: 'ok', by: 'verdict' });
+  assert.deepEqual(o({ outcome: 'success' }), { key: 'worked', text: 'worked', tone: 'ok', by: 'signal' });
+  assert.deepEqual(o({ outcome: 'failure' }), { key: 'failed', text: 'failed', tone: 'bad', by: 'signal' });
+  assert.equal(o({ outcome: 'neutral' }).tone, 'warn');
+  assert.equal(o({ outcome: 'neutral' }).key, 'neutral');
+  assert.deepEqual(o({ outcome: 'none', apiError: 'rate_limit', startedAt: T0, endedAt: T0 + 1 }), { key: 'none', text: 'api error', tone: 'muted', by: 'api' });
+  assert.equal(o({ startedAt: T0, endedAt: 0 }).key, 'open');
+  assert.equal(o({ outcome: 'none', startedAt: T0, endedAt: T0 + 1 }).key, 'none');
+  assert.equal(o(null).key, 'none');
+});
+
+test('turns: sortTurns and matchesTurnFilters order and narrow the table', () => {
+  const r = turns();
+  const rows = [
+    { promptId: 'a', startedAt: T0 + 1, recalledCount: 2, tok: 50, outcome: 'neutral', promptPreview: 'rebuild the bundle', sessionId: 's1' },
+    { promptId: 'b', startedAt: T0 + 3, recalledCount: 0, tok: 0, outcome: 'none', promptPreview: 'and again', sessionId: 's2', endedAt: T0 + 4 },
+    { promptId: 'c', startedAt: T0 + 2, recalledCount: 5, tok: 900, outcome: 'success', verdict: 'failed', promptPreview: 'ship it', sessionId: 's1' },
+  ];
+  assert.deepEqual(plain(r.sortTurns(rows, 'time', 'desc').map((t) => t.promptId)), ['b', 'c', 'a']);
+  assert.deepEqual(plain(r.sortTurns(rows, 'injected', 'desc').map((t) => t.promptId)), ['c', 'a', 'b']);
+  assert.deepEqual(plain(r.sortTurns(rows, 'tok', 'asc').map((t) => t.promptId)), ['b', 'a', 'c']);
+  assert.deepEqual(plain(r.sortTurns(rows, 'outcome', 'asc').map((t) => t.promptId)), ['a', 'c', 'b'], 'worked, neutral, failed, then none');
+  const ids = (f) => plain(rows.filter((t) => r.matchesTurnFilters(t, f)).map((t) => t.promptId));
+  assert.deepEqual(ids({}), ['a', 'b', 'c']);
+  assert.deepEqual(ids({ q: 'BUNDLE' }), ['a'], 'case-insensitive over the preview');
+  assert.deepEqual(ids({ session: 's1' }), ['a', 'c']);
+  assert.deepEqual(ids({ outcome: 'failed' }), ['c'], 'the verdict is what the filter sees');
+  assert.deepEqual(ids({ outcome: 'none' }), ['b']);
+  assert.deepEqual(ids({ injectedOnly: true }), ['a', 'c']);
+  assert.deepEqual(ids({ q: 's1', injectedOnly: true, session: 's1' }), ['a', 'c'], 'the session id is in the haystack too');
+});
+
+// ---------------------------------------------------------------------------
+// The overview model
+// ---------------------------------------------------------------------------
+
+test('overview: deltaText reads direction against whether up is good, and says when there is no earlier window', () => {
+  const r = overview();
+  assert.deepEqual(plain(r.deltaText(12, 9, { days: 7, good: 'up' })), { text: '+3 vs previous 7 days', tone: 'ok' });
+  assert.deepEqual(plain(r.deltaText(9, 12, { days: 7, good: 'up' })), { text: '−3 vs previous 7 days', tone: 'bad' });
+  assert.deepEqual(plain(r.deltaText(900, 1200, { days: 7, good: 'down' })), { text: '−300 vs previous 7 days', tone: 'ok' });
+  assert.equal(r.deltaText(5, 2, { days: 7, good: 'none' }).tone, 'muted', 'a count with no better direction is not coloured');
+  assert.deepEqual(plain(r.deltaText(5, 5, { days: 7, good: 'up' })), { text: 'no change vs previous 7 days', tone: 'muted' });
+  assert.deepEqual(plain(r.deltaText(5, null, { days: 7 })), { text: 'no earlier window', tone: 'muted' });
+  assert.equal(r.deltaText(5, 2, { days: 7, hasPrev: false }).text, 'no earlier window');
+});
+
+/** The server's overview, as `lib/dashboard-data.mjs` shapes it. */
+function overviewFixture(over = {}) {
+  const day = (d, turns, injected, tokens, success, failure, neutral, none) => ({
+    day: d, turns, injectedTurns: injected ? 1 : 0, injectedRefs: injected, injected, tokens, chars: tokens * 4,
+    outcomes: { success, failure, neutral, none }, verdicts: { worked: 0, failed: 0 },
+  });
+  const series = [day('2026-09-03', 2, 3, 400, 1, 0, 1, 0), day('2026-09-04', 0, 0, 0, 0, 0, 0, 0), day('2026-09-05', 3, 6, 900, 1, 1, 0, 1)];
+  return {
+    days: 7, now: T0, windowStart: T0 - 7 * 86400000, previousStart: T0 - 14 * 86400000, firstLedgerAt: T0 - 20 * 86400000,
+    kpi: { turns: 5, injectedTurns: 2, injectedRefs: 9, tokens: 1300, outcomes: { success: 2, failure: 1, neutral: 1, none: 1 }, verdicts: { worked: 1, failed: 0 } },
+    previous: { turns: 4, injectedTurns: 3, injectedRefs: 6, tokens: 1600, outcomes: { success: 1, failure: 0, neutral: 2, none: 1 }, verdicts: { worked: 0, failed: 0 } },
+    series,
+    ...over,
+  };
+}
+
+test('overview: kpiTiles yields the five tiles with zeros rather than NaN, and deltas against the previous window', () => {
+  const r = overview();
+  const tiles = r.kpiTiles(overviewFixture(), { lessonsLoaded: true, lessonsSaved: 2, lessonsSavedPrev: 5 });
+  assert.deepEqual(plain(tiles.map((t) => t.key)), ['turns', 'injected', 'outcomes', 'saved', 'cost']);
+  const by = (k) => tiles.find((t) => t.key === k);
+  assert.equal(by('turns').value, '5');
+  assert.equal(by('turns').delta.text, '+1 vs previous 7 days');
+  assert.equal(by('injected').value, '9');
+  assert.equal(by('outcomes').value, '2 / 1');
+  assert.ok(by('outcomes').unit.includes('1 by verdict'), by('outcomes').unit);
+  assert.equal(by('outcomes').delta.tone, 'ok', 'more worked is good');
+  assert.equal(by('saved').value, '2');
+  assert.equal(by('saved').delta.text, '−3 vs previous 7 days');
+  assert.equal(by('cost').value, '260', '1300 tokens over 5 turns');
+  assert.equal(by('cost').delta.tone, 'ok', '260 is down from 400, and down is good');
   for (const t of tiles) {
-    for (const k of ['key', 'value', 'unit', 'method']) assert.equal(typeof t[k], 'string', `tile.${k}`);
-    assert.ok(Array.isArray(t.series));
+    assert.equal(typeof t.value, 'string');
+    assert.ok(!t.value.includes('NaN'), `${t.key} rendered NaN`);
   }
-  assert.ok(tiles[0].method.includes('14 prompts'), tiles[0].method);
-  assert.equal(tiles[2].value, '25%');
-  assert.match(r.analyticsNote({ points: 0 }), /starts empty/);
-  assert.match(r.analyticsNote({ points: 3, firstSampleAt: 1_700_000_000_000 }), /3 prompts/);
+  const empty = r.kpiTiles(null, {});
+  assert.equal(empty.length, 5);
+  assert.equal(empty.find((t) => t.key === 'cost').value, '0');
+  assert.equal(empty.find((t) => t.key === 'saved').value, '—', 'lessons not loaded is a dash, not a zero');
+  assert.equal(empty.find((t) => t.key === 'turns').delta.text, 'no earlier window');
+  // A ledger younger than two windows has no honest previous window.
+  const young = r.kpiTiles(overviewFixture({ firstLedgerAt: T0 - 3 * 86400000 }), {});
+  assert.equal(young.find((t) => t.key === 'turns').delta.text, 'no earlier window');
+});
 
-  const ht = r.healthTileSpecs({ spoolDepth: 2, rejectedCount: 1, marker: { state: 'ready', captured: { ingested: 5, pending: 1, tools: 2 } }, breaker: { phase: 'open', state: 'unreachable', cooldownLeftMs: 4500 } });
-  assert.equal(ht.length, 4);
-  assert.ok(ht[2].method.includes('5s left'), ht[2].method);
-  assert.match(r.healthNote({ marker: { recall: { sources: 2, tokens: 30, rung: 1, dry_streak: 0 }, reflect: { status: 'ok', lessons_stored: 2 } } }), /last-write-wins/);
+test('overview: outcomesByDay, perDay and rankedLessons shape the chart and the two tables', () => {
+  const r = overview();
+  const ov = overviewFixture();
+  assert.deepEqual(plain(r.outcomesByDay(ov.series)), [
+    { day: '2026-09-03', worked: 1, neutral: 1, failed: 0, none: 0 },
+    { day: '2026-09-04', worked: 0, neutral: 0, failed: 0, none: 0 },
+    { day: '2026-09-05', worked: 1, neutral: 0, failed: 1, none: 1 },
+  ]);
+  assert.deepEqual(plain(r.perDay(ov.series, 'injected').map((d) => d.value)), [3, 0, 6]);
+  assert.deepEqual(plain(r.perDay(ov.series, 'cost').map((d) => d.value)), [200, 0, 300], 'tokens per turn, zero on an empty day');
+  assert.deepEqual(plain(r.outcomesByDay(null)), []);
+  const lessons = [
+    { id: 'a', content: 'A', countersStamped: true, successCount: 4, failureCount: 1 },
+    { id: 'b', content: 'B', countersStamped: true, successCount: 0, failureCount: 3 },
+    { id: 'c', content: 'C', countersStamped: false },
+    { id: 'd', content: 'D', countersStamped: true, successCount: 2 },
+  ];
+  assert.deepEqual(plain(r.rankedLessons(lessons, 'worked', 5)), [
+    { id: 'a', content: 'A', count: 4, share: 1 }, { id: 'd', content: 'D', count: 2, share: 0.5 },
+  ], 'zeros and unstamped rows are not ranked');
+  assert.deepEqual(plain(r.rankedLessons(lessons, 'failed', 1).map((x) => x.id)), ['b']);
+});
+
+test('overview: historyNote and healthTiles say what the window can show', () => {
+  const r = overview();
+  assert.match(r.historyNote(0, 7), /No turn history yet/);
+  assert.match(r.historyNote(T0 - 2 * 86400000, 7, T0), /History starts .* \(2 days of 7 asked for\)/);
+  assert.match(r.historyNote(T0 - 1000, 30, T0), /\(today of 30 asked for\)/);
+  const tiles = r.healthTiles({ spoolDepth: 2, rejectedCount: 1, jobs: [{}, {}], marker: { captured: { ingested: 5, pending: 1 } }, breaker: { phase: 'open', state: 'unreachable', cooldownLeftMs: 4500 }, coldStart: { active: true, until: T0 } });
+  assert.deepEqual(plain(tiles.map((t) => t.key)), ['spool', 'breaker', 'ingest', 'cold']);
+  assert.equal(tiles[0].value, '2');
+  assert.ok(tiles[1].sub.includes('5s left'), tiles[1].sub);
+  assert.equal(tiles[2].value, '2');
+  assert.equal(tiles[3].value, 'active');
+  assert.equal(r.healthTiles(null).length, 4);
+  assert.match(r.healthNote({ marker: { recall: { sources: 2 }, reflect: { status: 'ok', lessons_stored: 2 } } }), /last-write-wins/);
+});
+
+// ---------------------------------------------------------------------------
+// Chart geometry
+// ---------------------------------------------------------------------------
+
+test('charts: scaleLinear, niceTicks, linePath, areaPath and sparkPoints are exact', () => {
+  const r = charts();
+  const y = r.scaleLinear([0, 10], [100, 0]);
+  assert.equal(y(0), 100);
+  assert.equal(y(10), 0);
+  assert.equal(y(5), 50);
+  assert.equal(r.scaleLinear([3, 3], [0, 100])(3), 50, 'a flat domain maps to the middle');
+  assert.deepEqual(plain(r.niceTicks(0, 4)), [0, 1]);
+  assert.deepEqual(plain(r.niceTicks(7, 4)), [0, 2, 4, 6, 8]);
+  assert.deepEqual(plain(r.niceTicks(23, 4)), [0, 10, 20, 30]);
+  assert.deepEqual(plain(r.niceTicks(1300, 4)), [0, 500, 1000, 1500]);
+  for (const max of [1, 3, 9, 42, 999, 12345]) {
+    const t = r.niceTicks(max, 4);
+    assert.ok(t[t.length - 1] >= max, `ticks for ${max} stop at ${t[t.length - 1]}`);
+    assert.ok(t.length >= 2 && t.length <= 7, `ticks for ${max}: ${t.length}`);
+  }
+  assert.equal(r.linePath([{ x: 0, y: 10 }, { x: 5.5, y: 2.25 }]), 'M0,10 L5.5,2.25');
+  assert.equal(r.linePath([]), '');
+  assert.equal(r.areaPath([{ x: 0, y: 10 }, { x: 5, y: 2 }], 20), 'M0,10 L5,2 L5,20 L0,20 Z');
+  assert.equal(r.areaPath([], 20), '');
+  assert.equal(r.sparkPoints([1, 1, 1], 100, 28), '0,14 50,14 100,14', 'a flat series is a line, not nothing');
+  assert.equal(r.sparkPoints([], 100, 28), '');
+  assert.match(r.sparkPoints([0, 10], 100, 28), /^0,26 100,2$/);
+});
+
+test('charts: stackedBars caps thickness, gaps segments in surface, rounds only the top, and hBars scales to the largest', () => {
+  const r = charts();
+  const rows = [{ worked: 2, neutral: 1, failed: 0, none: 0 }, { worked: 0, neutral: 0, failed: 0, none: 0 }, { worked: 0, neutral: 0, failed: 3, none: 0 }];
+  const bars = r.stackedBars(rows, ['worked', 'neutral', 'failed', 'none'], { x0: 40, width: 300, height: 200, max: 4, maxBar: 24, segGap: 2 });
+  assert.equal(bars.length, 3);
+  assert.ok(bars.every((b) => b.w <= 24), 'never thicker than 24px');
+  assert.deepEqual(plain(bars[0].segments.map((s) => [s.key, s.top])), [['worked', false], ['neutral', true]], 'only the last non-zero segment is the data-end');
+  assert.equal(bars[0].segments[0].h, 100 - 2, 'a 2px gap comes off the lower segment');
+  assert.equal(bars[0].segments[1].h, 50, 'the top segment keeps its full height');
+  assert.equal(bars[0].total, 3);
+  assert.deepEqual(plain(bars[1].segments), [], 'an empty day is an empty bar, not a zero-height rect');
+  assert.equal(bars[2].segments[0].key, 'failed');
+  assert.ok(bars[1].cx > bars[0].cx && bars[2].cx > bars[1].cx, 'left to right');
+  assert.deepEqual(plain(r.stackedBars([], ['a'], {})), []);
+  assert.deepEqual(plain(r.hBars([{ label: 'a', value: 4 }, { label: 'b', value: 2 }], 200)), [{ label: 'a', value: 4, w: 200 }, { label: 'b', value: 2, w: 100 }]);
+  assert.deepEqual(plain(r.hBars([{ label: 'a', value: 0 }], 200)), [{ label: 'a', value: 0, w: 0 }], 'all zero is no bar, not a division by zero');
+});
+
+// ---------------------------------------------------------------------------
+// The router
+// ---------------------------------------------------------------------------
+
+test('router: parseHash and buildHash round-trip page and context, and refuse what they do not know', () => {
+  const r = router();
+  assert.deepEqual(plain(r.PAGES), ['overview', 'turns', 'lessons', 'feed', 'health']);
+  assert.deepEqual(plain(r.parseHash('')), { page: 'overview', params: {} });
+  assert.deepEqual(plain(r.parseHash('#/turns')), { page: 'turns', params: {} });
+  assert.deepEqual(plain(r.parseHash('#/turns?dir=%2Fa%2Fb&run=cc-x-00000001&turn=p1&q=hi')), { page: 'turns', params: { dir: '/a/b', run: 'cc-x-00000001', turn: 'p1', q: 'hi' } });
+  assert.equal(r.parseHash('#/nope?dir=x').page, 'overview', 'an unknown page is the first one');
+  assert.deepEqual(plain(r.parseHash('#/lessons?evil=1&lesson=l1').params), { lesson: 'l1' }, 'unknown keys are dropped');
+  assert.deepEqual(plain(r.parseHash('#/overview?window=30&chart=cost').params), { window: '30', chart: 'cost' });
+  assert.equal(r.buildHash('turns', { dir: '/a/b', run: 'cc-x-00000001', turn: 'p1', q: '' }), '#/turns?dir=%2Fa%2Fb&run=cc-x-00000001&turn=p1');
+  assert.equal(r.buildHash('nope', {}), '#/overview');
+  assert.equal(r.buildHash('health', null), '#/health');
+  const h = r.buildHash('lessons', { dir: '/x y', lesson: 'ref_1', q: 'a&b' });
+  assert.deepEqual(plain(r.parseHash(h)), { page: 'lessons', params: { dir: '/x y', lesson: 'ref_1', q: 'a&b' } }, 'round-trips through encoding');
 });

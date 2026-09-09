@@ -217,6 +217,18 @@ export async function launchChrome(opts = {}) {
   });
   const cdp = new Cdp(ws);
 
+  // A Chrome that dies mid-suite must fail the pending command loudly, not leave it hanging
+  // until the event loop drains and node:test reports a promise that never settled.
+  let exited = null;
+  child.once('exit', (code, signal) => {
+    exited = `Chrome exited (${signal || code})`;
+    try { ws.close(); } catch { /* already closed */ }
+  });
+  const sendOrExplain = cdp.send.bind(cdp);
+  cdp.send = (method, params, sessionId) => (exited
+    ? Promise.reject(new Error(`${method}: ${exited}`))
+    : sendOrExplain(method, params, sessionId));
+
   let closed = false;
   const close = async () => {
     if (closed) return;
@@ -393,20 +405,30 @@ async function openPage(cdp) {
 
 /** @type {Promise<Chrome>|null} */
 let shared = null;
+let hooked = false;
 
 /**
- * The file's Chrome, launched on first use and closed by an `after` hook.
+ * The file's Chrome, launched on first use.
+ *
+ * The `after` hook that closes it is registered by `browserTest` at declaration time, never
+ * from inside a running test: a hook registered while a test runs attaches to *that test*, and
+ * Chrome was being killed after the first case while the second waited on it.
+ *
  * @returns {Promise<Chrome>}
  */
 export function sharedChrome() {
-  if (!shared) {
-    shared = launchChrome();
-    after(async () => {
-      const c = await /** @type {Promise<Chrome>} */ (shared).catch(() => null);
-      if (c) await c.close();
-    });
-  }
+  if (!shared) shared = launchChrome();
   return shared;
+}
+
+function hookClose() {
+  if (hooked) return;
+  hooked = true;
+  after(async () => {
+    if (!shared) return;
+    const c = await shared.catch(() => null);
+    if (c) await c.close();
+  });
 }
 
 /** @param {string} s */
@@ -429,6 +451,7 @@ export function browserTest(name, fn, opts = {}) {
     test(name, { skip }, () => {});
     return;
   }
+  hookClose();
   test(name, { timeout: opts.timeoutMs ?? 30000 }, async (t) => {
     const chrome = await sharedChrome();
     const page = await chrome.page();

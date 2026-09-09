@@ -975,3 +975,88 @@ test('entry: a failing dereference records nothing in the breaker and a 401 read
   assert.equal(r.code, 'auth_failed');
   assert.equal(r.status, 502);
 });
+
+// ---------------------------------------------------------------------------
+// The outcome counters — what the instance already knows about each lesson
+// ---------------------------------------------------------------------------
+
+/**
+ * `bump_outcome_counters` on the instance stamps `success_count`, `reinforcement_count`,
+ * `confidence`, `last_outcome` and friends into a lesson's metadata every time an outcome
+ * credits it — and `failure_count` / `partial_count` / `neutral_count` appear only once such
+ * an outcome has landed. The plugin never read any of it. The census carries the metadata
+ * whole, so the counters ride the same path as scope and provenance.
+ */
+test('lessons: the outcome counters are read off the census, absent counts are zero, and countersStamped says which', async (t) => {
+  const { mod } = await setup(t);
+
+  const stamped = mod.normalizeActivityLesson({
+    id: 'a3c1f0de-0000-4000-8000-000000000001', run_id: 'cc-x', entry_type: 'lesson',
+    content: 'Run the migration first.', source: 'agent', created_at: '2026-08-19T15:03:18Z',
+    metadata_json: JSON.stringify({
+      scope: 'session', success_count: 4, failure_count: 1, reinforcement_count: 5,
+      confidence: 0.83, last_outcome: 'success', last_outcome_at: 1_756_000_000,
+      last_outcome_actor: 'user:u_1', validation_status: 'validated', validation_score: 0.7,
+      recurrence_count: 2, project_key: 'mubit/plugins',
+    }),
+  });
+  assert.equal(stamped.successCount, 4);
+  assert.equal(stamped.failureCount, 1);
+  assert.equal(stamped.partialCount, 0, 'never bumped, so absent — and absent is zero');
+  assert.equal(stamped.neutralCount, 0);
+  assert.equal(stamped.countersStamped, true);
+  assert.equal(stamped.reinforcementCount, 5);
+  assert.equal(stamped.confidence, 0.83);
+  assert.equal(stamped.lastOutcome, 'success');
+  assert.equal(stamped.lastOutcomeAt, '2025-08-24T02:26:40.000Z', 'epoch seconds become ISO');
+  assert.equal(stamped.lastOutcomeActor, 'user:u_1');
+  assert.equal(stamped.validationStatus, 'validated');
+  assert.equal(stamped.validationScore, 0.7);
+  assert.equal(stamped.recurrenceCount, 2);
+  assert.equal(stamped.projectKey, 'mubit/plugins');
+
+  // Nothing stamped: zeros for the counts, null for the confidence, and the flag says so.
+  const bare = mod.normalizeActivityLesson({
+    id: 'a3c1f0de-0000-4000-8000-000000000002', entry_type: 'lesson', content: 'x',
+    metadata_json: JSON.stringify({ scope: 'run' }),
+  });
+  assert.equal(bare.successCount, 0);
+  assert.equal(bare.failureCount, 0);
+  assert.equal(bare.countersStamped, false);
+  assert.equal(bare.reinforcementCount, 0);
+  assert.equal(bare.confidence, null, 'null, not 0: a confidence nobody computed is not a low one');
+  assert.equal(bare.lastOutcome, '');
+  assert.equal(bare.lastOutcomeAt, '');
+  assert.equal(bare.lastOutcomeActor, '');
+  assert.equal(bare.validationStatus, '');
+  assert.equal(bare.validationScore, null);
+  assert.equal(bare.recurrenceCount, 0);
+  assert.equal(bare.projectKey, '');
+
+  // A failure that landed alone still stamps the flag.
+  const failedOnly = mod.normalizeActivityLesson({
+    id: 'a3c1f0de-0000-4000-8000-000000000003', entry_type: 'lesson', content: 'x',
+    metadata_json: JSON.stringify({ failure_count: 1 }),
+  });
+  assert.equal(failedOnly.countersStamped, true);
+  assert.equal(failedOnly.failureCount, 1);
+  assert.equal(failedOnly.successCount, 0);
+
+  // The lessons route carries no metadata, and the evidence shape carries whatever it has:
+  // the same keys, the empty values, so the page reads one shape.
+  const COUNTER_KEYS = ['successCount', 'failureCount', 'partialCount', 'neutralCount', 'countersStamped',
+    'reinforcementCount', 'confidence', 'lastOutcome', 'lastOutcomeAt', 'lastOutcomeActor',
+    'validationStatus', 'validationScore', 'recurrenceCount', 'projectKey'];
+  const fromLessons = mod.normalizeLesson({ lesson_id: 'les_1', content: 'x', scope: 'run' });
+  for (const k of COUNTER_KEYS) assert.ok(k in fromLessons, `normalizeLesson lacks ${k}`);
+  assert.equal(fromLessons.countersStamped, false);
+  assert.equal(fromLessons.confidence, null);
+  const fromEvidence = mod.normalizeEvidence({
+    id: 'x', entry_type: 'lesson', content: 'x',
+    metadata_json: JSON.stringify({ success_count: 2, confidence: 0.5 }),
+  });
+  for (const k of COUNTER_KEYS) assert.ok(k in fromEvidence, `normalizeEvidence lacks ${k}`);
+  assert.equal(fromEvidence.successCount, 2);
+  assert.equal(fromEvidence.countersStamped, true);
+  assert.equal(fromEvidence.confidence, 0.5);
+});

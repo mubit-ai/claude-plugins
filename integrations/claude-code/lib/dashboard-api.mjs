@@ -203,6 +203,7 @@ export function normalizeLesson(raw, ctx = {}) {
     // This route carries no metadata, so the provenance keys are empty here and only here:
     // the same keys, so a page reading either shape reads one shape.
     ...provenanceOf(null),
+    ...countersOf(null),
     timestamp: String(ctx.createdAt || ''),
     origin: originOf(l.source, null, 'lesson'),
     autoReflection: false,
@@ -279,6 +280,7 @@ export function normalizeActivityLesson(entry, ctx = {}) {
     promotionQuarantined: meta.promotion_quarantined ?? null,
     promotionShadowStats: meta.promotion_shadow_stats ?? null,
     ...provenanceOf(meta),
+    ...countersOf(meta),
     timestamp: timestampOf(e, meta),
     origin: originOf(e.source, meta, e.entry_type),
     autoReflection: meta.auto_reflection === true,
@@ -309,6 +311,61 @@ function provenanceOf(meta) {
     promptId: str(m.prompt_id),
     turnNumber: Math.max(0, Math.trunc(Number(m.turn_number) || 0)),
   };
+}
+
+/** The four per-outcome counters `bump_outcome_counters` keeps. Any one present means the lesson has been credited. */
+const COUNTER_KEYS = Object.freeze(['success_count', 'failure_count', 'partial_count', 'neutral_count']);
+
+/**
+ * What the instance already knows about a lesson's track record, read off its metadata.
+ *
+ * Every accepted outcome runs `bump_outcome_counters` server-side, which stamps
+ * `success_count`, `reinforcement_count`, `confidence`, `last_outcome`, `last_outcome_at` and
+ * `last_outcome_actor` into the lesson's metadata — and `failure_count`, `partial_count` and
+ * `neutral_count` only once such an outcome has landed. Measured on a hosted instance: twenty
+ * of sixty-six lessons carried counters, none carried a failure count yet. The lessons route
+ * serialises none of this; the census (`projection: 'full'`) carries the metadata whole, so
+ * the counters ride the same path as scope and provenance.
+ *
+ * Absent counts are zero: a counter that was never bumped is a count of nothing, and a page
+ * summing them must not meet `undefined`. `confidence` and `validationScore` are `null` when
+ * absent rather than zero, because a confidence nobody computed is not a low one.
+ * `countersStamped` says whether any counter is present at all, so "0 worked" and "never
+ * credited" render as different facts.
+ *
+ * @param {Record<string, any>|null} meta
+ */
+function countersOf(meta) {
+  const m = (meta && typeof meta === 'object') ? meta : {};
+  return {
+    successCount: count(m.success_count),
+    failureCount: count(m.failure_count),
+    partialCount: count(m.partial_count),
+    neutralCount: count(m.neutral_count),
+    countersStamped: COUNTER_KEYS.some((k) => m[k] !== undefined && m[k] !== null),
+    reinforcementCount: count(m.reinforcement_count),
+    confidence: fraction(m.confidence),
+    lastOutcome: str(m.last_outcome),
+    lastOutcomeAt: isoOf(m.last_outcome_at),
+    lastOutcomeActor: str(m.last_outcome_actor),
+    validationStatus: str(m.validation_status),
+    validationScore: fraction(m.validation_score),
+    recurrenceCount: count(m.recurrence_count),
+    projectKey: str(m.project_key),
+  };
+}
+
+/** A non-negative integer, or 0. @param {any} v */
+function count(v) {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+}
+
+/** A finite number, or null when nothing was recorded. @param {any} v */
+function fraction(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 /**
@@ -402,6 +459,7 @@ export function normalizeEvidence(raw) {
     project: projectTag(meta.env_tags),
     leaksScope: scope !== DEFAULT_SCOPE,
     ...provenanceOf(meta),
+    ...countersOf(meta),
     timestamp: timestampOf(e, meta),
     origin: originOf(e.source, meta, e.entry_type),
     autoReflection: meta.auto_reflection === true,

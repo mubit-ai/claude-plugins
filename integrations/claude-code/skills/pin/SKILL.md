@@ -1,6 +1,6 @@
 ---
 name: pin
-description: "Pin a standing constraint for the rest of this run, so it is put in front of the model on every prompt — 'don't touch the vendored server', 'stay on the 0.10 branch', 'no new dependencies'. Use when the user states a rule that holds for this task and stops being true when the task ends. A pin is for THIS run and is cleared when it no longer applies; a durable, cross-session lesson is /mubit-memory:remember instead. Also use to list or clear what is pinned."
+description: Pin a constraint for the rest of this run, shown on every prompt; use when a rule ends with the task, and remember for anything durable.
 disable-model-invocation: false
 allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs:*)"]
 ---
@@ -37,7 +37,7 @@ wrong to say next week, it is a pin.
 ## Pin something
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" add "don't touch the vendored server" --run <run_id> --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" add "don't touch the vendored server" --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --run <run_id> --json
 ```
 
 It renders on the very next prompt — the command writes through to the local cache the recall
@@ -60,12 +60,23 @@ The command now refuses rather than guessing when two runs are live (`ambiguous_
 but do not rely on that: it can only see the sessions whose hooks happen to have fired inside
 its window, and passing `--run` is what makes the question not arise.
 
+### And always pass `--data-dir`
+
+**`--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"` is not optional.** A Bash tool
+call does not inherit `CLAUDE_PLUGIN_DATA` — it arrives empty — so without the flag the command
+has to guess which of several `mubit-memory*` directories the host is using, and either
+refuses with `no_run` or writes the pin through a store this session's hooks never read. The
+host substitutes `${CLAUDE_PLUGIN_DATA}` into this file before you read it, and the shell
+default around it lets a session that pins `MUBIT_CC_DATA_DIR` keep its pin — the same order
+every hook resolves in. Pass the whole expression straight through. Do not turn it into an
+`ENV=… node …` prefix: that is no longer a `node` command and will stop for a permission prompt.
+
 ## See what is pinned, and clear one
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" list --run <run_id> --json
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear <slug> --run <run_id> --json
-node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear --all --run <run_id> --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" list --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --run <run_id> --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear <slug> --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --run <run_id> --json
+node "${CLAUDE_PLUGIN_ROOT}/bin/pin.mjs" clear --all --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --run <run_id> --json
 ```
 
 `list` prints a slug beside each pin; `clear` takes that slug. `--all` clears only this
@@ -114,5 +125,5 @@ Two failures worth recognising by name:
 - **It is not stored offline.** A pin that the instance did not accept is not written locally
   at all, because a pin that exists only on one machine is one the user believes is shared and
   is not.
-- **It does not reach subagents.** `SubagentStart` injects its own recalled block and does not
-  read pins yet.
+- **It does reach subagents.** `SubagentStart` puts the parent run's pins above its own,
+  smaller recalled block, under a budget of its own, so a fan-out is told the constraint too.

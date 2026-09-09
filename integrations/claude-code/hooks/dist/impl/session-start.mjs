@@ -432,15 +432,9 @@ var DEFAULT_MCP_TOOLS = [
   "mubit_learned",
   "mubit_recall",
   "mubit_outcome",
-  "mubit_reflect",
-  "mubit_lessons",
   "mubit_diagnose",
-  "mubit_archive",
   "mubit_dereference",
-  "mubit_forget",
   "mubit_status",
-  "mubit_strategies",
-  "mubit_checkpoint",
   "mubit_memory_health"
 ];
 var CACHE_FILE = "config.json";
@@ -575,6 +569,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     ["run", "session", "global"],
     "session"
   );
+  const mcpResultTokenBudget = int(pick("mcpResultTokenBudget", "MUBIT_CC_MCP_RESULT_TOKENS"), 2e3);
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
     const opt = key ? optionValue(key, e) : void 0;
@@ -643,6 +638,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,
@@ -791,12 +787,15 @@ var ASSIGNMENT_KEYWORDS = [
   "secret",
   "token",
   "password",
+  "passphrase",
+  "passwd",
   "credential",
   "assertion",
   "signature",
   "apikey",
   "api_key"
 ];
+var ASSIGNMENT_NAME_SUFFIXES = ["pass"];
 var ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(?=\S)/g;
 var VALUE_RE = /\S+/y;
 var ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
@@ -809,6 +808,16 @@ var RULES = [
   { kind: "pem", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { kind: "mubit-key", re: /mbt_[A-Za-z0-9_-]{8,}/g },
   { kind: "openai-key", re: /sk-[A-Za-z0-9_-]{16,}/g },
+  // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+  // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+  // underscore where that rule expects a hyphen, so it fell through every rule in this table
+  // and, being short, under the `high-entropy` floor as well.
+  //
+  // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+  // safe to ship in client-side code — it is in committed source and in browser bundles, and
+  // redacting it would scrub something the user is deliberately looking at while calling a
+  // published value a secret.
+  { kind: "stripe-key", re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
   { kind: "github-token", re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
   { kind: "aws-access-key", re: /AKIA[0-9A-Z]{16}/g },
   { kind: "jwt", re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -824,7 +833,7 @@ function scrubAssignments(text, count) {
     const [, pre, name] = m;
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -839,6 +848,9 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 function scrubUrlCredentials(text, count) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
@@ -1381,8 +1393,13 @@ var ROUTES = Object.freeze({
   outcome: "/v2/control/outcome",
   checkpoint: "/v2/control/checkpoint",
   lessons: "/v2/control/lessons",
-  reflect: "/v2/control/reflect"
+  reflect: "/v2/control/reflect",
+  strategies: "/v2/control/strategies",
+  handoff: "/v2/control/handoff",
+  feedback: "/v2/control/feedback"
 });
+var HANDOFF_ACTIONS = Object.freeze(["review", "continue", "approve", "execute"]);
+var FEEDBACK_VERDICTS = Object.freeze(["approve", "request_changes", "block", "acknowledge"]);
 var MAX_QUERY_BYTES = 256 * 1024;
 var MAX_BODY_BYTES = 64 * 1024 * 1024;
 var DEFAULT_TIMEOUT_MS = 4e3;
@@ -1750,8 +1767,9 @@ function NETWORK_HINT(err) {
 function SANDBOX_BLOCKED() {
   const env = typeof process === "object" && process ? process.env || {} : {};
   if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
-  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+  return SANDBOX_SENTENCE;
 }
+var SANDBOX_SENTENCE = "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
 function messageOf(err) {
   try {
     if (!err) return "unknown error";
@@ -2692,11 +2710,15 @@ function steerBlock(cfg, runId, lessons, anchor = "", partial = false) {
   const lines = [
     "# Mubit memory is active",
     "",
-    `Run: ${runId} (${cfg.mode})`,
-    "Relevant memory is injected automatically before each of your turns \u2014 no need to open a turn by searching for it.",
-    "Do search when the injected memory falls short: mubit_recall for a topic, mubit_diagnose when a command has failed, mubit_dereference for a reference_id you already hold.",
-    `Save what you learn with mubit_learned, and credit what helped with mubit_outcome. ${skill("remember")} and ${skill("recall")} are the explicit forms.`
+    `Run: ${runId} (${cfg.mode})`
   ];
+  if (cfg.host === "codex") {
+    lines.push(
+      "Relevant memory is injected automatically before each of your turns \u2014 no need to open a turn by searching for it.",
+      "Do search when the injected memory falls short: mubit_recall for a topic, mubit_diagnose when a command has failed, mubit_dereference for a reference_id you already hold.",
+      `Save what you learn with mubit_learned, and credit what helped with mubit_outcome. ${skill("remember")} and ${skill("recall")} are the explicit forms.`
+    );
+  }
   if (anchor) {
     lines.push(
       "",

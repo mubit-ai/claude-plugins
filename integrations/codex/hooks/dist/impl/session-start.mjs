@@ -17,7 +17,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync as readdirSync2,
-  readFileSync,
+  readFileSync as readFileSync2,
   renameSync,
   rmSync,
   statSync as statSync2,
@@ -41,7 +41,7 @@ function liveDataDir(home, env = {}) {
   const root = join2(home, ".claude", "plugins", "data");
   try {
     const codexHome = typeof env.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join2(home, ".codex");
-    const pinned = JSON.stringify(JSON.parse(readFileSync(join2(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    const pinned = JSON.stringify(JSON.parse(readFileSync2(join2(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
     if (pinned && pinned[1]) return pinned[1];
   } catch {
   }
@@ -93,7 +93,7 @@ function resolveDataDir(cfg = {}) {
 }
 function readJson(p, fallback = null) {
   try {
-    const raw = readFileSync(p, "utf8");
+    const raw = readFileSync2(p, "utf8");
     if (!raw || !raw.trim()) return fallback;
     const parsed = JSON.parse(raw);
     return parsed === void 0 ? fallback : parsed;
@@ -411,14 +411,14 @@ var init_breaker = __esm({
 });
 
 // ../claude-code/lib/credentials.mjs
-import { existsSync as existsSync3, readFileSync as readFileSync2, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3, unlinkSync as unlinkSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 function credentialsPath(dataDir2) {
   return join4(String(dataDir2 ?? ""), FILE);
 }
 function readCredentials(dataDir2) {
   try {
-    const raw = readFileSync2(credentialsPath(dataDir2), "utf8");
+    const raw = readFileSync3(credentialsPath(dataDir2), "utf8");
     if (!raw || !raw.trim()) return {};
     const parsed = JSON.parse(raw);
     if (!isPlainObject(parsed)) return {};
@@ -444,7 +444,7 @@ var init_credentials = __esm({
 
 // ../claude-code/lib/config.mjs
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync4, readFileSync as readFileSync3, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
 import { basename, dirname as dirname3, join as join5, resolve as resolve2 } from "node:path";
 function screaming(key) {
   return String(key).replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
@@ -574,6 +574,7 @@ function resolveAll(e, userFile, creds, projectDir2, dataDir2) {
     ["run", "session", "global"],
     "session"
   );
+  const mcpResultTokenBudget = int(pick("mcpResultTokenBudget", "MUBIT_CC_MCP_RESULT_TOKENS"), 2e3);
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
     const opt = key ? optionValue(key, e) : void 0;
@@ -642,6 +643,7 @@ function resolveAll(e, userFile, creds, projectDir2, dataDir2) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,
@@ -703,7 +705,7 @@ function freezeConfig(cfg) {
 function readUserFileRaw(projectDir2) {
   try {
     if (!projectDir2) return "";
-    return readFileSync3(join5(projectDir2, ".mubit-cc.json"), "utf8");
+    return readFileSync4(join5(projectDir2, ".mubit-cc.json"), "utf8");
   } catch {
     return "";
   }
@@ -773,15 +775,9 @@ var init_config = __esm({
       "mubit_learned",
       "mubit_recall",
       "mubit_outcome",
-      "mubit_reflect",
-      "mubit_lessons",
       "mubit_diagnose",
-      "mubit_archive",
       "mubit_dereference",
-      "mubit_forget",
       "mubit_status",
-      "mubit_strategies",
-      "mubit_checkpoint",
       "mubit_memory_health"
     ];
     CACHE_FILE = "config.json";
@@ -801,7 +797,7 @@ function scrubAssignments(text, count) {
     const [, pre, name] = m;
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -816,6 +812,9 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 function scrubUrlCredentials(text, count) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
@@ -914,7 +913,7 @@ function numberOr(v, d) {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : d;
 }
-var PH, EXEMPT_RE, ASSIGNMENT_KEYWORDS, ASSIGNMENT_RE, VALUE_RE, ENTROPY_RUN_RE, URL_CREDENTIALS_RE, ENTROPY_MIN_LEN, ENTROPY_THRESHOLD, RULES, truncMarker, OWN_MCP_PREFIXES;
+var PH, EXEMPT_RE, ASSIGNMENT_KEYWORDS, ASSIGNMENT_NAME_SUFFIXES, ASSIGNMENT_RE, VALUE_RE, ENTROPY_RUN_RE, URL_CREDENTIALS_RE, ENTROPY_MIN_LEN, ENTROPY_THRESHOLD, RULES, truncMarker, OWN_MCP_PREFIXES;
 var init_redact = __esm({
   "../claude-code/lib/redact.mjs"() {
     PH = (kind) => `[REDACTED:${kind}]`;
@@ -923,12 +922,15 @@ var init_redact = __esm({
       "secret",
       "token",
       "password",
+      "passphrase",
+      "passwd",
       "credential",
       "assertion",
       "signature",
       "apikey",
       "api_key"
     ];
+    ASSIGNMENT_NAME_SUFFIXES = ["pass"];
     ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(?=\S)/g;
     VALUE_RE = /\S+/y;
     ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
@@ -941,6 +943,16 @@ var init_redact = __esm({
       { kind: "pem", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
       { kind: "mubit-key", re: /mbt_[A-Za-z0-9_-]{8,}/g },
       { kind: "openai-key", re: /sk-[A-Za-z0-9_-]{16,}/g },
+      // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+      // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+      // underscore where that rule expects a hyphen, so it fell through every rule in this table
+      // and, being short, under the `high-entropy` floor as well.
+      //
+      // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+      // safe to ship in client-side code — it is in committed source and in browser bundles, and
+      // redacting it would scrub something the user is deliberately looking at while calling a
+      // published value a secret.
+      { kind: "stripe-key", re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
       { kind: "github-token", re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
       { kind: "aws-access-key", re: /AKIA[0-9A-Z]{16}/g },
       { kind: "jwt", re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -1035,7 +1047,7 @@ import { randomUUID } from "node:crypto";
 import {
   existsSync as existsSync5,
   mkdirSync as mkdirSync3,
-  readFileSync as readFileSync4,
+  readFileSync as readFileSync5,
   unlinkSync as unlinkSync3,
   writeFileSync as writeFileSync2,
   writeSync as writeSync2
@@ -1337,7 +1349,7 @@ function parseObject(raw) {
 }
 function readFileText(p) {
   try {
-    return readFileSync4(p, "utf8");
+    return readFileSync5(p, "utf8");
   } catch {
     return "";
   }
@@ -1771,7 +1783,7 @@ function NETWORK_HINT(err) {
 function SANDBOX_BLOCKED() {
   const env = typeof process === "object" && process ? process.env || {} : {};
   if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
-  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+  return SANDBOX_SENTENCE;
 }
 function messageOf(err) {
   try {
@@ -1796,7 +1808,7 @@ function snippet(text) {
 function numOr(v, d) {
   return typeof v === "number" && Number.isFinite(v) ? v : d;
 }
-var ROUTES, MAX_QUERY_BYTES, MAX_BODY_BYTES, DEFAULT_TIMEOUT_MS, HEALTH_TTL_MS, HEALTH_CACHE, QUERY_MODES, POISONED_RUN_ID;
+var ROUTES, HANDOFF_ACTIONS, FEEDBACK_VERDICTS, MAX_QUERY_BYTES, MAX_BODY_BYTES, DEFAULT_TIMEOUT_MS, HEALTH_TTL_MS, HEALTH_CACHE, QUERY_MODES, POISONED_RUN_ID, SANDBOX_SENTENCE;
 var init_http = __esm({
   "../claude-code/lib/http.mjs"() {
     init_breaker();
@@ -1814,8 +1826,13 @@ var init_http = __esm({
       outcome: "/v2/control/outcome",
       checkpoint: "/v2/control/checkpoint",
       lessons: "/v2/control/lessons",
-      reflect: "/v2/control/reflect"
+      reflect: "/v2/control/reflect",
+      strategies: "/v2/control/strategies",
+      handoff: "/v2/control/handoff",
+      feedback: "/v2/control/feedback"
     });
+    HANDOFF_ACTIONS = Object.freeze(["review", "continue", "approve", "execute"]);
+    FEEDBACK_VERDICTS = Object.freeze(["approve", "request_changes", "block", "acknowledge"]);
     MAX_QUERY_BYTES = 256 * 1024;
     MAX_BODY_BYTES = 64 * 1024 * 1024;
     DEFAULT_TIMEOUT_MS = 4e3;
@@ -1823,6 +1840,7 @@ var init_http = __esm({
     HEALTH_CACHE = ["status", "health.json"];
     QUERY_MODES = Object.freeze(["direct_bypass", "direct", "agent_routed"]);
     POISONED_RUN_ID = "default";
+    SANDBOX_SENTENCE = "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
   }
 });
 
@@ -2281,7 +2299,7 @@ var init_rules = __esm({
 // ../claude-code/lib/runid.mjs
 import { spawnSync } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync6, readdirSync as readdirSync3, readFileSync as readFileSync5, statSync as statSync5 } from "node:fs";
+import { existsSync as existsSync6, readdirSync as readdirSync3, readFileSync as readFileSync6, statSync as statSync5 } from "node:fs";
 import { basename as basename2, dirname as dirname5, join as join11, resolve as resolve4 } from "node:path";
 function agentRole(env = process.env) {
   const host2 = typeof env?.MUBIT_CC_HOST === "string" ? env.MUBIT_CC_HOST.trim().toLowerCase() : "";
@@ -2623,11 +2641,15 @@ function steerBlock(cfg, runId, lessons, anchor = "", partial = false) {
   const lines = [
     "# Mubit memory is active",
     "",
-    `Run: ${runId} (${cfg.mode})`,
-    "Relevant memory is injected automatically before each of your turns \u2014 no need to open a turn by searching for it.",
-    "Do search when the injected memory falls short: mubit_recall for a topic, mubit_diagnose when a command has failed, mubit_dereference for a reference_id you already hold.",
-    `Save what you learn with mubit_learned, and credit what helped with mubit_outcome. ${skill("remember")} and ${skill("recall")} are the explicit forms.`
+    `Run: ${runId} (${cfg.mode})`
   ];
+  if (cfg.host === "codex") {
+    lines.push(
+      "Relevant memory is injected automatically before each of your turns \u2014 no need to open a turn by searching for it.",
+      "Do search when the injected memory falls short: mubit_recall for a topic, mubit_diagnose when a command has failed, mubit_dereference for a reference_id you already hold.",
+      `Save what you learn with mubit_learned, and credit what helped with mubit_outcome. ${skill("remember")} and ${skill("recall")} are the explicit forms.`
+    );
+  }
   if (anchor) {
     lines.push(
       "",
@@ -2966,7 +2988,7 @@ var init_session_start = __esm({
 });
 
 // lib/boot.mjs
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3022,6 +3044,8 @@ var DATA_DIR_PREFIX = "mubit-memory";
 function claudeCodeDataDir(env = process.env) {
   const home = typeof env?.HOME === "string" && env.HOME ? env.HOME : safeHome();
   if (!home) return "";
+  const pinned = pinnedDataDir(home, env);
+  if (pinned) return pinned;
   const root = join(home, ...CC_DATA_ROOT);
   const bare = join(root, DATA_DIR_PREFIX);
   let candidates = [];
@@ -3046,6 +3070,15 @@ function claudeCodeDataDir(env = process.env) {
   const pool = withCreds.length ? withCreds : candidates;
   pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
   return pool[0].path;
+}
+function pinnedDataDir(home, env) {
+  try {
+    const codexHome = typeof env?.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join(home, ".codex");
+    const found = JSON.stringify(JSON.parse(readFileSync(join(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    return found?.[1] ?? "";
+  } catch {
+    return "";
+  }
 }
 function mtime(dir) {
   let newest = 0;

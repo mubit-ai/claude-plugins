@@ -1,6 +1,6 @@
 ---
 name: dashboard
-description: "Open the local Mubit dashboard: browse and search lessons, see what recall cost per prompt, and check ingest health. Loopback only, on a port nobody else can reach."
+description: Open the local Mubit dashboard for lessons, recall cost and ingest health; use when the user wants to look, not ask.
 disable-model-invocation: true
 allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/dashboard.mjs:*)"]
 ---

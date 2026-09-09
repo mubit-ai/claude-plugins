@@ -1,17 +1,30 @@
 ---
 name: forget
-description: Delete a lesson from Mubit memory, or mark an entry superseded. Prefer a negative outcome for a lesson that is merely wrong — deletion cannot be undone.
+description: Delete a lesson, or down-weight one that is merely wrong; use when asked, after saying it cannot be undone.
 disable-model-invocation: false
-tools: ["mcp__plugin_mubit-memory_mubit__mubit_forget", "mcp__plugin_mubit-memory_mubit__mubit_outcome"]
+allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs forget:*)", "mcp__plugin_mubit-memory_mubit__mubit_outcome"]
 ---
 
-Call `mubit_forget` with `lesson_id` — the `reference_id` cited in recalled context, or the
-`lesson_id` reported by `/mubit-memory:reflect`. Confirm the id and the text with the user
-before you call it; there is no dry run.
+Delete with the bundled script, naming the lesson — the `reference_id` cited in recalled
+context, or the id on a line of `/mubit-memory:reflect` or `/mubit-memory:strategies`:
 
-Pass `lesson_id` and nothing else. The same tool accepts `session_id`, and that argument
-deletes **the entire run** — every capture, trace, and lesson in it — not one entry. Never
-send it unless the user has asked for exactly that, in those words.
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs forget --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" <lesson_id>
+```
+
+**`--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"` is not optional.** A Bash tool
+call does not inherit `CLAUDE_PLUGIN_DATA` — it arrives empty — so without the flag the script
+has to guess which of several `mubit-memory*` directories the host is using, and either
+refuses with `no_run` or acts on a run this session's hooks never touch. The host substitutes
+`${CLAUDE_PLUGIN_DATA}` into this file before you read it, and the shell default around it
+lets a session that pins `MUBIT_CC_DATA_DIR` keep its pin — the same order every hook resolves
+in. Pass the whole expression straight through. Do not turn it into an `ENV=… node …` prefix:
+that is no longer a `node` command and will stop for a permission prompt.
+
+Confirm the id and the text with the user before you run it; there is no dry run. The script
+deletes one lesson by `POST /v2/control/lessons/delete` and nothing else: it has no way to
+delete a whole run, on purpose, because that operation removed every capture, trace and
+lesson in the run and was one argument away from a single-lesson delete.
 
 There is also no "mark superseded" operation: nothing flags an entry as replaced. Superseding
 is done the way described below — write the corrected lesson, and down-weight the old one so

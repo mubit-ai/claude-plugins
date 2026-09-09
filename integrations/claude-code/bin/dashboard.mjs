@@ -437,15 +437,9 @@ var DEFAULT_MCP_TOOLS = [
   "mubit_learned",
   "mubit_recall",
   "mubit_outcome",
-  "mubit_reflect",
-  "mubit_lessons",
   "mubit_diagnose",
-  "mubit_archive",
   "mubit_dereference",
-  "mubit_forget",
   "mubit_status",
-  "mubit_strategies",
-  "mubit_checkpoint",
   "mubit_memory_health"
 ];
 var CACHE_FILE = "config.json";
@@ -580,6 +574,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     ["run", "session", "global"],
     "session"
   );
+  const mcpResultTokenBudget = int(pick("mcpResultTokenBudget", "MUBIT_CC_MCP_RESULT_TOKENS"), 2e3);
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
     const opt = key ? optionValue(key, e) : void 0;
@@ -648,6 +643,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,
@@ -782,12 +778,15 @@ var ASSIGNMENT_KEYWORDS = [
   "secret",
   "token",
   "password",
+  "passphrase",
+  "passwd",
   "credential",
   "assertion",
   "signature",
   "apikey",
   "api_key"
 ];
+var ASSIGNMENT_NAME_SUFFIXES = ["pass"];
 var ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(?=\S)/g;
 var VALUE_RE = /\S+/y;
 var ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
@@ -800,6 +799,16 @@ var RULES = [
   { kind: "pem", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { kind: "mubit-key", re: /mbt_[A-Za-z0-9_-]{8,}/g },
   { kind: "openai-key", re: /sk-[A-Za-z0-9_-]{16,}/g },
+  // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+  // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+  // underscore where that rule expects a hyphen, so it fell through every rule in this table
+  // and, being short, under the `high-entropy` floor as well.
+  //
+  // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+  // safe to ship in client-side code — it is in committed source and in browser bundles, and
+  // redacting it would scrub something the user is deliberately looking at while calling a
+  // published value a secret.
+  { kind: "stripe-key", re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
   { kind: "github-token", re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
   { kind: "aws-access-key", re: /AKIA[0-9A-Z]{16}/g },
   { kind: "jwt", re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -815,7 +824,7 @@ function scrubAssignments(text, count) {
     const [, pre, name] = m;
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -830,6 +839,9 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 function scrubUrlCredentials(text, count) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
@@ -1011,8 +1023,13 @@ var ROUTES = Object.freeze({
   outcome: "/v2/control/outcome",
   checkpoint: "/v2/control/checkpoint",
   lessons: "/v2/control/lessons",
-  reflect: "/v2/control/reflect"
+  reflect: "/v2/control/reflect",
+  strategies: "/v2/control/strategies",
+  handoff: "/v2/control/handoff",
+  feedback: "/v2/control/feedback"
 });
+var HANDOFF_ACTIONS = Object.freeze(["review", "continue", "approve", "execute"]);
+var FEEDBACK_VERDICTS = Object.freeze(["approve", "request_changes", "block", "acknowledge"]);
 var MAX_QUERY_BYTES = 256 * 1024;
 var MAX_BODY_BYTES = 64 * 1024 * 1024;
 var DEFAULT_TIMEOUT_MS = 4e3;
@@ -1301,8 +1318,9 @@ function NETWORK_HINT(err) {
 function SANDBOX_BLOCKED() {
   const env = typeof process === "object" && process ? process.env || {} : {};
   if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
-  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+  return SANDBOX_SENTENCE;
 }
+var SANDBOX_SENTENCE = "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
 function messageOf(err) {
   try {
     if (!err) return "unknown error";
@@ -2112,14 +2130,15 @@ function resolveDirParam(wanted, dirs) {
   }
   return (list2.find((d) => d.isDefault) ?? list2[0]).path;
 }
-function runsIn(dir) {
+function runsIn(dir, opts = {}) {
+  const byRun = opts && opts.sessions === true ? groupSessions(readSessionMap(dir)) : null;
   return lsDir(join8(dir, "status")).filter(isRunMarker).map((f) => {
     const runId = f.slice(0, -5);
     const cfg = { dataDir: dir };
     const marker = readMarker(cfg, runId);
     const rd = runDir(cfg, runId);
     const turns = lsDir(join8(rd, "turns")).filter((n) => n.endsWith(".json"));
-    return {
+    const row = {
       runId,
       dir,
       dirName: basename2(dir),
@@ -2129,14 +2148,97 @@ function runsIn(dir) {
       state: String(marker.state || "unknown"),
       mode: String(marker.mode || "")
     };
+    if (byRun) {
+      const sessions = byRun.get(runId) ?? [];
+      Object.assign(row, {
+        sessions,
+        sessionCount: sessions.length,
+        projectDir: firstNonEmpty2(sessions, "projectDir"),
+        projectRoot: firstNonEmpty2(sessions, "projectRoot")
+      });
+    }
+    return row;
   }).sort((a, b) => b.lastWrite - a.lastWrite);
 }
-function listRuns(dirs) {
-  return (Array.isArray(dirs) ? dirs : []).flatMap((d) => runsIn(d.path)).sort((a, b) => b.lastWrite - a.lastWrite);
+function listRuns(dirs, opts = {}) {
+  return (Array.isArray(dirs) ? dirs : []).flatMap((d) => runsIn(d.path, opts)).sort((a, b) => b.lastWrite - a.lastWrite);
 }
 function newestRun(dir) {
   const runs = runsIn(dir);
   return runs.length ? String(runs[0].runId) : "";
+}
+function readSessionMap(dir) {
+  const sdir = join8(dir, "sessions");
+  const out = [];
+  for (const f of lsDir(sdir)) {
+    if (!f.endsWith(".json")) continue;
+    const rec = readJson(join8(sdir, f), null);
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
+    out.push({
+      sessionId: f.slice(0, -5),
+      runId: String(rec.run_id || ""),
+      agentId: String(rec.agent_id || ""),
+      strategy: String(rec.strategy || ""),
+      projectDir: String(rec.project_dir || ""),
+      projectRoot: String(rec.project_root || ""),
+      createdAt: num2(rec.created_at),
+      lastSeenAt: num2(rec.last_seen_at),
+      mode: String(rec.mode || ""),
+      clearCount: num2(rec.clear_count),
+      endpointHash: String(rec.endpoint_hash || "")
+    });
+  }
+  return out.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+}
+function launchRunFor(dir, projectDir) {
+  const want = typeof projectDir === "string" ? projectDir : "";
+  if (!want) return "";
+  const hit = readSessionMap(dir).find((s) => s.runId && (s.projectRoot === want || s.projectDir === want));
+  return hit ? hit.runId : "";
+}
+function groupSessions(rows) {
+  const byRun = /* @__PURE__ */ new Map();
+  for (const s of rows) {
+    if (!s.runId) continue;
+    const list2 = byRun.get(s.runId);
+    if (list2) list2.push(s);
+    else byRun.set(s.runId, [s]);
+  }
+  return byRun;
+}
+function firstNonEmpty2(rows, key) {
+  for (const r of rows) if (r[key]) return r[key];
+  return "";
+}
+var STRATEGY_TEXT = {
+  "per-directory": "one run per directory; every session opened here shares it",
+  "git-branch": "one run per git branch",
+  "per-conversation": "one run per host session",
+  static: "a fixed run id from MUBIT_CC_RUN_ID"
+};
+var WRITES_AT_TEXT = {
+  run: "lessons an agent saves stay inside this run",
+  session: "lessons an agent saves can surface in later sessions of this project",
+  global: "lessons an agent saves are visible to every run on this instance"
+};
+var READS_ACROSS_TEXT = {
+  auto: "recall consults other runs when at least 3 s of budget remains",
+  on: "every recall consults other runs",
+  off: "recall never consults other runs; only the session-start briefing does"
+};
+function describeRunScope(cfg) {
+  const c = cfg && typeof cfg === "object" ? cfg : {};
+  const strategy = String(c.runStrategy || "per-directory");
+  const writesAt = String(c.mcpLessonScope || "session");
+  const readsAcrossRuns = String(c.recallCrossRun || "auto");
+  return {
+    strategy,
+    strategyText: STRATEGY_TEXT[strategy] || `runs are keyed by the "${strategy}" strategy`,
+    writesAt,
+    writesAtText: WRITES_AT_TEXT[writesAt] || `lessons an agent saves are capped at "${writesAt}" scope`,
+    readsAcrossRuns,
+    readsAcrossRunsText: READS_ACROSS_TEXT[readsAcrossRuns] || `cross-run recall is set to "${readsAcrossRuns}"`
+  };
 }
 function outcomeState(turn) {
   if (turn.outcome_abandoned === true) return "dropped";
@@ -2729,6 +2831,18 @@ async function getRoute(ctx, res, path, url) {
       dirs,
       dir,
       run,
+      // Where this page was opened from, and which run that directory maps to. `run` above
+      // stays the newest run in the directory — that is the contract every local route
+      // resolves `?run=` against — so this is the page's way of saying "and this is the one you
+      // were sitting in", which on a machine with two sessions open is not the same run.
+      launch: {
+        cwd: safeCwd2(),
+        projectDir: String(cfg.projectDir ?? ""),
+        run: dir ? launchRunFor(dir, String(cfg.projectDir ?? "")) : ""
+      },
+      // What the run writes at and reads from, in words. Built server-side from the live
+      // config so the page and the settings that decide it cannot drift.
+      scope: describeRunScope(cfg),
       pollMs: POLL_MS,
       startedAt: ctx.startedAt
     }, cfg);
@@ -2739,7 +2853,10 @@ async function getRoute(ctx, res, path, url) {
   if (path === "/api/runs") {
     const { dir, dirs } = scope(ctx, url);
     const all = String(url.searchParams.get("all") ?? "") === "1";
-    return sendJson(res, 200, { dir, runs: all ? listRuns(dirs) : runsIn(dir) }, cfg);
+    return sendJson(res, 200, {
+      dir,
+      runs: all ? listRuns(dirs, { sessions: true }) : runsIn(dir, { sessions: true })
+    }, cfg);
   }
   if (path === "/api/turns") {
     const { dir, run } = scope(ctx, url);
@@ -2892,6 +3009,13 @@ async function probe(state, fetchImpl = fetch) {
     return { alive: true, pid: Number(body.pid), startedAt: Number(body.startedAt) };
   } catch {
     return { alive: false };
+  }
+}
+function safeCwd2() {
+  try {
+    return process.cwd();
+  } catch {
+    return "";
   }
 }
 function defaultOpen(url) {

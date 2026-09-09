@@ -269,15 +269,9 @@ var DEFAULT_MCP_TOOLS = [
   "mubit_learned",
   "mubit_recall",
   "mubit_outcome",
-  "mubit_reflect",
-  "mubit_lessons",
   "mubit_diagnose",
-  "mubit_archive",
   "mubit_dereference",
-  "mubit_forget",
   "mubit_status",
-  "mubit_strategies",
-  "mubit_checkpoint",
   "mubit_memory_health"
 ];
 var CACHE_FILE = "config.json";
@@ -398,6 +392,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     ["run", "session", "global"],
     "session"
   );
+  const mcpResultTokenBudget = int(pick("mcpResultTokenBudget", "MUBIT_CC_MCP_RESULT_TOKENS"), 2e3);
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
     const opt = key ? optionValue(key, e) : void 0;
@@ -466,6 +461,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,

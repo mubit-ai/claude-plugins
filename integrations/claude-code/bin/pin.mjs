@@ -46,6 +46,11 @@ function dataDir(cfg = {}, env = process.env) {
   const home = typeof e.HOME === "string" && e.HOME ? e.HOME : safeHome();
   return liveDataDir(home, e);
 }
+function dataDirFlag(v) {
+  const s = typeof v === "string" ? v.trim() : "";
+  if (!s || /^\$\{/.test(s)) return "";
+  return s;
+}
 function liveDataDir(home, env = {}) {
   const root = join(home, ".claude", "plugins", "data");
   try {
@@ -180,15 +185,9 @@ var DEFAULT_MCP_TOOLS = [
   "mubit_learned",
   "mubit_recall",
   "mubit_outcome",
-  "mubit_reflect",
-  "mubit_lessons",
   "mubit_diagnose",
-  "mubit_archive",
   "mubit_dereference",
-  "mubit_forget",
   "mubit_status",
-  "mubit_strategies",
-  "mubit_checkpoint",
   "mubit_memory_health"
 ];
 var CACHE_FILE = "config.json";
@@ -323,6 +322,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     ["run", "session", "global"],
     "session"
   );
+  const mcpResultTokenBudget = int(pick("mcpResultTokenBudget", "MUBIT_CC_MCP_RESULT_TOKENS"), 2e3);
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
     const opt = key ? optionValue(key, e) : void 0;
@@ -391,6 +391,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,
@@ -562,7 +563,9 @@ var SECTION_BY_ENTRY_TYPE = Object.freeze({
   task_result: "traces",
   step_outcome: "traces",
   archive_block: "archive_blocks",
-  checkpoint: "checkpoints"
+  checkpoint: "checkpoints",
+  handoff: "handoffs",
+  feedback: "feedback"
 });
 var HEADINGS = Object.freeze({
   mental_models: "Mental models",
@@ -838,12 +841,15 @@ var ASSIGNMENT_KEYWORDS = [
   "secret",
   "token",
   "password",
+  "passphrase",
+  "passwd",
   "credential",
   "assertion",
   "signature",
   "apikey",
   "api_key"
 ];
+var ASSIGNMENT_NAME_SUFFIXES = ["pass"];
 var ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(?=\S)/g;
 var VALUE_RE = /\S+/y;
 var ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
@@ -856,6 +862,16 @@ var RULES = [
   { kind: "pem", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { kind: "mubit-key", re: /mbt_[A-Za-z0-9_-]{8,}/g },
   { kind: "openai-key", re: /sk-[A-Za-z0-9_-]{16,}/g },
+  // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+  // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+  // underscore where that rule expects a hyphen, so it fell through every rule in this table
+  // and, being short, under the `high-entropy` floor as well.
+  //
+  // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+  // safe to ship in client-side code — it is in committed source and in browser bundles, and
+  // redacting it would scrub something the user is deliberately looking at while calling a
+  // published value a secret.
+  { kind: "stripe-key", re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
   { kind: "github-token", re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
   { kind: "aws-access-key", re: /AKIA[0-9A-Z]{16}/g },
   { kind: "jwt", re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -871,7 +887,7 @@ function scrubAssignments(text, count) {
     const [, pre, name] = m;
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -886,6 +902,9 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 function scrubUrlCredentials(text, count) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
@@ -922,9 +941,9 @@ function scrub(text, count) {
 }
 function entropy(s) {
   if (s === null || s === void 0) return 0;
-  const str4 = typeof s === "string" ? s : String(s);
-  if (str4.length === 0) return 0;
-  const buf = Buffer.from(str4, "utf8");
+  const str5 = typeof s === "string" ? s : String(s);
+  if (str5.length === 0) return 0;
+  const buf = Buffer.from(str5, "utf8");
   const n = buf.length;
   if (n === 0) return 0;
   const counts = new Uint32Array(256);
@@ -1067,8 +1086,13 @@ var ROUTES = Object.freeze({
   outcome: "/v2/control/outcome",
   checkpoint: "/v2/control/checkpoint",
   lessons: "/v2/control/lessons",
-  reflect: "/v2/control/reflect"
+  reflect: "/v2/control/reflect",
+  strategies: "/v2/control/strategies",
+  handoff: "/v2/control/handoff",
+  feedback: "/v2/control/feedback"
 });
+var HANDOFF_ACTIONS = Object.freeze(["review", "continue", "approve", "execute"]);
+var FEEDBACK_VERDICTS = Object.freeze(["approve", "request_changes", "block", "acknowledge"]);
 var MAX_QUERY_BYTES = 256 * 1024;
 var MAX_BODY_BYTES = 64 * 1024 * 1024;
 var DEFAULT_TIMEOUT_MS = 4e3;
@@ -1309,8 +1333,9 @@ function NETWORK_HINT(err) {
 function SANDBOX_BLOCKED() {
   const env = typeof process === "object" && process ? process.env || {} : {};
   if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
-  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+  return SANDBOX_SENTENCE;
 }
+var SANDBOX_SENTENCE = "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
 function messageOf(err) {
   try {
     if (!err) return "unknown error";
@@ -1561,10 +1586,60 @@ function str2(v) {
   return typeof v === "string" ? v : "";
 }
 
-// bin/pin.src.mjs
+// lib/runpick.mjs
 var POISONED_RUN_ID3 = "default";
 var MARKER_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
 var MARKER_AMBIGUOUS_MS = 5 * 60 * 1e3;
+function pickRun(cfg, explicit = "", opts = {}) {
+  const command = str3(opts?.command) || "pin";
+  const named = str3(explicit) || (str3(cfg?.runStrategy) === "static" ? str3(cfg?.runId) : "");
+  if (named) {
+    if (named === POISONED_RUN_ID3) {
+      return {
+        ok: false,
+        state: "poisoned_run",
+        detail: `"${POISONED_RUN_ID3}" is the fallback a run id takes when nothing configured one, not a run of yours. Name the run this session is using: ${command} --run <run_id> \u2026`
+      };
+    }
+    return { ok: true, runId: named };
+  }
+  const { runId, rivals } = newestMarker(cfg);
+  if (runId && rivals.length) {
+    return {
+      ok: false,
+      state: "ambiguous_run",
+      detail: `More than one Mubit run is live in this data directory \u2014 ${[runId, ...rivals].join(", ")} \u2014 so the most recently touched marker is not reliably the session that typed this. Name the run this session is using: ${command} --run <run_id> \u2026. The SessionStart block at the top of the conversation prints it, and so does /mubit-memory:doctor.`
+    };
+  }
+  if (runId) return { ok: true, runId };
+  return {
+    ok: false,
+    state: "no_run",
+    detail: `Could not tell which Mubit run this session is using \u2014 no run marker in ${str3(cfg?.dataDir) || "(no data directory resolved)"}. If the session has been sending prompts, that is not the directory its hooks are writing to: /mubit-memory:doctor prints the one they use, and MUBIT_CC_DATA_DIR overrides it. Otherwise send one prompt first, or name the run: ${command} --run <run_id> \u2026.`
+  };
+}
+function newestMarker(cfg) {
+  const now = Date.now();
+  const fresh2 = scanRunMarkers(str3(cfg?.dataDir)).filter((m) => m.runId !== POISONED_RUN_ID3 && m.at > 0 && now - m.at < MARKER_MAX_AGE_MS).sort((a, b) => b.at - a.at);
+  const [best, ...rest] = fresh2;
+  if (!best) return { runId: "", rivals: [] };
+  const bestBase = markerBase(best.runId);
+  const rivals = [];
+  for (const m of rest) {
+    if (best.at - m.at >= MARKER_AMBIGUOUS_MS) break;
+    if (markerBase(m.runId) === bestBase) continue;
+    if (!rivals.includes(m.runId)) rivals.push(m.runId);
+  }
+  return { runId: best.runId, rivals };
+}
+function markerBase(runId) {
+  return str3(runId).replace(/-sub-[^-]+$/, "").replace(/-c\d+$/, "");
+}
+function str3(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+// bin/pin.src.mjs
 function parseArgs(argv = []) {
   const args = Array.isArray(argv) ? argv.map((a) => String(a ?? "")) : [];
   const flag = (f) => args.includes(f);
@@ -1572,7 +1647,7 @@ function parseArgs(argv = []) {
     const i = args.indexOf(f);
     return i >= 0 && i + 1 < args.length ? args[i + 1] : "";
   };
-  const takesValue = /* @__PURE__ */ new Set(["--name", "--run"]);
+  const takesValue = /* @__PURE__ */ new Set(["--name", "--run", "--data-dir"]);
   const known = /* @__PURE__ */ new Set([...takesValue, "--all", "--json"]);
   const positional = [];
   for (let i = 0; i < args.length; i++) {
@@ -1593,6 +1668,9 @@ function parseArgs(argv = []) {
     text: rest.join(" ").trim(),
     slug: valueOf("--name").trim(),
     runId: valueOf("--run").trim(),
+    // The skill passes the data directory the host interpolated into its body, because a Bash
+    // tool call inherits none; blank and unsubstituted values are dropped (`lib/state.mjs`).
+    dataDir: dataDirFlag(valueOf("--data-dir")),
     all: flag("--all"),
     json: flag("--json")
   };
@@ -1606,11 +1684,11 @@ async function main(argv = process.argv.slice(2), env = process.env, deps = {}) 
   };
   let cfg;
   try {
-    cfg = deps.cfg ?? loadConfig(env);
+    cfg = deps.cfg ?? loadConfig(args.dataDir ? { ...env, MUBIT_CC_DATA_DIR: args.dataDir } : env);
   } catch (err) {
     return emit({ ok: false, state: "config_error", detail: `Could not read the plugin configuration: ${messageOf3(err)}` });
   }
-  if (!str3(cfg.endpoint)) {
+  if (!str4(cfg.endpoint)) {
     return emit({
       ok: false,
       state: "unconfigured",
@@ -1722,46 +1800,6 @@ async function doClear(cfg, runId, args) {
     detail: `Cleared ${targets.length} pin(s) from ${runId}. ${next.length} left.`
   };
 }
-function pickRun(cfg, explicit = "") {
-  const named = str3(explicit) || (str3(cfg?.runStrategy) === "static" ? str3(cfg?.runId) : "");
-  if (named) {
-    if (named === POISONED_RUN_ID3) {
-      return { ok: false, state: "poisoned_run", detail: `"${POISONED_RUN_ID3}" is the fallback a run id takes when nothing configured one, not a run of yours. A pin is a standing constraint, so it needs a real run to belong to.` };
-    }
-    return { ok: true, runId: named };
-  }
-  const { runId, rivals } = newestMarker(cfg);
-  if (runId && rivals.length) {
-    return {
-      ok: false,
-      state: "ambiguous_run",
-      detail: `More than one Mubit run is live in this data directory \u2014 ${[runId, ...rivals].join(", ")} \u2014 so the most recently touched marker is not reliably the session that typed this. Name the run this session is using: pin --run <run_id> "\u2026". The SessionStart block at the top of the conversation prints it, and so does /mubit-memory:doctor.`
-    };
-  }
-  if (runId) return { ok: true, runId };
-  return {
-    ok: false,
-    state: "no_run",
-    detail: `Could not tell which Mubit run this session is using \u2014 no run marker in ${str3(cfg?.dataDir) || "(no data directory resolved)"}. If the session has been sending prompts, that is not the directory its hooks are writing to: /mubit-memory:doctor prints the one they use, and MUBIT_CC_DATA_DIR overrides it. Otherwise send one prompt first, or name the run: pin --run <run_id> "\u2026".`
-  };
-}
-function newestMarker(cfg) {
-  const now = Date.now();
-  const fresh2 = scanRunMarkers(str3(cfg?.dataDir)).filter((m) => m.runId !== POISONED_RUN_ID3 && m.at > 0 && now - m.at < MARKER_MAX_AGE_MS).sort((a, b) => b.at - a.at);
-  const [best, ...rest] = fresh2;
-  if (!best) return { runId: "", rivals: [] };
-  const bestBase = markerBase(best.runId);
-  const rivals = [];
-  for (const m of rest) {
-    if (best.at - m.at >= MARKER_AMBIGUOUS_MS) break;
-    if (markerBase(m.runId) === bestBase) continue;
-    if (!rivals.includes(m.runId)) rivals.push(m.runId);
-  }
-  return { runId: best.runId, rivals };
-}
-function markerBase(runId) {
-  return str3(runId).replace(/-sub-[^-]+$/, "").replace(/-c\d+$/, "");
-}
 function toPins(variables) {
   return (Array.isArray(variables) ? variables : []).map((v) => ({ slug: safeSlug2(v.slug), text: oneLine2(v.value), at: Date.now() })).filter((p) => p.slug && p.text);
 }
@@ -1782,14 +1820,14 @@ function oneLine2(v) {
 function failed(what, runId, res) {
   return {
     ok: false,
-    state: str3(res?.state) || "upstream_failed",
+    state: str4(res?.state) || "upstream_failed",
     run_id: runId,
     pins: [],
     // `res.error` has already been scrubbed of the API key by `lib/variables.mjs`.
-    detail: `Could not ${what} ${runId}: ${str3(res?.error) || "the instance did not answer"}`
+    detail: `Could not ${what} ${runId}: ${str4(res?.error) || "the instance did not answer"}`
   };
 }
-function str3(v) {
+function str4(v) {
   return typeof v === "string" ? v.trim() : "";
 }
 function messageOf3(err) {
@@ -1820,7 +1858,6 @@ if (entryPath === selfReal) {
 export {
   main,
   parseArgs,
-  pickRun,
   safeSlug2 as safeSlug,
   slugify
 };

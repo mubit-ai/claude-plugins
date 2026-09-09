@@ -320,7 +320,7 @@ health and stuck ingest jobs — and reports the connection state by name.
 
 ---
 
-## Part 5 — The seven commands
+## Part 5 — The commands
 
 You will not need most of these day to day. Capture is automatic; these are for the moments it
 is not enough.
@@ -334,6 +334,8 @@ is not enough.
 | `/mubit-memory:reflect` | You want lessons extracted **now** rather than at session end |
 | `/mubit-memory:forget` | A stored lesson is wrong |
 | `/mubit-memory:dashboard` | You want to *look* at any of the above rather than ask about it |
+| `/mubit-memory:import` | The plugin was installed after the work, and the transcripts are still on disk |
+| `/mubit-memory:handoff` | Work is changing hands between agents, or a subagent's result is waiting for a verdict |
 
 ### Saving something worth keeping
 
@@ -424,6 +426,56 @@ into the model's context.
 Runs up to three distinct queries in an isolated context and returns a synthesis, so your main
 conversation never absorbs the raw evidence. Bounded: Haiku, low effort, three turns.
 
+### Importing what happened before the plugin
+
+```
+/mubit-memory:import
+```
+
+A dry run: it prints where it is reading from, which projects are in scope, and how many items
+it *would* send, one line per source. Read that number before anything else — "2,300 items
+from 41 transcripts across 3 runs" is a sentence you can say yes or no to. Then, and only
+then:
+
+```
+/mubit-memory:import --send
+```
+
+Two sources. `--source claude-code` is `~/.claude/projects`, including the subagent transcripts
+nested under each session. `--source codex` is `~/.codex/sessions` — both the shape Codex
+wrote before 0.149 and the one it writes now — minus the reviewer threads Codex spawns to
+approve its own actions and the preamble it writes in your voice at the top of every thread.
+`--source all` is both. The default is whichever tool you are typing this in.
+
+The scope is this project and the git worktrees linked to it; `--all` is every project on the
+machine, including the ones you would not want on a shared instance, so it is a flag you type.
+Everything goes through the same three redaction stages as live capture (Part 7). Running it
+again is safe: every transcript keeps a cursor, so a second run reads nothing new and an
+interrupted import picks up where it stopped. Three numbers in the report are findings rather
+than decoration — `denied` is the denylist working, `oversize` is lines too large to read, and
+"this answer is incomplete" means it stopped at a bound and what it sent is a prefix of the
+history.
+
+### Handing work between agents
+
+```
+/mubit-memory:handoff send --to codex --action review "the auth diff is ready for a second pair of eyes"
+/mubit-memory:handoff list --open
+/mubit-memory:handoff feedback <handoff_id> --verdict approve
+```
+
+A handoff is a note from one agent to another inside this run; feedback is the answer, one of
+`approve`, `request_changes`, `block`, `acknowledge`. A handoff nobody has answered is open.
+
+You do not have to send the first kind by hand. Every subagent's result is filed as a handoff
+from that subagent to your session, addressed for review, so after a fan-out `list --open` is
+the list of results nobody has looked at yet, and answering each is how it empties. A new
+session's resume briefing includes what is still open.
+
+Two things it is not. It is not a queue — nothing is pushed; the other agent sees a handoff
+when it lists, or when its next session resumes. And it is not cross-run: a handoff lives in
+one run id, and a subagent's note is filed under its parent's run, which is the one you list.
+
 ---
 
 ## Part 6 — The settings worth changing
@@ -488,6 +540,18 @@ indistinguishable from memory that does not work.
 
 `recallTokenBudget`, default `1500`. Raise it if recall keeps getting trimmed; lower it if you
 want the context back.
+
+`mcpResultTokenBudget`, default `2000`. The most one Mubit MCP tool result may put in front of
+the model. A lesson list or a recall always comes back one line per item with the id kept, and a
+memory already shown in this run is repeated as a one-line pointer; anything over the ceiling is
+cut. The untouched result is saved under the plugin's data directory, and the note at the foot
+of the result names the file, so the rest costs nothing unless the model reads it. `0` returns
+the raw result.
+
+To see what memory actually cost on this machine — every hook injection and every tool result,
+per event and per session, read off the transcripts Claude Code keeps — run
+`node scripts/measure-context-usage.mjs` from the plugin directory. It prints counts and
+sizes only, never content.
 
 ### Keep this on
 
@@ -631,6 +695,17 @@ so truncation can never leave a recognizable half of a secret.
 Also worth knowing: `redact: false` disables stage 1 only — the denylist and caps always run.
 The local log is scrubbed too. The plugin never captures its own traffic. The status line does
 no network I/O, ever.
+
+**What a file change looks like once stored.** A tool call that changed a file carries
+`files: [{path, kind}]` in its metadata, with `kind` one of `add`, `update`, `delete`, and the
+same rows are merged into a small per-run index of what is in play. The path goes through the
+denylist exactly as the call does, so a patch that touched `.env` is dropped whole rather than
+recorded as "touched `.env`". A `Write` is `add` or `update` according to the host's own
+result; `delete` only ever comes from Codex's `apply_patch`, because Claude Code removes files
+with a shell command, which names no path. An import records the same rows for historical
+calls, and checks a call and its result against the denylist as one — the path is on one
+transcript line and the file's body on another, and reading them apart is how a `.env` would
+slip through.
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: activity
-description: "Answer the audit question: list what this Mubit instance actually holds for a run, filter it by time, type, agent or origin, and export the whole record as JSONL you can keep. Read-only."
+description: List or export what this instance holds for a run; use when the user wants the audit record, not an answer.
 disable-model-invocation: true
 allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/activity.mjs:*)"]
 ---

@@ -224,7 +224,7 @@ function classifyTurn(prompt, lastAssistantMessage, opts = {}) {
   const o = opts && typeof opts === "object" ? opts : {};
   const event = typeof o.event === "string" ? o.event : "";
   const isSubagent = event === "SubagentStop";
-  const [intent, importance] = event === "PreCompact" ? ["checkpoint", "medium"] : ["task_result", "medium"];
+  const [intent, importance] = event === "PreCompact" ? ["checkpoint", "medium"] : isSubagent ? ["handoff", "medium"] : ["task_result", "medium"];
   const rawAgentId = o.agent_id ?? o.agentId;
   return {
     intent,
@@ -272,15 +272,9 @@ var DEFAULT_MCP_TOOLS = [
   "mubit_learned",
   "mubit_recall",
   "mubit_outcome",
-  "mubit_reflect",
-  "mubit_lessons",
   "mubit_diagnose",
-  "mubit_archive",
   "mubit_dereference",
-  "mubit_forget",
   "mubit_status",
-  "mubit_strategies",
-  "mubit_checkpoint",
   "mubit_memory_health"
 ];
 var CACHE_FILE2 = "config.json";
@@ -327,7 +321,8 @@ var LANG_FILES = [
 ];
 function envTags(cfg, projectDir = "") {
   const dir = projectDir || cfg?.projectDir || process.cwd();
-  const tags = ["tool:claude-code"];
+  const tool = cfg?.host === "codex" || cfg?.host === "claude-code" ? cfg.host : host();
+  const tags = [`tool:${tool}`];
   const root = gitToplevel(dir) || dir;
   const slug = sanitiseTag(basename(root));
   if (slug) tags.push(`repo:${slug}`);
@@ -478,6 +473,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     ["run", "session", "global"],
     "session"
   );
+  const mcpResultTokenBudget = int(pick("mcpResultTokenBudget", "MUBIT_CC_MCP_RESULT_TOKENS"), 2e3);
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
     const opt = key ? optionValue(key, e) : void 0;
@@ -546,6 +542,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,
@@ -690,12 +687,15 @@ var ASSIGNMENT_KEYWORDS = [
   "secret",
   "token",
   "password",
+  "passphrase",
+  "passwd",
   "credential",
   "assertion",
   "signature",
   "apikey",
   "api_key"
 ];
+var ASSIGNMENT_NAME_SUFFIXES = ["pass"];
 var ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(?=\S)/g;
 var VALUE_RE = /\S+/y;
 var ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
@@ -708,6 +708,16 @@ var RULES = [
   { kind: "pem", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { kind: "mubit-key", re: /mbt_[A-Za-z0-9_-]{8,}/g },
   { kind: "openai-key", re: /sk-[A-Za-z0-9_-]{16,}/g },
+  // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+  // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+  // underscore where that rule expects a hyphen, so it fell through every rule in this table
+  // and, being short, under the `high-entropy` floor as well.
+  //
+  // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+  // safe to ship in client-side code — it is in committed source and in browser bundles, and
+  // redacting it would scrub something the user is deliberately looking at while calling a
+  // published value a secret.
+  { kind: "stripe-key", re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
   { kind: "github-token", re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
   { kind: "aws-access-key", re: /AKIA[0-9A-Z]{16}/g },
   { kind: "jwt", re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -723,7 +733,7 @@ function scrubAssignments(text, count) {
     const [, pre, name] = m;
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -738,6 +748,9 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 function scrubUrlCredentials(text, count) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
@@ -774,9 +787,9 @@ function scrub(text, count) {
 }
 function entropy(s) {
   if (s === null || s === void 0) return 0;
-  const str3 = typeof s === "string" ? s : String(s);
-  if (str3.length === 0) return 0;
-  const buf = Buffer.from(str3, "utf8");
+  const str4 = typeof s === "string" ? s : String(s);
+  if (str4.length === 0) return 0;
+  const buf = Buffer.from(str4, "utf8");
   const n = buf.length;
   if (n === 0) return 0;
   const counts = new Uint32Array(256);
@@ -1449,8 +1462,13 @@ var ROUTES = Object.freeze({
   outcome: "/v2/control/outcome",
   checkpoint: "/v2/control/checkpoint",
   lessons: "/v2/control/lessons",
-  reflect: "/v2/control/reflect"
+  reflect: "/v2/control/reflect",
+  strategies: "/v2/control/strategies",
+  handoff: "/v2/control/handoff",
+  feedback: "/v2/control/feedback"
 });
+var HANDOFF_ACTIONS = Object.freeze(["review", "continue", "approve", "execute"]);
+var FEEDBACK_VERDICTS = Object.freeze(["approve", "request_changes", "block", "acknowledge"]);
 var MAX_QUERY_BYTES = 256 * 1024;
 var MAX_BODY_BYTES = 64 * 1024 * 1024;
 var DEFAULT_TIMEOUT_MS = 4e3;
@@ -1705,8 +1723,9 @@ function NETWORK_HINT(err) {
 function SANDBOX_BLOCKED() {
   const env = typeof process === "object" && process ? process.env || {} : {};
   if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
-  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+  return SANDBOX_SENTENCE;
 }
+var SANDBOX_SENTENCE = "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
 function messageOf(err) {
   try {
     if (!err) return "unknown error";
@@ -2062,6 +2081,67 @@ function safeCwd2() {
   }
 }
 
+// lib/transcript.mjs
+var CHUNK_BYTES = 256 * 1024;
+var MAX_LINE_BYTES = 2 * 1024 * 1024;
+var TEXT_BLOCKS = /* @__PURE__ */ new Set(["text", "input_text", "output_text"]);
+var MAX_CONTENT_DEPTH = 3;
+function parseLine(line) {
+  const s = typeof line === "string" ? line.trim() : "";
+  if (!s) return null;
+  try {
+    const v = JSON.parse(s);
+    return isObject4(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+function messageRecord(entry) {
+  if (!isObject4(entry)) return {};
+  if (isObject4(entry.message)) return entry.message;
+  const payload = entry.payload;
+  if (isObject4(payload) && (typeof payload.role === "string" || payload.content !== void 0)) {
+    return payload;
+  }
+  return entry;
+}
+function messageText(content, opts = {}, depth = 0) {
+  if (content === null || content === void 0) return "";
+  if (typeof content === "string") return content;
+  if (depth > MAX_CONTENT_DEPTH) return "";
+  if (Array.isArray(content)) {
+    return content.map((b) => messageText(b, opts, depth + 1)).filter(Boolean).join("\n");
+  }
+  if (!isObject4(content)) return "";
+  const type = str2(content.type);
+  if (TEXT_BLOCKS.has(type) && typeof content.text === "string") return content.text;
+  if (type === "thinking" && typeof content.thinking === "string") return content.thinking;
+  if (opts?.includeTools === true) {
+    if (type === "tool_result") return messageText(content.content, opts, depth + 1);
+    if (type === "tool_use") return "";
+  }
+  if (type) return "";
+  if (typeof content.text === "string") return content.text;
+  return "";
+}
+function renderEntry(line, opts = {}) {
+  const s = typeof line === "string" ? line.trim() : "";
+  if (!s) return "";
+  const entry = parseLine(s);
+  if (!entry) return s;
+  const message = messageRecord(entry);
+  const body = messageText(message.content ?? entry.content ?? entry.text, opts);
+  if (!body.trim()) return "";
+  const role = str2(message.role) || str2(entry.role) || str2(entry.type) || "message";
+  return `${role}: ${body}`;
+}
+function isObject4(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function str2(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+
 // lib/resume.mjs
 import { unlinkSync as unlinkSync5 } from "node:fs";
 import { join as join9 } from "node:path";
@@ -2088,13 +2168,17 @@ function clearResume(cfg, runId) {
 import { unlinkSync as unlinkSync6 } from "node:fs";
 import { join as join10 } from "node:path";
 var SEEN_TTL_MS = 6 * 60 * 60 * 1e3;
-function seenPath(cfg, runId) {
+var SEEN_DIR = "seen";
+var MAX_SESSION_SEGMENT = 128;
+function seenPath(cfg, runId, sessionId) {
   if (!safeSegment(runId)) return "";
-  return join10(runDir(cfg, runId), "seen.json");
+  const session = safeSegment(hostSessionId({ session_id: sessionId }), MAX_SESSION_SEGMENT);
+  if (!session) return "";
+  return join10(runDir(cfg, runId), SEEN_DIR, `${session}.json`);
 }
-function clearSeen(cfg, runId) {
+function clearSeen(cfg, runId, sessionId = "") {
   try {
-    const p = seenPath(cfg, runId);
+    const p = seenPath(cfg, runId, sessionId);
     if (!p) return true;
     try {
       unlinkSync6(p);
@@ -2178,7 +2262,6 @@ var POST_HARNESS_MS = 800;
 var PERSIST_RESERVE_MS = 250;
 var MIN_POST_MS = 300;
 var SNAPSHOT_BYTES = 200 * 1024;
-var TEXT_BLOCKS = /* @__PURE__ */ new Set(["text", "input_text", "output_text"]);
 var RAW_TAIL_BYTES = 2 * 1024 * 1024;
 var SUMMARY_TAIL_BYTES = 6 * 1024;
 var LABEL_PREFIX = "claude-code-precompact-";
@@ -2188,7 +2271,7 @@ var SUPPRESS = Object.freeze({ suppressOutput: true });
 var NO_SNAPSHOT = Object.freeze({ text: "", bytes: 0, messages: 0, redactions: 0, truncated: false });
 await runHook("checkpoint", {
   budgetMs: MODE2 === "pre" ? PRE_HARNESS_MS : POST_HARNESS_MS,
-  body: (payload, cfg, ctx) => MODE2 === "pre" ? precompact(isObject4(payload) ? payload : {}, cfg, ctx) : postcompact(isObject4(payload) ? payload : {}, cfg)
+  body: (payload, cfg, ctx) => MODE2 === "pre" ? precompact(isObject5(payload) ? payload : {}, cfg, ctx) : postcompact(isObject5(payload) ? payload : {}, cfg)
 });
 async function precompact(payload, cfg, ctx) {
   const started = numOr(ctx?.startedAt, Date.now());
@@ -2205,7 +2288,7 @@ async function precompact(payload, cfg, ctx) {
   if (!snap.text) {
     log(cfg, "warn", "checkpoint: no readable transcript text; pre-compaction context not saved", {
       run_id: runId,
-      transcript_path: str2(payload.transcript_path)
+      transcript_path: str3(payload.transcript_path)
     });
     return { systemMessage: failedMessage("no_transcript") };
   }
@@ -2219,11 +2302,11 @@ async function precompact(payload, cfg, ctx) {
     label,
     context_snapshot: snap.text,
     metadata_json: safeJson({
-      session_id: str2(payload.session_id),
+      session_id: str3(payload.session_id),
       // Codex sends no `turn_number`; the staged turn file is where it comes from there.
       turn_number: attempt(() => turnNumber(cfg, runId, payload), 0),
       source: "PreCompact",
-      trigger: str2(payload.trigger),
+      trigger: str3(payload.trigger),
       label,
       messages: snap.messages,
       snapshot_bytes: snap.bytes,
@@ -2231,18 +2314,18 @@ async function precompact(payload, cfg, ctx) {
       truncated: snap.truncated
     })
   }, { timeoutMs });
-  const body = res.ok && isObject4(res.body) ? res.body : null;
-  const checkpointId = body ? str2(body.checkpoint_id) : "";
+  const body = res.ok && isObject5(res.body) ? res.body : null;
+  const checkpointId = body ? str3(body.checkpoint_id) : "";
   if (!checkpointId) {
     const err = (
       /** @type {any} */
       res
     );
-    const state = res.ok ? "server_error" : str2(err.state) || "server_error";
+    const state = res.ok ? "server_error" : str3(err.state) || "server_error";
     log(cfg, "error", `checkpoint: ${label} failed (${state})`, {
       run_id: runId,
       status: err.status ?? 0,
-      error: str2(err.error).slice(0, 300)
+      error: str3(err.error).slice(0, 300)
     });
     return { systemMessage: failedMessage(state) };
   }
@@ -2267,23 +2350,23 @@ function postcompact(payload, cfg) {
     log(cfg, "warn", `checkpoint: no usable run id (${messageOf2(err)}); nothing to re-anchor`);
     return SUPPRESS;
   }
-  clearSeen(cfg, runId);
+  clearSeen(cfg, runId, hostSessionId(payload));
   clearCarry(cfg, runId);
   clearResume(cfg, runId);
   const latest = readHistory(cfg, runId).at(-1);
-  const checkpointId = str2(latest?.checkpoint_id);
+  const checkpointId = str3(latest?.checkpoint_id);
   if (!checkpointId) {
     log(cfg, "debug", "checkpoint: no stored checkpoint to re-anchor to", { run_id: runId });
     return SUPPRESS;
   }
   log(cfg, "info", `checkpoint: compaction re-anchors to ${clamp(checkpointId, MAX_ID_CHARS)}`, {
     run_id: runId,
-    trigger: str2(payload.trigger)
+    trigger: str3(payload.trigger)
   });
   return SUPPRESS;
 }
 function buildSnapshot(payload, cfg) {
-  const path = str2(payload.transcript_path);
+  const path = str3(payload.transcript_path);
   if (!path) return NO_SNAPSHOT;
   const raw = attempt(() => readTail(path, RAW_TAIL_BYTES), "");
   if (!raw) return NO_SNAPSHOT;
@@ -2348,45 +2431,6 @@ function lastMessages(raw, maxBytes) {
   picked.reverse();
   return { text: picked.join("\n"), messages: picked.length };
 }
-function renderEntry(line) {
-  const s = typeof line === "string" ? line.trim() : "";
-  if (!s) return "";
-  let entry;
-  try {
-    entry = JSON.parse(s);
-  } catch {
-    return s;
-  }
-  if (!isObject4(entry)) return "";
-  const message = messageRecord(entry);
-  const body = messageText(message.content ?? entry.content ?? entry.text);
-  if (!body.trim()) return "";
-  const role = str2(message.role) || str2(entry.role) || str2(entry.type) || "message";
-  return `${role}: ${body}`;
-}
-function messageRecord(entry) {
-  if (isObject4(entry.message)) return entry.message;
-  const payload = entry.payload;
-  if (isObject4(payload) && (typeof payload.role === "string" || payload.content !== void 0)) {
-    return payload;
-  }
-  return entry;
-}
-function messageText(content, depth = 0) {
-  if (content === null || content === void 0) return "";
-  if (typeof content === "string") return content;
-  if (depth > 3) return "";
-  if (Array.isArray(content)) {
-    return content.map((b) => messageText(b, depth + 1)).filter(Boolean).join("\n");
-  }
-  if (!isObject4(content)) return "";
-  const type = str2(content.type);
-  if (TEXT_BLOCKS.has(type) && typeof content.text === "string") return content.text;
-  if (type === "thinking" && typeof content.thinking === "string") return content.thinking;
-  if (type) return "";
-  if (typeof content.text === "string") return content.text;
-  return "";
-}
 function spoolSummary(cfg, runId, payload, snap, label) {
   const turn = attempt(() => turnNumber(cfg, runId, payload), 0);
   const head = `PreCompact checkpoint ${label}${turn ? ` at turn ${turn}` : ""} (${snap.messages} message${snap.messages === 1 ? "" : "s"}, ${snap.bytes} bytes). Transcript tail before compaction:`;
@@ -2398,7 +2442,7 @@ ${tail}`, cfg, "output"),
   );
   if (!body.text.trim()) return;
   const cls = attempt(
-    () => classifyTurn("", "", { event: "PreCompact", trigger: str2(payload.trigger) }),
+    () => classifyTurn("", "", { event: "PreCompact", trigger: str3(payload.trigger) }),
     { intent: "checkpoint", importance: "medium", contentType: "text" }
   );
   const actor = attempt(() => readActor(cfg), "");
@@ -2407,9 +2451,9 @@ ${tail}`, cfg, "output"),
     // batch. Derived from (session, counter) and never from a clock, so a retried drain
     // deduplicates instead of writing a second anchor for one compaction.
     item_id: clamp(`cc-precompact-${idPart(payload.session_id) || idPart(runId) || "anon"}-${label.slice(LABEL_PREFIX.length)}`, MAX_ID_CHARS),
-    content_type: str2(cls.contentType) || "text",
+    content_type: str3(cls.contentType) || "text",
     text: body.text,
-    intent: str2(cls.intent) || "checkpoint",
+    intent: str3(cls.intent) || "checkpoint",
     importance: importanceOr(cls.importance),
     source: "agent",
     // Unix SECONDS (`control.proto`); milliseconds here dates every memory to the year 57000.
@@ -2419,14 +2463,14 @@ ${tail}`, cfg, "output"),
     // right run wearing the wrong labels.
     env_tags: attempt(
       () => envTags(cfg, resolveProjectDir(cfg, payload)),
-      ["tool:claude-code"]
+      [`tool:${host()}`]
     ),
     metadata_json: safeJson({
-      hook_event: str2(payload.hook_event_name) || "PreCompact",
+      hook_event: str3(payload.hook_event_name) || "PreCompact",
       source: "PreCompact",
-      session_id: str2(payload.session_id),
+      session_id: str3(payload.session_id),
       turn_number: turn,
-      trigger: str2(payload.trigger),
+      trigger: str3(payload.trigger),
       label,
       messages: snap.messages,
       snapshot_bytes: snap.bytes,
@@ -2436,7 +2480,7 @@ ${tail}`, cfg, "output"),
       // never says anything.
       ...actor ? { actor } : {}
     }),
-    ...str2(cfg?.userId) ? { user_id: str2(cfg.userId) } : {}
+    ...str3(cfg?.userId) ? { user_id: str3(cfg.userId) } : {}
   });
 }
 function checkpointsPath(cfg, runId) {
@@ -2445,10 +2489,10 @@ function checkpointsPath(cfg, runId) {
 function readHistory(cfg, runId) {
   try {
     const stored = readJson(checkpointsPath(cfg, runId), []);
-    if (Array.isArray(stored)) return stored.filter(isObject4);
-    if (isObject4(stored)) {
+    if (Array.isArray(stored)) return stored.filter(isObject5);
+    if (isObject5(stored)) {
       const inner = stored.checkpoints ?? stored.items;
-      if (Array.isArray(inner)) return inner.filter(isObject4);
+      if (Array.isArray(inner)) return inner.filter(isObject5);
     }
     return [];
   } catch {
@@ -2496,10 +2540,10 @@ function attempt(fn, fallback = (
     return fallback;
   }
 }
-function isObject4(v) {
+function isObject5(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
-function str2(v) {
+function str3(v) {
   return typeof v === "string" ? v.trim() : "";
 }
 function num2(v) {
@@ -2519,7 +2563,7 @@ function clamp(s, max) {
   return v.length > max ? `${v.slice(0, max)}\u2026` : v;
 }
 function importanceOr(v) {
-  const s = str2(v).toLowerCase();
+  const s = str3(v).toLowerCase();
   return ["low", "medium", "high", "critical"].includes(s) ? s : "medium";
 }
 function safeJson(v) {

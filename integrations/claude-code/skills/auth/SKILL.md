@@ -1,6 +1,6 @@
 ---
 name: auth
-description: "Sign in to Mubit and store an API key for this machine. Use on a fresh install, when the plugin reports auth_failed, or when a key has been rotated or revoked."
+description: Sign in to Mubit and store an API key; use when the plugin reports auth_failed or a key was rotated.
 disable-model-invocation: false
 allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/auth.mjs:*)"]
 ---

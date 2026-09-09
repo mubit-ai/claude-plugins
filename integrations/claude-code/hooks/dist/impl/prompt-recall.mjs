@@ -49,7 +49,9 @@ var SECTION_BY_ENTRY_TYPE = Object.freeze({
   task_result: "traces",
   step_outcome: "traces",
   archive_block: "archive_blocks",
-  checkpoint: "checkpoints"
+  checkpoint: "checkpoints",
+  handoff: "handoffs",
+  feedback: "feedback"
 });
 var HEADINGS = Object.freeze({
   mental_models: "Mental models",
@@ -705,15 +707,9 @@ var DEFAULT_MCP_TOOLS = [
   "mubit_learned",
   "mubit_recall",
   "mubit_outcome",
-  "mubit_reflect",
-  "mubit_lessons",
   "mubit_diagnose",
-  "mubit_archive",
   "mubit_dereference",
-  "mubit_forget",
   "mubit_status",
-  "mubit_strategies",
-  "mubit_checkpoint",
   "mubit_memory_health"
 ];
 var CACHE_FILE = "config.json";
@@ -760,7 +756,8 @@ var LANG_FILES = [
 ];
 function envTags(cfg, projectDir = "") {
   const dir = projectDir || cfg?.projectDir || process.cwd();
-  const tags = ["tool:claude-code"];
+  const tool = cfg?.host === "codex" || cfg?.host === "claude-code" ? cfg.host : host();
+  const tags = [`tool:${tool}`];
   const root = gitToplevel(dir) || dir;
   const slug = sanitiseTag(basename(root));
   if (slug) tags.push(`repo:${slug}`);
@@ -911,6 +908,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     ["run", "session", "global"],
     "session"
   );
+  const mcpResultTokenBudget = int2(pick("mcpResultTokenBudget", "MUBIT_CC_MCP_RESULT_TOKENS"), 2e3);
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
     const opt = key ? optionValue(key, e) : void 0;
@@ -979,6 +977,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,
@@ -1127,12 +1126,15 @@ var ASSIGNMENT_KEYWORDS = [
   "secret",
   "token",
   "password",
+  "passphrase",
+  "passwd",
   "credential",
   "assertion",
   "signature",
   "apikey",
   "api_key"
 ];
+var ASSIGNMENT_NAME_SUFFIXES = ["pass"];
 var ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(?=\S)/g;
 var VALUE_RE = /\S+/y;
 var ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
@@ -1145,6 +1147,16 @@ var RULES = [
   { kind: "pem", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { kind: "mubit-key", re: /mbt_[A-Za-z0-9_-]{8,}/g },
   { kind: "openai-key", re: /sk-[A-Za-z0-9_-]{16,}/g },
+  // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+  // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+  // underscore where that rule expects a hyphen, so it fell through every rule in this table
+  // and, being short, under the `high-entropy` floor as well.
+  //
+  // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+  // safe to ship in client-side code — it is in committed source and in browser bundles, and
+  // redacting it would scrub something the user is deliberately looking at while calling a
+  // published value a secret.
+  { kind: "stripe-key", re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
   { kind: "github-token", re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
   { kind: "aws-access-key", re: /AKIA[0-9A-Z]{16}/g },
   { kind: "jwt", re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -1160,7 +1172,7 @@ function scrubAssignments(text, count) {
     const [, pre, name] = m;
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -1175,6 +1187,9 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 function scrubUrlCredentials(text, count) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
@@ -1801,8 +1816,13 @@ var ROUTES = Object.freeze({
   outcome: "/v2/control/outcome",
   checkpoint: "/v2/control/checkpoint",
   lessons: "/v2/control/lessons",
-  reflect: "/v2/control/reflect"
+  reflect: "/v2/control/reflect",
+  strategies: "/v2/control/strategies",
+  handoff: "/v2/control/handoff",
+  feedback: "/v2/control/feedback"
 });
+var HANDOFF_ACTIONS = Object.freeze(["review", "continue", "approve", "execute"]);
+var FEEDBACK_VERDICTS = Object.freeze(["approve", "request_changes", "block", "acknowledge"]);
 var MAX_QUERY_BYTES = 256 * 1024;
 var MAX_BODY_BYTES = 64 * 1024 * 1024;
 var DEFAULT_TIMEOUT_MS = 4e3;
@@ -2080,8 +2100,9 @@ function NETWORK_HINT(err) {
 function SANDBOX_BLOCKED() {
   const env = typeof process === "object" && process ? process.env || {} : {};
   if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
-  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+  return SANDBOX_SENTENCE;
 }
+var SANDBOX_SENTENCE = "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
 function messageOf(err) {
   try {
     if (!err) return "unknown error";
@@ -2127,7 +2148,7 @@ var EMPTY = Object.freeze({
   stale: false,
   at: 0
 });
-function readPins(cfg, runId) {
+function readPins(cfg, runId, opts = {}) {
   try {
     if (isObject4(cfg) && cfg.pins === false) return blank();
     const p = cachePath(cfg, runId);
@@ -2140,7 +2161,7 @@ function readPins(cfg, runId) {
     if (!Array.isArray(raw.pins)) return blank();
     const at = num3(raw.at, 0);
     const stale = !(at > 0) || Math.abs(Date.now() - at) >= PIN_TTL_MS;
-    const { pins, dropped } = capped(raw.pins);
+    const { pins, dropped } = capped(raw.pins, tokenCapOf(opts));
     if (pins.length === 0) {
       return { ...blank(), stale, at };
     }
@@ -2152,7 +2173,7 @@ ${pins.map((pin) => `- ${pin.text}
     return blank();
   }
 }
-function capped(raw) {
+function capped(raw, maxTokens = MAX_PIN_TOKENS) {
   const clean = [];
   let dropped = 0;
   for (const entry of raw) {
@@ -2179,7 +2200,7 @@ function capped(raw) {
   for (const pin of clean) {
     const cost = estimateTokens(`- ${pin.text}
 `);
-    if (spent + cost > MAX_PIN_TOKENS) {
+    if (spent + cost > maxTokens) {
       dropped++;
       continue;
     }
@@ -2221,6 +2242,10 @@ function str3(v) {
 function num3(v, d) {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : d;
+}
+function tokenCapOf(opts) {
+  const n = Number(opts && opts.maxTokens);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : MAX_PIN_TOKENS;
 }
 function isObject4(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
@@ -2433,6 +2458,7 @@ var CONTEXT_LIMIT = 6;
 var RESUME_SECTIONS = Object.freeze([
   "working_memory",
   "traces",
+  "handoffs",
   "mental_models",
   "active_rules",
   "lessons"
@@ -2440,6 +2466,7 @@ var RESUME_SECTIONS = Object.freeze([
 var RESUME_ENTRY_TYPES = Object.freeze([
   "trace",
   "task_result",
+  "handoff",
   "mental_model",
   "rule",
   "lesson"
@@ -3024,16 +3051,20 @@ function safeCwd2() {
 import { join as join14 } from "node:path";
 var SEEN_TTL_MS = 6 * 60 * 60 * 1e3;
 var MAX_SEEN_REFS = 512;
+var SEEN_DIR = "seen";
+var MAX_SESSION_SEGMENT = 128;
 function emptySeen() {
   return { ids: /* @__PURE__ */ new Set(), entries: {}, updatedAt: 0 };
 }
-function seenPath(cfg, runId) {
+function seenPath(cfg, runId, sessionId) {
   if (!safeSegment(runId)) return "";
-  return join14(runDir(cfg, runId), "seen.json");
+  const session = safeSegment(hostSessionId({ session_id: sessionId }), MAX_SESSION_SEGMENT);
+  if (!session) return "";
+  return join14(runDir(cfg, runId), SEEN_DIR, `${session}.json`);
 }
-function readSeen(cfg, runId) {
+function readSeen(cfg, runId, sessionId = "") {
   try {
-    const p = seenPath(cfg, runId);
+    const p = seenPath(cfg, runId, sessionId);
     if (!p) return emptySeen();
     const raw = readJson(p, null);
     if (!isObject9(raw) || !isObject9(raw.refs)) return emptySeen();
@@ -3057,13 +3088,13 @@ function readSeen(cfg, runId) {
     return emptySeen();
   }
 }
-function markSeen(cfg, runId, refIds) {
+function markSeen(cfg, runId, refIds, sessionId = "") {
   try {
-    const p = seenPath(cfg, runId);
+    const p = seenPath(cfg, runId, sessionId);
     if (!p) return false;
     const ids = usableIds(refIds);
     if (ids.length === 0) return false;
-    const prior = readSeen(cfg, runId).entries;
+    const prior = readSeen(cfg, runId, sessionId).entries;
     const now = Date.now();
     const refs = { ...prior };
     for (const id of ids) {
@@ -3072,6 +3103,7 @@ function markSeen(cfg, runId, refIds) {
     }
     return writeJsonAtomic(p, {
       run_id: String(runId ?? ""),
+      session_id: String(sessionId ?? ""),
       updated_at: now,
       refs: bounded(refs)
     });
@@ -3241,9 +3273,10 @@ await runHook("prompt-recall", {
       log(cfg, "warn", `prompt-recall: no usable run id (${messageOf3(err)})`);
       return SUPPRESS;
     }
+    const sessionId = hostSessionId(payload);
     const pins = readPins(cfg, runId);
-    const resume = claimResume(cfg, runId);
-    if (cfg.recallAsync) return carryForward(cfg, payload, runId, started, pins, resume);
+    const resume = claimResume(cfg, runId, sessionId);
+    if (cfg.recallAsync) return carryForward(cfg, payload, runId, sessionId, started, pins, resume);
     if (breakerOpen(cfg)) {
       const b = readBreaker(cfg);
       log(cfg, "debug", "prompt-recall: breaker open; skipping recall", { run_id: runId });
@@ -3269,7 +3302,7 @@ await runHook("prompt-recall", {
     const rankBy = rankForRecall(cfg, query);
     const promptId = safeId(turnKey(payload));
     const projectDir = resolveProjectDir(cfg, payload);
-    const seen = readSeen(cfg, runId).ids;
+    const seen = readSeen(cfg, runId, sessionId).ids;
     const outcome = await recallBlock(cfg, {
       runId,
       agentId,
@@ -3288,7 +3321,7 @@ await runHook("prompt-recall", {
       return injection(runId, NO_RECALL, resume, pins, ms);
     }
     persistRecalled(cfg, runId, promptId, payload, outcome, resume);
-    markSeen(cfg, runId, outcome.refIds);
+    markSeen(cfg, runId, outcome.refIds, sessionId);
     updateMarker(cfg, runId, {
       state: "ready",
       last_error: "",
@@ -3310,14 +3343,14 @@ await runHook("prompt-recall", {
     return injection(runId, outcome, resume, pins, ms);
   }
 });
-function carryForward(cfg, payload, runId, started, pins, resume = null) {
+function carryForward(cfg, payload, runId, sessionId, started, pins, resume = null) {
   const promptId = safeId(turnKey(payload));
   const carry = takeCarry(cfg, runId);
   const rendered = !!(carry && carry.block);
   if (rendered || resume) {
     persistRecalled(cfg, runId, promptId, payload, rendered ? carry : NO_RECALL, resume);
   }
-  if (rendered) markSeen(cfg, runId, carry.refIds);
+  if (rendered) markSeen(cfg, runId, carry.refIds, sessionId);
   const open = breakerOpen(cfg);
   const b = open ? readBreaker(cfg) : null;
   const ms = Date.now() - started;
@@ -3355,12 +3388,12 @@ function carryForward(cfg, payload, runId, started, pins, resume = null) {
   if (!rendered && !resume) return pinsOnly(cfg, pins, runId, true);
   return injection(runId, rendered ? carry : NO_RECALL, resume, pins, ms, true);
 }
-function claimResume(cfg, runId) {
+function claimResume(cfg, runId, sessionId) {
   try {
     if (!cfg.resumeBlock) return null;
     const resume = takeResume(cfg, runId);
     if (!resume) return null;
-    markSeen(cfg, runId, resume.refIds);
+    markSeen(cfg, runId, resume.refIds, sessionId);
     log(
       cfg,
       "debug",

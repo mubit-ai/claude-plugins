@@ -1,6 +1,6 @@
 ---
 name: setup
-description: "First-run setup: confirm the Mubit endpoint and API key are set and that the instance answers. Use on a fresh install, or when the plugin reports auth_failed or unreachable."
+description: "First-run setup: check the endpoint, the key and that the instance answers; use when freshly installed or reporting auth_failed."
 disable-model-invocation: false
 tools: ["mcp__plugin_mubit-memory_mubit__mubit_status"]
 ---

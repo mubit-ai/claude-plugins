@@ -1,6 +1,6 @@
 ---
 name: recall
-description: Search Mubit memory for lessons, rules, facts, or past work relevant to a specific question. Use when you need detail beyond the memory already injected into this turn.
+description: Search Mubit memory for lessons, rules, facts or past work; use when the injected memory is not enough.
 disable-model-invocation: false
 visibility: all
 tools: ["mcp__plugin_mubit-memory_mubit__mubit_recall", "mcp__plugin_mubit-memory_mubit__mubit_learned"]

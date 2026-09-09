@@ -17,7 +17,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync as readdirSync2,
-  readFileSync,
+  readFileSync as readFileSync2,
   renameSync,
   rmSync,
   statSync as statSync2,
@@ -41,7 +41,7 @@ function liveDataDir(home, env = {}) {
   const root = join2(home, ".claude", "plugins", "data");
   try {
     const codexHome = typeof env.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join2(home, ".codex");
-    const pinned = JSON.stringify(JSON.parse(readFileSync(join2(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    const pinned = JSON.stringify(JSON.parse(readFileSync2(join2(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
     if (pinned && pinned[1]) return pinned[1];
   } catch {
   }
@@ -93,7 +93,7 @@ function resolveDataDir(cfg = {}) {
 }
 function readJson(p, fallback = null) {
   try {
-    const raw = readFileSync(p, "utf8");
+    const raw = readFileSync2(p, "utf8");
     if (!raw || !raw.trim()) return fallback;
     const parsed = JSON.parse(raw);
     return parsed === void 0 ? fallback : parsed;
@@ -211,14 +211,14 @@ var init_actor = __esm({
 });
 
 // ../claude-code/lib/credentials.mjs
-import { existsSync as existsSync3, readFileSync as readFileSync2, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3, unlinkSync as unlinkSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 function credentialsPath(dataDir2) {
   return join4(String(dataDir2 ?? ""), FILE);
 }
 function readCredentials(dataDir2) {
   try {
-    const raw = readFileSync2(credentialsPath(dataDir2), "utf8");
+    const raw = readFileSync3(credentialsPath(dataDir2), "utf8");
     if (!raw || !raw.trim()) return {};
     const parsed = JSON.parse(raw);
     if (!isPlainObject(parsed)) return {};
@@ -245,7 +245,7 @@ var init_credentials = __esm({
 // ../claude-code/lib/config.mjs
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync as existsSync4, readFileSync as readFileSync3, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
 import { basename, dirname as dirname4, join as join5, resolve as resolve3 } from "node:path";
 function screaming(key) {
   return String(key).replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
@@ -264,7 +264,8 @@ function host(env = process.env) {
 }
 function envTags(cfg, projectDir2 = "") {
   const dir = projectDir2 || cfg?.projectDir || process.cwd();
-  const tags = ["tool:claude-code"];
+  const tool = cfg?.host === "codex" || cfg?.host === "claude-code" ? cfg.host : host();
+  const tags = [`tool:${tool}`];
   const root = gitToplevel(dir) || dir;
   const slug = sanitiseTag(basename(root));
   if (slug) tags.push(`repo:${slug}`);
@@ -415,6 +416,7 @@ function resolveAll(e, userFile, creds, projectDir2, dataDir2) {
     ["run", "session", "global"],
     "session"
   );
+  const mcpResultTokenBudget = int(pick("mcpResultTokenBudget", "MUBIT_CC_MCP_RESULT_TOKENS"), 2e3);
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
     const opt = key ? optionValue(key, e) : void 0;
@@ -483,6 +485,7 @@ function resolveAll(e, userFile, creds, projectDir2, dataDir2) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,
@@ -544,7 +547,7 @@ function freezeConfig(cfg) {
 function readUserFileRaw(projectDir2) {
   try {
     if (!projectDir2) return "";
-    return readFileSync3(join5(projectDir2, ".mubit-cc.json"), "utf8");
+    return readFileSync4(join5(projectDir2, ".mubit-cc.json"), "utf8");
   } catch {
     return "";
   }
@@ -614,15 +617,9 @@ var init_config = __esm({
       "mubit_learned",
       "mubit_recall",
       "mubit_outcome",
-      "mubit_reflect",
-      "mubit_lessons",
       "mubit_diagnose",
-      "mubit_archive",
       "mubit_dereference",
-      "mubit_forget",
       "mubit_status",
-      "mubit_strategies",
-      "mubit_checkpoint",
       "mubit_memory_health"
     ];
     CACHE_FILE2 = "config.json";
@@ -641,8 +638,52 @@ var init_config = __esm({
   }
 });
 
+// ../claude-code/lib/transcript.mjs
+function messageText(content, opts = {}, depth = 0) {
+  if (content === null || content === void 0) return "";
+  if (typeof content === "string") return content;
+  if (depth > MAX_CONTENT_DEPTH) return "";
+  if (Array.isArray(content)) {
+    return content.map((b) => messageText(b, opts, depth + 1)).filter(Boolean).join("\n");
+  }
+  if (!isObject2(content)) return "";
+  const type = str2(content.type);
+  if (TEXT_BLOCKS.has(type) && typeof content.text === "string") return content.text;
+  if (type === "thinking" && typeof content.thinking === "string") return content.thinking;
+  if (opts?.includeTools === true) {
+    if (type === "tool_result") return messageText(content.content, opts, depth + 1);
+    if (type === "tool_use") return "";
+  }
+  if (type) return "";
+  if (typeof content.text === "string") return content.text;
+  return "";
+}
+function isObject2(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function str2(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+var CHUNK_BYTES, MAX_LINE_BYTES, TEXT_BLOCKS, MAX_CONTENT_DEPTH;
+var init_transcript = __esm({
+  "../claude-code/lib/transcript.mjs"() {
+    CHUNK_BYTES = 256 * 1024;
+    MAX_LINE_BYTES = 2 * 1024 * 1024;
+    TEXT_BLOCKS = /* @__PURE__ */ new Set(["text", "input_text", "output_text"]);
+    MAX_CONTENT_DEPTH = 3;
+  }
+});
+
 // ../claude-code/lib/codex-rollout.mjs
 import { openSync as openSync2, readSync, closeSync as closeSync2, fstatSync } from "node:fs";
+function isInjectedUserText(text) {
+  return typeof text === "string" && INJECTED_USER_RE.test(text);
+}
+function stripInjectedBlocks(content) {
+  if (typeof content === "string") return isInjectedUserText(content) ? "" : content;
+  if (!Array.isArray(content)) return content;
+  return content.filter((b) => !(b && typeof b === "object" && !Array.isArray(b) && isInjectedUserText(b.text)));
+}
 function toolCallRecord(transcriptPath, toolUseId, opts = {}) {
   const path = typeof transcriptPath === "string" ? transcriptPath.trim() : "";
   const id = typeof toolUseId === "string" ? toolUseId.trim() : "";
@@ -720,22 +761,10 @@ function firstUserText(transcriptPath, opts = {}) {
     const record = entry?.payload ?? entry?.message ?? entry;
     if (!record || typeof record !== "object") continue;
     if (record.role !== "user") continue;
-    const body = blockText(record.content);
+    const body = messageText(stripInjectedBlocks(record.content));
     if (body.trim()) return body.slice(0, Number(opts.maxChars) > 0 ? Number(opts.maxChars) : MAX_PROMPT_CHARS);
   }
   return "";
-}
-function blockText(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.map((b) => {
-    if (typeof b === "string") return b;
-    if (!b || typeof b !== "object") return "";
-    const type = typeof b.type === "string" ? b.type : "";
-    if (TEXT_BLOCKS.has(type) && typeof b.text === "string") return b.text;
-    if (!type && typeof b.text === "string") return b.text;
-    return "";
-  }).filter(Boolean).join("\n");
 }
 function readHead(path, bytes) {
   let fd = -1;
@@ -758,13 +787,14 @@ function readHead(path, bytes) {
     }
   }
 }
-var TAIL_BYTES, HEAD_BYTES, MAX_PROMPT_CHARS, TEXT_BLOCKS, NOT_FOUND;
+var TAIL_BYTES, HEAD_BYTES, MAX_PROMPT_CHARS, INJECTED_USER_RE, NOT_FOUND;
 var init_codex_rollout = __esm({
   "../claude-code/lib/codex-rollout.mjs"() {
+    init_transcript();
     TAIL_BYTES = 512 * 1024;
     HEAD_BYTES = 256 * 1024;
     MAX_PROMPT_CHARS = 4096;
-    TEXT_BLOCKS = /* @__PURE__ */ new Set(["text", "input_text", "output_text"]);
+    INJECTED_USER_RE = /^\s*(?:<(?:environment_context|recommended_plugins|turn_aborted|user_shell_command|skill|image)\b|# AGENTS\.md instructions|# Files mentioned)/;
     NOT_FOUND = Object.freeze({
       found: false,
       failed: false,
@@ -788,7 +818,7 @@ function scrubAssignments(text, count) {
     const [, pre, name] = m;
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -803,6 +833,9 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 function scrubUrlCredentials(text, count) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
@@ -839,9 +872,9 @@ function scrub(text, count) {
 }
 function entropy(s) {
   if (s === null || s === void 0) return 0;
-  const str3 = typeof s === "string" ? s : String(s);
-  if (str3.length === 0) return 0;
-  const buf = Buffer.from(str3, "utf8");
+  const str4 = typeof s === "string" ? s : String(s);
+  if (str4.length === 0) return 0;
+  const buf = Buffer.from(str4, "utf8");
   const n = buf.length;
   if (n === 0) return 0;
   const counts = new Uint32Array(256);
@@ -975,19 +1008,8 @@ function gitRootOf(start) {
 function isGitIgnored(p, projectDir2) {
   const root = gitRootOf(projectDir2);
   if (!root) return false;
-  let rel = String(p).replace(/\\/g, "/");
-  if (isAbsolute(rel)) {
-    const abs = resolve4(rel);
-    for (const base of /* @__PURE__ */ new Set([resolve4(projectDir2), root])) {
-      if (abs === base) return false;
-      if (abs.startsWith(base + sep)) {
-        rel = abs.slice(base.length + 1);
-        break;
-      }
-    }
-    if (isAbsolute(rel)) return false;
-  }
-  if (!rel || rel.startsWith("..")) return false;
+  const rel = relativeToRepo(p, projectDir2, root);
+  if (!rel) return false;
   const key = `${root}\0${rel}`;
   const hit = _ignoreCache.get(key);
   if (hit !== void 0) return hit;
@@ -1004,6 +1026,23 @@ function isGitIgnored(p, projectDir2) {
   }
   _ignoreCache.set(key, ignored);
   return ignored;
+}
+function relativeToRepo(p, projectDir2, root) {
+  if (typeof p !== "string" || !p) return "";
+  let rel = p.replace(/\\/g, "/");
+  if (isAbsolute(rel)) {
+    const abs = resolve4(rel);
+    for (const base of /* @__PURE__ */ new Set([resolve4(projectDir2 || root), root])) {
+      if (abs === base) return "";
+      if (abs.startsWith(base + sep)) {
+        rel = abs.slice(base.length + 1);
+        break;
+      }
+    }
+    if (isAbsolute(rel)) return "";
+  }
+  if (!rel || rel.startsWith("..")) return "";
+  return rel;
 }
 function isDeniedPath(p, cfg = {}, projectDir2 = "") {
   try {
@@ -1092,7 +1131,7 @@ function numberOr(v, d) {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : d;
 }
-var PH, EXEMPT_RE, ASSIGNMENT_KEYWORDS, ASSIGNMENT_RE, VALUE_RE, ENTROPY_RUN_RE, URL_CREDENTIALS_RE, ENTROPY_MIN_LEN, ENTROPY_THRESHOLD, RULES, truncMarker, BUILTIN_DENY, _globCache, _repoRootCache, _ignoreCache, OWN_MCP_PREFIXES, PATH_KEYS, SHELL_INPUT_KEYS;
+var PH, EXEMPT_RE, ASSIGNMENT_KEYWORDS, ASSIGNMENT_NAME_SUFFIXES, ASSIGNMENT_RE, VALUE_RE, ENTROPY_RUN_RE, URL_CREDENTIALS_RE, ENTROPY_MIN_LEN, ENTROPY_THRESHOLD, RULES, truncMarker, BUILTIN_DENY, _globCache, _repoRootCache, _ignoreCache, OWN_MCP_PREFIXES, PATH_KEYS, SHELL_INPUT_KEYS;
 var init_redact = __esm({
   "../claude-code/lib/redact.mjs"() {
     PH = (kind) => `[REDACTED:${kind}]`;
@@ -1101,12 +1140,15 @@ var init_redact = __esm({
       "secret",
       "token",
       "password",
+      "passphrase",
+      "passwd",
       "credential",
       "assertion",
       "signature",
       "apikey",
       "api_key"
     ];
+    ASSIGNMENT_NAME_SUFFIXES = ["pass"];
     ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(?=\S)/g;
     VALUE_RE = /\S+/y;
     ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
@@ -1119,6 +1161,16 @@ var init_redact = __esm({
       { kind: "pem", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
       { kind: "mubit-key", re: /mbt_[A-Za-z0-9_-]{8,}/g },
       { kind: "openai-key", re: /sk-[A-Za-z0-9_-]{16,}/g },
+      // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+      // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+      // underscore where that rule expects a hyphen, so it fell through every rule in this table
+      // and, being short, under the `high-entropy` floor as well.
+      //
+      // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+      // safe to ship in client-side code — it is in committed source and in browser bundles, and
+      // redacting it would scrub something the user is deliberately looking at while calling a
+      // published value a secret.
+      { kind: "stripe-key", re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
       { kind: "github-token", re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
       { kind: "aws-access-key", re: /AKIA[0-9A-Z]{16}/g },
       { kind: "jwt", re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -1242,7 +1294,7 @@ import { randomUUID } from "node:crypto";
 import {
   existsSync as existsSync6,
   mkdirSync as mkdirSync3,
-  readFileSync as readFileSync4,
+  readFileSync as readFileSync5,
   unlinkSync as unlinkSync3,
   writeFileSync as writeFileSync2,
   writeSync as writeSync2
@@ -1250,20 +1302,20 @@ import {
 import { dirname as dirname6, join as join8, resolve as resolve5 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function forHost(value, event) {
-  if (!isObject2(value) || !("suppressOutput" in value)) return value;
+  if (!isObject3(value) || !("suppressOutput" in value)) return value;
   if (host(process.env) !== "codex") return value;
   if (event && !CODEX_REJECTS_SUPPRESS_OUTPUT.includes(event)) return value;
   const { suppressOutput, ...rest } = value;
   return rest;
 }
 function eventNameOf(payload) {
-  const v = isObject2(payload) ? payload.hook_event_name : void 0;
+  const v = isObject3(payload) ? payload.hook_event_name : void 0;
   return typeof v === "string" ? v.trim() : "";
 }
 async function runHook(name, options = {}) {
   const startedAt = Date.now();
   process.exitCode = 0;
-  const opts = isObject2(options) ? options : {};
+  const opts = isObject3(options) ? options : {};
   const budgetMs = positiveInt(opts.budgetMs, DEFAULT_BUDGET_MS);
   const args = process.argv.slice(2);
   const payloadPath = flagValue(args, "--payload");
@@ -1475,7 +1527,7 @@ function withDeadline(fn, ms) {
 }
 function emit(value) {
   let text = "{}";
-  if (isObject2(value)) {
+  if (isObject3(value)) {
     try {
       const s = JSON.stringify(value);
       if (typeof s === "string" && s) text = s;
@@ -1536,7 +1588,7 @@ function parseObject(raw) {
   if (!s) return { ok: false, value: null };
   try {
     const v = JSON.parse(s);
-    if (!isObject2(v)) return { ok: false, value: null };
+    if (!isObject3(v)) return { ok: false, value: null };
     return { ok: true, value: v };
   } catch {
     return { ok: false, value: null };
@@ -1544,12 +1596,12 @@ function parseObject(raw) {
 }
 function readFileText(p) {
   try {
-    return readFileSync4(p, "utf8");
+    return readFileSync5(p, "utf8");
   } catch {
     return "";
   }
 }
-function isObject2(v) {
+function isObject3(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 function positiveInt(v, d) {
@@ -1643,7 +1695,7 @@ function classifyTurn(prompt, lastAssistantMessage, opts = {}) {
   const o = opts && typeof opts === "object" ? opts : {};
   const event = typeof o.event === "string" ? o.event : "";
   const isSubagent = event === "SubagentStop";
-  const [intent, importance] = event === "PreCompact" ? ["checkpoint", "medium"] : ["task_result", "medium"];
+  const [intent, importance] = event === "PreCompact" ? ["checkpoint", "medium"] : isSubagent ? ["handoff", "medium"] : ["task_result", "medium"];
   const rawAgentId = o.agent_id ?? o.agentId;
   return {
     intent,
@@ -1724,19 +1776,205 @@ var init_classify = __esm({
   }
 });
 
+// ../claude-code/lib/filechange.mjs
+import { join as join9 } from "node:path";
+function fileChanges(toolName, toolInput, toolResponse) {
+  const out = [];
+  try {
+    const input = isObject4(toolInput) ? toolInput : {};
+    const seen = /* @__PURE__ */ new Set();
+    const push = (path, kind) => {
+      if (out.length >= MAX_CHANGES_PER_EVENT) return;
+      const p = clampPath(path);
+      if (!p) return;
+      const key = `${kind}:${p}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ path: p, kind });
+    };
+    const body = patchBody(input);
+    if (body) collectPatch(body, push);
+    collectNode(input, "", push, responseKind(toolResponse));
+    const parentPath = firstPath(input);
+    const edits = Array.isArray(input.edits) ? input.edits.slice(0, MAX_CHANGES_PER_EVENT) : [];
+    for (const e of edits) {
+      if (!isObject4(e)) continue;
+      collectNode(e, parentPath, push);
+    }
+  } catch {
+  }
+  return out;
+}
+function collectNode(node, fallbackPath, push, stated = "") {
+  const path = firstPath(node) || fallbackPath;
+  if (!path) return;
+  const kind = kindOf(node);
+  if (kind) push(path, stated || kind);
+}
+function responseKind(response) {
+  if (!isObject4(response) || typeof response.type !== "string") return "";
+  if (response.type === "create") return "add";
+  if (response.type === "update") return "update";
+  return "";
+}
+function kindOf(node) {
+  const prior = firstStringKey(node, PRIOR_KEYS);
+  const content = firstStringKey(node, CONTENT_KEYS);
+  if (prior === null && content === null) return "";
+  if (typeof prior === "string" && prior.trim() !== "") return "update";
+  return "add";
+}
+function patchBody(input) {
+  for (const key of PATCH_BODY_KEYS) {
+    const v = input[key];
+    if (typeof v === "string" && v.indexOf(PATCH_SENTINEL) !== -1) return v;
+  }
+  return "";
+}
+function collectPatch(body, push) {
+  PATCH_FILE_RE.lastIndex = 0;
+  let m;
+  while ((m = PATCH_FILE_RE.exec(body)) !== null) {
+    push(
+      String(m[2]).trim(),
+      /** @type {any} */
+      String(m[1]).toLowerCase()
+    );
+  }
+  PATCH_MOVE_RE.lastIndex = 0;
+  while ((m = PATCH_MOVE_RE.exec(body)) !== null) push(String(m[1]).trim(), "add");
+}
+function recordFileChanges(cfg, runId, changes) {
+  try {
+    if (!runId) return 0;
+    const incoming = Array.isArray(changes) ? changes : [];
+    if (incoming.length === 0) return 0;
+    const now = Date.now();
+    const map = /* @__PURE__ */ new Map();
+    for (const row of readStored(cfg, runId)) map.set(row.path, row);
+    const touched = [];
+    for (const c of incoming) {
+      if (!isObject4(c)) continue;
+      const path = clampPath(c.path);
+      const kind = kindOrEmpty(c.kind);
+      if (!path || !kind) continue;
+      const cur = map.get(path) ?? { path, kinds: [], occurrences: 0, at: now };
+      if (!cur.kinds.includes(kind)) cur.kinds.push(kind);
+      cur.occurrences += 1;
+      cur.at = now;
+      map.set(path, cur);
+      if (!touched.includes(path)) touched.push(path);
+    }
+    const rest = [...map.values()].filter((f) => !touched.includes(f.path));
+    const files = [...touched.map((p) => map.get(p)), ...rest].slice(0, MAX_INDEXED_PATHS);
+    const dir = runDir(cfg, runId);
+    if (!ensureDir(dir)) return 0;
+    const ok = writeJsonAtomic(join9(dir, FILES_FILE), {
+      version: VERSION,
+      updated_at: now,
+      files
+    });
+    return ok ? files.length : 0;
+  } catch {
+    return 0;
+  }
+}
+function readStored(cfg, runId) {
+  try {
+    if (!runId) return [];
+    const stored = readJson(join9(runDir(cfg, runId), FILES_FILE), null);
+    if (!isObject4(stored)) return [];
+    if (stored.version !== VERSION) return [];
+    if (!Array.isArray(stored.files)) return [];
+    const out = [];
+    for (const f of stored.files) {
+      if (!isObject4(f)) continue;
+      const path = clampPath(f.path);
+      if (!path) continue;
+      const kinds = [];
+      for (const k of Array.isArray(f.kinds) ? f.kinds : []) {
+        const kind = kindOrEmpty(k);
+        if (kind && !kinds.includes(kind)) kinds.push(kind);
+      }
+      if (kinds.length === 0) continue;
+      out.push({
+        path,
+        kinds,
+        occurrences: Math.max(1, Math.trunc(numOr(f.occurrences, 1))),
+        at: Math.max(0, Math.trunc(numOr(f.at, 0)))
+      });
+      if (out.length >= MAX_INDEXED_PATHS) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+function firstPath(node) {
+  for (const key of PATH_KEYS2) {
+    const v = node[key];
+    if (typeof v === "string" && v.trim()) return clampPath(v);
+  }
+  return "";
+}
+function firstStringKey(node, keys) {
+  for (const key of keys) {
+    const v = node[key];
+    if (typeof v === "string") return v;
+  }
+  return null;
+}
+function clampPath(v) {
+  if (typeof v !== "string") return "";
+  const t = v.trim();
+  return t.length > MAX_PATH_CHARS ? t.slice(0, MAX_PATH_CHARS) : t;
+}
+function kindOrEmpty(v) {
+  return typeof v === "string" && FILE_CHANGE_KINDS.includes(v) ? (
+    /** @type {any} */
+    v
+  ) : "";
+}
+function isObject4(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function numOr(v, d) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : d;
+}
+var FILE_CHANGE_KINDS, FILES_FILE, VERSION, MAX_CHANGES_PER_EVENT, MAX_INDEXED_PATHS, MAX_PATH_CHARS, PATH_KEYS2, PRIOR_KEYS, CONTENT_KEYS, PATCH_BODY_KEYS, PATCH_SENTINEL, PATCH_FILE_RE, PATCH_MOVE_RE;
+var init_filechange = __esm({
+  "../claude-code/lib/filechange.mjs"() {
+    init_state();
+    FILE_CHANGE_KINDS = Object.freeze(["add", "delete", "update"]);
+    FILES_FILE = "files.json";
+    VERSION = 1;
+    MAX_CHANGES_PER_EVENT = 32;
+    MAX_INDEXED_PATHS = 256;
+    MAX_PATH_CHARS = 512;
+    PATH_KEYS2 = ["file_path", "filePath", "path", "notebook_path", "notebookPath", "target_file"];
+    PRIOR_KEYS = ["old_string", "oldString", "old_source", "oldSource", "old_str"];
+    CONTENT_KEYS = ["content", "new_string", "newString", "new_source", "newSource", "new_str"];
+    PATCH_BODY_KEYS = ["command", "patch", "input"];
+    PATCH_SENTINEL = "*** Begin Patch";
+    PATCH_FILE_RE = /^\*\*\* (Add|Delete|Update) File:[ \t]*(.*)$/gm;
+    PATCH_MOVE_RE = /^\*\*\* Move to:[ \t]*(.*)$/gm;
+  }
+});
+
 // ../claude-code/lib/runid.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync7, readdirSync as readdirSync3, readFileSync as readFileSync5, statSync as statSync5 } from "node:fs";
-import { basename as basename2, dirname as dirname7, join as join9, resolve as resolve6 } from "node:path";
+import { existsSync as existsSync7, readdirSync as readdirSync3, readFileSync as readFileSync6, statSync as statSync5 } from "node:fs";
+import { basename as basename2, dirname as dirname7, join as join10, resolve as resolve6 } from "node:path";
 function agentRole(env = process.env) {
   const host2 = typeof env?.MUBIT_CC_HOST === "string" ? env.MUBIT_CC_HOST.trim().toLowerCase() : "";
   return AGENT_ROLES[host2] ?? DEFAULT_AGENT_ROLE;
 }
 function deriveRunId(cfg, payload = {}, options = {}) {
-  const c = isObject3(cfg) ? cfg : {};
-  const p = isObject3(payload) ? payload : {};
-  const persist = !(isObject3(options) && options.persist === false);
+  const c = isObject5(cfg) ? cfg : {};
+  const p = isObject5(payload) ? payload : {};
+  const persist = !(isObject5(options) && options.persist === false);
   return assertUsableRunId(resolveRunId(c, p, persist));
 }
 function resolveRunId(cfg, payload, persist) {
@@ -1805,7 +2043,7 @@ function directoryRunId(cfg, payload, withBranch) {
   return branch ? `cc-${slug}-${branch}-${digest}` : `cc-${slug}-${digest}`;
 }
 function reusableRun(cfg, payload, prev, strategy) {
-  if (!isObject3(prev)) return "";
+  if (!isObject5(prev)) return "";
   const id = typeof prev.run_id === "string" ? prev.run_id.trim() : "";
   if (!id || FORBIDDEN_RUN_IDS.has(id.toLowerCase())) return "";
   const recorded = typeof prev.strategy === "string" ? prev.strategy.trim() : "";
@@ -1830,7 +2068,7 @@ function assertUsableRunId(id) {
   return s;
 }
 function turnKey(payload) {
-  if (!isObject3(payload)) return "";
+  if (!isObject5(payload)) return "";
   const prompt = typeof payload.prompt_id === "string" ? payload.prompt_id.trim() : "";
   if (prompt) return prompt;
   const turn = typeof payload.turn_id === "string" ? payload.turn_id.trim() : "";
@@ -1842,7 +2080,7 @@ function turnNumber(cfg, runId, payload) {
   try {
     const id = safeSegment(turnKey(payload));
     if (!id) return 0;
-    const staged = readJson(join9(runDir(cfg, runId), "turns", `${id}.json`), null);
+    const staged = readJson(join10(runDir(cfg, runId), "turns", `${id}.json`), null);
     const n = Number(staged?.turn_number);
     return Number.isFinite(n) && n > 0 ? n : 0;
   } catch {
@@ -1850,7 +2088,7 @@ function turnNumber(cfg, runId, payload) {
   }
 }
 function deriveAgentId(payload = {}) {
-  const p = isObject3(payload) ? payload : {};
+  const p = isObject5(payload) ? payload : {};
   const role = agentRole();
   const sub = subagentShort(p);
   return sub ? `${role}-sub-${sub}` : role;
@@ -1877,7 +2115,7 @@ function loadSessionMap(sessionId) {
     const file = sessionFileName(sessionId);
     if (!file) return null;
     const stored = readJson(sessionPath(file), null);
-    return isObject3(stored) ? stored : null;
+    return isObject5(stored) ? stored : null;
   } catch {
     return null;
   }
@@ -1885,10 +2123,10 @@ function loadSessionMap(sessionId) {
 function rememberRun(cfg, payload, sessionId, prev, next) {
   const now = Date.now();
   const isSessionStart = !!next.source || payload.hook_event_name === "SessionStart";
-  const moved = !isObject3(prev) || prev.run_id !== next.run_id || clearCount(prev) !== next.clear_count;
-  const lastSeen = isObject3(prev) ? numberOr2(prev.last_seen_at, 0) : 0;
+  const moved = !isObject5(prev) || prev.run_id !== next.run_id || clearCount(prev) !== next.clear_count;
+  const lastSeen = isObject5(prev) ? numberOr2(prev.last_seen_at, 0) : 0;
   if (!moved && !isSessionStart && now - lastSeen < TOUCH_INTERVAL_MS) return;
-  const inherited = isObject3(prev) ? prev : {};
+  const inherited = isObject5(prev) ? prev : {};
   const dir = projectDirOf(cfg, payload);
   saveSessionMap(sessionId, {
     ...inherited,
@@ -1922,7 +2160,7 @@ function normaliseRecord(record) {
     clear_count: 0,
     endpoint_hash: ""
   };
-  if (isObject3(record)) {
+  if (isObject5(record)) {
     for (const [k, v] of Object.entries(record)) {
       if (v !== void 0) out[k] = v;
     }
@@ -1930,7 +2168,7 @@ function normaliseRecord(record) {
   return out;
 }
 function sessionPath(file) {
-  return join9(dataDir({}), "sessions", `${file}.json`);
+  return join10(dataDir({}), "sessions", `${file}.json`);
 }
 function sessionFileName(sessionId) {
   const raw = typeof sessionId === "string" ? sessionId.trim() : "";
@@ -1939,10 +2177,10 @@ function sessionFileName(sessionId) {
   return safe && safe !== "." && safe !== ".." ? safe : "";
 }
 function projectDirOf(cfg, payload = {}) {
-  return usableDir(isObject3(payload) ? payload.cwd : "") || firstString2(cfg.projectDir, process.env.CLAUDE_PROJECT_DIR) || safeCwd2();
+  return usableDir(isObject5(payload) ? payload.cwd : "") || firstString2(cfg.projectDir, process.env.CLAUDE_PROJECT_DIR) || safeCwd2();
 }
 function resolveProjectDir(cfg, payload = {}) {
-  return projectDirOf(isObject3(cfg) ? cfg : {}, payload);
+  return projectDirOf(isObject5(cfg) ? cfg : {}, payload);
 }
 function projectRootOf(dir) {
   return gitToplevel2(dir) || dir;
@@ -1981,7 +2219,7 @@ function hasGitDir2(start) {
   try {
     let cur = resolve6(start);
     for (let i = 0; i < 24; i++) {
-      if (existsSync7(join9(cur, ".git"))) return true;
+      if (existsSync7(join10(cur, ".git"))) return true;
       const up = dirname7(cur);
       if (up === cur) return false;
       cur = up;
@@ -1990,7 +2228,7 @@ function hasGitDir2(start) {
   }
   return false;
 }
-function isObject3(v) {
+function isObject5(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 function firstString2(...vals) {
@@ -2004,7 +2242,7 @@ function numberOr2(v, d) {
   return Number.isFinite(n) ? n : d;
 }
 function clearCount(rec) {
-  if (!isObject3(rec)) return 0;
+  if (!isObject5(rec)) return 0;
   const n = Math.trunc(numberOr2(rec.clear_count, 0));
   return n > 0 ? n : 0;
 }
@@ -2017,7 +2255,7 @@ function normaliseSource(v) {
   return SOURCES.has(s) ? s : "";
 }
 function hostSessionId(payload) {
-  const v = isObject3(payload) && typeof payload.session_id === "string" ? payload.session_id.trim() : "";
+  const v = isObject5(payload) && typeof payload.session_id === "string" ? payload.session_id.trim() : "";
   if (!v || PLACEHOLDER_SESSION_IDS.has(v.toLowerCase())) return "";
   return v;
 }
@@ -2071,7 +2309,7 @@ import {
   linkSync,
   openSync as openSync3,
   readdirSync as readdirSync4,
-  readFileSync as readFileSync6,
+  readFileSync as readFileSync7,
   renameSync as renameSync3,
   statSync as statSync6,
   unlinkSync as unlinkSync4,
@@ -2079,9 +2317,9 @@ import {
   writeSync as writeSync3
 } from "node:fs";
 import { createHash as createHash3, randomBytes } from "node:crypto";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 function spoolDir(cfg, runId) {
-  return join10(runDir(cfg, runId), "spool");
+  return join11(runDir(cfg, runId), "spool");
 }
 function rand6() {
   let s = "";
@@ -2106,7 +2344,7 @@ function appendItem(cfg, runId, item2) {
     }
     if (typeof body !== "string") return "";
     for (let attempt2 = 0; attempt2 < 8; attempt2++) {
-      const target = join10(dir, `${Date.now()}-${rand6()}.json`);
+      const target = join11(dir, `${Date.now()}-${rand6()}.json`);
       if (existsSync8(target)) continue;
       const tmp = `${target}.tmp-${process.pid}`;
       try {
@@ -2133,7 +2371,7 @@ function stampOf(dir, name) {
     if (Number.isFinite(n)) return n;
   }
   try {
-    return statSync6(join10(dir, name)).mtimeMs;
+    return statSync6(join11(dir, name)).mtimeMs;
   } catch {
     return 0;
   }
@@ -2171,7 +2409,7 @@ var init_spool = __esm({
 
 // ../claude-code/hooks/src/capture.mjs
 var capture_exports = {};
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 function pickMode(argv) {
   const args = Array.isArray(argv) ? argv : [];
   if (args.includes("--failure")) return "failure";
@@ -2182,9 +2420,9 @@ function pickMode(argv) {
   return "tool";
 }
 function capture(rawPayload, cfg, mode) {
-  const payload = isObject4(rawPayload) ? rawPayload : {};
+  const payload = isObject6(rawPayload) ? rawPayload : {};
   if (cfg && cfg.capture === false) return;
-  if ((mode === "tool" || mode === "permission") && SKIP_TOOLS.has(str2(payload.tool_name).trim())) return;
+  if ((mode === "tool" || mode === "permission") && SKIP_TOOLS.has(str3(payload.tool_name).trim())) return;
   if (mode === "tool" || mode === "permission") {
     if (attempt(() => isSelfReference(payload.tool_name, payload.tool_input, cfg), false)) return;
   }
@@ -2197,7 +2435,7 @@ function capture(rawPayload, cfg, mode) {
     () => {
       if (mode === "stop-failure") return null;
       if (mode === "permission") return buildPermissionItem(payload, cfg);
-      return mode === "stop" || mode === "subagent" ? buildTurnItem(payload, cfg, runId, mode) : buildToolItem(payload, cfg, mode);
+      return mode === "stop" || mode === "subagent" ? buildTurnItem(payload, cfg, runId, mode) : buildToolItem(payload, cfg, mode, runId);
     },
     null
   );
@@ -2215,13 +2453,15 @@ function capture(rawPayload, cfg, mode) {
   }
 }
 function apiErrorOf(payload) {
-  const raw = str2(payload.error).trim();
+  const raw = str3(payload.error).trim();
   return raw ? clamp(raw, MAX_API_ERROR_CHARS) : API_ERROR_UNKNOWN;
 }
-function buildToolItem(payload, cfg, mode) {
+function buildToolItem(payload, cfg, mode, runId) {
   const recorded = mode === "tool" && host() === "codex" ? attempt(() => toolCallRecord(payload.transcript_path, payload.tool_use_id), null) : null;
   const failed = mode === "failure" || !!recorded?.failed;
-  const toolName = clamp(str2(payload.tool_name) || "Tool", 128);
+  const toolName = clamp(str3(payload.tool_name) || "Tool", 128);
+  const changes = failed ? [] : attempt(() => fileChanges(payload.tool_name, payload.tool_input, payload.tool_response), []);
+  if (changes.length) attempt(() => recordFileChanges(cfg, runId, changes));
   const cls = attempt(
     () => classifyTool(payload.tool_name, payload.tool_input, failed ? "failure" : "ok"),
     { intent: "tool_output", importance: "low", contentType: "text" }
@@ -2250,9 +2490,9 @@ function buildToolItem(payload, cfg, mode) {
     importance: cls.importance,
     metadata: {
       tool: toolName,
-      tool_use_id: str2(payload.tool_use_id),
-      hook_event: str2(payload.hook_event_name) || (failed ? "PostToolUseFailure" : "PostToolUse"),
-      session_id: str2(payload.session_id),
+      tool_use_id: str3(payload.tool_use_id),
+      hook_event: str3(payload.hook_event_name) || (failed ? "PostToolUseFailure" : "PostToolUse"),
+      session_id: str3(payload.session_id),
       prompt_id: turnKey(payload),
       // The host names it `duration_ms`; `execution_time_ms` is the older payload name and
       // stays as a fallback. The metadata key keeps the old spelling because it is already
@@ -2270,14 +2510,19 @@ function buildToolItem(payload, cfg, mode) {
       // failure from every other.
       ...typeof recorded?.exitCode === "number" ? { exit_code: recorded.exitCode } : {},
       outcome: failed ? "failure" : "ok",
+      // The retrieval axis. Omitted entirely when the call changed nothing, on the same rule
+      // `withModel` and `withActor` follow below: a field that is always present and never
+      // says anything is worse than an absent one — here it would say "this call changed no
+      // files" on every `Read` in the store.
+      ...changes.length ? { files: changes } : {},
       truncated: !!(params.truncated || tail.truncated),
       redactions: num(scrubbed.redactions) + num(params.redactions) + num(tail.redactions),
-      ...isObject4(cls.metadata) ? cls.metadata : {}
+      ...isObject6(cls.metadata) ? cls.metadata : {}
     }
   });
 }
 function buildPermissionItem(payload, cfg) {
-  const toolName = clamp(str2(payload.tool_name) || "Tool", 128);
+  const toolName = clamp(str3(payload.tool_name) || "Tool", 128);
   const scrubbed = attempt(() => redactParams(payload.tool_input, cfg), { params: null, redactions: 0 });
   const params = attempt(
     () => redactText(renderParams(scrubbed.params), cfg, "param"),
@@ -2293,8 +2538,8 @@ function buildPermissionItem(payload, cfg) {
     importance: "medium",
     metadata: {
       tool: toolName,
-      hook_event: str2(payload.hook_event_name) || "PermissionRequest",
-      session_id: str2(payload.session_id),
+      hook_event: str3(payload.hook_event_name) || "PermissionRequest",
+      session_id: str3(payload.session_id),
       prompt_id: turnKey(payload),
       permission_requested: true,
       // Deliberately not an `outcome`: this event fires *before* the human answers, and the
@@ -2310,22 +2555,29 @@ function buildTurnItem(payload, cfg, runId, mode) {
   const cls = attempt(
     () => classifyTurn("", "", {
       event,
-      agent_id: str2(payload.agent_id),
-      agent_type: str2(payload.agent_type)
+      agent_id: str3(payload.agent_id),
+      agent_type: str3(payload.agent_type)
     }),
     { intent: "task_result", importance: "medium", contentType: "text", agentId: "", agentType: "" }
   );
   const turn = attempt(() => readTurn(cfg, runId, turnKey(payload)), null);
   const own = mode === "subagent" ? attempt(() => firstUserText(payload.agent_transcript_path), "") : "";
-  const staged = own || str2(turn?.prompt) || str2(payload.prompt);
-  const answer = str2(payload.last_assistant_message) || str2(payload.message);
+  const staged = own || str3(turn?.prompt) || str3(payload.prompt);
+  const answer = str3(payload.last_assistant_message) || str3(payload.message);
   if (!staged && !answer) return null;
   const q = attempt(() => redactText(staged, cfg, "output"), { text: "", redactions: 0, truncated: false });
   const a = attempt(() => redactText(answer, cfg, "output"), { text: "", redactions: 0, truncated: false });
   const text = `Q: ${q.text}
 
 A: ${a.text}`;
-  const subAgent = str2(cls.agentId);
+  const subAgent = str3(cls.agentId);
+  const handoff = mode === "subagent" ? {
+    from_agent_id: attempt(() => deriveAgentId(payload), ""),
+    to_agent_id: attempt(() => deriveAgentId({}), ""),
+    requested_action: "review",
+    task_id: turnKey(payload),
+    active: true
+  } : {};
   return item({
     cfg,
     payload,
@@ -2334,17 +2586,18 @@ A: ${a.text}`;
     intent: cls.intent,
     importance: cls.importance,
     metadata: {
-      hook_event: str2(payload.hook_event_name) || event,
-      session_id: str2(payload.session_id),
+      hook_event: str3(payload.hook_event_name) || event,
+      session_id: str3(payload.session_id),
       prompt_id: turnKey(payload),
       // Payload first, then the ordinal `stage-prompt` staged — Codex sends no `turn_number`
       // on any event, so without the second source every item here recorded 0.
       turn_number: attempt(() => turnNumber(cfg, runId, payload), 0),
-      ...subAgent ? { agent_id: subAgent, agent_type: str2(cls.agentType) } : {},
+      ...subAgent ? { agent_id: subAgent, agent_type: str3(cls.agentType) } : {},
       ...subAgent ? { mubit_agent_id: attempt(() => deriveAgentId(payload), "") } : {},
+      ...handoff,
       // The path itself, so a later reader can rejoin this subagent to its own rollout —
       // which is what `persistSubRun` names as the next step on real per-subagent isolation.
-      ...str2(payload.agent_transcript_path) ? { agent_transcript_path: str2(payload.agent_transcript_path) } : {},
+      ...str3(payload.agent_transcript_path) ? { agent_transcript_path: str3(payload.agent_transcript_path) } : {},
       truncated: !!(q.truncated || a.truncated),
       redactions: num(q.redactions) + num(a.redactions)
     }
@@ -2368,7 +2621,7 @@ function item(o) {
     // would be half a fix: the memory would land in the right run wearing the wrong labels.
     env_tags: attempt(
       () => envTags(cfg, resolveProjectDir(cfg, o.payload)),
-      ["tool:claude-code"]
+      [`tool:${host()}`]
     ),
     // Both merged here rather than at each call site, so *every* ingest item this hook
     // writes carries them uniformly, and both omitted entirely when unknown rather than
@@ -2381,18 +2634,18 @@ function item(o) {
     // empty string would read as "the host said the model is blank".
     metadata_json: safeJson(withActor(withModel(o.metadata, o.payload), actor))
   };
-  const userId = str2(cfg.userId);
+  const userId = str3(cfg.userId);
   if (userId) out.user_id = userId;
   return out;
 }
 function withModel(metadata, payload) {
-  const base = isObject4(metadata) ? metadata : {};
+  const base = isObject6(metadata) ? metadata : {};
   if ("model" in base) return base;
-  const model = clamp(str2(payload?.model), 128);
+  const model = clamp(str3(payload?.model), 128);
   return model ? { ...base, model } : base;
 }
 function withActor(metadata, actor) {
-  const base = isObject4(metadata) ? metadata : {};
+  const base = isObject6(metadata) ? metadata : {};
   return actor ? { ...base, actor } : base;
 }
 function renderParams(params) {
@@ -2443,7 +2696,7 @@ function outputText(v, depth = 0) {
       return v.map((x) => outputText(x, depth + 1)).filter(Boolean).join("\n");
     }
     if (typeof v.text === "string") return v.text;
-    if (isObject4(v.file) && typeof v.file.content === "string") return v.file.content;
+    if (isObject6(v.file) && typeof v.file.content === "string") return v.file.content;
     if (typeof v.content === "string") return v.content;
     if (Array.isArray(v.content)) return outputText(v.content, depth + 1);
     if (typeof v.output === "string") return v.output;
@@ -2456,28 +2709,28 @@ function outputText(v, depth = 0) {
   }
 }
 function errorText(payload) {
-  const direct = str2(payload.error) || str2(payload.tool_error) || str2(payload.error_message);
+  const direct = str3(payload.error) || str3(payload.tool_error) || str3(payload.error_message);
   if (direct) return direct;
   return outputText(payload.error ?? payload.tool_response ?? payload.tool_output);
 }
 function turnPath(cfg, runId, promptId) {
   const id = idPart(promptId);
   if (!id) return "";
-  return join11(resolveDataDir(cfg), "runs", idPart(runId), "turns", `${id}.json`);
+  return join12(resolveDataDir(cfg), "runs", idPart(runId), "turns", `${id}.json`);
 }
 function readTurn(cfg, runId, promptId) {
   const p = turnPath(cfg, runId, promptId);
   if (!p) return null;
   const v = readJson(p, null);
-  return isObject4(v) ? v : null;
+  return isObject6(v) ? v : null;
 }
 function closeTurn(cfg, runId, payload, apiError = "") {
   const p = turnPath(cfg, runId, turnKey(payload));
   if (!p) return;
   const prev = readJson(p, null);
-  const base = isObject4(prev) ? prev : {
+  const base = isObject6(prev) ? prev : {
     prompt_id: turnKey(payload),
-    session_id: str2(payload.session_id),
+    session_id: str3(payload.session_id),
     started_at: Date.now()
   };
   const evidence = apiError ? null : attempt(() => usedEvidence(base, payload), null);
@@ -2494,10 +2747,10 @@ function closeTurn(cfg, runId, payload, apiError = "") {
   });
 }
 function usedEvidence(turn, payload) {
-  const recall = isObject4(turn.recall) ? turn.recall : null;
+  const recall = isObject6(turn.recall) ? turn.recall : null;
   if (!recall || !Array.isArray(recall.terms)) return null;
   const terms = recall.terms.filter((t) => typeof t === "string" && t.length >= TERM_MIN_CHARS && t.length <= TERM_MAX_CHARS).map((t) => t.toLowerCase()).slice(0, MAX_TERMS_READ);
-  const answer = str2(payload.last_assistant_message) || str2(payload.message);
+  const answer = str3(payload.last_assistant_message) || str3(payload.message);
   const out = {
     method: USED_SIGNAL_METHOD,
     at: Date.now(),
@@ -2537,14 +2790,14 @@ function outcomeArgs(payload) {
 }
 function fireDrain(cfg, runId, payload, args) {
   const handoff = stashPayload(cfg, {
-    hook_event_name: str2(payload.hook_event_name),
-    session_id: str2(payload.session_id),
+    hook_event_name: str3(payload.hook_event_name),
+    session_id: str3(payload.session_id),
     prompt_id: turnKey(payload),
-    transcript_path: str2(payload.transcript_path),
-    cwd: str2(payload.cwd),
-    permission_mode: str2(payload.permission_mode),
-    agent_id: str2(payload.agent_id),
-    agent_type: str2(payload.agent_type),
+    transcript_path: str3(payload.transcript_path),
+    cwd: str3(payload.cwd),
+    permission_mode: str3(payload.permission_mode),
+    agent_id: str3(payload.agent_id),
+    agent_type: str3(payload.agent_type),
     // Resolved here rather than in the child: the child reads this stash, not the payload.
     turn_number: attempt(() => turnNumber(cfg, runId, payload), 0),
     run_id: runId
@@ -2552,19 +2805,22 @@ function fireDrain(cfg, runId, payload, args) {
   spawnDetached(cfg, "drain", args, handoff);
 }
 function hasDeniedSubject(payload, cfg) {
-  const input = isObject4(payload.tool_input) ? payload.tool_input : {};
-  const projectDir2 = str2(cfg?.projectDir);
-  for (const key of PATH_KEYS2) {
+  const input = isObject6(payload.tool_input) ? payload.tool_input : {};
+  const projectDir2 = str3(cfg?.projectDir);
+  for (const key of PATH_KEYS3) {
     const v = input[key];
     if (typeof v === "string" && v && isDeniedPath(v, cfg, projectDir2)) return true;
   }
   const edits = Array.isArray(input.edits) ? input.edits.slice(0, MAX_RENDER_ITEMS) : [];
   for (const e of edits) {
-    if (!isObject4(e)) continue;
-    for (const key of PATH_KEYS2) {
+    if (!isObject6(e)) continue;
+    for (const key of PATH_KEYS3) {
       const v = e[key];
       if (typeof v === "string" && v && isDeniedPath(v, cfg, projectDir2)) return true;
     }
+  }
+  for (const c of attempt(() => fileChanges(payload.tool_name, input), [])) {
+    if (isDeniedPath(c.path, cfg, projectDir2)) return true;
   }
   return false;
 }
@@ -2578,10 +2834,10 @@ function attempt(fn, fallback = (
     return fallback;
   }
 }
-function isObject4(v) {
+function isObject6(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
-function str2(v) {
+function str3(v) {
   return typeof v === "string" ? v : "";
 }
 function num(v) {
@@ -2605,7 +2861,7 @@ function idPart(v) {
 }
 function fallbackId(payload, text) {
   let h = 2166136261;
-  const seed = `${str2(payload.session_id)}|${turnKey(payload)}|${str2(payload.tool_name)}|${text}`;
+  const seed = `${str3(payload.session_id)}|${turnKey(payload)}|${str3(payload.tool_name)}|${text}`;
   for (let i = 0; i < seed.length; i++) {
     h ^= seed.charCodeAt(i);
     h = Math.imul(h, 16777619) >>> 0;
@@ -2613,11 +2869,11 @@ function fallbackId(payload, text) {
   return `anon-${h.toString(16).padStart(8, "0")}`;
 }
 function intentOr(v) {
-  const s = str2(v).trim();
+  const s = str3(v).trim();
   return s && s !== "unclassified" ? s : "tool_output";
 }
 function importanceOr(v) {
-  const s = str2(v).trim().toLowerCase();
+  const s = str3(v).trim().toLowerCase();
   return ["low", "medium", "high", "critical"].includes(s) ? s : "medium";
 }
 function safeJson(v) {
@@ -2628,7 +2884,7 @@ function safeJson(v) {
     return "{}";
   }
 }
-var BUDGET_MS, PATH_KEYS2, SKIP_TOOLS, MAX_RENDER_DEPTH, MAX_RENDER_ITEMS, MAX_VALUE_CHARS, MAX_ID_CHARS, USED_SIGNAL_METHOD, MAX_EVIDENCE_TERMS, MAX_ANSWER_SCAN, MAX_TERMS_READ, TERM_MIN_CHARS, TERM_MAX_CHARS, API_ERROR_KEY, MAX_API_ERROR_CHARS, API_ERROR_UNKNOWN, MODE2;
+var BUDGET_MS, PATH_KEYS3, SKIP_TOOLS, MAX_RENDER_DEPTH, MAX_RENDER_ITEMS, MAX_VALUE_CHARS, MAX_ID_CHARS, USED_SIGNAL_METHOD, MAX_EVIDENCE_TERMS, MAX_ANSWER_SCAN, MAX_TERMS_READ, TERM_MIN_CHARS, TERM_MAX_CHARS, API_ERROR_KEY, MAX_API_ERROR_CHARS, API_ERROR_UNKNOWN, MODE2;
 var init_capture = __esm({
   async "../claude-code/hooks/src/capture.mjs"() {
     init_actor();
@@ -2636,12 +2892,13 @@ var init_capture = __esm({
     init_codex_rollout();
     init_hook();
     init_classify();
+    init_filechange();
     init_redact();
     init_runid();
     init_spool();
     init_state();
     BUDGET_MS = 1500;
-    PATH_KEYS2 = [
+    PATH_KEYS3 = [
       "file_path",
       "filePath",
       "path",
@@ -2686,7 +2943,7 @@ var init_capture = __esm({
 });
 
 // lib/boot.mjs
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2742,6 +2999,8 @@ var DATA_DIR_PREFIX = "mubit-memory";
 function claudeCodeDataDir(env = process.env) {
   const home = typeof env?.HOME === "string" && env.HOME ? env.HOME : safeHome();
   if (!home) return "";
+  const pinned = pinnedDataDir(home, env);
+  if (pinned) return pinned;
   const root = join(home, ...CC_DATA_ROOT);
   const bare = join(root, DATA_DIR_PREFIX);
   let candidates = [];
@@ -2766,6 +3025,15 @@ function claudeCodeDataDir(env = process.env) {
   const pool = withCreds.length ? withCreds : candidates;
   pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
   return pool[0].path;
+}
+function pinnedDataDir(home, env) {
+  try {
+    const codexHome = typeof env?.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join(home, ".codex");
+    const found = JSON.stringify(JSON.parse(readFileSync(join(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    return found?.[1] ?? "";
+  } catch {
+    return "";
+  }
 }
 function mtime(dir) {
   let newest = 0;

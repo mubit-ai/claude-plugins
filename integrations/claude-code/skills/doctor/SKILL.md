@@ -1,6 +1,6 @@
 ---
 name: doctor
-description: Diagnose Mubit connectivity, memory health, and stuck ingest jobs. Use when memory looks empty, captures are not landing, or the status line shows a failure glyph.
+description: Diagnose connectivity, memory health and stuck ingest; use when memory looks empty or the status line shows a failure.
 disable-model-invocation: false
 tools: ["mcp__plugin_mubit-memory_mubit__mubit_status", "mcp__plugin_mubit-memory_mubit__mubit_diagnose", "mcp__plugin_mubit-memory_mubit__mubit_memory_health"]
 ---

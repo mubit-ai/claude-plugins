@@ -17,7 +17,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync as readdirSync2,
-  readFileSync,
+  readFileSync as readFileSync2,
   renameSync,
   rmSync,
   statSync as statSync2,
@@ -41,7 +41,7 @@ function liveDataDir(home, env = {}) {
   const root = join2(home, ".claude", "plugins", "data");
   try {
     const codexHome = typeof env.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join2(home, ".codex");
-    const pinned = JSON.stringify(JSON.parse(readFileSync(join2(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    const pinned = JSON.stringify(JSON.parse(readFileSync2(join2(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
     if (pinned && pinned[1]) return pinned[1];
   } catch {
   }
@@ -93,7 +93,7 @@ function resolveDataDir(cfg = {}) {
 }
 function readJson(p, fallback = null) {
   try {
-    const raw = readFileSync(p, "utf8");
+    const raw = readFileSync2(p, "utf8");
     if (!raw || !raw.trim()) return fallback;
     const parsed = JSON.parse(raw);
     return parsed === void 0 ? fallback : parsed;
@@ -161,14 +161,14 @@ var init_state = __esm({
 });
 
 // ../claude-code/lib/credentials.mjs
-import { existsSync as existsSync3, readFileSync as readFileSync2, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3, unlinkSync as unlinkSync2 } from "node:fs";
 import { join as join3 } from "node:path";
 function credentialsPath(dataDir2) {
   return join3(String(dataDir2 ?? ""), FILE);
 }
 function readCredentials(dataDir2) {
   try {
-    const raw = readFileSync2(credentialsPath(dataDir2), "utf8");
+    const raw = readFileSync3(credentialsPath(dataDir2), "utf8");
     if (!raw || !raw.trim()) return {};
     const parsed = JSON.parse(raw);
     if (!isPlainObject(parsed)) return {};
@@ -195,7 +195,7 @@ var init_credentials = __esm({
 // ../claude-code/lib/config.mjs
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync as existsSync4, readFileSync as readFileSync3, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
 import { basename, dirname as dirname3, join as join4, resolve as resolve2 } from "node:path";
 function screaming(key) {
   return String(key).replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
@@ -228,7 +228,8 @@ function isConfigured(cfg) {
 }
 function envTags(cfg, projectDir2 = "") {
   const dir = projectDir2 || cfg?.projectDir || process.cwd();
-  const tags = ["tool:claude-code"];
+  const tool = cfg?.host === "codex" || cfg?.host === "claude-code" ? cfg.host : host();
+  const tags = [`tool:${tool}`];
   const root = gitToplevel(dir) || dir;
   const slug = sanitiseTag(basename(root));
   if (slug) tags.push(`repo:${slug}`);
@@ -287,12 +288,12 @@ function loadConfig(env = process.env) {
   const userFileRaw = readUserFileRaw(projectDir2);
   const userFile = parseUserFile(userFileRaw);
   const creds = readCredentials(dataDir2);
-  const cachePath = join4(dataDir2, CACHE_FILE);
+  const cachePath2 = join4(dataDir2, CACHE_FILE);
   const key = inputHash(e, userFileRaw, creds, projectDir2, dataDir2);
-  const cached = readCache(cachePath, key);
+  const cached = readCache(cachePath2, key);
   if (cached) return freezeConfig({ ...cached, apiKey: resolveApiKey(e, creds, userFile) });
   const cfg = resolveAll(e, userFile, creds, projectDir2, dataDir2);
-  writeJsonAtomic(cachePath, {
+  writeJsonAtomic(cachePath2, {
     v: CACHE_VERSION,
     hash: key,
     at: Date.now(),
@@ -379,6 +380,7 @@ function resolveAll(e, userFile, creds, projectDir2, dataDir2) {
     ["run", "session", "global"],
     "session"
   );
+  const mcpResultTokenBudget = int(pick("mcpResultTokenBudget", "MUBIT_CC_MCP_RESULT_TOKENS"), 2e3);
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
     const opt = key ? optionValue(key, e) : void 0;
@@ -447,6 +449,7 @@ function resolveAll(e, userFile, creds, projectDir2, dataDir2) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,
@@ -508,7 +511,7 @@ function freezeConfig(cfg) {
 function readUserFileRaw(projectDir2) {
   try {
     if (!projectDir2) return "";
-    return readFileSync3(join4(projectDir2, ".mubit-cc.json"), "utf8");
+    return readFileSync4(join4(projectDir2, ".mubit-cc.json"), "utf8");
   } catch {
     return "";
   }
@@ -578,15 +581,9 @@ var init_config = __esm({
       "mubit_learned",
       "mubit_recall",
       "mubit_outcome",
-      "mubit_reflect",
-      "mubit_lessons",
       "mubit_diagnose",
-      "mubit_archive",
       "mubit_dereference",
-      "mubit_forget",
       "mubit_status",
-      "mubit_strategies",
-      "mubit_checkpoint",
       "mubit_memory_health"
     ];
     CACHE_FILE = "config.json";
@@ -615,7 +612,7 @@ function scrubAssignments(text, count) {
     const [, pre, name] = m;
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -630,6 +627,9 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 function scrubUrlCredentials(text, count) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
@@ -666,9 +666,9 @@ function scrub(text, count) {
 }
 function entropy(s) {
   if (s === null || s === void 0) return 0;
-  const str5 = typeof s === "string" ? s : String(s);
-  if (str5.length === 0) return 0;
-  const buf = Buffer.from(str5, "utf8");
+  const str6 = typeof s === "string" ? s : String(s);
+  if (str6.length === 0) return 0;
+  const buf = Buffer.from(str6, "utf8");
   const n = buf.length;
   if (n === 0) return 0;
   const counts = new Uint32Array(256);
@@ -719,16 +719,16 @@ function redactText(text, cfg = {}, kind = "output") {
   }
   out.redactions = count.n;
   const cap = kind === "param" ? numberOr(cfg?.maxParamBytes, 4096) : numberOr(cfg?.maxOutputBytes, 8192);
-  const capped = capBytes(s, cap);
-  out.text = capped.text;
-  out.truncated = capped.truncated;
+  const capped2 = capBytes(s, cap);
+  out.text = capped2.text;
+  out.truncated = capped2.truncated;
   return out;
 }
 function numberOr(v, d) {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : d;
 }
-var PH, EXEMPT_RE, ASSIGNMENT_KEYWORDS, ASSIGNMENT_RE, VALUE_RE, ENTROPY_RUN_RE, URL_CREDENTIALS_RE, ENTROPY_MIN_LEN, ENTROPY_THRESHOLD, RULES, truncMarker, OWN_MCP_PREFIXES;
+var PH, EXEMPT_RE, ASSIGNMENT_KEYWORDS, ASSIGNMENT_NAME_SUFFIXES, ASSIGNMENT_RE, VALUE_RE, ENTROPY_RUN_RE, URL_CREDENTIALS_RE, ENTROPY_MIN_LEN, ENTROPY_THRESHOLD, RULES, truncMarker, OWN_MCP_PREFIXES;
 var init_redact = __esm({
   "../claude-code/lib/redact.mjs"() {
     PH = (kind) => `[REDACTED:${kind}]`;
@@ -737,12 +737,15 @@ var init_redact = __esm({
       "secret",
       "token",
       "password",
+      "passphrase",
+      "passwd",
       "credential",
       "assertion",
       "signature",
       "apikey",
       "api_key"
     ];
+    ASSIGNMENT_NAME_SUFFIXES = ["pass"];
     ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(?=\S)/g;
     VALUE_RE = /\S+/y;
     ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
@@ -755,6 +758,16 @@ var init_redact = __esm({
       { kind: "pem", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
       { kind: "mubit-key", re: /mbt_[A-Za-z0-9_-]{8,}/g },
       { kind: "openai-key", re: /sk-[A-Za-z0-9_-]{16,}/g },
+      // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+      // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+      // underscore where that rule expects a hyphen, so it fell through every rule in this table
+      // and, being short, under the `high-entropy` floor as well.
+      //
+      // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+      // safe to ship in client-side code — it is in committed source and in browser bundles, and
+      // redacting it would scrub something the user is deliberately looking at while calling a
+      // published value a secret.
+      { kind: "stripe-key", re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
       { kind: "github-token", re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
       { kind: "aws-access-key", re: /AKIA[0-9A-Z]{16}/g },
       { kind: "jwt", re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -847,7 +860,7 @@ var init_log = __esm({
 import {
   existsSync as existsSync5,
   mkdirSync as mkdirSync3,
-  readFileSync as readFileSync4,
+  readFileSync as readFileSync5,
   unlinkSync as unlinkSync3,
   writeFileSync as writeFileSync2,
   writeSync as writeSync2
@@ -1079,7 +1092,7 @@ function parseObject(raw) {
 }
 function readFileText(p) {
   try {
-    return readFileSync4(p, "utf8");
+    return readFileSync5(p, "utf8");
   } catch {
     return "";
   }
@@ -1139,62 +1152,6 @@ var init_hook = __esm({
       "PreToolUse",
       "PostToolUse",
       "PermissionRequest"
-    ]);
-  }
-});
-
-// ../claude-code/lib/rank.mjs
-function rankForPrompt(prompt) {
-  if (typeof prompt !== "string" || !prompt.trim()) return "relevance";
-  const text = prompt.toLowerCase();
-  for (const rule of FRESHNESS_RULES) {
-    if (!rule.when.test(text)) continue;
-    if (rule.unless && rule.unless.test(text)) continue;
-    return "freshness";
-  }
-  return "relevance";
-}
-function rankForRecall(cfg, prompt) {
-  const mode = typeof cfg?.recallRankBy === "string" ? cfg.recallRankBy.trim().toLowerCase() : "";
-  if (mode === "relevance" || mode === "balanced" || mode === "freshness") return mode;
-  return rankForPrompt(prompt);
-}
-var FRESHNESS_RULES;
-var init_rank = __esm({
-  "../claude-code/lib/rank.mjs"() {
-    FRESHNESS_RULES = Object.freeze([
-      // "where were we", "where did we leave off", "where we left off". The archetypal handoff.
-      { id: "where_were_we", when: /\bwhere\s+(?:were|was|are)\s+(?:we|i|you)\b|\bwhere\s+did\s+(?:we|i)\s+(?:leave|get|stop)\b/ },
-      // "left off" on its own — it is a handoff phrase in every context it appears in.
-      { id: "left_off", when: /\bleft\s+off\b|\bstopped\s+off\b/ },
-      // "what changed", "what's changed", "what has changed".
-      { id: "what_changed", when: /\bwhat(?:'s|s)?\s+(?:has\s+|have\s+|had\s+)?changed\b/ },
-      { id: "catch_me_up", when: /\bcatch\s+(?:me|us)\s+up\b/ },
-      // "pick up where we left off", "picking up where I stopped".
-      { id: "pick_up_where", when: /\bpick(?:ing|ed)?\s+(?:this\s+|it\s+|things\s+|that\s+)?up\s+where\b/ },
-      { id: "last_session", when: /\b(?:last|previous|prior)\s+session\b/ },
-      { id: "recently", when: /\brecently\b/ },
-      // AMBIGUOUS. "what's the latest on the migration" is our state; "the latest version of
-      // esbuild" is somebody else's release. The veto covers both shapes it shows up in: a
-      // release-flavoured noun after the word, and an upgrade instruction anywhere around it.
-      {
-        id: "latest",
-        when: /\blatest\b/,
-        unless: /\blatest\s+(?:stable\s+|beta\s+|lts\s+|major\s+|minor\s+|patch\s+)?(?:version|release|tag|build|docs?|documentation|api|apis|sdk|spec|schema|node|npm)\b|\blatest\s+\w+\s+(?:version|release)\b|\b(?:upgrade|upgrading|bump|bumping|update\s+to|install|pin)\b[^.?!]*\blatest\b/
-      },
-      // AMBIGUOUS. "so far as I can tell" is the idiom "as far as", not a progress question.
-      { id: "so_far", when: /\bso\s+far\b/, unless: /\bso\s+far\s+as\b/ },
-      // AMBIGUOUS. "the current state of the art" is a survey question about a field.
-      { id: "current_state", when: /\bcurrent\s+state\b/, unless: /\bcurrent\s+state\s+of\s+the\s+art\b/ },
-      // "since yesterday" and its neighbours. `since` alone is far too broad — it is a causal
-      // conjunction at least as often as a temporal one ("since the parser returns null…") — so
-      // only an explicitly temporal object counts.
-      {
-        id: "since_temporal",
-        when: /\bsince\s+(?:yesterday|today|this\s+(?:morning|afternoon|evening|week)|last\s+(?:night|week|session|time|run|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|the\s+last\s+\w+|(?:we|i)\s+last\b|(?:we|i)\s+(?:started|left|stopped|paused)|then)\b/
-      },
-      // "still failing" — a question about whether a known-bad thing is bad *now*.
-      { id: "still_broken", when: /\bstill\s+(?:failing|broken|red|erroring|crashing|not\s+working|failing\?)\b/ }
     ]);
   }
 });
@@ -1392,7 +1349,9 @@ var init_assemble = __esm({
       task_result: "traces",
       step_outcome: "traces",
       archive_block: "archive_blocks",
-      checkpoint: "checkpoints"
+      checkpoint: "checkpoints",
+      handoff: "handoffs",
+      feedback: "feedback"
     });
     HEADINGS = Object.freeze({
       mental_models: "Mental models",
@@ -1941,7 +1900,7 @@ function NETWORK_HINT(err) {
 function SANDBOX_BLOCKED() {
   const env = typeof process === "object" && process ? process.env || {} : {};
   if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
-  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+  return SANDBOX_SENTENCE;
 }
 function messageOf(err) {
   try {
@@ -1963,7 +1922,7 @@ function snippet(text) {
   const s = String(text ?? "").replace(/\s+/g, " ").trim();
   return s.length > 160 ? `${s.slice(0, 160)}\u2026` : s;
 }
-var ROUTES, MAX_QUERY_BYTES, MAX_BODY_BYTES, DEFAULT_TIMEOUT_MS, HEALTH_TTL_MS, QUERY_MODES, POISONED_RUN_ID;
+var ROUTES, HANDOFF_ACTIONS, FEEDBACK_VERDICTS, MAX_QUERY_BYTES, MAX_BODY_BYTES, DEFAULT_TIMEOUT_MS, HEALTH_TTL_MS, QUERY_MODES, POISONED_RUN_ID, SANDBOX_SENTENCE;
 var init_http = __esm({
   "../claude-code/lib/http.mjs"() {
     init_breaker();
@@ -1981,19 +1940,224 @@ var init_http = __esm({
       outcome: "/v2/control/outcome",
       checkpoint: "/v2/control/checkpoint",
       lessons: "/v2/control/lessons",
-      reflect: "/v2/control/reflect"
+      reflect: "/v2/control/reflect",
+      strategies: "/v2/control/strategies",
+      handoff: "/v2/control/handoff",
+      feedback: "/v2/control/feedback"
     });
+    HANDOFF_ACTIONS = Object.freeze(["review", "continue", "approve", "execute"]);
+    FEEDBACK_VERDICTS = Object.freeze(["approve", "request_changes", "block", "acknowledge"]);
     MAX_QUERY_BYTES = 256 * 1024;
     MAX_BODY_BYTES = 64 * 1024 * 1024;
     DEFAULT_TIMEOUT_MS = 4e3;
     HEALTH_TTL_MS = 30 * 1e3;
     QUERY_MODES = Object.freeze(["direct_bypass", "direct", "agent_routed"]);
     POISONED_RUN_ID = "default";
+    SANDBOX_SENTENCE = "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+  }
+});
+
+// ../claude-code/lib/variables.mjs
+var VARIABLE_ROUTES;
+var init_variables = __esm({
+  "../claude-code/lib/variables.mjs"() {
+    init_http();
+    VARIABLE_ROUTES = Object.freeze({
+      set: "/v2/control/variables/set",
+      get: "/v2/control/variables/get",
+      list: "/v2/control/variables/list",
+      delete: "/v2/control/variables/delete"
+    });
+  }
+});
+
+// ../claude-code/lib/pins.mjs
+import { join as join7 } from "node:path";
+function readPins(cfg, runId, opts = {}) {
+  try {
+    if (isObject3(cfg) && cfg.pins === false) return blank();
+    const p = cachePath(cfg, runId);
+    if (!p) return blank();
+    const raw = readJson(p, null);
+    if (!isObject3(raw)) return blank();
+    if (raw.v !== CACHE_VERSION2) return blank();
+    if (str3(raw.run_id) !== str3(runId)) return blank();
+    if (trimSlash(raw.endpoint) !== endpointOf2(cfg)) return blank();
+    if (!Array.isArray(raw.pins)) return blank();
+    const at = num2(raw.at, 0);
+    const stale = !(at > 0) || Math.abs(Date.now() - at) >= PIN_TTL_MS;
+    const { pins, dropped } = capped(raw.pins, tokenCapOf(opts));
+    if (pins.length === 0) {
+      return { ...blank(), stale, at };
+    }
+    const text = `${HEADING}
+${pins.map((pin) => `- ${pin.text}
+`).join("")}`;
+    return { pins, text, tokens: estimateTokens(text), dropped, stale, at };
+  } catch {
+    return blank();
+  }
+}
+function capped(raw, maxTokens = MAX_PIN_TOKENS) {
+  const clean = [];
+  let dropped = 0;
+  for (const entry of raw) {
+    if (!isObject3(entry)) {
+      dropped++;
+      continue;
+    }
+    const text = oneLine2(entry.text);
+    const slug = safeSlug(entry.slug);
+    if (!text || !slug) {
+      dropped++;
+      continue;
+    }
+    clean.push({ slug, text, at: num2(entry.at, 0) });
+  }
+  clean.sort((a, b) => (a.at || 0) - (b.at || 0) || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  if (clean.length > MAX_PINS) {
+    dropped += clean.length - MAX_PINS;
+    clean.length = MAX_PINS;
+  }
+  const fitted = [];
+  let spent = estimateTokens(`${HEADING}
+`);
+  for (const pin of clean) {
+    const cost = estimateTokens(`- ${pin.text}
+`);
+    if (spent + cost > maxTokens) {
+      dropped++;
+      continue;
+    }
+    spent += cost;
+    fitted.push(pin);
+  }
+  return { pins: fitted, dropped };
+}
+function cachePath(cfg, runId) {
+  if (!safeSegment(runId)) return "";
+  return join7(runDir(isObject3(cfg) ? cfg : {}, runId), CACHE_FILE2);
+}
+function oneLine2(v) {
+  try {
+    if (typeof v !== "string") {
+      if (typeof v === "number" || typeof v === "boolean") return String(v);
+      return "";
+    }
+    return v.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_PIN_CHARS).trim();
+  } catch {
+    return "";
+  }
+}
+function safeSlug(v) {
+  return String(v ?? "").trim().toLowerCase().replace(/[^a-z0-9._-]/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 64);
+}
+function blank() {
+  return { pins: [], text: "", tokens: 0, dropped: 0, stale: EMPTY.stale, at: 0 };
+}
+function endpointOf2(cfg) {
+  return trimSlash(isObject3(cfg) ? cfg.endpoint : "");
+}
+function trimSlash(v) {
+  return (typeof v === "string" ? v.trim() : "").replace(/\/+$/, "");
+}
+function str3(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+function num2(v, d) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : d;
+}
+function tokenCapOf(opts) {
+  const n = Number(opts && opts.maxTokens);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : MAX_PIN_TOKENS;
+}
+function isObject3(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+var CACHE_VERSION2, CACHE_FILE2, PIN_TTL_MS, MAX_PINS, MAX_PIN_CHARS, MAX_PIN_TOKENS, MAX_SUBAGENT_PIN_TOKENS, HEADING, EMPTY;
+var init_pins = __esm({
+  "../claude-code/lib/pins.mjs"() {
+    init_assemble();
+    init_state();
+    init_variables();
+    CACHE_VERSION2 = 1;
+    CACHE_FILE2 = "pins.json";
+    PIN_TTL_MS = 60 * 1e3;
+    MAX_PINS = 5;
+    MAX_PIN_CHARS = 200;
+    MAX_PIN_TOKENS = 240;
+    MAX_SUBAGENT_PIN_TOKENS = 96;
+    HEADING = "## Pinned for this run";
+    EMPTY = Object.freeze({
+      pins: Object.freeze([]),
+      text: "",
+      tokens: 0,
+      dropped: 0,
+      stale: false,
+      at: 0
+    });
+  }
+});
+
+// ../claude-code/lib/rank.mjs
+function rankForPrompt(prompt) {
+  if (typeof prompt !== "string" || !prompt.trim()) return "relevance";
+  const text = prompt.toLowerCase();
+  for (const rule of FRESHNESS_RULES) {
+    if (!rule.when.test(text)) continue;
+    if (rule.unless && rule.unless.test(text)) continue;
+    return "freshness";
+  }
+  return "relevance";
+}
+function rankForRecall(cfg, prompt) {
+  const mode = typeof cfg?.recallRankBy === "string" ? cfg.recallRankBy.trim().toLowerCase() : "";
+  if (mode === "relevance" || mode === "balanced" || mode === "freshness") return mode;
+  return rankForPrompt(prompt);
+}
+var FRESHNESS_RULES;
+var init_rank = __esm({
+  "../claude-code/lib/rank.mjs"() {
+    FRESHNESS_RULES = Object.freeze([
+      // "where were we", "where did we leave off", "where we left off". The archetypal handoff.
+      { id: "where_were_we", when: /\bwhere\s+(?:were|was|are)\s+(?:we|i|you)\b|\bwhere\s+did\s+(?:we|i)\s+(?:leave|get|stop)\b/ },
+      // "left off" on its own — it is a handoff phrase in every context it appears in.
+      { id: "left_off", when: /\bleft\s+off\b|\bstopped\s+off\b/ },
+      // "what changed", "what's changed", "what has changed".
+      { id: "what_changed", when: /\bwhat(?:'s|s)?\s+(?:has\s+|have\s+|had\s+)?changed\b/ },
+      { id: "catch_me_up", when: /\bcatch\s+(?:me|us)\s+up\b/ },
+      // "pick up where we left off", "picking up where I stopped".
+      { id: "pick_up_where", when: /\bpick(?:ing|ed)?\s+(?:this\s+|it\s+|things\s+|that\s+)?up\s+where\b/ },
+      { id: "last_session", when: /\b(?:last|previous|prior)\s+session\b/ },
+      { id: "recently", when: /\brecently\b/ },
+      // AMBIGUOUS. "what's the latest on the migration" is our state; "the latest version of
+      // esbuild" is somebody else's release. The veto covers both shapes it shows up in: a
+      // release-flavoured noun after the word, and an upgrade instruction anywhere around it.
+      {
+        id: "latest",
+        when: /\blatest\b/,
+        unless: /\blatest\s+(?:stable\s+|beta\s+|lts\s+|major\s+|minor\s+|patch\s+)?(?:version|release|tag|build|docs?|documentation|api|apis|sdk|spec|schema|node|npm)\b|\blatest\s+\w+\s+(?:version|release)\b|\b(?:upgrade|upgrading|bump|bumping|update\s+to|install|pin)\b[^.?!]*\blatest\b/
+      },
+      // AMBIGUOUS. "so far as I can tell" is the idiom "as far as", not a progress question.
+      { id: "so_far", when: /\bso\s+far\b/, unless: /\bso\s+far\s+as\b/ },
+      // AMBIGUOUS. "the current state of the art" is a survey question about a field.
+      { id: "current_state", when: /\bcurrent\s+state\b/, unless: /\bcurrent\s+state\s+of\s+the\s+art\b/ },
+      // "since yesterday" and its neighbours. `since` alone is far too broad — it is a causal
+      // conjunction at least as often as a temporal one ("since the parser returns null…") — so
+      // only an explicitly temporal object counts.
+      {
+        id: "since_temporal",
+        when: /\bsince\s+(?:yesterday|today|this\s+(?:morning|afternoon|evening|week)|last\s+(?:night|week|session|time|run|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|the\s+last\s+\w+|(?:we|i)\s+last\b|(?:we|i)\s+(?:started|left|stopped|paused)|then)\b/
+      },
+      // "still failing" — a question about whether a known-bad thing is bad *now*.
+      { id: "still_broken", when: /\bstill\s+(?:failing|broken|red|erroring|crashing|not\s+working|failing\?)\b/ }
+    ]);
   }
 });
 
 // ../claude-code/lib/rules.mjs
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 function recordRules(cfg, runId, entries) {
   try {
     if (!runId) return 0;
@@ -2006,7 +2170,7 @@ function recordRules(cfg, runId, entries) {
     const merged = dedupe([...incoming, ...readRules(cfg, runId)]).slice(0, MAX_RULES);
     const dir = runDir(cfg, runId);
     if (!ensureDir(dir)) return 0;
-    const ok = writeJsonAtomic(join7(dir, RULES_FILE), {
+    const ok = writeJsonAtomic(join8(dir, RULES_FILE), {
       version: VERSION,
       updated_at: Date.now(),
       rules: merged
@@ -2019,12 +2183,12 @@ function recordRules(cfg, runId, entries) {
 function readRules(cfg, runId) {
   try {
     if (!runId) return [];
-    const stored = readJson(join7(runDir(cfg, runId), RULES_FILE), null);
-    if (!isObject3(stored)) return [];
+    const stored = readJson(join8(runDir(cfg, runId), RULES_FILE), null);
+    if (!isObject4(stored)) return [];
     if (!Array.isArray(stored.rules)) return [];
     const out = [];
     for (const r of stored.rules) {
-      if (!isObject3(r)) continue;
+      if (!isObject4(r)) continue;
       const text = clamp(r.text);
       if (!text) continue;
       out.push({ ref: segment(r.ref), text });
@@ -2036,9 +2200,9 @@ function readRules(cfg, runId) {
   }
 }
 function normalise(e) {
-  if (!isObject3(e)) return null;
+  if (!isObject4(e)) return null;
   if (e.is_stale === true) return null;
-  const type = str3(e.origin_entry_type) || str3(e.entry_type) || str3(e.lesson_type);
+  const type = str4(e.origin_entry_type) || str4(e.entry_type) || str4(e.lesson_type);
   if (type.toLowerCase() !== "rule") return null;
   const text = clamp(e.content);
   if (!text) return null;
@@ -2068,10 +2232,10 @@ function segment(v) {
   if (!s) return "";
   return s.replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, MAX_REF);
 }
-function str3(v) {
+function str4(v) {
   return typeof v === "string" ? v.trim() : "";
 }
-function isObject3(v) {
+function isObject4(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 var RULES_FILE, VERSION, MAX_RULES, MAX_TEXT, MAX_REF;
@@ -2089,7 +2253,7 @@ var init_rules = __esm({
 // ../claude-code/lib/recall.mjs
 import { createHash as createHash3 } from "node:crypto";
 import { unlinkSync as unlinkSync4 } from "node:fs";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 async function recallBlock(cfg, o) {
   try {
     return cfg?.recallAssemble === "server" ? await rungThree(cfg, o) : await ladder(cfg, o);
@@ -2201,11 +2365,11 @@ async function rungThree(cfg, o) {
   return fromContext(res.body, 3);
 }
 function fromContext(responseBody, rung) {
-  const b = isObject4(responseBody) ? responseBody : {};
+  const b = isObject5(responseBody) ? responseBody : {};
   const block = typeof b.context_block === "string" ? b.context_block.trim() : "";
   const refIds = Array.isArray(b.sources) ? [...new Set(b.sources.filter((s) => typeof s === "string" && s.trim()).map((s) => s.trim()))] : [];
   const summaries = Array.isArray(b.section_summaries) ? b.section_summaries : [];
-  const counted = summaries.reduce((n, s) => n + (isObject4(s) ? numOr(s.count, 0) : 0), 0);
+  const counted = summaries.reduce((n, s) => n + (isObject5(s) ? numOr(s.count, 0) : 0), 0);
   return {
     failed: false,
     rung,
@@ -2219,7 +2383,7 @@ function fromContext(responseBody, rung) {
   };
 }
 function fromEvidence(cfg, responseBody, rung, o) {
-  const b = isObject4(responseBody) ? responseBody : {};
+  const b = isObject5(responseBody) ? responseBody : {};
   const evidence = Array.isArray(b.evidence) ? b.evidence : [];
   if (o?.runId) recordRules(cfg, o.runId, evidence);
   const a = assembleContext(evidence, {
@@ -2288,12 +2452,12 @@ function failure(state, error, rung) {
 function policyPath(cfg) {
   const endpoint = typeof cfg?.endpoint === "string" ? cfg.endpoint : "";
   const hash = createHash3("sha256").update(endpoint).digest("hex").slice(0, ENDPOINT_HASH_LEN);
-  return join8(resolveDataDir(cfg), "policy", `${hash}.json`);
+  return join9(resolveDataDir(cfg), "policy", `${hash}.json`);
 }
 function readPolicyDenial(cfg) {
   try {
     const v = readJson(policyPath(cfg), null);
-    if (!isObject4(v) || v.direct_bypass !== "denied") return false;
+    if (!isObject5(v) || v.direct_bypass !== "denied") return false;
     const ttl = intOr(cfg.policyTtlMs, 0) || intOr(v.ttl_ms, 0) || POLICY_TTL_MS;
     const observed = numOr(v.observed_at, 0);
     return observed > 0 && Date.now() - observed < ttl;
@@ -2322,7 +2486,7 @@ function remaining(cfg, deadline2) {
   if (left <= 0) return 0;
   return Math.max(1, Math.min(left, intOr(cfg.timeoutMs, 4e3)));
 }
-function isObject4(v) {
+function isObject5(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 function numOr(v, d) {
@@ -2360,6 +2524,7 @@ var init_recall = __esm({
     RESUME_SECTIONS = Object.freeze([
       "working_memory",
       "traces",
+      "handoffs",
       "mental_models",
       "active_rules",
       "lessons"
@@ -2367,6 +2532,7 @@ var init_recall = __esm({
     RESUME_ENTRY_TYPES = Object.freeze([
       "trace",
       "task_result",
+      "handoff",
       "mental_model",
       "rule",
       "lesson"
@@ -2379,16 +2545,16 @@ var init_recall = __esm({
 // ../claude-code/lib/runid.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash4 } from "node:crypto";
-import { existsSync as existsSync6, readdirSync as readdirSync3, readFileSync as readFileSync5, statSync as statSync5 } from "node:fs";
-import { basename as basename2, dirname as dirname4, join as join9, resolve as resolve3 } from "node:path";
+import { existsSync as existsSync6, readdirSync as readdirSync3, readFileSync as readFileSync6, statSync as statSync5 } from "node:fs";
+import { basename as basename2, dirname as dirname4, join as join10, resolve as resolve3 } from "node:path";
 function agentRole(env = process.env) {
   const host2 = typeof env?.MUBIT_CC_HOST === "string" ? env.MUBIT_CC_HOST.trim().toLowerCase() : "";
   return AGENT_ROLES[host2] ?? DEFAULT_AGENT_ROLE;
 }
 function deriveRunId(cfg, payload = {}, options = {}) {
-  const c = isObject5(cfg) ? cfg : {};
-  const p = isObject5(payload) ? payload : {};
-  const persist = !(isObject5(options) && options.persist === false);
+  const c = isObject6(cfg) ? cfg : {};
+  const p = isObject6(payload) ? payload : {};
+  const persist = !(isObject6(options) && options.persist === false);
   return assertUsableRunId(resolveRunId(c, p, persist));
 }
 function resolveRunId(cfg, payload, persist) {
@@ -2457,7 +2623,7 @@ function directoryRunId(cfg, payload, withBranch) {
   return branch ? `cc-${slug}-${branch}-${digest}` : `cc-${slug}-${digest}`;
 }
 function reusableRun(cfg, payload, prev, strategy) {
-  if (!isObject5(prev)) return "";
+  if (!isObject6(prev)) return "";
   const id = typeof prev.run_id === "string" ? prev.run_id.trim() : "";
   if (!id || FORBIDDEN_RUN_IDS.has(id.toLowerCase())) return "";
   const recorded = typeof prev.strategy === "string" ? prev.strategy.trim() : "";
@@ -2482,21 +2648,21 @@ function assertUsableRunId(id) {
   return s;
 }
 function turnKey(payload) {
-  if (!isObject5(payload)) return "";
+  if (!isObject6(payload)) return "";
   const prompt = typeof payload.prompt_id === "string" ? payload.prompt_id.trim() : "";
   if (prompt) return prompt;
   const turn = typeof payload.turn_id === "string" ? payload.turn_id.trim() : "";
   return turn;
 }
 function deriveAgentId(payload = {}) {
-  const p = isObject5(payload) ? payload : {};
+  const p = isObject6(payload) ? payload : {};
   const role = agentRole();
   const sub = subagentShort(p);
   return sub ? `${role}-sub-${sub}` : role;
 }
 function deriveSubRunId(runId, payload = {}) {
   const parent = assertUsableRunId(runId);
-  const short = subagentShort(isObject5(payload) ? payload : {});
+  const short = subagentShort(isObject6(payload) ? payload : {});
   if (!short) return parent;
   const suffix = `-sub-${short}`;
   return parent.endsWith(suffix) ? parent : assertUsableRunId(`${parent}${suffix}`);
@@ -2523,7 +2689,7 @@ function loadSessionMap(sessionId) {
     const file = sessionFileName(sessionId);
     if (!file) return null;
     const stored = readJson(sessionPath(file), null);
-    return isObject5(stored) ? stored : null;
+    return isObject6(stored) ? stored : null;
   } catch {
     return null;
   }
@@ -2531,10 +2697,10 @@ function loadSessionMap(sessionId) {
 function rememberRun(cfg, payload, sessionId, prev, next) {
   const now = Date.now();
   const isSessionStart = !!next.source || payload.hook_event_name === "SessionStart";
-  const moved = !isObject5(prev) || prev.run_id !== next.run_id || clearCount(prev) !== next.clear_count;
-  const lastSeen = isObject5(prev) ? numberOr2(prev.last_seen_at, 0) : 0;
+  const moved = !isObject6(prev) || prev.run_id !== next.run_id || clearCount(prev) !== next.clear_count;
+  const lastSeen = isObject6(prev) ? numberOr2(prev.last_seen_at, 0) : 0;
   if (!moved && !isSessionStart && now - lastSeen < TOUCH_INTERVAL_MS) return;
-  const inherited = isObject5(prev) ? prev : {};
+  const inherited = isObject6(prev) ? prev : {};
   const dir = projectDirOf(cfg, payload);
   saveSessionMap(sessionId, {
     ...inherited,
@@ -2568,7 +2734,7 @@ function normaliseRecord(record) {
     clear_count: 0,
     endpoint_hash: ""
   };
-  if (isObject5(record)) {
+  if (isObject6(record)) {
     for (const [k, v] of Object.entries(record)) {
       if (v !== void 0) out[k] = v;
     }
@@ -2576,7 +2742,7 @@ function normaliseRecord(record) {
   return out;
 }
 function sessionPath(file) {
-  return join9(dataDir({}), "sessions", `${file}.json`);
+  return join10(dataDir({}), "sessions", `${file}.json`);
 }
 function sessionFileName(sessionId) {
   const raw = typeof sessionId === "string" ? sessionId.trim() : "";
@@ -2585,10 +2751,10 @@ function sessionFileName(sessionId) {
   return safe && safe !== "." && safe !== ".." ? safe : "";
 }
 function projectDirOf(cfg, payload = {}) {
-  return usableDir(isObject5(payload) ? payload.cwd : "") || firstString(cfg.projectDir, process.env.CLAUDE_PROJECT_DIR) || safeCwd2();
+  return usableDir(isObject6(payload) ? payload.cwd : "") || firstString(cfg.projectDir, process.env.CLAUDE_PROJECT_DIR) || safeCwd2();
 }
 function resolveProjectDir(cfg, payload = {}) {
-  return projectDirOf(isObject5(cfg) ? cfg : {}, payload);
+  return projectDirOf(isObject6(cfg) ? cfg : {}, payload);
 }
 function projectRootOf(dir) {
   return gitToplevel2(dir) || dir;
@@ -2627,7 +2793,7 @@ function hasGitDir2(start) {
   try {
     let cur = resolve3(start);
     for (let i = 0; i < 24; i++) {
-      if (existsSync6(join9(cur, ".git"))) return true;
+      if (existsSync6(join10(cur, ".git"))) return true;
       const up = dirname4(cur);
       if (up === cur) return false;
       cur = up;
@@ -2636,7 +2802,7 @@ function hasGitDir2(start) {
   }
   return false;
 }
-function isObject5(v) {
+function isObject6(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 function firstString(...vals) {
@@ -2650,7 +2816,7 @@ function numberOr2(v, d) {
   return Number.isFinite(n) ? n : d;
 }
 function clearCount(rec) {
-  if (!isObject5(rec)) return 0;
+  if (!isObject6(rec)) return 0;
   const n = Math.trunc(numberOr2(rec.clear_count, 0));
   return n > 0 ? n : 0;
 }
@@ -2663,7 +2829,7 @@ function normaliseSource(v) {
   return SOURCES.has(s) ? s : "";
 }
 function hostSessionId(payload) {
-  const v = isObject5(payload) && typeof payload.session_id === "string" ? payload.session_id.trim() : "";
+  const v = isObject6(payload) && typeof payload.session_id === "string" ? payload.session_id.trim() : "";
   if (!v || PLACEHOLDER_SESSION_IDS.has(v.toLowerCase())) return "";
   return v;
 }
@@ -2712,14 +2878,14 @@ var init_runid = __esm({
 
 // ../claude-code/hooks/src/subagent-start.mjs
 var subagent_start_exports = {};
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 function parentQuery(cfg, runId, payload) {
   try {
     const promptId = safeSegment(turnKey(payload), MAX_ID);
     if (!promptId) return "";
-    const file = join10(runDir(cfg, runId), "turns", `${promptId}.json`);
+    const file = join11(runDir(cfg, runId), "turns", `${promptId}.json`);
     const turn = readJson(file, null);
-    return isObject6(turn) ? str4(turn.prompt).slice(0, MAX_QUERY_CHARS) : "";
+    return isObject7(turn) ? str5(turn.prompt).slice(0, MAX_QUERY_CHARS) : "";
   } catch {
     return "";
   }
@@ -2728,17 +2894,17 @@ function persistSubRun(cfg, o) {
   try {
     const name = safeSegment(o.subRunId, MAX_ID);
     if (!name) return;
-    const dir = join10(runDir(cfg, o.runId), "subagents");
-    writeJsonAtomic(join10(dir, `${name}.json`), {
+    const dir = join11(runDir(cfg, o.runId), "subagents");
+    writeJsonAtomic(join11(dir, `${name}.json`), {
       sub_run_id: o.subRunId,
       parent_run_id: o.runId,
       // The host's own id, unmodified — `mubit_agent_id` is what went on the wire. Both,
       // because only the first can be matched against a `SubagentStop` and only the second
       // can be matched against the store.
-      agent_id: str4(o.payload?.agent_id),
+      agent_id: str5(o.payload?.agent_id),
       mubit_agent_id: o.agentId,
-      agent_type: str4(o.payload?.agent_type),
-      session_id: str4(o.payload?.session_id),
+      agent_type: str5(o.payload?.agent_type),
+      session_id: str5(o.payload?.session_id),
       // The parent's, and shared with every sibling. Kept precisely because it is the
       // coordinate that collapses: without it here, nothing records which turn fanned out.
       prompt_id: turnKey(o.payload),
@@ -2749,13 +2915,19 @@ function persistSubRun(cfg, o) {
         tokens: numOr2(o.outcome?.tokens, 0),
         // Characters are what was actually injected; the token figure is a
         // four-chars-per-token estimate (§4.10) a later reader can re-derive from these.
-        chars: str4(o.outcome?.block).length,
+        chars: str5(o.outcome?.block).length,
         dropped: numOr2(o.outcome?.dropped, 0),
         // Always 0 while the seen-set stays out of this path. Recorded rather than assumed,
         // so a future change that starts passing one is visible here instead of silent.
         pointers: numOr2(o.outcome?.pointers, 0),
-        empty_reason: str4(o.outcome?.emptyReason),
-        ms: numOr2(o.ms, 0)
+        empty_reason: str5(o.outcome?.emptyReason),
+        ms: numOr2(o.ms, 0),
+        // The parent's standing constraints, counted separately from recall because they are
+        // paid on a different budget and are never ranked. This is where the figure lives:
+        // `prompt-recall` puts its equivalent on the marker, and a subagent may not — see the
+        // "No marker write" note in the header.
+        pins: o.pins?.pins?.length ?? 0,
+        pin_tokens: numOr2(o.pins?.tokens, 0)
       },
       // What this subagent was actually given, separable from what its siblings were given.
       recalled: Array.isArray(o.outcome?.refIds) ? [...o.outcome.refIds] : [],
@@ -2770,17 +2942,40 @@ function persistSubRun(cfg, o) {
     );
   }
 }
-function wrap(runId, agentId, sources, tokens, block) {
-  return `<mubit-memory run="${runId}" agent="${agentId}" sources="${sources}" tokens="${tokens}">
-Recalled from memory of earlier work on this project, retrieved against the prompt that spawned you rather than against your own instructions \u2014 so it may be incomplete, out of date, or about a different part of the task. Verify against the code before relying on it.
-
+function wrap(runId, agentId, sources, tokens, block, pins = null) {
+  const pinned = pins && pins.text ? pins : null;
+  const recalled = typeof block === "string" && block !== "";
+  return `<mubit-memory run="${runId}" agent="${agentId}" sources="${sources}" tokens="${tokens}"${pinned ? ` pins="${pinned.pins.length}"` : ""}>
+` + (pinned ? `${pinned.text}${recalled ? "Those were pinned for this run and hold until they are cleared. Everything below them was retrieved for the prompt that spawned you.\n" : "Those were pinned for this run and hold until they are cleared.\n"}` : "") + (recalled ? "Recalled from memory of earlier work on this project, retrieved against the prompt that spawned you rather than against your own instructions \u2014 so it may be incomplete, out of date, or about a different part of the task. Verify against the code before relying on it.\n" : "") + (recalled ? `
 ${block.replace(/\s+$/, "")}
-</mubit-memory>`;
+` : "") + "</mubit-memory>";
 }
-function isObject6(v) {
+function pinsOnly(runId, agentId, pins) {
+  if (!pins || !pins.text) return SUPPRESS;
+  return {
+    hookSpecificOutput: {
+      hookEventName: "SubagentStart",
+      additionalContext: wrap(runId, agentId, 0, 0, "", pins)
+    },
+    suppressOutput: true
+  };
+}
+function pinsGate(cfg, payload) {
+  try {
+    const runId = deriveRunId(cfg, payload);
+    return pinsOnly(
+      runId,
+      deriveAgentId(payload),
+      readPins(cfg, runId, { maxTokens: MAX_SUBAGENT_PIN_TOKENS })
+    );
+  } catch {
+    return SUPPRESS;
+  }
+}
+function isObject7(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
-function str4(v) {
+function str5(v) {
   return typeof v === "string" ? v.trim() : "";
 }
 function numOr2(v, d) {
@@ -2828,6 +3023,7 @@ var init_subagent_start = __esm({
     init_config();
     init_hook();
     init_log();
+    init_pins();
     init_rank();
     init_recall();
     init_runid();
@@ -2845,9 +3041,9 @@ var init_subagent_start = __esm({
         const cfg = CFG;
         const started = numOr2(ctx?.startedAt, Date.now());
         const deadline2 = started + RECALL_BUDGET_MS;
-        if (!cfg.recall) return SUPPRESS;
+        if (!cfg.recall) return pinsGate(cfg, payload);
         if (!isConfigured(cfg)) return SUPPRESS;
-        if (OWN_AGENTS.has(str4(payload?.agent_type).toLowerCase())) {
+        if (OWN_AGENTS.has(str5(payload?.agent_type).toLowerCase())) {
           log(cfg, "debug", "subagent-start: skipping the plugin's own recall agent");
           return SUPPRESS;
         }
@@ -2862,6 +3058,7 @@ var init_subagent_start = __esm({
           log(cfg, "warn", `subagent-start: no usable run id (${messageOf3(err)})`);
           return SUPPRESS;
         }
+        const pins = readPins(cfg, runId, { maxTokens: MAX_SUBAGENT_PIN_TOKENS });
         const query = parentQuery(cfg, runId, payload);
         if (!query) {
           log(
@@ -2870,7 +3067,7 @@ var init_subagent_start = __esm({
             "subagent-start: no staged parent turn to query against; skipping",
             { run_id: runId }
           );
-          return SUPPRESS;
+          return pinsOnly(runId, agentId, pins);
         }
         const outcome = await recallBlock(cfg, {
           runId,
@@ -2897,13 +3094,13 @@ var init_subagent_start = __esm({
           log(
             cfg,
             "warn",
-            `subagent-start: recall failed on rung ${outcome.rung} (${str4(outcome.state) || "unknown"})`,
-            { run_id: runId, error: str4(outcome.error).slice(0, 300) }
+            `subagent-start: recall failed on rung ${outcome.rung} (${str5(outcome.state) || "unknown"})`,
+            { run_id: runId, error: str5(outcome.error).slice(0, 300) }
           );
-          return SUPPRESS;
+          return pinsOnly(runId, agentId, pins);
         }
-        persistSubRun(cfg, { runId, subRunId, agentId, payload, outcome, ms });
-        if (!outcome.block) return SUPPRESS;
+        persistSubRun(cfg, { runId, subRunId, agentId, payload, outcome, ms, pins });
+        if (!outcome.block) return pinsOnly(runId, agentId, pins);
         return {
           hookSpecificOutput: {
             hookEventName: "SubagentStart",
@@ -2912,7 +3109,8 @@ var init_subagent_start = __esm({
               agentId,
               outcome.refIds.length || outcome.sources,
               outcome.tokens,
-              outcome.block
+              outcome.block,
+              pins
             )
           },
           suppressOutput: true
@@ -2923,7 +3121,7 @@ var init_subagent_start = __esm({
 });
 
 // lib/boot.mjs
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2979,6 +3177,8 @@ var DATA_DIR_PREFIX = "mubit-memory";
 function claudeCodeDataDir(env = process.env) {
   const home = typeof env?.HOME === "string" && env.HOME ? env.HOME : safeHome();
   if (!home) return "";
+  const pinned = pinnedDataDir(home, env);
+  if (pinned) return pinned;
   const root = join(home, ...CC_DATA_ROOT);
   const bare = join(root, DATA_DIR_PREFIX);
   let candidates = [];
@@ -3003,6 +3203,15 @@ function claudeCodeDataDir(env = process.env) {
   const pool = withCreds.length ? withCreds : candidates;
   pool.sort((a, b) => b.at - a.at || Number(a.bare) - Number(b.bare) || a.path.localeCompare(b.path));
   return pool[0].path;
+}
+function pinnedDataDir(home, env) {
+  try {
+    const codexHome = typeof env?.CODEX_HOME === "string" && env.CODEX_HOME ? env.CODEX_HOME : join(home, ".codex");
+    const found = JSON.stringify(JSON.parse(readFileSync(join(codexHome, "hooks.json"), "utf8"))).match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    return found?.[1] ?? "";
+  } catch {
+    return "";
+  }
 }
 function mtime(dir) {
   let newest = 0;

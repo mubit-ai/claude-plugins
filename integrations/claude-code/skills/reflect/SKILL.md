@@ -1,27 +1,56 @@
 ---
 name: reflect
-description: Ask Mubit to extract lessons from this session's activity and report what it learned.
+description: Extract lessons from this session's activity now; use when the user wants them banked before session end or asks what memory holds.
 disable-model-invocation: false
-tools: ["mcp__plugin_mubit-memory_mubit__mubit_reflect", "mcp__plugin_mubit-memory_mubit__mubit_lessons"]
+allowed-tools: ["Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs reflect:*)", "Bash(node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons:*)"]
 ---
 
-Reflect over the current run — `POST /v2/control/reflect {run_id}` — and report the extracted
-`lessons[]` back to the user: `lesson_id`, `lesson_type`, and `scope` for each, one line
-apiece. If the response is empty, say so plainly; an empty reflect is a real answer, not an
-error. Use `mubit_lessons` afterwards when the user wants the standing catalogue rather than
-what this run just produced.
+Reflect over the current run with the bundled script — `POST /v2/control/reflect {run_id}`
+behind it — and relay what it prints: one line per extracted lesson, with the lesson's id,
+type, importance and scope on the line.
 
-`mubit_lessons` answers three different questions off its one `scope` argument, and asking the
-wrong one is how a healthy store reads as empty:
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs reflect --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"
+```
 
-- **no `scope`** — this run's lessons, plus every lesson stored above `run` scope by any run.
-  The honest default, and the right one for "what do we know here".
-- **`scope: "run"`** — this run alone. What this session has banked so far.
-- **`scope: "session"` / `"global"`** — only the lessons that have travelled, from every run
+**`--data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"` is not optional.** A Bash tool
+call does not inherit `CLAUDE_PLUGIN_DATA` — it arrives empty — so without the flag the script
+has to guess which of several `mubit-memory*` directories the host is using, and either
+refuses with `no_run` or acts on a run this session's hooks never touch. The host substitutes
+`${CLAUDE_PLUGIN_DATA}` into this file before you read it, and the shell default around it
+lets a session that pins `MUBIT_CC_DATA_DIR` keep its pin — the same order every hook resolves
+in. Pass the whole expression straight through. Do not turn it into an `ENV=… node …` prefix:
+that is no longer a `node` command and will stop for a permission prompt.
+
+If it reports no lessons, say so plainly; an empty reflect is a real answer, not an error.
+Neither command here is an MCP tool: `mubit_reflect` and `mubit_lessons` left the default
+tool surface so that a session pays nothing to list them, and this script reaches the same
+two routes.
+
+## The standing catalogue
+
+When the user wants what memory holds rather than what this run just produced:
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}"                    # this run, plus what travelled
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --scope run        # this run alone
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --scope global     # only what has travelled
+node ${CLAUDE_PLUGIN_ROOT}/bin/admin.mjs lessons --data-dir "${MUBIT_CC_DATA_DIR:-${CLAUDE_PLUGIN_DATA}}" --importance high --limit 10
+```
+
+The three scopes answer three different questions, and asking the wrong one is how a healthy
+store reads as empty:
+
+- **no `--scope`** — this run's lessons, plus every lesson stored above `run` scope by any
+  run. The honest default, and the right one for "what do we know here".
+- **`--scope run`** — this run alone. What this session has banked so far.
+- **`--scope session` / `global`** — only the lessons that have travelled, from every run
   the key can see. Read a zero here as a real zero rather than as a fault.
 
-Every answer carries a `mubit_lessons_guard` note saying what was shown and how many matched.
-When it says `partial: true`, report the result as partial and quote no total — there is none.
+The listing says what it is showing and how many matched. Every lesson is printed in full:
+the script never degrades a lesson to a `(seen earlier)` pointer and never records what it
+printed, because a shell command cannot know whether its output reached the model. `--json`
+is the whole catalogue with its metadata.
 
 ## Why the explicit call exists at all
 
@@ -48,6 +77,6 @@ calling it on a run that has barely changed costs time and returns the same less
 
 One timing detail worth knowing before you read a zero as a failure: reflection only sees
 items the server has already **indexed**. A reflect fired immediately after a burst of
-captures or an explicit `/mubit-memory:remember` can honestly return `lessons_stored: 0`
+captures or an explicit `/mubit-memory:remember` can honestly report `lessons_stored: 0`
 where the same run reflected about a minute later returns them. If you have just written
 something you expect to be reflected on, give ingest a moment rather than reflecting twice.

@@ -1,6 +1,6 @@
 ---
 name: remember
-description: Save a durable lesson, rule, or preference to Mubit memory. Use when the user states a standing preference, when you discover a non-obvious constraint, or when an approach fails in a way worth never repeating.
+description: Save one durable lesson, rule or preference; use when the user states a standing preference or an approach fails in a way worth never repeating.
 disable-model-invocation: false
 tools: ["mcp__plugin_mubit-memory_mubit__mubit_learned"]
 ---

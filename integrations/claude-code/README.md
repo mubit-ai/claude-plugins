@@ -100,7 +100,7 @@ failure glyph while the instance comes up — see [Connection states](#connectio
 | `PostToolUse` (every tool) | `capture.mjs` | 3 s | Redacts and spools the tool call, whatever the tool was — built-in or any MCP server's. Zero network. A short skip list drops the handful that carry no memory (mode switches, list-only queries), and Mubit's own tool calls are suppressed. |
 | `PostToolUseFailure` | `capture.mjs --failure` | 3 s | Captures the failure — these produce the most useful lessons. |
 | `Stop` | `capture.mjs --stop` | 5 s | Writes the `Q: … / A: …` turn, spawns the drain, and attributes the turn's outcome to the memories that were recalled for it. |
-| `SubagentStop` | `capture.mjs --subagent` | 3 s | Same, under a distinct subagent identity. |
+| `SubagentStop` | `capture.mjs --subagent` | 3 s | Same, under a distinct subagent identity — and filed as a **handoff** from that subagent to this session's role, with `requested_action: review`, so a fan-out's results are listed as open until each is answered. Still zero network. |
 | `PreCompact` | `checkpoint.mjs --pre` | 10 s | The one blocking network call in the plugin: snapshots the last 200 KB of transcript before the host throws it away. |
 | `PostCompact` | `checkpoint.mjs --post` | 5 s | Zero network. Records that the compaction happened; injects nothing, because Claude Code accepts no injected context on this event. The re-anchor arrives instead from `SessionStart`, which also fires on a `compact` source. |
 | `SessionEnd` | `session-end.mjs` | 8 s | Drains inline, flushes pending outcomes, then reflects. |
@@ -128,30 +128,39 @@ an unwritable data dir, or a corrupt state file costs you a memory, never a turn
 | `/mubit-memory:memory-health` | Report what is actually stored: entry counts, staleness, contradictions. The store, not the connection. |
 | `/mubit-memory:activity` | The audit question: what does this instance actually hold, filtered by time, type, agent or origin — and an export of the whole record as JSONL you can keep. Prints to stdout; writes a file only if you ask. Also not model-invocable. |
 | `/mubit-memory:pin` | Pin a standing constraint for the rest of this run — "don't touch the vendored server" — so it is put in front of the model on every prompt, including the ones recall skips. Cleared when it stops being true; a durable, cross-session rule is `remember` instead. |
+| `/mubit-memory:import` | Backfill memory from the transcripts already on this machine — Claude Code's, Codex's, or both — so an install made after the work still knows about it. A dry run by default; nothing is sent without `--send`. Not model-invocable. |
+| `/mubit-memory:handoff` | Hand work to another agent in this run, list what is still open, or answer a handoff with a verdict. Every subagent's result arrives here as an open handoff to review. |
 | `@mubit-memory:mubit-recall` | Subagent: multi-angle memory search in an isolated context, returns a synthesis instead of raw evidence. |
 
-### Thirteen MCP tools
+### Seven MCP tools
 
-The bundled MCP server carries 21 tools and registers thirteen of them by default — the other
-eight cost you nothing until you ask for them:
+The bundled MCP server carries 21 tools and registers seven of them by default — the rest cost
+you nothing until you ask for them:
 
 ```
-mubit_learned   mubit_recall   mubit_outcome   mubit_reflect   mubit_lessons
-mubit_diagnose  mubit_archive  mubit_dereference  mubit_forget  mubit_status
-mubit_strategies  mubit_checkpoint  mubit_memory_health
+mubit_learned   mubit_recall   mubit_outcome   mubit_diagnose
+mubit_dereference   mubit_status   mubit_memory_health
 ```
 
-The other eight are excluded because a hook already does the job better (`mubit_remember`,
-`mubit_context`) or because they have no Claude Code surface (`mubit_register_agent`,
-`mubit_list_agents` and the rest of the multi-agent orchestration group). Nothing is removed:
-restore any of them by name with `mcpTools`.
+The line is whether a tool answers a question the model is holding mid-task, or writes
+something only it can write: the retrieval verbs, the two writes that make memory improve
+with use, and the two diagnostics. Everything a person asks for — the lesson catalogue, a
+delete, a named checkpoint, the pattern across lessons, an explicit reflect — is reached
+through its skill, which runs `bin/admin.mjs` and costs no listing at all. On Claude Code a
+registered tool costs its name on every session; on Codex it costs its whole schema, and the
+six that left were half of that bill. Nothing is removed: restore any of them by name with
+`mcpTools`.
 
-The last three on that list were excluded until each had a skill to reach it. A checkpoint is
-not what `PreCompact` does — the hook fires when the window fills, which is the one moment you
-cannot ask for, and `mubit_checkpoint` is the marker you name yourself. `mubit_strategies`
-reads the pattern across many lessons where every other retrieval verb reads individual ones.
-`mubit_memory_health` answers the route `/mubit-memory:doctor` used to tell you to `POST` by
-hand.
+Every tool result is shaped on its way to the model (`mcp/src/results.mjs`): a lesson list or
+a recall comes back one line per item with the id kept, a memory this conversation has already
+been shown is repeated as a pointer, and nothing exceeds `mcpResultTokenBudget`. The untouched
+original is saved under the plugin data directory, where the foot of the result names it. The
+record of what has been shown is one conversation's — keyed by the host session id beside the
+run, so a second session in the same directory sees everything in full — and
+`recallRepeatMode: full` switches the pointer off here as well as in the injection. The
+`bin/admin.mjs` catalogue that the `reflect`, `strategies`, `forget` and `checkpoint` skills run
+always renders in full and never records what it printed: a shell command cannot know whether
+its output reached the model.
 
 ### A status line
 
@@ -250,11 +259,24 @@ never slice a secret in half and leave a recognizable prefix behind.
 - The plugin suppresses its own traffic: its MCP tool calls, shell commands mentioning the
   Mubit endpoint or `MUBIT_*`, and reads of anything inside its own data directory are never
   captured. Other MCP servers' output is captured — that cross-tool memory is the point.
+- A tool call that changed a file also carries a structured record of it: `metadata_json.files`
+  on the item, one `{path, kind}` per file with `kind` one of `add`, `update`, `delete`. The
+  path is subject to the denylist exactly as the call is — a patch that touches `.env` is
+  dropped whole, not recorded as "touched `.env`". `Write` says `add` or `update` from the
+  host's own result, since its input is the same either way; `delete` is only ever stated by
+  Codex's `apply_patch`, because Claude Code removes files with `rm` in a shell, which carries
+  no path. The same rows are merged into `runs/<run_id>/files.json`, a per-run index of what is
+  in play, most recently touched first, so a later recall can ask about the files without a
+  round trip.
+- An import (`/mubit-memory:import`) goes through the three stages above item by item, the
+  same as live capture, and a joined call+result is checked against the denylist as one — a
+  `.env` whose body arrived on a different transcript line from its path is still dropped whole.
 - The status line performs no network I/O at all, ever.
 - Local state (spool, markers, session map, breaker, logs) lives under
   `${MUBIT_CC_DATA_DIR}` → `${CLAUDE_PLUGIN_DATA}` → `~/.claude/plugins/data/mubit-memory`, and
   is pruned on a TTL: turns after 6 h, status markers after 12 h, spool and job records after
-  24 h, quarantined payloads and run directories after 7 days, session maps after 30 days.
+  24 h, quarantined payloads, run directories and the per-run file index after 7 days, session
+  maps and import cursors after 30 days.
 
 Nothing is sent to Mubit AI. The endpoint you configure is the only destination.
 
@@ -288,7 +310,7 @@ that cache, and writing credentials invalidates it immediately rather than after
 | `recallTokenBudget` | `1500` | `MUBIT_CC_RECALL_TOKENS` | Maximum tokens of recalled context injected per prompt. Sections are trimmed to fit, preferring non-stale entries. |
 | `subagentRecallTokenBudget` | `600` | `MUBIT_CC_SUBAGENT_RECALL_TOKENS` | Maximum tokens of recalled context injected into a **subagent** when it starts. `UserPromptSubmit` does not fire for a subagent, so without the `SubagentStart` hook a subagent gets no memory at all; with it, this is the ceiling. Kept below `recallTokenBudget` because a subagent's window is smaller and its task narrower, and because this is paid once per spawn — a fan-out of ten pays it ten times. Set to `0` to fall back to `recallTokenBudget`. |
 | `recallMaxPerSection` | `0` | `MUBIT_CC_RECALL_MAX_PER_SECTION` | Maximum items rendered per section of the injected block. `0` means no cap — the token budget and the server's own limit are what bound it. |
-| `recallRepeatMode` | `pointer` | `MUBIT_CC_RECALL_REPEAT_MODE` | What happens to a memory this run has already injected. `pointer` repeats it as its reference id plus its first clause — roughly 20 tokens against 200 — and keeps the id attributable, so `Stop` still reinforces it. `full` re-sends the whole entry on every prompt, which is what releases before 0.10 did. Recall injection is the plugin's largest recurring context cost: up to 1500 tokens on *every* prompt, against 356 tokens *once* for the whole MCP tool surface. Compaction resets the set, because after it the model has not seen any of it. |
+| `recallRepeatMode` | `pointer` | `MUBIT_CC_RECALL_REPEAT_MODE` | What happens to a memory this conversation has already been shown, in the per-prompt injection and in an MCP tool result alike. `pointer` repeats it as its reference id plus its first clause — roughly 20 tokens against 200 — and keeps the id attributable, so `Stop` still reinforces it. `full` re-sends the whole entry on every prompt, which is what releases before 0.10 did. Recall injection is the plugin's largest recurring context cost: up to 1500 tokens on *every* prompt, against 356 tokens *once* for the whole MCP tool surface. Compaction resets the set, because after it the model has not seen any of it. |
 | `recallAssemble` | `client` | `MUBIT_CC_RECALL_ASSEMBLE` | `client` assembles the context block locally for **0 LLM calls**. `server` uses `/v2/control/context`, which costs **2 LLM calls per prompt** and replaces the free path rather than adding to it. It also silently gives up `recallRankBy`: `/v2/control/context` has no ranking field of any kind, so on this path every recall fuses at the server's default weights and a handoff question goes back to being answered by similarity. |
 | `recallFallback` | `none` | `MUBIT_CC_RECALL_FALLBACK` | What recall does when the instance has direct-access recall disabled. `none` returns nothing, for **0 LLM calls**. `agent_routed` pays **1 LLM call per prompt** to get recall anyway — typically several seconds, against a recall budget of 1500 ms, so most prompts spend the call and still inject nothing. See [When recall returns nothing](#when-recall-returns-nothing). |
 | `recallRankBy` | `auto` | `MUBIT_CC_RECALL_RANK_BY` | How the server weights semantic, lexical and recency scores for a recall query. Its default weighting barely counts recency, which is why "where were we?" has always answered with the most *similar* memory rather than the most recent one — there is real event time to rank on, it was simply never asked for. `auto` decides per prompt: a temporal or handoff question ("what changed", "catch me up", "pick up where we left off", "still failing") is sent as `freshness`, which makes recency dominant, and everything else as `relevance`. Pin `relevance` to turn the rule off, `freshness` to rank every prompt by recency, or `balanced` for the middle, which the rule never chooses on its own. The exact weights belong to your instance and are operator-tunable; a query with `explain: true` reports the ones actually used. It costs **0 extra LLM calls and 0 extra round trips** — it is one field on a request that is already being sent. **`recallAssemble: server` ignores it entirely**: `/v2/control/context` has no ranking field of any kind, so rung 3 always fuses at the default weighting, silently. |
@@ -300,8 +322,9 @@ that cache, and writing credentials invalidates it immediately rather than after
 | `statusLine` | `true` | `MUBIT_CC_STATUSLINE` | Render the status line. When false it prints an empty line and exits 0 rather than erroring per frame. |
 | `preToolWarnings` | `false` | `MUBIT_CC_PRE_TOOL_WARNINGS` | Show the model a matching stored `rule` just before an `rm` or `git push` runs. Warnings only — it never blocks, rewrites or asks about a tool call, and the filter that decides when it runs at all is best-effort, so treat it as a reminder and use Claude Code's permission system for anything that has to hold. Off by default: this is the one setting that can put text in front of a tool call. |
 | `resumeBlock` | `true` | `MUBIT_CC_RESUME_BLOCK` | Open a session with a briefing on where earlier work left off. `SessionStart` spawns a detached child that asks `/v2/control/context` for a sections block about this run, and the first substantive prompt of the session renders it above the ordinary recall block. **The one opt-in feature here that ships on**, because its cost is per *session* and not per prompt: one background process and **2 LLM calls once**, against the prompt where the model knows least about what it is walking into — nothing waits for it, and no prompt after the first pays anything. Only `startup` and `resume` sessions get one: `/clear` starts a fresh run with no history, and a compaction or a fork is already re-anchored. It renders as `<mubit-resume>` and says, in the block, that it is a briefing and not a task list. **How much it can describe depends on `runStrategy`.** `/v2/control/context` is *mostly* run-scoped — activity, working memory, rules and archived blocks all come from the run id you give it — but lessons also reach across runs, through linked runs and a session/global lesson lane. So under the default `per-directory` the block summarises everything this project has ever done; under `per-conversation`, where every session is its own run, a new session's own run is empty and the block falls back to whatever cross-run lessons apply — thinner, but not nothing. Set `MUBIT_CC_RESUME_TOKENS` to change its 1000-token ceiling. |
-| `mcpTools` | `""` (the curated thirteen) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
+| `mcpTools` | `""` (the curated seven) | `MUBIT_MCP_TOOLS` | Comma-separated allowlist. A list you supply is used verbatim, not unioned with the default — that is how you ask for only `mubit_recall`. |
 | `mcpLessonScope` | `session` | `MUBIT_MCP_LESSON_SCOPE` | The widest scope a lesson written by an MCP tool may claim: `run`, `session` or `global`. The default is what `mubit_learned`'s own description tells the model it does, and it is the narrowest scope from which a lesson can reach a later session at all — at `run` it cannot, because reflection stamps `run` as well and there is then no path out of the run that wrote it. Set `run` to keep every agent-written lesson inside the run that wrote it — with `runStrategy: per-directory`, that is the project it was written in. Set `global` if you want agent-written rules to follow you between projects. The ceiling only ever narrows a caller that asked for more; a write that asked for less keeps the narrower scope. |
+| `mcpResultTokenBudget` | `2000` | `MUBIT_CC_MCP_RESULT_TOKENS` | The most one Mubit MCP tool result may put in front of the model. A lesson list or a recall always comes back one line per item with the id kept, and a memory already shown in this run is repeated as its reference id plus its first clause; anything over the ceiling is cut, and the untouched result is saved under the plugin data directory, where the note at the foot of the result names it. `0` returns the raw result. |
 | `pins` | `true` | `MUBIT_CC_PINS` | Put the constraints pinned with `/mubit-memory:pin` in front of the model on every prompt of the run. A pin is a sentence that is true for *this task* — "don't touch the vendored server", "no new dependencies until this PR lands" — and before this existed the only place to put one was memory, where it became a durable lesson and was recalled into every later session of a project where it had stopped being true. Pins render above the recalled block and, unlike recall, on the prompts recall skips: a two-word answer, an open circuit breaker, a recall that failed or found nothing. Capped at five pins, 200 characters each and 240 rendered tokens — tight, because a pin is unranked and never degrades to a pointer, so it is the most expensive context the plugin injects per unit of information. It costs **0 extra requests on the prompt path**: the hook reads one file, and the refresh rides in the detached drainer. Counted separately as `recall.pin_tokens`, so `recall.tokens` keeps meaning what recall cost. Off makes the feature invisible — the injected block is byte-for-byte what it was without it. |
 
 ### Environment-only settings
@@ -329,7 +352,7 @@ camelCase name in parentheses.
 | `MUBIT_CC_BREAKER_WINDOW_MS` (`breakerWindowMs`) | `300000` (5 min) | The rolling failure window. |
 | `MUBIT_CC_BREAKER_COOLDOWN_MS` (`breakerCooldownMs`) | `120000` (2 min) | Cooldown before a single half-open probe is allowed. |
 | `MUBIT_CC_LOG_LEVEL` (`logLevel`) | `warn` | `error`, `warn`, `info`, or `debug`. |
-| `MUBIT_CC_ENV_TAGS` (`envTags`) | `""` | Extra `TYPE:NAME` tags on every ingested item, appended to the derived `tool:claude-code`, `repo:`, `branch:`, `lang:` set (8 total). |
+| `MUBIT_CC_ENV_TAGS` (`envTags`) | `""` | Extra `TYPE:NAME` tags on every ingested item, appended to the derived `tool:<host>`, `repo:`, `branch:`, `lang:` set (8 total). |
 
 ### When recall returns nothing
 
@@ -392,8 +415,73 @@ constraints, it is a document, and a document belongs in `CLAUDE.md` where it co
 prompt. The pinned tokens are reported separately from `recall.tokens`, as `recall.pin_tokens`,
 so recall's own cost keeps meaning what it always did.
 
-Subagents do not get pins yet: `SubagentStart` injects its own, smaller recalled block and does
-not read them.
+Subagents get them too: `SubagentStart` puts the parent run's pins above its own, smaller
+recalled block, under a budget of its own (96 tokens, the same share of a smaller window), so a
+fan-out of ten is ten agents told the constraint rather than none.
+
+### Importing the history already on this machine
+
+A fresh install knows nothing that happened before it, and a hook that timed out lost that
+turn. The transcripts are still on disk, and `/mubit-memory:import` reads them:
+
+```
+/mubit-memory:import
+```
+
+That is a **dry run**, and it prints where it read from, the projects in scope, and how many
+items it would send — one line per source. Nothing is sent until `--send` is on the command
+line, and the skill is not model-invocable: a conversation cannot decide on its own to ship
+months of somebody's history to a server.
+
+`--source claude-code` reads `~/.claude/projects`, including the subagent transcripts nested
+under each session, which a naive glob misses. `--source codex` reads Codex's rollouts under
+`~/.codex/sessions`, in both the shape Codex wrote before 0.149 and the one it writes now,
+skipping the reviewer threads it spawns to approve its own actions and the preamble it writes
+in the user's voice at the top of every thread. `--source all` reads both, against one item
+cap and one set of cursors; a Codex item carries `tool:codex` in its tags so the two histories
+stay tellable apart. The default is the host the plugin is running under.
+
+The scope is this project plus the git worktrees linked to it; `--all` is every project on
+the machine and is a flag somebody types. Each transcript keeps a cursor, so a second run over
+unchanged files reads nothing and an interrupted import resumes rather than repeats — a claim
+about this client's bookkeeping, not about what the server stores. An imported tool call
+carries the same item id live capture would have written for it, and `imported: true` in its
+metadata so a reader can tell the two apart. Three counts are findings, not decoration:
+`denied` is the denylist working, `oversize` is lines too large to read, and `this answer is
+incomplete` means a bound was hit and the import is a prefix of the history, not the whole of
+it.
+
+When a batch is refused, the counts line is followed by the reason — `ingest failed (<state>):
+<message>`, the same sentence the plugin logs — so `failed 1` never stands alone. One case is
+refused before a transcript is opened: a `--send` from a shell that says it has no network,
+which is what Codex's sandbox does to an unapproved command. A dry run only reads and goes
+ahead there; the send needs the command run with escalated permissions.
+
+### Handing work to another agent
+
+A handoff is a note from one agent to another inside a run — "review this", "continue from
+here", "approve before I execute" — and feedback is the answer: a verdict (`approve`,
+`request_changes`, `block`, `acknowledge`) filed against the handoff's id. A handoff nobody has
+answered is **open**.
+
+```
+/mubit-memory:handoff send --to codex --action review "the auth diff is ready"
+/mubit-memory:handoff list --open
+/mubit-memory:handoff feedback <handoff_id> --verdict approve --comments "fine"
+```
+
+Every subagent files one without being asked: its result is stored as a handoff from that
+subagent to this session's role, addressed for review, so after a fan-out `list --open` is the
+list of results nobody has looked at yet. That note is written by the `SubagentStop` hook with
+zero network — it rides the ordinary drain, redaction and circuit breaker included — and under
+the **parent's** run id, because a handoff is scoped to a run and a subagent's sub-run id never
+reaches the wire. There is no way to address a note to another run.
+
+"Open" is computed by the command, not by the instance: the instance never flips a handoff's
+`active` flag and has no list route, so the command reads both entry types for the run and
+joins them — open means no feedback names that id. The resume briefing a new session gets
+includes the open handoffs, so work handed back and never reviewed is the first thing the next
+session hears about.
 
 ### When recall is slow rather than empty
 

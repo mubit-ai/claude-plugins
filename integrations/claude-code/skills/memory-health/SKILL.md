@@ -1,6 +1,6 @@
 ---
 name: memory-health
-description: Report what is actually in Mubit memory — entry counts, staleness, contradictions and per-section health. Use when memory looks empty or stale and you need to know whether anything was ever stored, rather than whether the instance is reachable.
+description: "Report what is actually stored: counts, staleness, contradictions; use when the question is whether anything was ever stored."
 disable-model-invocation: false
 tools: ["mcp__plugin_mubit-memory_mubit__mubit_memory_health", "mcp__plugin_mubit-memory_mubit__mubit_status"]
 ---

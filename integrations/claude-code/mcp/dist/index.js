@@ -135,6 +135,16 @@ function writeJsonAtomic(p, value, opts = {}) {
     return false;
   }
 }
+function safeSegment(value, max = 0) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return "";
+  let safe = raw.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_");
+  if (max > 0) safe = safe.slice(0, max);
+  return safe && safe !== "." && safe !== ".." ? safe : "";
+}
+function runDir(cfg, runId) {
+  return join(resolveDataDir(cfg), "runs", safeSegment(runId));
+}
 
 // lib/credentials.mjs
 var FILE = "credentials.json";
@@ -165,15 +175,9 @@ var DEFAULT_MCP_TOOLS = [
   "mubit_learned",
   "mubit_recall",
   "mubit_outcome",
-  "mubit_reflect",
-  "mubit_lessons",
   "mubit_diagnose",
-  "mubit_archive",
   "mubit_dereference",
-  "mubit_forget",
   "mubit_status",
-  "mubit_strategies",
-  "mubit_checkpoint",
   "mubit_memory_health"
 ];
 var CACHE_FILE = "config.json";
@@ -308,6 +312,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     ["run", "session", "global"],
     "session"
   );
+  const mcpResultTokenBudget = int(pick("mcpResultTokenBudget", "MUBIT_CC_MCP_RESULT_TOKENS"), 2e3);
   const pins = bool(pick("pins", "MUBIT_CC_PINS"), true);
   const only = (envVar, key) => {
     const opt = key ? optionValue(key, e) : void 0;
@@ -376,6 +381,7 @@ function resolveAll(e, userFile, creds, projectDir, dataDir2) {
     preToolWarnings,
     mcpTools,
     mcpLessonScope,
+    mcpResultTokenBudget,
     pins,
     denyGlobs,
     respectGitignore,
@@ -510,12 +516,15 @@ var ASSIGNMENT_KEYWORDS = [
   "secret",
   "token",
   "password",
+  "passphrase",
+  "passwd",
   "credential",
   "assertion",
   "signature",
   "apikey",
   "api_key"
 ];
+var ASSIGNMENT_NAME_SUFFIXES = ["pass"];
 var ASSIGNMENT_RE = /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,64})([ \t]*[:=][ \t]*)(?=\S)/g;
 var VALUE_RE = /\S+/y;
 var ENTROPY_RUN_RE = /[A-Za-z0-9+/=_-]{32,}/g;
@@ -528,6 +537,16 @@ var RULES = [
   { kind: "pem", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { kind: "mubit-key", re: /mbt_[A-Za-z0-9_-]{8,}/g },
   { kind: "openai-key", re: /sk-[A-Za-z0-9_-]{16,}/g },
+  // Stripe's secret (`sk_`) and restricted (`rk_`) keys, in both livemode and testmode. One
+  // character from `openai-key` above and claimed by nothing until now: `sk_live_…` uses an
+  // underscore where that rule expects a hyphen, so it fell through every rule in this table
+  // and, being short, under the `high-entropy` floor as well.
+  //
+  // `pk_` is excluded on purpose. That is the *publishable* key, which Stripe documents as
+  // safe to ship in client-side code — it is in committed source and in browser bundles, and
+  // redacting it would scrub something the user is deliberately looking at while calling a
+  // published value a secret.
+  { kind: "stripe-key", re: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{4,}/g },
   { kind: "github-token", re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
   { kind: "aws-access-key", re: /AKIA[0-9A-Z]{16}/g },
   { kind: "jwt", re: /eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}/g },
@@ -543,7 +562,7 @@ function scrubAssignments(text, count) {
     const [, pre, name] = m;
     const valueStart = ASSIGNMENT_RE.lastIndex;
     const lower = String(name).toLowerCase();
-    if (EXEMPT_RE.test(lower) || !ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k))) {
+    if (EXEMPT_RE.test(lower) || !isSecretName(lower)) {
       ASSIGNMENT_RE.lastIndex = valueStart - 1;
       continue;
     }
@@ -558,6 +577,9 @@ function scrubAssignments(text, count) {
     count.n += 1;
   }
   return out + text.slice(copied);
+}
+function isSecretName(lower) {
+  return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
 function scrubUrlCredentials(text, count) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
@@ -594,9 +616,9 @@ function scrub(text, count) {
 }
 function entropy(s) {
   if (s === null || s === void 0) return 0;
-  const str4 = typeof s === "string" ? s : String(s);
-  if (str4.length === 0) return 0;
-  const buf = Buffer.from(str4, "utf8");
+  const str5 = typeof s === "string" ? s : String(s);
+  if (str5.length === 0) return 0;
+  const buf = Buffer.from(str5, "utf8");
   const n = buf.length;
   if (n === 0) return 0;
   const counts = new Uint32Array(256);
@@ -612,10 +634,10 @@ function entropy(s) {
 }
 var truncMarker = (n) => `
 \u2026[truncated ${n} bytes]`;
-function capBytes(s, cap) {
+function capBytes(s, cap2) {
   const buf = Buffer.from(s, "utf8");
-  if (buf.length <= cap) return { text: s, truncated: false };
-  let end = cap;
+  if (buf.length <= cap2) return { text: s, truncated: false };
+  let end = cap2;
   while (end > 0 && (buf[end - 1] & 192) === 128) end -= 1;
   if (end > 0) {
     const lead = buf[end - 1];
@@ -623,7 +645,7 @@ function capBytes(s, cap) {
     if (lead >= 240) need = 4;
     else if (lead >= 224) need = 3;
     else if (lead >= 192) need = 2;
-    end = end - 1 + need <= cap ? end - 1 + need : end - 1;
+    end = end - 1 + need <= cap2 ? end - 1 + need : end - 1;
   }
   const body = buf.subarray(0, end).toString("utf8");
   return { text: `${body}${truncMarker(buf.length - end)}`, truncated: true };
@@ -648,8 +670,8 @@ function redactText(text, cfg = {}, kind = "output") {
     }
   }
   out.redactions = count.n;
-  const cap = kind === "param" ? numberOr(cfg?.maxParamBytes, 4096) : numberOr(cfg?.maxOutputBytes, 8192);
-  const capped = capBytes(s, cap);
+  const cap2 = kind === "param" ? numberOr(cfg?.maxParamBytes, 4096) : numberOr(cfg?.maxOutputBytes, 8192);
+  const capped = capBytes(s, cap2);
   out.text = capped.text;
   out.truncated = capped.truncated;
   return out;
@@ -1205,8 +1227,8 @@ function recordFailure(cfg, state) {
       s.state = "auth_failed";
     } else {
       s.failures.push(now);
-      const cap = Math.max(threshold * 4, 64);
-      if (s.failures.length > cap) s.failures = s.failures.slice(-cap);
+      const cap2 = Math.max(threshold * 4, 64);
+      if (s.failures.length > cap2) s.failures = s.failures.slice(-cap2);
       if (kind === "not_responding") {
         if (s.timeoutStreak >= TIMEOUT_ESCALATION && s.state !== "auth_failed") {
           s.state = "not_responding";
@@ -1280,8 +1302,13 @@ var ROUTES = Object.freeze({
   outcome: "/v2/control/outcome",
   checkpoint: "/v2/control/checkpoint",
   lessons: "/v2/control/lessons",
-  reflect: "/v2/control/reflect"
+  reflect: "/v2/control/reflect",
+  strategies: "/v2/control/strategies",
+  handoff: "/v2/control/handoff",
+  feedback: "/v2/control/feedback"
 });
+var HANDOFF_ACTIONS = Object.freeze(["review", "continue", "approve", "execute"]);
+var FEEDBACK_VERDICTS = Object.freeze(["approve", "request_changes", "block", "acknowledge"]);
 var MAX_QUERY_BYTES = 256 * 1024;
 var MAX_BODY_BYTES = 64 * 1024 * 1024;
 var DEFAULT_TIMEOUT_MS = 4e3;
@@ -1309,14 +1336,14 @@ async function request(cfg, method, path, body, opts = {}) {
         return refuse(cfg, started, `${verb} ${route}: body is not serializable as JSON (${encoded.error})`, { route });
       }
       bodyText = encoded.text;
-      const cap = capFor(route);
+      const cap2 = capFor(route);
       const size = Buffer.byteLength(bodyText, "utf8");
-      if (size > cap) {
+      if (size > cap2) {
         return refuse(
           cfg,
           started,
-          `${verb} ${route}: body is ${size} bytes, over the ${cap}-byte (${Math.round(cap / 1024)} KiB) cap for this route`,
-          { route, bytes: size, cap }
+          `${verb} ${route}: body is ${size} bytes, over the ${cap2}-byte (${Math.round(cap2 / 1024)} KiB) cap for this route`,
+          { route, bytes: size, cap: cap2 }
         );
       }
     }
@@ -1522,8 +1549,9 @@ function NETWORK_HINT(err) {
 function SANDBOX_BLOCKED() {
   const env = typeof process === "object" && process ? process.env || {} : {};
   if (!env.CODEX_SANDBOX && !env.CODEX_SANDBOX_NETWORK_DISABLED) return "";
-  return "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
+  return SANDBOX_SENTENCE;
 }
+var SANDBOX_SENTENCE = "this process has no network access \u2014 Codex ran it inside its sandbox. Approve the command and run it again; the endpoint is almost certainly fine";
 function messageOf(err) {
   try {
     if (!err) return "unknown error";
@@ -2351,7 +2379,7 @@ var INSTRUCTIONS = [
   "",
   "When to search. In the main conversation Mubit injects the memory relevant to each turn before you see it, so opening a turn by searching for that is wasted work. Search when the injected memory falls short \u2014 and always search as a subagent, which receives no injection at all and otherwise begins with no memory of this project.",
   "",
-  "Which tool. mubit_recall for a topic or question in words. mubit_diagnose when a command or test has just failed, which matches the error shape against past failures. mubit_dereference when you already hold a reference_id. mubit_lessons to review what has been learned rather than to ask a question. mubit_strategies for the pattern across many lessons rather than any single one.",
+  "Which tool. mubit_recall for a topic or question in words. mubit_diagnose when a command or test has just failed, which matches the error shape against past failures. mubit_dereference when you already hold a reference_id. Reviewing the whole catalogue, the pattern across many lessons, a named checkpoint, deleting a lesson and an explicit reflect are skills (/mubit-memory:strategies, :checkpoint, :forget, :reflect), not tools.",
   "",
   'What to write back. mubit_learned records one durable claim \u2014 a constraint, a fix that worked, a standing preference \u2014 stated so it is still true in a later session. It is not a session log: narrating what happened ("the user asked for X", "I refactored Y") is the common way this tool is misused, and every future recall pays for it. mubit_outcome credits the reference_ids that actually helped, which is what makes the memory that helps rank higher next time.'
 ].join("\n");
@@ -2425,20 +2453,486 @@ function fill(chunk, instructions) {
   return changed ? parts.join("\n") : null;
 }
 
+// mcp/src/results.mjs
+import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join9 } from "node:path";
+
+// lib/assemble.mjs
+var SECTION_KEYS = Object.freeze([
+  "mental_models",
+  "active_rules",
+  "lessons",
+  "archive_blocks",
+  "handoffs",
+  "feedback",
+  "facts",
+  "observations",
+  "working_memory",
+  "traces",
+  "goals",
+  "checkpoints",
+  "logs",
+  "other"
+]);
+var EMISSION_ORDER = Object.freeze([
+  "mental_models",
+  "active_rules",
+  "lessons",
+  "facts",
+  "observations",
+  "working_memory",
+  "traces",
+  "goals"
+]);
+var RENDER_ORDER = Object.freeze([
+  ...EMISSION_ORDER,
+  ...SECTION_KEYS.filter((k) => !EMISSION_ORDER.includes(k))
+]);
+var SECTION_BY_ENTRY_TYPE = Object.freeze({
+  mental_model: "mental_models",
+  rule: "active_rules",
+  lesson: "lessons",
+  fact: "facts",
+  observation: "observations",
+  working_memory: "working_memory",
+  goal: "working_memory",
+  trace: "traces",
+  tool_output: "traces",
+  tool_input: "traces",
+  task_result: "traces",
+  step_outcome: "traces",
+  archive_block: "archive_blocks",
+  checkpoint: "checkpoints",
+  handoff: "handoffs",
+  feedback: "feedback"
+});
+var HEADINGS = Object.freeze({
+  mental_models: "Mental models",
+  active_rules: "Active rules",
+  lessons: "Lessons",
+  archive_blocks: "Archive blocks",
+  handoffs: "Handoffs",
+  feedback: "Feedback",
+  facts: "Facts",
+  observations: "Observations",
+  working_memory: "Working memory",
+  traces: "Traces",
+  goals: "Goals",
+  checkpoints: "Checkpoints",
+  logs: "Logs",
+  other: "Other"
+});
+var CHARS_PER_TOKEN = 4;
+var POINTER_MARK = "(seen earlier)";
+var MAX_POINTER_CHARS = 64;
+var MIN_POINTER_CHARS = 24;
+function estimateTokens(text) {
+  if (typeof text !== "string" || text.length === 0) return 0;
+  return Math.ceil(text.length / CHARS_PER_TOKEN);
+}
+function firstClause(text) {
+  const s = typeof text === "string" ? text.trim() : "";
+  if (!s) return "";
+  const stop = s.search(/[.;!?]/);
+  let end = stop > 0 ? Math.min(stop, MAX_POINTER_CHARS) : MAX_POINTER_CHARS;
+  if (end < MIN_POINTER_CHARS) end = Math.min(s.length, MAX_POINTER_CHARS);
+  const clause = s.slice(0, end).trim() || s.slice(0, MAX_POINTER_CHARS).trim();
+  return clause.length < s.length ? `${clause}\u2026` : clause;
+}
+
+// lib/seen.mjs
+import { join as join8 } from "node:path";
+var SEEN_TTL_MS = 6 * 60 * 60 * 1e3;
+var MAX_SEEN_REFS = 512;
+var SEEN_DIR = "seen";
+var MAX_SESSION_SEGMENT = 128;
+function emptySeen() {
+  return { ids: /* @__PURE__ */ new Set(), entries: {}, updatedAt: 0 };
+}
+function seenPath(cfg, runId, sessionId) {
+  if (!safeSegment(runId)) return "";
+  const session = safeSegment(hostSessionId({ session_id: sessionId }), MAX_SESSION_SEGMENT);
+  if (!session) return "";
+  return join8(runDir(cfg, runId), SEEN_DIR, `${session}.json`);
+}
+function readSeen(cfg, runId, sessionId = "") {
+  try {
+    const p = seenPath(cfg, runId, sessionId);
+    if (!p) return emptySeen();
+    const raw = readJson(p, null);
+    if (!isObject2(raw) || !isObject2(raw.refs)) return emptySeen();
+    const cutoff = Date.now() - SEEN_TTL_MS;
+    const out = emptySeen();
+    out.updatedAt = num2(raw.updated_at, 0);
+    for (const [id, v] of Object.entries(raw.refs)) {
+      if (!id || !id.trim() || !isObject2(v)) continue;
+      const last = num2(v.last, 0);
+      if (!(last > 0) || last < cutoff) continue;
+      const first = num2(v.first, 0);
+      out.entries[id] = {
+        first: first > 0 ? first : last,
+        last,
+        count: Math.max(1, Math.trunc(num2(v.count, 1)))
+      };
+      out.ids.add(id);
+    }
+    return out;
+  } catch {
+    return emptySeen();
+  }
+}
+function markSeen(cfg, runId, refIds, sessionId = "") {
+  try {
+    const p = seenPath(cfg, runId, sessionId);
+    if (!p) return false;
+    const ids = usableIds(refIds);
+    if (ids.length === 0) return false;
+    const prior = readSeen(cfg, runId, sessionId).entries;
+    const now = Date.now();
+    const refs = { ...prior };
+    for (const id of ids) {
+      const was = refs[id];
+      refs[id] = was ? { first: was.first, last: now, count: was.count + 1 } : { first: now, last: now, count: 1 };
+    }
+    return writeJsonAtomic(p, {
+      run_id: String(runId ?? ""),
+      session_id: String(sessionId ?? ""),
+      updated_at: now,
+      refs: bounded(refs)
+    });
+  } catch {
+    return false;
+  }
+}
+function bounded(refs) {
+  const rows = Object.entries(refs);
+  if (rows.length <= MAX_SEEN_REFS) return refs;
+  const out = {};
+  rows.map((row, i) => (
+    /** @type {[string, SeenEntry, number]} */
+    [row[0], row[1], i]
+  )).sort((a, b) => b[1].last - a[1].last || b[2] - a[2]).slice(0, MAX_SEEN_REFS).forEach(([id, entry]) => {
+    out[id] = entry;
+  });
+  return out;
+}
+function usableIds(refIds) {
+  if (!Array.isArray(refIds)) return [];
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const v of refIds) {
+    if (typeof v !== "string") continue;
+    const id = v.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+function isObject2(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function num2(v, d) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : d;
+}
+
+// mcp/src/results.mjs
+var DEFAULT_RESULT_TOKENS = 2e3;
+var MIN_RESULT_TOKENS = 200;
+var SPILL_DIR = "spill";
+var NOTE_RESERVE = 90;
+var MAX_FIELD_CHARS = 1200;
+var SHAPES = [
+  { key: "lessons", ids: ["id", "lesson_id"], noun: "lessons" },
+  { key: "evidence", ids: ["reference_id"], noun: "memories" }
+];
+function shapeToolResult(message, opts = {}) {
+  const noop = { message, changed: false, shape: "", shown: [], pointed: [], dropped: 0, spilled: "" };
+  try {
+    const o = isObject3(opts) ? opts : {};
+    const budget = Math.max(MIN_RESULT_TOKENS, positiveInt(o.budget, DEFAULT_RESULT_TOKENS));
+    const seen = o.seen instanceof Set ? o.seen : null;
+    const spill = typeof o.spill === "function" ? o.spill : () => "";
+    const text = toolText(message);
+    if (text === null) return noop;
+    const out = message.result.isError === true ? holdText(text, budget, spill, "error") : render(text, budget, seen, spill);
+    if (out === null) return noop;
+    const block = message.result.content[0];
+    return {
+      message: {
+        ...message,
+        result: { ...message.result, content: [{ ...block, text: out.text }] }
+      },
+      changed: true,
+      shape: out.shape,
+      shown: out.shown ?? [],
+      pointed: out.pointed ?? [],
+      dropped: out.dropped ?? 0,
+      spilled: out.spilled ?? ""
+    };
+  } catch {
+    return noop;
+  }
+}
+function toolText(message) {
+  if (!isObject3(message) || message.jsonrpc !== "2.0") return null;
+  const result = message.result;
+  if (!isObject3(result) || !Array.isArray(result.content) || result.content.length !== 1) return null;
+  const block = result.content[0];
+  if (!isObject3(block) || block.type !== "text" || typeof block.text !== "string") return null;
+  return block.text;
+}
+function render(text, budget, seen, spill) {
+  const parsed = tryJson(text);
+  if (!isObject3(parsed)) return holdText(text, budget, spill, "text");
+  const shape = SHAPES.find((s) => isItemList(parsed[s.key]));
+  if (shape) return renderList(text, parsed, shape, budget, seen, spill);
+  return holdJson(text, parsed, budget, spill);
+}
+function renderList(original, parsed, shape, budget, seen, spill) {
+  const compact = renderCompact(parsed, shape.key, { budget, seen });
+  if (!compact) return holdJson(original, parsed, budget, spill);
+  const { shown, pointed, dropped, total } = compact;
+  const spilled = spill(original, shape.key);
+  const parts = [compact.text];
+  const foot = [];
+  if (dropped > 0) foot.push(`Showing ${total - dropped} of ${total}.`);
+  if (spilled) foot.push(`Raw result: ${spilled}`);
+  if (foot.length) parts.push(foot.join(" "));
+  if (pointed.length) {
+    parts.push(`A line marked "${POINTER_MARK}" was shown in full earlier in this conversation; mubit_dereference returns its text.`);
+  }
+  return { text: parts.join("\n"), shape: shape.key, shown, pointed, dropped, spilled };
+}
+function renderCompact(parsed, listKey, opts = {}) {
+  const shape = SHAPES.find((s) => s.key === listKey);
+  if (!shape || !isObject3(parsed) || !isItemList(parsed[shape.key])) return null;
+  const budget = Math.max(MIN_RESULT_TOKENS, positiveInt(opts?.budget, DEFAULT_RESULT_TOKENS));
+  const seen = opts?.seen instanceof Set ? opts.seen : null;
+  const items = parsed[shape.key];
+  const head = headLines(parsed, shape.key);
+  const shown = [];
+  const pointed = [];
+  const lines = [];
+  let used = estimateTokens(`${head.join("\n")}
+`) + NOTE_RESERVE;
+  for (const item of items) {
+    const id = firstString2(item, shape.ids);
+    const content = oneLine(item.content);
+    const tag = tagsFor(item, shape.key);
+    const full = `- ${tag ? `[${tag}] ` : ""}${id ? `${id} \u2014 ` : ""}${content}`;
+    const pointer = id && seen && seen.has(id) ? `- ${POINTER_MARK} ${id} \u2014 ${firstClause(content)}` : "";
+    const degraded = !!pointer && pointer.length < full.length;
+    const line = degraded ? pointer : full;
+    const cost = estimateTokens(`${line}
+`);
+    if (used + cost > budget) break;
+    lines.push(line);
+    used += cost;
+    if (id) (degraded ? pointed : shown).push(id);
+  }
+  const total = items.length;
+  const parts = [...head];
+  parts.push(`${cap(shape.noun)} (${total}${pointed.length ? `, ${pointed.length} seen earlier` : ""}):`);
+  parts.push(...lines);
+  return { text: parts.join("\n"), shown, pointed, dropped: total - lines.length, total };
+}
+function headLines(parsed, listKey) {
+  const out = [];
+  for (const [k, v] of Object.entries(parsed)) {
+    if (k === listKey) continue;
+    if (isScalar(v)) {
+      if (v !== "") out.push(`${k}: ${capField(v)}`);
+    } else if (isObject3(v)) {
+      for (const [k2, v2] of Object.entries(v)) {
+        if (isScalar(v2) && v2 !== "") out.push(`${k2}: ${capField(v2)}`);
+      }
+    }
+  }
+  return out;
+}
+function tagsFor(item, listKey) {
+  const tags = listKey === "lessons" ? [str4(item.lesson_type), str4(item.importance), str4(item.scope)] : [str4(item.origin_entry_type) || str4(item.entry_type), item.is_stale === true ? "stale" : ""];
+  return tags.filter(Boolean).join(", ");
+}
+function holdJson(original, parsed, budget, spill) {
+  const tokens = estimateTokens(original);
+  if (tokens <= budget) return null;
+  let key = "";
+  let longest = 0;
+  for (const [k, v] of Object.entries(parsed)) {
+    if (Array.isArray(v) && v.length > longest && v.every(isObject3)) {
+      key = k;
+      longest = v.length;
+    }
+  }
+  if (key) {
+    const list2 = parsed[key];
+    const spilled = spill(original, "json");
+    let keep = Math.min(longest, Math.max(0, Math.floor(longest * (budget - NOTE_RESERVE) / tokens)));
+    for (; keep >= 0; keep -= 1) {
+      const copy = {
+        ...parsed,
+        [key]: list2.slice(0, keep),
+        _truncated: `Showing ${keep} of ${longest} ${key}.${spilled ? ` Raw result: ${spilled}` : ""}`
+      };
+      const text = JSON.stringify(copy, null, 2);
+      if (estimateTokens(text) <= budget) {
+        return { text, shape: "json", dropped: longest - keep, spilled };
+      }
+      if (keep === 0) break;
+    }
+    return holdText(original, budget, spill, "json", spilled);
+  }
+  return holdText(original, budget, spill, "json");
+}
+function holdText(original, budget, spill, shape, already = "") {
+  const tokens = estimateTokens(original);
+  if (tokens <= budget) return null;
+  const spilled = already || spill(original, shape);
+  const maxChars = Math.max(1, Math.floor((budget - NOTE_RESERVE) * original.length / tokens));
+  let cut = original.lastIndexOf("\n", maxChars);
+  if (cut < maxChars / 2) cut = original.lastIndexOf(" ", maxChars);
+  if (cut < maxChars / 2) cut = maxChars;
+  const kept = original.slice(0, cut).replace(/\s+$/, "");
+  const note2 = `\u2026 cut at ${estimateTokens(kept)} of ${tokens} tokens.${spilled ? ` Raw result: ${spilled}` : ""}`;
+  return { text: `${kept}
+${note2}`, shape, dropped: tokens - estimateTokens(kept), spilled };
+}
+function installResultsGuard(opts) {
+  const budget = positiveInt(opts?.budget, DEFAULT_RESULT_TOKENS);
+  if (budget <= 0) return;
+  const stream = opts?.stream ?? process.stdout;
+  const current = stream?.write;
+  if (typeof current !== "function") return;
+  const base = typeof current.mubitResultsGuardOriginal === "function" ? current.mubitResultsGuardOriginal : current;
+  const cfg = opts?.cfg ?? {};
+  const runId = typeof opts?.runId === "string" ? opts.runId : "";
+  const sessionId = hostSessionId({ session_id: opts?.sessionId });
+  const repeatMode = opts?.repeatMode === "full" ? "full" : "pointer";
+  const seen = typeof opts?.seen === "function" ? opts.seen : () => repeatMode === "full" ? null : readSeen(cfg, runId, sessionId).ids;
+  const spill = typeof opts?.spill === "function" ? opts.spill : spillWriter(cfg, runId);
+  const mark = typeof opts?.mark === "function" ? opts.mark : (ids) => {
+    markSeen(cfg, runId, ids, sessionId);
+  };
+  const wrapped = function write(chunk, ...rest) {
+    if (typeof chunk === "string" && chunk.includes('"content"')) {
+      try {
+        const shaped = shapeChunk(chunk, { budget, seen, spill, mark });
+        if (shaped !== null) chunk = shaped;
+      } catch {
+      }
+    }
+    return base.call(this, chunk, ...rest);
+  };
+  Object.assign(wrapped, current);
+  Object.defineProperty(wrapped, "mubitResultsGuardOriginal", {
+    value: base,
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
+  wrapped.mubitResultsGuard = { budget, seen: sessionId ? "session" : "off", repeat: repeatMode };
+  stream.write = wrapped;
+}
+function shapeChunk(chunk, ctx) {
+  const parts = chunk.split("\n");
+  let changed = false;
+  for (let i = 0; i < parts.length; i += 1) {
+    if (parts[i].trim() === "") continue;
+    let frame;
+    try {
+      frame = JSON.parse(parts[i]);
+    } catch {
+      continue;
+    }
+    if (toolText(frame) === null) continue;
+    let seen = null;
+    try {
+      seen = ctx.seen();
+    } catch {
+    }
+    const out = shapeToolResult(frame, { budget: ctx.budget, seen, spill: ctx.spill });
+    if (!out.changed) continue;
+    parts[i] = JSON.stringify(out.message);
+    changed = true;
+    const ids = [...out.shown, ...out.pointed];
+    if (ids.length) {
+      try {
+        ctx.mark(ids);
+      } catch {
+      }
+    }
+  }
+  return changed ? parts.join("\n") : null;
+}
+function spillWriter(cfg, runId) {
+  let n = 0;
+  return (text, shape) => {
+    try {
+      if (!safeSegment(runId)) return "";
+      const dir = join9(runDir(cfg, runId), SPILL_DIR);
+      mkdirSync3(dir, { recursive: true });
+      const ext = shape === "text" || shape === "error" ? "txt" : "json";
+      const p = join9(dir, `${Date.now()}-${safeSegment(shape) || "result"}-${n++}.${ext}`);
+      writeFileSync2(p, text, { encoding: "utf8", mode: 384 });
+      return p;
+    } catch {
+      return "";
+    }
+  };
+}
+function isItemList(v) {
+  return Array.isArray(v) && v.length > 0 && v.every((item) => isObject3(item) && typeof item.content === "string");
+}
+function isObject3(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function isScalar(v) {
+  return typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+}
+function str4(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+function cap(s) {
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+function firstString2(item, keys) {
+  for (const k of keys) {
+    const v = str4(item[k]);
+    if (v) return v;
+  }
+  return "";
+}
+function oneLine(v) {
+  return typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "";
+}
+function capField(v) {
+  const s = oneLine(String(v));
+  return s.length > MAX_FIELD_CHARS ? `${s.slice(0, MAX_FIELD_CHARS).trim()}\u2026` : s;
+}
+function positiveInt(v, d) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return d;
+  return Math.trunc(n);
+}
+function tryJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 // mcp/src/launch.mjs
 var DEFAULT_ALLOWLIST = [
   "mubit_learned",
   "mubit_recall",
   "mubit_outcome",
-  "mubit_reflect",
-  "mubit_lessons",
   "mubit_diagnose",
-  "mubit_archive",
   "mubit_dereference",
-  "mubit_forget",
   "mubit_status",
-  "mubit_strategies",
-  "mubit_checkpoint",
   "mubit_memory_health"
 ];
 var BRIDGED = [
@@ -2447,7 +2941,7 @@ var BRIDGED = [
   ["MUBIT_CC_DATA_DIR", "CLAUDE_PLUGIN_DATA"]
 ];
 var UNEXPANDED = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
-var SERVER_VERSION = true ? "0.12.6" : "";
+var SERVER_VERSION = true ? "0.13.1" : "";
 if (prepare(process.env)) {
   await import("./server.js");
 }
@@ -2478,6 +2972,14 @@ function prepare(env) {
   const ceiling = resolveCeiling(cfg.mcpLessonScope);
   installFetchGuard({ ceiling, runId, pinRun: true, cfg });
   installInstructionsGuard({ instructions: INSTRUCTIONS });
+  const sessionId = hostPayload(env).session_id ?? "";
+  installResultsGuard({
+    cfg,
+    runId,
+    sessionId,
+    repeatMode: cfg.recallRepeatMode,
+    budget: cfg.mcpResultTokenBudget
+  });
   log(cfg, "info", "mcp: starting server", {
     run_id: runId,
     endpoint: cfg.endpoint,
@@ -2485,7 +2987,10 @@ function prepare(env) {
     tools: tools.length,
     lesson_scope: ceiling,
     pin_run: true,
-    instruction_chars: INSTRUCTIONS.length
+    instruction_chars: INSTRUCTIONS.length,
+    result_tokens: cfg.mcpResultTokenBudget,
+    seen: sessionId ? "session" : "off",
+    repeat_mode: cfg.recallRepeatMode
   });
   return true;
 }

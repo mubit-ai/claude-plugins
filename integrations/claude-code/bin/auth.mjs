@@ -35,6 +35,11 @@ var MIN = 60 * SEC;
 var HOUR = 60 * MIN;
 var DAY = 24 * HOUR;
 var DATA_DIR_PREFIX = "mubit-memory";
+function dataDirFlag(v) {
+  const s = typeof v === "string" ? v.trim() : "";
+  if (!s || /^\$\{/.test(s)) return "";
+  return s;
+}
 function liveDataDir(home, env = {}) {
   const root = join(home, ".claude", "plugins", "data");
   try {
@@ -623,8 +628,8 @@ function warnOnDataDirSplit(env = {}, args = {}, logProgress = () => {
 }
 function resolveDataDirFrom(env = process.env, args = {}) {
   const e = env ?? {};
-  const flag = typeof args?.dataDir === "string" ? args.dataDir.trim() : "";
-  if (flag && !/^\$\{/.test(flag)) return flag;
+  const flag = dataDirFlag(args?.dataDir);
+  if (flag) return flag;
   if (e.MUBIT_CC_DATA_DIR) return e.MUBIT_CC_DATA_DIR;
   if (e.CLAUDE_PLUGIN_DATA) return e.CLAUDE_PLUGIN_DATA;
   return liveDataDir(e.HOME || safeHome(), e);

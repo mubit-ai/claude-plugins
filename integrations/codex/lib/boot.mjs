@@ -30,7 +30,7 @@
  * | -------------------- | ------------------------------------- | ----------------------- |
  * | `MUBIT_CC_HOST`      | the constant `codex`                  | declared, never sniffed — see below |
  * | `CLAUDE_PLUGIN_ROOT` | the nearest `.codex-plugin/plugin.json` above this file | Codex sets no plugin root of any spelling |
- * | `CLAUDE_PLUGIN_DATA` | whichever `~/.claude/plugins/data/mubit-memory*` this machine's Claude Code install uses | deliberately the **same** directory, suffix and all |
+ * | `CLAUDE_PLUGIN_DATA` | the directory `scripts/setup.mjs` pinned into `$CODEX_HOME/hooks.json`, else whichever `~/.claude/plugins/data/mubit-memory*` this machine's Claude Code install uses | deliberately the **same** directory, suffix and all |
  * | `CLAUDE_PROJECT_DIR` | the payload `cwd`, else `process.cwd()` | Codex runs a hook in the project directory |
  *
  * **The host is declared, not detected**, and that is a correctness decision rather than a
@@ -55,7 +55,7 @@
  * one to ask it a question would be the very ordering mistake the file exists to prevent.
  */
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -180,24 +180,29 @@ const DATA_DIR_PREFIX = 'mubit-memory';
  * ---------------------------------------------------------------------------
  * The preference order, and why each rung
  * ---------------------------------------------------------------------------
- *   1. **A directory holding `credentials.json`.** `/mubit-memory:auth` writes exactly one of
+ *   1. **What setup pinned into `$CODEX_HOME/hooks.json`.** `scripts/setup.mjs` resolves the
+ *      directory once, shows it, and writes it as `MUBIT_CC_DATA_DIR="…"` in front of every
+ *      hook command. That is the answer setup *recorded* rather than a guess, and it is the
+ *      directory the hooks are actually writing to — so it outranks any search.
+ *   2. **A directory holding `credentials.json`.** `/mubit-memory:auth` writes exactly one of
  *      these, into the install the user actually authenticated. It is the strongest available
  *      evidence of which install is live, and it is the one that makes the credentials the
  *      user already has work under Codex without copying anything.
- *   2. **The most recently modified.** Every hook touches its data directory, so recency is a
+ *   3. **The most recently modified.** Every hook touches its data directory, so recency is a
  *      good proxy for "in use" when nobody has authenticated yet.
- *   3. **The bare name**, created if absent. A machine with no Claude Code install at all is
+ *   4. **The bare name**, created if absent. A machine with no Claude Code install at all is
  *      the ordinary case for a Codex-only user, and it wants a directory rather than an error.
  *
- * A search is still a guess, so it is a fallback and not the mechanism.
- * `scripts/setup.mjs` resolves the same thing at install time and **pins** it as
- * `MUBIT_CC_DATA_DIR` in the registrations it writes, which outranks everything here — so on
- * a set-up install this function is never consulted at all.
+ * Rung 1 is what makes this answer agree with the hooks. A hook never consults it — the pin
+ * rides in its own command line, which is rung 0 of `dataDir()` — but a command-line bundle a
+ * skill runs from a plain shell has no such pin, and this is where it gets the same answer.
+ * Before the rung existed a shimmed bin fell through to the search, which could name a
+ * different store than the hooks of the very session it was run from.
  *
- * `liveDataDir()` in `integrations/claude-code/lib/state.mjs` is the same algorithm, copied
- * rather than shared. This module is loaded unbundled at runtime by `scripts/setup.mjs`, and
- * the codex package ships only its own `lib/`, so an import across integrations here would be
- * a dead path in the published plugin. Keep the two in step by hand.
+ * `liveDataDir()` in `integrations/claude-code/lib/state.mjs` is the same algorithm, rung for
+ * rung, copied rather than shared. This module is loaded unbundled at runtime by
+ * `scripts/setup.mjs`, and the codex package ships only its own `lib/`, so an import across
+ * integrations here would be a dead path in the published plugin. Keep the two in step by hand.
  *
  * @param {Record<string, string|undefined>} env
  * @returns {string}
@@ -205,6 +210,10 @@ const DATA_DIR_PREFIX = 'mubit-memory';
 export function claudeCodeDataDir(env = process.env) {
   const home = (typeof env?.HOME === 'string' && env.HOME) ? env.HOME : safeHome();
   if (!home) return '';
+
+  const pinned = pinnedDataDir(home, env);
+  if (pinned) return pinned;
+
   const root = join(home, ...CC_DATA_ROOT);
   const bare = join(root, DATA_DIR_PREFIX);
 
@@ -238,6 +247,27 @@ export function claudeCodeDataDir(env = process.env) {
     || (Number(a.bare) - Number(b.bare))
     || a.path.localeCompare(b.path));
   return pool[0].path;
+}
+
+/**
+ * Rung 1: the `MUBIT_CC_DATA_DIR="…"` pin `scripts/setup.mjs` wrote into `$CODEX_HOME/hooks.json`.
+ * The same regex as `scripts/login.mjs` and `liveDataDir()`: setup quotes the value with
+ * `JSON.stringify`, so it is read back out of the file's own JSON encoding.
+ * @param {string} home
+ * @param {Record<string, string|undefined>} env
+ * @returns {string} `''` when there is no registration to read
+ */
+function pinnedDataDir(home, env) {
+  try {
+    const codexHome = (typeof env?.CODEX_HOME === 'string' && env.CODEX_HOME)
+      ? env.CODEX_HOME
+      : join(home, '.codex');
+    const found = JSON.stringify(JSON.parse(readFileSync(join(codexHome, 'hooks.json'), 'utf8')))
+      .match(/MUBIT_CC_DATA_DIR=\\"([^\\"]+)\\"/);
+    return found?.[1] ?? '';
+  } catch {
+    return '';                         // no Codex registrations, or unreadable: search instead
+  }
 }
 
 /** Latest mtime of a directory or of the files a live install touches. */

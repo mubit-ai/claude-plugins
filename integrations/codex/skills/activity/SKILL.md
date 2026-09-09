@@ -1,6 +1,6 @@
 ---
 name: activity
-description: "Answer the audit question: list what this Mubit instance actually holds for a run, filter it by time, type, agent or origin, and export the whole record as JSONL. Use when the user asks what memory has stored about them, or for a copy of it they can keep — and only then. Read-only."
+description: List or export what this instance holds for a run; use when the user wants the audit record, not an answer.
 ---
 
 **This skill never installs anything, and it writes nothing anywhere unless asked.** It runs one

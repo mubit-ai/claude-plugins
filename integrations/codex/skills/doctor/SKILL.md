@@ -1,6 +1,6 @@
 ---
 name: doctor
-description: Diagnose Mubit connectivity, memory health, stuck ingest jobs, and hooks that were never trusted. Use when memory looks empty, when captures are not landing, or when the plugin appears installed but inert.
+description: Diagnose connectivity, memory health and stuck ingest; use when memory looks empty or the status line shows a failure.
 ---
 
 Work in this order and stop at the first thing that is broken. Each step costs more than the

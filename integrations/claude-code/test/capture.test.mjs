@@ -575,6 +575,113 @@ test('capture --stop: always spawns a drain with --with-outcome <prompt_id>', as
 });
 
 // ---------------------------------------------------------------------------
+// The ledger — the row that outlives the turn file
+// ---------------------------------------------------------------------------
+
+/** The rows in `runs/<RUN_ID>/ledger.jsonl`, parsed. */
+function ledgerRows(dataDir) {
+  const p = join(runDir(dataDir), 'ledger.jsonl');
+  if (!existsSync(p)) return [];
+  return readFileSync(p, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+}
+
+/**
+ * Turn files are pruned after six hours; the ledger is what the dashboard reads after that.
+ * One row per closed turn, appended as the last step of `--stop` inside its own `attempt()`,
+ * so a failure here costs the row and never the turn file or the drain.
+ */
+test('capture --stop: appends exactly one redacted ledger row, carrying the decision and never the reply', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  seedTurn(dataDir, {
+    prompt: `ship it with ${SECRETS.mubitKey} and ${SECRETS.githubToken}`,
+    recall: { at: Date.now() - 3000, rung: 1, sources: 1, tokens: 40, chars: 160, dropped: 0, empty_reason: '', terms: ['indexing', 'queued'] },
+    turn_number: 7,
+  });
+  const { env } = withSpy(staticEnv(dataDir, server, { MUBIT_CC_REDACT: '0' }));
+
+  const r = await runHook('capture', stop(), { env, args: ['--stop'] });
+  assertHookContract(r);
+
+  const rows = ledgerRows(dataDir);
+  assert.equal(rows.length, 1, `expected one ledger row, got ${rows.length}`);
+  const row = rows[0];
+  assert.equal(row.v, 1);
+  assert.equal(row.kind, 'turn');
+  assert.equal(row.run_id, RUN_ID);
+  assert.equal(row.prompt_id, PROMPT_ID);
+  assert.equal(row.session_id, SESSION_ID);
+  assert.equal(row.turn_number, 7);
+  assert.ok(row.started_at > 0 && row.ended_at >= row.started_at);
+  assert.deepEqual(row.recalled, ['ref_rule_1']);
+  assert.equal(row.recall.tokens, 40);
+  assert.equal(row.used, true, 'the reply carried "queued", which was staged');
+  assert.equal(row.outcome, 'success');
+  assert.equal(row.signal, 0.2);
+  assert.equal(row.api_error, '');
+
+  // Redacted under the ledger's own policy, with MUBIT_CC_REDACT=0 in force.
+  const text = readFileSync(join(runDir(dataDir), 'ledger.jsonl'), 'utf8');
+  assert.ok(!text.includes(SECRETS.mubitKey), 'the key reached the ledger');
+  assert.ok(!text.includes(SECRETS.githubToken), 'the token reached the ledger');
+  assert.match(row.prompt, /ship it with/);
+  assert.ok(row.prompt_redactions >= 2);
+  // §4.4: nothing from the reply is written down — not the text, not the staged terms.
+  assert.ok(!text.includes('The job stays queued until'), 'the reply reached the ledger');
+  assert.ok(!('terms' in row.recall));
+  assert.ok(!('used_evidence' in row));
+
+  // The turn file itself is untouched by the append.
+  const turn = readJsonFile(join(runDir(dataDir), 'turns', `${PROMPT_ID}.json`));
+  assert.equal(turn.outcome_pending, true);
+  assert.deepEqual(turn.recalled, ['ref_rule_1']);
+});
+
+test('capture --stop: a second Stop for the same prompt appends a second row rather than rewriting the first', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  seedTurn(dataDir);
+  const { env } = withSpy(staticEnv(dataDir, server));
+  await runHook('capture', stop(), { env, args: ['--stop'] });
+  await runHook('capture', stop(), { env, args: ['--stop'] });
+  const rows = ledgerRows(dataDir);
+  assert.equal(rows.length, 2, 'the ledger is append-only; the reader keeps the newest per prompt');
+  assert.equal(rows[0].prompt_id, PROMPT_ID);
+  assert.equal(rows[1].prompt_id, PROMPT_ID);
+});
+
+test('capture --stop-failure: appends a ledger row stamped with the API error and no outcome', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  seedTurn(dataDir, {
+    recall: { at: Date.now() - 3000, rung: 1, sources: 1, tokens: 40, chars: 160, dropped: 0, empty_reason: '', terms: ['indexing', 'queued'] },
+  });
+  const { env } = withSpy(staticEnv(dataDir, server));
+  await runHook('capture', stopFailure(), { env, args: ['--stop-failure'] });
+
+  const rows = ledgerRows(dataDir);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].api_error, 'rate_limit');
+  assert.equal(rows[0].outcome, 'none');
+  assert.equal(rows[0].signal, 0);
+  assert.equal(rows[0].used, null, 'a reply the API cut off is unmeasurable, not unused');
+  assert.deepEqual(rows[0].recalled, ['ref_rule_1']);
+});
+
+test('capture --subagent: writes no ledger row; the fan-out is joined from the subagent records', async (t) => {
+  const dataDir = makeDataDir();
+  const server = await mubit(t);
+  holdDrainLock(dataDir);
+  seedTurn(dataDir);
+  const { env } = withSpy(staticEnv(dataDir, server));
+  await runHook('capture', subagentStop(), { env, args: ['--subagent'] });
+  assert.deepEqual(ledgerRows(dataDir), []);
+});
+
+// ---------------------------------------------------------------------------
 // `--stop-failure` — the turn the API killed
 // ---------------------------------------------------------------------------
 

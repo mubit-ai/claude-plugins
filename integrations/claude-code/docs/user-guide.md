@@ -380,32 +380,52 @@ prefer letting outcome attribution down-weight it.
 ```
 
 Opens a page on `127.0.0.1` — a random port, a token minted for that launch, and nothing on
-your network can reach it. Three tabs:
+your network can reach it. Everything on it is anchored on one **directory**: the sidebar lists
+every project directory the plugin has seen, with its runs under it (the current one, the one
+before `/clear`, how many subagent runs), because one directory's memory is spread over
+several run ids and the page folds them back together. Five pages:
 
-- **Memory** — every lesson your instance holds, across **every run** unless you switch to
-  *This run*. Filter instantly, or press *Search instance* to ask it properly. There is a filter
-  for lessons **visible outside the run that wrote them**, which is the question nothing else
-  here answers: a rule saved at global scope follows you into every project, and one saved at
-  run scope dies with the session. `session` and `global` are separately selectable, and
-  *scope not recorded* is its own bucket rather than being folded into `run`.
-- **Turns** — one row per prompt: which rung recall used, how many memories it injected, what
-  they cost, and how many were repeats rendered as a one-line pointer. This is read from disk,
-  so it works with the network off.
-- **Analytics** — those numbers as a trend, plus spool depth, ingest counts and breaker state.
+- **Overview** — five tiles over the last 7, 14 or 30 days (turns, lessons injected, worked /
+  failed, lessons saved, recall cost per prompt), each against the previous equal window; one
+  chart with three tabs (turns per day by outcome, lessons injected, recall cost); the most
+  reinforced and most failed lessons.
+- **Turns** — one row per prompt across the directory's runs, grouped by session: time,
+  prompt, agents (`main` or `main + 3 sub`), lessons injected, tokens, whether the reply used
+  them, outcome. Open a turn to see every lesson it was given with that lesson's own worked /
+  failed record, to say **Worked** or **Did not work** — which credits all of them at full
+  weight, where the automatic signal is deliberately weak — and to see the lessons saved
+  during the turn and the subagents that ran under it. Read from disk (the turn files for six
+  hours, the per-turn ledger for thirty days), so it works with the network off.
+- **Lessons** — every lesson with how often it was injected here, how often it worked and
+  failed, its confidence and its last outcome. Three views over one load — *Written here*,
+  *+ shared* (session and global lessons other directories saved, which reach here at
+  recall), *Everything* — plus scope, project and origin filters, an instant text filter and
+  *Search instance*. Each row says who wrote it, which session and which prompt (`recorded`
+  when the write was stamped with them, *by time* when the page inferred them), and its
+  drawer is one provenance block with a *Show turn* link. Worked, Did not work and Delete
+  are on the row menu; deletion requires typing the id.
+- **Feed** — everything stored, newest first; a row resolves by id so a trace says which hook
+  and which tool.
+- **Health** — spool depth, breaker, ingest jobs and cold start.
 
-Four things it deliberately does not claim:
+Five things it deliberately does not claim:
 
+- **History starts at this build.** The per-turn ledger accrues from the first turn that ends
+  after the plugin was built with it and holds thirty days; the Overview says where its
+  history starts, and nothing earlier can be reconstructed.
+- **A blank worked or failed count is "nothing stamped", not zero.** The instance writes
+  counters on a lesson only once an outcome has named it.
 - **A lesson with no project tag is unattributed, not local.** The `repo:` tag is written by the
   capture hooks; a lesson you saved through `/mubit-memory:remember`, and every lesson reflection
-  writes, carries none. Those land in *No project tag*, which is a large bucket and is never
-  shown as belonging to the project you have open.
-- **No per-prompt latency.** The recall timing on the status marker is last-write-wins — it
-  describes the most recent prompt, not each one — so there is no honest per-prompt series to
-  plot and the page does not invent one.
-- **A blank in the `used` column means "could not be measured", not "was not used".** It is a
-  term-echo proxy, and its false negatives dominate.
-- **The Analytics trend starts empty.** Turn files are pruned six hours after they are written,
-  so the series is something the dashboard accumulates while it is open.
+  writes, carries none. Those land in *No project tag* and are never shown as belonging to the
+  project you have open.
+- **"Agent" means the tool path, not which agent.** A `mubit_learned` call from a subagent is
+  indistinguishable from the main agent's — they share one MCP process — so a lesson says
+  "agent" and only a subagent's own recall record says "subagent". A reflection lesson gets a
+  session by time but never a prompt.
+- **No per-prompt latency, and a blank `used` means "could not be measured".** The recall
+  timing on the status marker is last-write-wins, so there is no honest per-prompt series to
+  plot; the used signal is a term-echo proxy whose false negatives dominate.
 
 It shuts itself down after about half an hour of no traffic. To stop it sooner:
 

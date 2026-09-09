@@ -47,6 +47,7 @@ import { basename, dirname, join } from 'node:path';
 import { resolveActor } from '../../lib/actor.mjs';
 import { readBreaker } from '../../lib/breaker.mjs';
 import { loadConfig } from '../../lib/config.mjs';
+import { appendLedger } from '../../lib/ledger.mjs';
 import { postIngest, postOutcome } from '../../lib/http.mjs';
 import { log } from '../../lib/log.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
@@ -57,7 +58,7 @@ import {
   acquireDrainLock, batchIdempotencyKey, commitBatch, readBatch, releaseDrainLock, spoolStats,
 } from '../../lib/spool.mjs';
 import {
-  ensureDir, pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
+  ensureDir, pruneStale, readJson, resolveDataDir, runDir, safeSegment, writeJsonAtomic,
 } from '../../lib/state.mjs';
 
 /** §5.5: "Budget 10 s soft" — nothing waits on it, but it still bounds itself. */
@@ -617,6 +618,10 @@ async function sendOutcome(cfg, runId, agentId, promptId) {
       writeJsonAtomic(p, {
         ...turn, outcome_attempts: attempts + 1, outcome_pending: false, outcome_sent_at: Date.now(),
       });
+      // The durable record of the delivery. The turn file above is pruned in six hours; the
+      // ledger row is what the dashboard reads after that to say this turn's outcome reached
+      // the instance, and when.
+      appendLedger(resolveDataDir(cfg), runId, outcomeLedgerRow(runId, promptId, decision, attempts + 1));
     } else {
       // Left pending on purpose: the next drain re-posts it under the same key, up to the
       // attempt bound above.
@@ -627,6 +632,27 @@ async function sendOutcome(cfg, runId, agentId, promptId) {
   } catch (err) {
     log(cfg, 'warn', `drain: outcome skipped — ${messageOf(err)}`, { run_id: runId });
   }
+}
+
+/**
+ * The `kind: 'outcome'` ledger row for a post the instance accepted. Ids are counted, not
+ * listed: the turn row already carries `recalled[]`, and this row says what was credited.
+ *
+ * @param {string} runId @param {string} promptId
+ * @param {import('../../lib/outcome.mjs').OutcomeDecision} decision @param {number} attempts
+ */
+function outcomeLedgerRow(runId, promptId, decision, attempts) {
+  return {
+    v: 1,
+    kind: 'outcome',
+    at: Date.now(),
+    run_id: runId,
+    prompt_id: promptId,
+    outcome: String(decision.outcome ?? ''),
+    signal: numOr(decision.signal, 0),
+    entry_ids_n: Array.isArray(decision.entryIds) ? decision.entryIds.length : 0,
+    attempts,
+  };
 }
 
 // ---------------------------------------------------------------------------

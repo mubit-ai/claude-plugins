@@ -305,6 +305,10 @@ const TTL_ROWS = [
   // nobody has re-imported in a month costs more to remember than to re-read. Without this row
   // it would live forever, and there are 1,283 transcript files on one measured machine.
   { what: 'import cursor', rel: 'import/0a1b2c3d4e5f6071.json', ttl: 30 * DAY },
+  // The per-turn ledger `capture --stop` appends to. Thirty days after its last write, which
+  // is the window the dashboard's overview reads; the file is `.jsonl`, so the `.json` sweeps
+  // above never saw it and without this row it would live for ever.
+  { what: 'turn ledger', rel: 'runs/cc-x/ledger.jsonl', ttl: 30 * DAY },
 ];
 
 for (const row of TTL_ROWS) {
@@ -326,6 +330,19 @@ for (const row of TTL_ROWS) {
     assert.equal(existsSync(p), true, `${row.rel} was inside its ${row.ttl}ms TTL and must survive`);
   });
 }
+
+// The ledger is the record that outlives the turn files: a sweep that ages out every turn of
+// a run must leave a fresh ledger where it was, or the dashboard's history is only ever six
+// hours long again.
+test('pruneStale(): a fresh ledger survives the sweep that ages out the turn files beside it', async () => {
+  const state = await lib('state.mjs');
+  const dir = makeDataDir();
+  const turn = putAged(join(dir, 'runs/cc-x/turns', `${fx.PROMPT_ID}.json`), 7 * HOUR);
+  const ledger = putAged(join(dir, 'runs/cc-x/ledger.jsonl'), 7 * HOUR, '{"v":1,"kind":"turn"}\n');
+  inData(dir, () => state.pruneStale(mkCfg(dir)));
+  assert.equal(existsSync(turn), false, 'the turn file was past six hours');
+  assert.equal(existsSync(ledger), true, 'the ledger is on a thirty-day clock, not the turns\' six-hour one');
+});
 
 // §7: "Pruning runs at most hourly, gated by an O_EXCL marker at prune.lock."
 test('pruneStale(): claims an O_EXCL prune.lock', async () => {

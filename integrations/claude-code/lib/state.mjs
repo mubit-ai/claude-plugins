@@ -381,6 +381,12 @@ export function pruneStale(cfg = {}) {
       expire(join(rd, 'files.json'), 7 * DAY);
       // runs/<run_id>/drain.lock — 60 s, stolen after
       expire(join(rd, 'drain.lock'), 60 * SEC);
+      // runs/<run_id>/ledger.jsonl — 30 d after its last write. The per-turn ledger
+      // `capture --stop` appends to (`lib/ledger.mjs`): the record that is meant to outlive
+      // the six-hour turn files, and the window the dashboard's overview reads. It is
+      // `.jsonl`, so the `.json`-matched sweeps above never touched it; without this row it
+      // would live for ever. Row-level ageing inside the file is the ledger's own trim.
+      expire(join(rd, 'ledger.jsonl'), 30 * DAY);
       // runs/<run_id>/checkpoints.json — 30 d; jobs.json — 24 h
       expire(join(rd, 'checkpoints.json'), 30 * DAY);
       expire(join(rd, 'jobs.json'), 24 * HOUR);

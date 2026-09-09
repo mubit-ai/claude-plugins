@@ -22,8 +22,8 @@
  * same envelope — `{ok: true, data}` or `{ok: false, status, code, message}` — so a caller
  * can map one shape onto an HTTP response and the page can keep showing the local tabs.
  *
- * Four routes here have no named helper in `lib/http.mjs`'s `ROUTES` and are called through
- * the generic `request()`: activity, memory_health, archive and lessons/delete.
+ * Five routes here have no named helper in `lib/http.mjs`'s `ROUTES` and are called through
+ * the generic `request()`: activity, memory_health, archive, lessons/delete and dereference.
  */
 
 import { postLessons, postOutcome, postQuery, request } from './http.mjs';
@@ -53,6 +53,7 @@ export const EXTRA_ROUTES = Object.freeze({
   archive: '/v2/control/archive',
   deleteLesson: '/v2/control/lessons/delete',
   runs: '/v2/control/runs',
+  dereference: '/v2/control/dereference',
 });
 
 /**
@@ -199,6 +200,13 @@ export function normalizeLesson(raw, ctx = {}) {
     // the question the column exists to let a human answer.
     leaksScope: scope !== DEFAULT_SCOPE,
     fromOtherRun: !!(ctx.currentRun && sourceRun && sourceRun !== ctx.currentRun),
+    // This route carries no metadata, so the provenance keys are empty here and only here:
+    // the same keys, so a page reading either shape reads one shape.
+    ...provenanceOf(null),
+    ...countersOf(null),
+    timestamp: String(ctx.createdAt || ''),
+    origin: originOf(l.source, null, 'lesson'),
+    autoReflection: false,
   };
 }
 
@@ -271,6 +279,11 @@ export function normalizeActivityLesson(entry, ctx = {}) {
     promotionCandidate: meta.promotion_candidate ?? null,
     promotionQuarantined: meta.promotion_quarantined ?? null,
     promotionShadowStats: meta.promotion_shadow_stats ?? null,
+    ...provenanceOf(meta),
+    ...countersOf(meta),
+    timestamp: timestampOf(e, meta),
+    origin: originOf(e.source, meta, e.entry_type),
+    autoReflection: meta.auto_reflection === true,
   };
 }
 
@@ -278,6 +291,214 @@ export function normalizeActivityLesson(entry, ctx = {}) {
 const PROMOTION_KEYS = Object.freeze([
   'promotion_candidate', 'promotion_quarantined', 'promotion_shadow_stats',
 ]);
+
+// ---------------------------------------------------------------------------
+// Provenance — which session, which prompt, and who wrote it
+// ---------------------------------------------------------------------------
+
+/**
+ * The stamp the egress guard puts on every MCP write (`mcp/src/egress.mjs`), read back. A
+ * row without it reads as empty, never as guessed: the page has a time-window fallback of
+ * its own, and it says "by time" when it uses it.
+ *
+ * @param {Record<string, any>|null} meta
+ * @returns {{sessionId: string, promptId: string, turnNumber: number}}
+ */
+function provenanceOf(meta) {
+  const m = (meta && typeof meta === 'object') ? meta : {};
+  return {
+    sessionId: str(m.session_id),
+    promptId: str(m.prompt_id),
+    turnNumber: Math.max(0, Math.trunc(Number(m.turn_number) || 0)),
+  };
+}
+
+/** The four per-outcome counters `bump_outcome_counters` keeps. Any one present means the lesson has been credited. */
+const COUNTER_KEYS = Object.freeze(['success_count', 'failure_count', 'partial_count', 'neutral_count']);
+
+/**
+ * What the instance already knows about a lesson's track record, read off its metadata.
+ *
+ * Every accepted outcome runs `bump_outcome_counters` server-side, which stamps
+ * `success_count`, `reinforcement_count`, `confidence`, `last_outcome`, `last_outcome_at` and
+ * `last_outcome_actor` into the lesson's metadata — and `failure_count`, `partial_count` and
+ * `neutral_count` only once such an outcome has landed. Measured on a hosted instance: twenty
+ * of sixty-six lessons carried counters, none carried a failure count yet. The lessons route
+ * serialises none of this; the census (`projection: 'full'`) carries the metadata whole, so
+ * the counters ride the same path as scope and provenance.
+ *
+ * Absent counts are zero: a counter that was never bumped is a count of nothing, and a page
+ * summing them must not meet `undefined`. `confidence` and `validationScore` are `null` when
+ * absent rather than zero, because a confidence nobody computed is not a low one.
+ * `countersStamped` says whether any counter is present at all, so "0 worked" and "never
+ * credited" render as different facts.
+ *
+ * @param {Record<string, any>|null} meta
+ */
+function countersOf(meta) {
+  const m = (meta && typeof meta === 'object') ? meta : {};
+  return {
+    successCount: count(m.success_count),
+    failureCount: count(m.failure_count),
+    partialCount: count(m.partial_count),
+    neutralCount: count(m.neutral_count),
+    countersStamped: COUNTER_KEYS.some((k) => m[k] !== undefined && m[k] !== null),
+    reinforcementCount: count(m.reinforcement_count),
+    confidence: fraction(m.confidence),
+    lastOutcome: str(m.last_outcome),
+    lastOutcomeAt: isoOf(m.last_outcome_at),
+    lastOutcomeActor: str(m.last_outcome_actor),
+    validationStatus: str(m.validation_status),
+    validationScore: fraction(m.validation_score),
+    recurrenceCount: count(m.recurrence_count),
+    projectKey: str(m.project_key),
+  };
+}
+
+/** A non-negative integer, or 0. @param {any} v */
+function count(v) {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+}
+
+/** A finite number, or null when nothing was recorded. @param {any} v */
+function fraction(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Who wrote an entry, in the four words the page uses.
+ *
+ * `mcp-agent` and `agent` are the tool path — a `mubit_learned` call, which from inside the
+ * one MCP process is the same whether the main agent or a subagent made it, so the page says
+ * "agent" and no more. Reflection is the instance's own author; the automatic session-end
+ * form is told apart by its source prefix or by the flag the reflect path stamps. Everything
+ * the hooks capture is a hook capture.
+ *
+ * @param {any} source
+ * @param {Record<string, any>|null} meta
+ * @param {any} entryType
+ * @returns {'agent'|'auto-reflection'|'reflection'|'hook'|''}
+ */
+export function originOf(source, meta, entryType) {
+  const s = str(source);
+  const m = (meta && typeof meta === 'object') ? meta : {};
+  // The entry type outranks the source: the capture hooks stamp `source: 'agent'` on what
+  // they ingest, and a trace is a hook capture whatever its source says.
+  const t = str(entryType);
+  if (t === 'trace' || t === 'tool_output' || t === 'capture') return 'hook';
+  if (m.auto_reflection === true || /^auto[-_]?reflect/i.test(s)) return 'auto-reflection';
+  if (/^reflect/i.test(s)) return 'reflection';
+  if (s === 'agent' || s === 'mcp-agent') return 'agent';
+  if (/hook/i.test(s)) return 'hook';
+  return '';
+}
+
+/**
+ * When an entry was written, as ISO: the feed's `created_at` when it has one, else the
+ * metadata's own stamp. `mubit_learned` writes `timestamp` in epoch seconds and the instance
+ * adds `ingested_at`; either is better than an undated row.
+ *
+ * @param {Record<string, any>} e
+ * @param {Record<string, any>|null} meta
+ * @returns {string}
+ */
+function timestampOf(e, meta) {
+  const own = str(e && e.created_at);
+  if (own) return own;
+  const m = (meta && typeof meta === 'object') ? meta : {};
+  return isoOf(m.timestamp) || isoOf(m.ingested_at);
+}
+
+/** An epoch (seconds or ms) or an ISO string, as ISO; `''` for anything else. @param {any} v */
+function isoOf(v) {
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (!s) return '';
+    if (!/^\d+(\.\d+)?$/.test(s)) return s;
+    v = Number(s);
+  }
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return '';
+  const ms = v < 1e12 ? v * 1000 : v;
+  try { return new Date(ms).toISOString(); } catch { return ''; }
+}
+
+/**
+ * The `evidence` half of a `POST /v2/control/dereference` answer, normalised to the same
+ * keys a lesson row carries plus the ones only a hook capture has: which hook, which tool,
+ * which agent, and when the thing it records actually happened.
+ *
+ * Nothing is invented. A lesson has no `tool` and a trace has no scope; both read as empty
+ * or, for scope, as the instance's own default with `scopeKnown: false`.
+ *
+ * @param {any} raw
+ * @returns {Record<string, any>}
+ */
+export function normalizeEvidence(raw) {
+  const e = (raw && typeof raw === 'object') ? raw : {};
+  const meta = parseMetadata(e.metadata_json ?? e.metadata) || {};
+  const stated = str(meta.scope) || str(meta.lesson_scope);
+  const scope = stated || DEFAULT_SCOPE;
+  const conditions = meta.conditions || meta.lesson_conditions;
+  return {
+    id: lessonId(e),
+    entryType: str(e.entry_type) || str(meta.entry_type),
+    content: String(e.content || ''),
+    lessonType: String(meta.lesson_type || ''),
+    scope,
+    scopeKnown: stated !== '',
+    importance: String(meta.importance || meta.lesson_importance || e.importance || ''),
+    conditions: Array.isArray(conditions) ? conditions.map(String) : [],
+    rationale: String(meta.rationale || ''),
+    sourceRunId: String(meta.source_run_id || e.run_id || ''),
+    source: String(e.source || ''),
+    createdAt: String(e.created_at || ''),
+    runId: String(e.run_id || ''),
+    project: projectTag(meta.env_tags),
+    leaksScope: scope !== DEFAULT_SCOPE,
+    ...provenanceOf(meta),
+    ...countersOf(meta),
+    timestamp: timestampOf(e, meta),
+    origin: originOf(e.source, meta, e.entry_type),
+    autoReflection: meta.auto_reflection === true,
+    hookEvent: str(meta.hook_event),
+    tool: str(meta.tool),
+    agentType: str(meta.agent_type),
+    mubitAgentId: str(meta.mubit_agent_id),
+    occurrenceAt: str(meta.occurrence_time),
+  };
+}
+
+/**
+ * `POST /v2/control/dereference` — one entry by id, whatever its type.
+ *
+ * The body is exactly two fields. `user_id` and `agent_id` are accepted by the route and are
+ * retrieval filters server-side; sending either empty is the trap the ingest side already
+ * fell into once. `found: false` is the caller's 404, not a 200 with nothing in it.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {{run?: string, id?: string}} [params]
+ * @returns {Promise<Record<string, any>>}
+ */
+export async function fetchEntry(cfg, params = {}) {
+  const run = str(params.run);
+  const id = str(params.id);
+  if (!run) return fail(400, 'bad_request', 'entry lookup requires a run id');
+  if (!id) return fail(400, 'bad_request', 'entry lookup requires an id');
+
+  const res = await request(cfg, 'POST', EXTRA_ROUTES.dereference,
+    { run_id: run, reference_id: id }, READ_ONLY);
+  if (!res.ok) return mapError(cfg, res);
+
+  const body = (res.body && typeof res.body === 'object') ? res.body : {};
+  const evidence = body.evidence;
+  if (body.found === false || !evidence || typeof evidence !== 'object') {
+    return fail(404, 'not_found', `no entry with id ${scrubKey(cfg, id)} is on this instance`);
+  }
+  return ok({ entry: normalizeEvidence(evidence), found: true });
+}
 
 /**
  * The project a lesson belongs to, or nothing at all.
@@ -553,14 +774,31 @@ export async function runSearch(cfg, params = {}) {
 /**
  * `POST /v2/control/outcome`.
  *
+ * The route reads `outcome` (one of the four words below), `signal` in [-1, 1], `rationale`,
+ * `entry_ids` and `idempotency_key`. It has no `success` field. This function used to send one,
+ * and nothing else that named the outcome — so the server saw no outcome at all and answered
+ * every call with a 400, "outcome must be one of: success, failure, partial, neutral". The
+ * page's Worked / Did not work buttons were a 400 on every click, rendered as "failed" and
+ * never investigated, because a failed reinforcement looks exactly like a flaky instance.
+ *
+ * `success: bool` is kept as an *input* for the page's existing body and mapped here. `signal`
+ * defaults to ±1.0 — the vendored `mubit_outcome` default, and the strongest evidence the
+ * system accepts; the hooks' implicit 0.2 / -0.3 exist because a completed turn is not a
+ * verdict, and a person clicking a button is.
+ *
  * The `idempotency_key` is what makes the button safe to double-click: without one, two
  * clicks are two reinforcements and the confidence the page just showed becomes wrong because
- * the page showed it. `reference_id` must be non-empty — `"global"` is the documented value
- * for run-level attribution with no single primary lesson.
+ * the page showed it. The default key names the outcome, so Worked and Did not work on the
+ * same lesson are two records rather than one. `reference_id` must be non-empty —
+ * `"global"` is the documented value for run-level attribution with no single primary lesson.
+ *
+ * No `agent_id` is ever sent: the backend then records the authenticated user as the actor,
+ * which keeps a person's verdict distinguishable from a hook's inference.
  *
  * @param {Record<string, any>} cfg
- * @param {{run?: string, referenceId?: string, success?: boolean, entryIds?: string[],
- *          idempotencyKey?: string, notes?: string}} [params]
+ * @param {{run?: string, referenceId?: string, outcome?: string, success?: boolean,
+ *          signal?: number, rationale?: string, entryIds?: string[],
+ *          idempotencyKey?: string}} [params]
  * @returns {Promise<Record<string, any>>}
  */
 export async function sendOutcome(cfg, params = {}) {
@@ -572,16 +810,28 @@ export async function sendOutcome(cfg, params = {}) {
       'outcome requires a reference_id; pass "global" for run-level attribution');
   }
 
+  const outcome = str(params.outcome).toLowerCase()
+    || (params.success === false ? 'failure' : 'success');
+  if (!OUTCOME_WORDS.includes(outcome)) {
+    return fail(400, 'bad_request',
+      `outcome must be one of: ${OUTCOME_WORDS.join(', ')}; got "${outcome}"`);
+  }
+  const given = typeof params.signal === 'number' ? params.signal : Number(params.signal);
+  const signal = Number.isFinite(given)
+    ? Math.max(-1, Math.min(1, given))
+    : (outcome === 'failure' ? -1.0 : outcome === 'neutral' ? 0 : 1.0);
+
   const req = {
     run_id: run,
     reference_id: referenceId,
-    success: params.success !== false,
-    idempotency_key: str(params.idempotencyKey) || `dash-${run}-${referenceId}-${params.success !== false}`,
+    outcome,
+    signal,
+    idempotency_key: str(params.idempotencyKey) || `dash-${run}-${referenceId}-${outcome}`,
   };
+  if (str(params.rationale)) req.rationale = str(params.rationale);
   if (Array.isArray(params.entryIds) && params.entryIds.length) {
     req.entry_ids = params.entryIds.map(String);
   }
-  if (str(params.notes)) req.notes = str(params.notes);
 
   const res = await postOutcome(cfg, req, READ_ONLY);
   if (!res.ok) return mapError(cfg, res);
@@ -592,6 +842,9 @@ export async function sendOutcome(cfg, params = {}) {
     updatedConfidence: Number(body.updated_confidence) || 0,
   });
 }
+
+/** The four words `record_outcome` accepts; anything else is a 400 for the whole call. */
+const OUTCOME_WORDS = Object.freeze(['success', 'failure', 'partial', 'neutral']);
 
 /**
  * `POST /v2/control/archive`. `run_id`, `content` and `artifact_kind` are all required by the

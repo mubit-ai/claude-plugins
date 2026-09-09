@@ -5,7 +5,7 @@
  * Every other outbound call this plugin makes goes through `lib/http.mjs`, which checks the
  * run id (§4.3) and scrubs the body first (§7). The MCP server is the one exception: it is a
  * vendored bundle that dials the endpoint itself, so nothing in this repo ever saw the
- * request. Three things about an MCP call were therefore outside this plugin's control.
+ * request. Four things about an MCP call were therefore outside this plugin's control.
  *
  *   1. **Scope.** `mubit_learned` is the only lesson-writing tool a default install exposes,
  *      and the bundled SDK stamps a fixed `lesson_scope` on it regardless of the caller. The
@@ -24,6 +24,14 @@
  *      request that asks for every run the key can see rather than the one the model is
  *      working in. Filling the field is the whole of the fix; answering the question better
  *      is the rest of it.
+ *
+ *   4. **Provenance.** A lesson written through `mubit_learned` reached the instance saying
+ *      nothing about which session or which prompt produced it; its `metadata_json` was
+ *      `{verified_in_production}` or empty. The hooks know both — `stage-prompt` keeps the open
+ *      turn under `runs/<run>/turns/`, and the host puts `CLAUDE_CODE_SESSION_ID` in this
+ *      process's environment — so the guard joins the two at write time and stamps the item.
+ *      A stamp is neither a clamp nor a pin: it changes no scope, moves no run, and is never
+ *      reported back as a correction.
  *
  * **Why here and not where the constant is.** It lives inside a vendored bundle whose source
  * is not in this repo; hand-editing a build artefact would be discarded by the first real
@@ -45,8 +53,13 @@
  * see that it happened.
  */
 
+import { readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { lessonCensus } from '../../lib/activity.mjs';
 import { readMarker, updateMarker } from '../../lib/markers.mjs';
+import { loadSessionMap } from '../../lib/runid.mjs';
+import { readJson, runDir } from '../../lib/state.mjs';
 
 /**
  * The scope lattice, widest last. Every step up this list is a step out of the run that wrote
@@ -62,6 +75,26 @@ const CEILINGS = ['run', 'session', 'global'];
 
 /** The route a lesson leaves by. Matched on the pathname only; the host is the user's. */
 const INGEST_PATH = '/v2/control/ingest';
+
+/** The route an archived note leaves by. Its `metadata_json` sits on the body, not on an item. */
+const ARCHIVE_PATH = '/v2/control/archive';
+
+/**
+ * How long after a turn's `ended_at` a write is still attributed to it.
+ *
+ * A tool call runs inside its turn, so the open turn is normally the one with no `ended_at`
+ * at all. The grace covers the write that lands as the `Stop` hook is closing the file. Past
+ * it, the newest turn is simply the last one that happened, and attributing a write to it
+ * would put a wrong fact on the instance for ever — so only the session is stamped.
+ */
+const OPEN_TURN_GRACE_MS = 60_000;
+
+/**
+ * How many turn files are opened to find the live one. The open turn was written on the
+ * prompt that is still running, so it is among the newest by mtime; a six-hour directory of
+ * a busy session does not need to be parsed whole on every write.
+ */
+const TURN_FILES_TO_READ = 16;
 
 /**
  * The route a lesson catalogue is asked for by.
@@ -167,6 +200,7 @@ function rank(scope) {
  * @property {any} body     the body to send — the ORIGINAL reference when nothing moved
  * @property {boolean} changed
  * @property {any} note     the clamp note to attach to the response, or `null`
+ * @property {boolean} stamped  whether provenance was merged into `metadata_json`
  */
 
 /**
@@ -182,12 +216,17 @@ function rank(scope) {
  * `SDK_DEFAULT_SCOPE`), and that one resolves to the ceiling in either direction. Left
  * unset — as every caller but `installFetchGuard` leaves it — this is a pure clamp.
  *
+ * `stamp`, when given, is merged into every item's `metadata_json` by `stampProvenance` on
+ * the way out. It is reported as `stamped`, never as `changed`: `changed` means a correction
+ * the model should hear about, and a stamp corrects nothing.
+ *
  * @param {any} body
- * @param {{ceiling: string, runId?: string, pinRun?: boolean, sdkDefaultScope?: string}} opts
+ * @param {{ceiling: string, runId?: string, pinRun?: boolean, sdkDefaultScope?: string,
+ *          stamp?: Record<string, any>|null}} opts
  * @returns {GuardResult}
  */
 export function guardIngest(body, opts) {
-  const noop = { body, changed: false, note: null };
+  const noop = { body, changed: false, note: null, stamped: false };
   try {
     const ceiling = resolveCeiling(opts?.ceiling);
     const ceilingRank = rank(ceiling);
@@ -224,35 +263,203 @@ export function guardIngest(body, opts) {
 
     const priorRun = typeof body.run_id === 'string' ? body.run_id : '';
     const movesRun = pinRun && body.run_id !== runId;
-
-    if (!clamped.length && !movesRun) return noop;
+    const changed = clamped.length > 0 || movesRun;
 
     // --- only now is anything copied ---------------------------------------
-    const next = { ...body };
-    if (movesRun) next.run_id = runId;
-    if (clamped.length) {
-      next.items = items.slice();
-      for (const i of clamped) next.items[i] = { ...items[i], lesson_scope: ceiling };
+    let next = body;
+    /** @type {Record<string, any>|null} */
+    let note = null;
+    if (changed) {
+      next = { ...body };
+      if (movesRun) next.run_id = runId;
+      if (clamped.length) {
+        next.items = items.slice();
+        for (const i of clamped) next.items[i] = { ...items[i], lesson_scope: ceiling };
+      }
+      note = { ceiling };
+      if (clamped.length) {
+        note.lesson_scope = {
+          requested: requested.join(', '),
+          written: ceiling,
+          items: clamped.length,
+        };
+      }
+      if (movesRun) note.run_id = { requested: priorRun, written: runId };
+      note.raise_with = RAISE_WITH;
     }
 
-    /** @type {Record<string, any>} */
-    const note = { ceiling };
-    if (clamped.length) {
-      note.lesson_scope = {
-        requested: requested.join(', '),
-        written: ceiling,
-        items: clamped.length,
-      };
-    }
-    if (movesRun) note.run_id = { requested: priorRun, written: runId };
-    note.raise_with = RAISE_WITH;
-
-    return { body: next, changed: true, note };
+    const stamped = stampProvenance(next, opts?.stamp);
+    if (!changed && !stamped.stamped) return noop;
+    return { body: stamped.body, changed, note, stamped: stamped.stamped };
   } catch {
     // A body shaped in a way this function did not anticipate is not a reason to fail
     // somebody else's write.
     return noop;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Provenance
+// ---------------------------------------------------------------------------
+
+/**
+ * Merge a stamp into the `metadata_json` of every item a body carries — or, for a body with
+ * no `items`, into its own `metadata_json` (the archive route's shape).
+ *
+ * `metadata_json` is a **string** on the wire (`encodeJsonField`: `""` for nothing, else
+ * `JSON.stringify`), so it is parsed, spread and re-encoded. A key the caller already set is
+ * never overwritten: `verified_in_production` is the caller's claim, and a stamp is only ever
+ * additive. A string that does not parse is left exactly as it arrived — it is somebody
+ * else's field, and rewriting it would be this guard inventing a value.
+ *
+ * Pure and inert on anything it does not understand: an untouched body is returned by
+ * identity, so a caller can tell "nothing to do" from "rewritten to the same value".
+ *
+ * @param {any} body
+ * @param {Record<string, any>|null|undefined} stamp
+ * @param {{at?: 'items'|'body'}} [where]  `body` forces the top-level field even when absent
+ * @returns {{body: any, stamped: boolean}}
+ */
+export function stampProvenance(body, stamp, where = {}) {
+  const noop = { body, stamped: false };
+  try {
+    if (!isPlainObject(body) || !isPlainObject(stamp)) return noop;
+    /** @type {Record<string, any>} */
+    const add = {};
+    for (const [k, v] of Object.entries(stamp)) {
+      if (v !== undefined && v !== null && v !== '') add[k] = v;
+    }
+    if (!Object.keys(add).length) return noop;
+
+    if (Array.isArray(body.items) && where.at !== 'body') {
+      let any = false;
+      const items = body.items.map((item) => {
+        if (!isPlainObject(item)) return item;
+        const merged = mergeMetadata(item.metadata_json, add);
+        if (merged === null) return item;
+        any = true;
+        return { ...item, metadata_json: merged };
+      });
+      return any ? { body: { ...body, items }, stamped: true } : noop;
+    }
+
+    if (where.at !== 'body' && !('metadata_json' in body)) return noop;
+    const merged = mergeMetadata(body.metadata_json, add);
+    if (merged === null) return noop;
+    return { body: { ...body, metadata_json: merged }, stamped: true };
+  } catch {
+    return noop;
+  }
+}
+
+/**
+ * One `metadata_json` value with the stamp underneath it, in the encoding it arrived in.
+ * `null` means "leave this field alone".
+ *
+ * @param {any} raw
+ * @param {Record<string, any>} add
+ * @returns {string|Record<string, any>|null}
+ */
+function mergeMetadata(raw, add) {
+  if (raw === undefined || raw === null || raw === '') return JSON.stringify(add);
+  if (isPlainObject(raw)) return { ...add, ...raw };
+  if (typeof raw !== 'string') return null;
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return null; }
+  if (!isPlainObject(parsed)) return null;
+  return JSON.stringify({ ...add, ...parsed });
+}
+
+/**
+ * What this process can truthfully say about where a write came from, right now.
+ *
+ * The session id is the host's, handed over by the launcher. The prompt comes from the open
+ * turn of the **live** run: the pinned `runId` is the process-start one, and after a `/clear`
+ * the hooks write to `<run>-c<N>` while this process still says `<run>` — so the session
+ * record, which the hooks keep current, says where the turns are. Only a turn this session
+ * opened counts: two terminals in one directory share a run, and the other terminal's open
+ * prompt is not the one this write belongs to.
+ *
+ * Never throws, and never returns less than the session when there is one: a missing turns
+ * directory, a torn file or an unreadable session map costs the prompt fields, not the stamp.
+ *
+ * @param {Record<string, any>|undefined} cfg
+ * @param {string} runId
+ * @param {string} sessionId
+ * @param {number} [now]
+ * @returns {Record<string, any>|null}
+ */
+export function provenanceStamp(cfg, runId, sessionId, now = Date.now()) {
+  const sid = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!sid) return null;
+  /** @type {Record<string, any>} */
+  const stamp = { session_id: sid };
+  try {
+    const mapped = loadSessionMap(sid);
+    const mappedRun = mapped && typeof mapped.run_id === 'string' ? mapped.run_id.trim() : '';
+    const turn = openTurn(cfg ?? {}, mappedRun || runId, sid, now);
+    if (turn) {
+      stamp.prompt_id = turn.prompt_id;
+      if (turn.turn_number > 0) stamp.turn_number = turn.turn_number;
+      if (turn.started_at > 0) stamp.prompt_started_at = turn.started_at;
+    }
+  } catch {
+    // The session is still true without the prompt.
+  }
+  return stamp;
+}
+
+/**
+ * The turn this session has open in `runId`, or `null`.
+ *
+ * @param {Record<string, any>} cfg
+ * @param {string} runId
+ * @param {string} sessionId
+ * @param {number} now
+ * @returns {{prompt_id: string, turn_number: number, started_at: number}|null}
+ */
+function openTurn(cfg, runId, sessionId, now) {
+  const dir = join(runDir(cfg, runId), 'turns');
+  /** @type {string[]} */
+  let names;
+  try { names = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return null; }
+  if (names.length > TURN_FILES_TO_READ) {
+    names = names
+      .map((f) => ({ f, at: mtimeOf(join(dir, f)) }))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, TURN_FILES_TO_READ)
+      .map((e) => e.f);
+  }
+  /** @type {Record<string, any>|null} */
+  let best = null;
+  for (const f of names) {
+    const t = readJson(join(dir, f), null);
+    if (!isPlainObject(t)) continue;
+    if (String(t.session_id ?? '') !== sessionId) continue;
+    if (!best || num(t.started_at) > num(best.started_at)) best = t;
+  }
+  if (!best) return null;
+  const ended = num(best.ended_at);
+  if (ended > 0 && now - ended > OPEN_TURN_GRACE_MS) return null;
+  const promptId = typeof best.prompt_id === 'string' ? best.prompt_id.trim() : '';
+  if (!promptId) return null;
+  return { prompt_id: promptId, turn_number: num(best.turn_number), started_at: num(best.started_at) };
+}
+
+/** @param {string} p @returns {number} */
+function mtimeOf(p) {
+  try { return statSync(p).mtimeMs; } catch { return 0; }
+}
+
+/** @param {any} v @returns {number} */
+function num(v) {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** @param {any} v @returns {v is Record<string, any>} */
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
 }
 
 // ---------------------------------------------------------------------------
@@ -546,7 +753,12 @@ function countItems(body) {
  * forwarded. Without it the read path degrades to the pin alone — still narrow, just less
  * complete — which is what an install that could not resolve its configuration should get.
  *
- * @param {{ceiling: string, runId?: string, pinRun?: boolean, cfg?: Record<string, any>}} opts
+ * `sessionId` is the host session this process was started for. With one, every write is
+ * stamped with it and with the prompt this session has open at the moment of the write
+ * (`provenanceStamp`); without one there is nothing true to say, and nothing is said.
+ *
+ * @param {{ceiling: string, runId?: string, pinRun?: boolean, cfg?: Record<string, any>,
+ *          sessionId?: string}} opts
  * @returns {void}
  */
 export function installFetchGuard(opts) {
@@ -554,6 +766,9 @@ export function installFetchGuard(opts) {
   const runId = typeof opts?.runId === 'string' ? opts.runId : '';
   const pinRun = opts?.pinRun === true;
   const census = censusOnce(opts?.cfg);
+  const sessionId = typeof opts?.sessionId === 'string' ? opts.sessionId.trim() : '';
+  // Read at the moment of each write, not at install: the open turn changes every prompt.
+  const stampNow = () => (sessionId ? provenanceStamp(opts?.cfg, runId, sessionId) : null);
 
   const current = /** @type {any} */ (globalThis.fetch);
   if (typeof current !== 'function') return;
@@ -615,16 +830,23 @@ export function installFetchGuard(opts) {
         const parsed = parseBody(init);
         if (parsed.ok) {
           const out = guardIngest(parsed.value, {
-            ceiling, runId, pinRun, sdkDefaultScope: SDK_DEFAULT_SCOPE,
+            ceiling, runId, pinRun, sdkDefaultScope: SDK_DEFAULT_SCOPE, stamp: stampNow(),
           });
-          if (out.changed) {
-            sendInit = { ...init, body: JSON.stringify(out.body) };
-            note = out.note;
-          }
+          if (out.changed || out.stamped) sendInit = { ...init, body: JSON.stringify(out.body) };
+          // Only a correction is reported back; a stamp is not one.
+          if (out.changed) note = out.note;
           ingestedItems = countItems(out.body);
           // The run the write actually goes to, which is the pinned one under `pinRun` and
           // the caller's otherwise — the marker has to name the run the hooks will look in.
           ingestedRun = typeof out.body?.run_id === 'string' ? out.body.run_id : '';
+        }
+      } else if (isArchive(input, init)) {
+        // An archived note has a session and a prompt too. Its `metadata_json` is on the
+        // body rather than on an item, and nothing else about the request is touched.
+        const parsed = parseBody(init);
+        if (parsed.ok) {
+          const out = stampProvenance(parsed.value, stampNow(), { at: 'body' });
+          if (out.stamped) sendInit = { ...init, body: JSON.stringify(out.body) };
         }
       } else if (isLessonsRead(input, init)) {
         const plan = await planLessons(init);
@@ -651,7 +873,7 @@ export function installFetchGuard(opts) {
   });
   // The launch tests read this off `globalThis.fetch` from inside the stub server and
   // JSON-serialise it, so it stays plain data.
-  wrapped.mubitEgressGuard = { ceiling, pinRun, runId, census: census !== null };
+  wrapped.mubitEgressGuard = { ceiling, pinRun, runId, census: census !== null, stamp: sessionId !== '' };
 
   globalThis.fetch = /** @type {any} */ (wrapped);
 }
@@ -683,11 +905,25 @@ function jsonResponse(payload) {
  * @returns {boolean}
  */
 function isIngest(input, init) {
+  return isPostTo(input, init, INGEST_PATH);
+}
+
+/** The archive route, matched the same way. @param {any} input @param {any} init */
+function isArchive(input, init) {
+  return isPostTo(input, init, ARCHIVE_PATH);
+}
+
+/**
+ * A `POST` whose pathname ends with `path`, under every spelling of a trailing slash.
+ * @param {any} input @param {any} init @param {string} path
+ * @returns {boolean}
+ */
+function isPostTo(input, init, path) {
   if (String(init?.method ?? 'GET').toUpperCase() !== 'POST') return false;
   if (typeof input !== 'string' && !(input instanceof URL)) return false;
   try {
     const { pathname } = input instanceof URL ? input : new URL(input);
-    return pathname.replace(/\/+$/, '').endsWith(INGEST_PATH);
+    return pathname.replace(/\/+$/, '').endsWith(path);
   } catch {
     return false;
   }

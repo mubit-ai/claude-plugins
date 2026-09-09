@@ -25,7 +25,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -309,6 +309,18 @@ test('flushes a turn left outcome_pending, before reflecting', async (t) => {
   if (existsSync(turnPath)) {
     assert.ok(!readJsonFile(turnPath).outcome_pending, 'the pending flag must be cleared once flushed');
   }
+
+  // The flush records the delivered post in the ledger, the same row the drain writes, so
+  // a turn attributed at session end reads the same as one the drain reached in time.
+  const ledger = join(runDir(dataDir), 'ledger.jsonl');
+  assert.ok(existsSync(ledger), 'the flush appends an outcome row to the run ledger');
+  const rows = readFileSync(ledger, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const row = rows.find((r) => r.kind === 'outcome' && r.prompt_id === fx.PROMPT_ID);
+  assert.ok(row, `no outcome row in ${JSON.stringify(rows)}`);
+  assert.equal(row.run_id, RUN_ID);
+  assert.equal(row.outcome, 'success');
+  assert.equal(row.entry_ids_n, 2);
+  assert.equal(row.attempts, 1);
 });
 
 // ---------------------------------------------------------------------------

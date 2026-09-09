@@ -330,9 +330,10 @@ test('turns: outcomeState collapses the five outcome keys to one word', async (t
 test('turns: a turn carrying only the five required fields still produces a full row', async (t) => {
   const { mod } = await setup(t);
   const row = mod.turnRow(turnFixture());
-  for (const k of ['promptId', 'sessionId', 'startedAt', 'tok', 'chars', 'ptr', 'rung', 'recalledCount']) {
+  for (const k of ['promptId', 'sessionId', 'startedAt', 'tok', 'chars', 'ptr', 'rung', 'recalledCount', 'turnNumber']) {
     assert.ok(k in row, `turnRow must always emit ${k}`);
   }
+  assert.equal(mod.turnRow(turnFixture({ turn_number: 23 })).turnNumber, 23, 'the ordinal is what "turn 23" on the page reads');
   assert.equal(row.tok, 0, 'an absent recall block reads as zero cost, not as NaN');
   assert.equal(row.endedAt, 0, 'a turn still open has no ended_at, and that is normal');
 });
@@ -915,4 +916,484 @@ test('scope: describeRunScope has a distinct sentence for every value of each se
   assert.equal(empty.strategy, 'per-directory', 'the config default');
   assert.equal(empty.writesAt, 'session');
   assert.equal(empty.readsAcrossRuns, 'auto');
+});
+
+// ---------------------------------------------------------------------------
+// Families — one directory, several run ids
+// ---------------------------------------------------------------------------
+
+/**
+ * A directory's memory is spread over several run ids: `cc-<slug>-<hash8>` at first,
+ * `-c<N>` after each `/clear`, and `-sub-<id>` for every subagent. The activity feed spells
+ * the same id `state::<uid>::cc-…` on top of that. Nothing on the page could say "this
+ * directory" until the ids were folded back together, and this is the fold.
+ */
+const BASE_TABLE = [
+  ['cc-pre-main-af449e06', 'cc-pre-main-af449e06', 'a per-directory id is its own base'],
+  ['cc-pre-main-feat-x-af449e06', 'cc-pre-main-feat-x-af449e06', 'a git-branch id too'],
+  ['cc-pre-main-af449e06-c1', 'cc-pre-main-af449e06', 'one /clear'],
+  ['cc-pre-main-af449e06-c12', 'cc-pre-main-af449e06', 'twelve /clears'],
+  ['cc-pre-main-af449e06-sub-a06e2764eaae', 'cc-pre-main-af449e06', 'a subagent of the base'],
+  ['cc-pre-main-af449e06-c1-sub-abc123', 'cc-pre-main-af449e06', 'a subagent after a /clear'],
+  ['state::01234::cc-pre-main-af449e06-c1', 'cc-pre-main-af449e06', 'the activity feed spelling'],
+  ['my-pinned-run-c1', 'my-pinned-run-c1', 'a static id that happens to end in -c1 is left alone'],
+  ['my-pinned-run', 'my-pinned-run', 'a static id'],
+  ['11111111-2222-4333-8444-555555555555', '11111111-2222-4333-8444-555555555555', 'a per-conversation uuid'],
+  ['', '', 'nothing'],
+];
+
+test('families: baseRunId folds /clear and subagent suffixes and the feed prefix back to the directory key', async (t) => {
+  const { mod } = await setup(t);
+  for (const [id, base, why] of BASE_TABLE) {
+    assert.equal(mod.baseRunId(id), base, `${why}: baseRunId(${JSON.stringify(id)})`);
+  }
+  assert.equal(mod.plainRunId('state::01234::cc-a-00000001'), 'cc-a-00000001');
+  assert.equal(mod.plainRunId('cc-a-00000001'), 'cc-a-00000001');
+  assert.equal(mod.plainRunId(''), '');
+  assert.equal(mod.plainRunId(undefined), '');
+  assert.equal(mod.baseRunId(undefined), '');
+});
+
+/** One `runs/<run>/subagents/<sub>.json`, in the shape `subagent-start.mjs` writes it. */
+function writeSubagent(dataDir, runId, subId, patch = {}) {
+  const dir = join(dataDir, 'runs', runId, 'subagents');
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, `${runId}-sub-${subId}.json`);
+  writeFileSync(p, JSON.stringify({
+    sub_run_id: `${runId}-sub-${subId}`,
+    parent_run_id: runId,
+    agent_id: subId,
+    mubit_agent_id: `claude-code-sub-${subId}`,
+    agent_type: 'Explore',
+    session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    prompt_id: '11111111-2222-3333-4444-555555555555',
+    at: 1_700_000_010_000,
+    recall: { rung: 1, sources: 1, tokens: 504, chars: 2013, dropped: 0, pointers: 0, empty_reason: '', ms: 384 },
+    recalled: ['05c404d7-c1f4-4d91-95a1-e70c55c5d3ff'],
+    linked: false,
+    ...patch,
+  }));
+  return p;
+}
+
+test('subagents: readSubagents maps every record through a whitelist, sorted by time, and never throws', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-subs-00000001');
+  writeSubagent(dataDir, 'cc-subs-00000001', 'bbb', { at: 1_700_000_020_000, agent_type: 'Plan' });
+  writeSubagent(dataDir, 'cc-subs-00000001', 'aaa', { at: 1_700_000_010_000, secret_field: 'must not be served' });
+  writeFileSync(join(dataDir, 'runs', 'cc-subs-00000001', 'subagents', 'torn.json'), '{ "sub_run_id": ');
+  writeFileSync(join(dataDir, 'runs', 'cc-subs-00000001', 'subagents', 'list.json'), '[1]');
+
+  const rows = mod.readSubagents(dataDir, 'cc-subs-00000001');
+  assert.deepEqual(rows.map((r) => r.agentType), ['Explore', 'Plan'], 'oldest first');
+  const first = rows[0];
+  assert.equal(first.subRunId, 'cc-subs-00000001-sub-aaa');
+  assert.equal(first.parentRunId, 'cc-subs-00000001');
+  assert.equal(first.agentId, 'aaa');
+  assert.equal(first.mubitAgentId, 'claude-code-sub-aaa');
+  assert.equal(first.sessionId, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  assert.equal(first.promptId, '11111111-2222-3333-4444-555555555555');
+  assert.equal(first.at, 1_700_000_010_000);
+  assert.deepEqual(first.recall, { rung: 1, sources: 1, tokens: 504, chars: 2013, pointers: 0, ms: 384 });
+  assert.deepEqual(first.recalled, ['05c404d7-c1f4-4d91-95a1-e70c55c5d3ff']);
+  assert.equal(first.recalledCount, 1);
+  assert.ok(!JSON.stringify(rows).includes('must not be served'), 'unknown fields are dropped');
+  for (const k of Object.keys(first)) assert.ok(!k.includes('_'), `camel-cased for the page; found ${k}`);
+
+  assert.deepEqual(mod.readSubagents(dataDir, 'cc-none-00000002'), []);
+  assert.deepEqual(mod.readSubagents(dataDir, '../../etc'), []);
+  assert.deepEqual(mod.readSubagents(tempDir('mubit-cc-bare-'), 'cc-subs-00000001'), []);
+});
+
+// The subagents directory is outside the TTL table, so a long-lived run accumulates records
+// for ever. A reader bounded by the turns it is attaching to must not open all of them.
+test('subagents: a since bound skips records older than the window', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-old-00000001');
+  const old = writeSubagent(dataDir, 'cc-old-00000001', 'old', { at: 1_600_000_000_000 });
+  const { utimesSync } = await import('node:fs');
+  utimesSync(old, new Date(1_600_000_000_000), new Date(1_600_000_000_000));
+  writeSubagent(dataDir, 'cc-old-00000001', 'new', { at: Date.now() });
+
+  const rows = mod.readSubagents(dataDir, 'cc-old-00000001', { since: Date.now() - 3_600_000 });
+  assert.deepEqual(rows.map((r) => r.agentId), ['new']);
+  assert.equal(mod.readSubagents(dataDir, 'cc-old-00000001').length, 2, 'without a bound, every record');
+});
+
+test('families: familyOf unions the runs sharing a base with the runs whose sessions share the directory', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-fam-00000001', { updated_at: 1000 });
+  writeMarker(dataDir, 'cc-fam-00000001-c1', { updated_at: 3000 });
+  writeMarker(dataDir, 'cc-fam-00000001-sub-abc', { updated_at: 2000 });
+  writeMarker(dataDir, 'pinned-run', { updated_at: 2500 });
+  writeMarker(dataDir, 'cc-other-00000002', { updated_at: 4000 });
+  writeSession(dataDir, 'aaaaaaaa-0000-4000-8000-00000000000a', { run_id: 'cc-fam-00000001-c1', last_seen_at: 3000 });
+  writeSession(dataDir, 'aaaaaaaa-0000-4000-8000-00000000000b', { run_id: 'pinned-run', last_seen_at: 2500 });
+  writeSession(dataDir, 'aaaaaaaa-0000-4000-8000-00000000000c', {
+    run_id: 'cc-other-00000002', last_seen_at: 4000, project_dir: '/home/user/other', project_root: '/home/user/other',
+  });
+
+  const fam = mod.familyOf(dataDir, 'cc-fam-00000001');
+  assert.equal(fam.base, 'cc-fam-00000001');
+  assert.equal(fam.projectRoot, '/home/user/proj');
+  assert.deepEqual(fam.runIds, ['cc-fam-00000001-c1', 'pinned-run', 'cc-fam-00000001-sub-abc', 'cc-fam-00000001'],
+    'newest first; the pinned run joins through its session\'s project root; the other directory does not');
+
+  // Asked by any member, the same family.
+  assert.deepEqual(mod.familyOf(dataDir, 'cc-fam-00000001-c1').runIds, fam.runIds);
+  assert.deepEqual(mod.familyOf(dataDir, 'pinned-run').runIds, fam.runIds);
+
+  // A run with no marker and no session is still a family of one, never a throw.
+  const lone = mod.familyOf(dataDir, 'cc-lone-00000009');
+  assert.deepEqual(lone.runIds, ['cc-lone-00000009']);
+  assert.equal(lone.projectRoot, '');
+  assert.deepEqual(mod.familyOf(dataDir, '').runIds, []);
+  assert.deepEqual(mod.familyOf(dataDir, '../../etc').runIds, []);
+});
+
+test('families: run rows carry baseRunId, clearIndex and subagentCount', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-row-00000001-c2');
+  writeSubagent(dataDir, 'cc-row-00000001-c2', 'aaa');
+  writeSubagent(dataDir, 'cc-row-00000001-c2', 'bbb');
+  writeMarker(dataDir, 'cc-row-00000001');
+
+  const rows = mod.runsIn(dataDir, { sessions: true });
+  const cleared = rows.find((r) => r.runId === 'cc-row-00000001-c2');
+  assert.equal(cleared.baseRunId, 'cc-row-00000001');
+  assert.equal(cleared.clearIndex, 2);
+  assert.equal(cleared.subagentCount, 2);
+  const base = rows.find((r) => r.runId === 'cc-row-00000001');
+  assert.equal(base.baseRunId, 'cc-row-00000001');
+  assert.equal(base.clearIndex, 0);
+  assert.equal(base.subagentCount, 0);
+});
+
+test('turns: a family turn row says which run it came from, and which subagents ran under it', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-ft-00000001', { updated_at: 1000 });
+  writeMarker(dataDir, 'cc-ft-00000001-c1', { updated_at: 2000 });
+  writeTurn(dataDir, 'cc-ft-00000001', turnFixture({ started_at: 1_700_000_000_000 }));
+  writeTurn(dataDir, 'cc-ft-00000001-c1', turnFixture({
+    prompt_id: '22222222-2222-3333-4444-555555555555', started_at: 1_700_000_100_000,
+  }));
+  writeSubagent(dataDir, 'cc-ft-00000001-c1', 'aaa', { prompt_id: '22222222-2222-3333-4444-555555555555', at: 1_700_000_100_500 });
+  writeSubagent(dataDir, 'cc-ft-00000001-c1', 'bbb', { prompt_id: '22222222-2222-3333-4444-555555555555', at: 1_700_000_100_600, agent_type: 'Plan' });
+
+  const rows = mod.turnRows(dataDir, 'cc-ft-00000001', { family: true });
+  assert.deepEqual(rows.map((r) => r.runId), ['cc-ft-00000001-c1', 'cc-ft-00000001'], 'newest first across the family');
+  assert.equal(rows[0].subagentCount, 2);
+  assert.deepEqual(rows[0].subagentTypes, ['Explore', 'Plan']);
+  assert.equal(rows[1].subagentCount, 0);
+  assert.deepEqual(rows[1].subagentTypes, []);
+
+  // Without the flag, one run — and the row still says which.
+  const one = mod.turnRows(dataDir, 'cc-ft-00000001');
+  assert.deepEqual(one.map((r) => r.runId), ['cc-ft-00000001']);
+
+  const detail = mod.turnDetail(dataDir, 'cc-ft-00000001-c1', '22222222-2222-3333-4444-555555555555');
+  assert.equal(detail.runId, 'cc-ft-00000001-c1');
+  assert.deepEqual(detail.subagents.map((s) => s.agentType), ['Explore', 'Plan']);
+  assert.equal(detail.subagents[0].recalledCount, 1);
+  const other = mod.turnDetail(dataDir, 'cc-ft-00000001', turnFixture().prompt_id);
+  assert.deepEqual(other.subagents, [], 'a subagent is attached to its own prompt only');
+});
+
+test('analytics: the family form concatenates every run\'s rollup by time', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-fa-00000001', { updated_at: 1000 });
+  writeMarker(dataDir, 'cc-fa-00000001-c1', { updated_at: 2000 });
+  mkdirSync(join(dataDir, 'dashboard'), { recursive: true });
+  writeFileSync(mod.rollupPath(dataDir, 'cc-fa-00000001'),
+    [{ at: 100, tok: 10, sources: 1 }, { at: 300, tok: 30, sources: 1 }].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  writeFileSync(mod.rollupPath(dataDir, 'cc-fa-00000001-c1'),
+    [{ at: 200, tok: 20, sources: 1 }].map((r) => JSON.stringify(r)).join('\n') + '\n');
+
+  const a = mod.analytics(dataDir, 'cc-fa-00000001', { family: true });
+  assert.deepEqual(a.series.map((r) => r.at), [100, 200, 300]);
+  assert.equal(a.points, 3);
+  assert.equal(a.averages.tok, 20);
+  assert.deepEqual(a.runIds, ['cc-fa-00000001-c1', 'cc-fa-00000001']);
+  assert.equal(mod.analytics(dataDir, 'cc-fa-00000001').points, 2, 'without the flag, one run');
+});
+
+// ===========================================================================
+// The ledger behind the live turns
+// ===========================================================================
+
+import { writeLedger } from './helpers/dashboard-fixtures.mjs';
+
+const RUN_L = 'cc-ledg-00000001';
+const P1 = '11111111-2222-3333-4444-555555555555';
+const P2 = '22222222-2222-3333-4444-555555555555';
+const P3 = '33333333-2222-3333-4444-555555555555';
+const P4 = '44444444-2222-3333-4444-555555555555';
+
+/** A ledger `turn` row built the way `capture --stop` builds it. */
+async function ledgerRow(turn, runId = RUN_L, at) {
+  const L = await lib('ledger.mjs');
+  return L.turnLedgerRow(turn, runId, at ?? (num(turn.ended_at) || num(turn.started_at) || 1));
+}
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+
+/**
+ * The join rule. Turn files are the record while a turn is in flight and for six hours after;
+ * the ledger is the copy that outlives them. Both can exist for one prompt, and when they do
+ * the live file is the fresher of the two — it is the one the drain is still updating.
+ */
+test('turns: a ledger row and a live turn file for the same prompt are one row, and the live one wins', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, RUN_L);
+  writeLedger(dataDir, RUN_L, [
+    await ledgerRow(turnFixture({ recall: { tokens: 10 }, ended_at: 1_700_000_005_000 })),
+    await ledgerRow(turnFixture({
+      prompt_id: P2, prompt: 'the older one, gone from disk',
+      started_at: 1_699_999_000_000, ended_at: 1_699_999_010_000,
+      recalled: ['ref_a', 'ref_b'], recall: { tokens: 44, sources: 2, rung: 1 },
+      used_evidence: { used: true, matched: 1, candidates: 2 },
+    })),
+  ]);
+  writeTurn(dataDir, RUN_L, turnFixture({ recall: { tokens: 120 } }));
+
+  const rows = mod.turnRows(dataDir, RUN_L);
+  assert.deepEqual(rows.map((r) => [r.promptId, r.source, r.tok]), [[P1, 'live', 120], [P2, 'ledger', 44]]);
+
+  const old = rows[1];
+  assert.equal(old.outcome, 'success');
+  assert.equal(old.signal, 0.2);
+  assert.deepEqual(old.recalled, ['ref_a', 'ref_b']);
+  assert.equal(old.recalledCount, 2);
+  assert.equal(old.used.used, true);
+  assert.equal(old.used.measured, true);
+  assert.equal(old.promptPreview, 'the older one, gone from disk');
+  assert.equal(old.turnMs, 10_000);
+  assert.equal(old.runId, RUN_L);
+  assert.equal(old.verdict, '');
+  assert.equal(old.outcomeSentAt, 0);
+
+  // A ledger-sourced row has every key a live row has, so the page reads one shape.
+  assert.deepEqual(Object.keys(old).sort(), Object.keys(rows[0]).sort());
+  assert.equal(rows[0].source, 'live');
+  assert.equal(rows[0].outcome, 'none', 'nothing was injected into the live turn');
+  assert.equal(rows[0].verdict, '');
+});
+
+test('turns: ledger and live rows sort newest first together, and since and limit bound the window', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, RUN_L);
+  writeLedger(dataDir, RUN_L, [
+    await ledgerRow(turnFixture({ prompt_id: P1, started_at: 1000, ended_at: 1500 })),
+    await ledgerRow(turnFixture({ prompt_id: P3, started_at: 3000, ended_at: 3500 })),
+  ]);
+  writeTurn(dataDir, RUN_L, turnFixture({ prompt_id: P2, started_at: 2000 }));
+  writeTurn(dataDir, RUN_L, turnFixture({ prompt_id: P4, started_at: 4000 }));
+
+  const all = mod.turnRows(dataDir, RUN_L);
+  assert.deepEqual(all.map((r) => r.startedAt), [4000, 3000, 2000, 1000]);
+  assert.deepEqual(mod.turnRows(dataDir, RUN_L, { since: 2500 }).map((r) => r.startedAt), [4000, 3000]);
+  assert.deepEqual(mod.turnRows(dataDir, RUN_L, { limit: 3 }).map((r) => r.startedAt), [4000, 3000, 2000]);
+  assert.deepEqual(mod.turnRows(dataDir, RUN_L, { limit: 1000 }).length, 4, 'the page may ask for up to a thousand');
+});
+
+test('turns: a verdict overlays its row, the newest per prompt wins, and outcome stays the automatic signal', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, RUN_L);
+  writeTurn(dataDir, RUN_L, turnFixture({
+    recalled: ['ref_a'], ended_at: 1_700_000_005_000,
+    used_evidence: { used: true, matched: 1, candidates: 1 },
+  }));
+  assert.equal(mod.appendVerdict(dataDir, RUN_L, { at: 1, run: RUN_L, prompt: P1, verdict: 'worked', entryIds: 1 }), true);
+  assert.equal(mod.appendVerdict(dataDir, RUN_L, { at: 2, run: RUN_L, prompt: P1, verdict: 'failed', entryIds: 1 }), true);
+
+  const [row] = mod.turnRows(dataDir, RUN_L);
+  assert.equal(row.verdict, 'failed');
+  assert.equal(row.verdictAt, 2);
+  assert.equal(row.outcome, 'success', 'the automatic signal is reported as it was; the page folds the verdict');
+  assert.deepEqual(mod.readVerdicts(dataDir, RUN_L).map((v) => v.verdict), ['worked', 'failed']);
+
+  const detail = mod.turnDetail(dataDir, RUN_L, P1);
+  assert.equal(detail.verdict, 'failed');
+  assert.equal(detail.source, 'live');
+  assert.equal(detail.outcome, 'success');
+});
+
+test('turns: a delivered-outcome row folds outcomeSentAt onto a ledger-only turn', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, RUN_L);
+  writeLedger(dataDir, RUN_L, [
+    await ledgerRow(turnFixture({ prompt_id: P2, recalled: ['ref_a'], started_at: 1000, ended_at: 1500 })),
+    { v: 1, kind: 'outcome', at: 1900, run_id: RUN_L, prompt_id: P2, outcome: 'success', signal: 0.2, entry_ids_n: 1, attempts: 1 },
+  ]);
+  const [row] = mod.turnRows(dataDir, RUN_L);
+  assert.equal(row.source, 'ledger');
+  assert.equal(row.outcomeSentAt, 1900);
+  assert.equal(row.outcomeState, 'sent');
+  assert.equal(row.outcome, 'success');
+
+  // A ledger-only turn with nothing delivered does not claim to know.
+  writeLedger(dataDir, RUN_L, [await ledgerRow(turnFixture({ prompt_id: P3, recalled: ['ref_a'], started_at: 2000, ended_at: 2500 }))]);
+  const [pending] = mod.turnRows(dataDir, RUN_L);
+  assert.equal(pending.outcomeSentAt, 0);
+  assert.equal(pending.outcomeState, '', 'unknown, not "pending" and not "sent"');
+});
+
+test('turns: turnDetail falls back to the ledger row once the turn file is gone', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, RUN_L);
+  writeLedger(dataDir, RUN_L, [await ledgerRow(turnFixture({
+    prompt_id: P2, prompt: `deploy with ${SECRETS.mubitKey}`, recalled: ['ref_a'],
+    started_at: 1_700_000_000_000, ended_at: 1_700_000_005_000,
+    recall: { tokens: 44, sources: 1, rung: 1, chars: 100, pointers: 0, dropped: 0, terms: ['deploy'] },
+    used_evidence: { used: false, matched: 0, candidates: 1 },
+  }))]);
+  const sdir = join(dataDir, 'runs', RUN_L, 'subagents');
+  mkdirSync(sdir, { recursive: true });
+  writeFileSync(join(sdir, `${RUN_L}-sub-x.json`), JSON.stringify({
+    sub_run_id: `${RUN_L}-sub-x`, parent_run_id: RUN_L, agent_id: 'x', agent_type: 'Explore',
+    prompt_id: P2, at: 1_700_000_001_000, recall: { tokens: 5 }, recalled: [],
+  }));
+
+  const d = mod.turnDetail(dataDir, RUN_L, P2);
+  assert.ok(d, 'the ledger row answers');
+  assert.equal(d.source, 'ledger');
+  assert.equal(d.promptId, P2);
+  assert.ok(!d.prompt.includes(SECRETS.mubitKey));
+  assert.match(d.prompt, /deploy with/);
+  assert.deepEqual(d.recalled, ['ref_a']);
+  assert.equal(d.recall.tokens, 44);
+  assert.equal(d.recall.terms, null, 'the staged terms were never written to the ledger');
+  assert.equal(d.usedEvidence, null);
+  assert.equal(d.used.used, false);
+  assert.equal(d.outcome, 'neutral');
+  assert.equal(d.outcomePending, false);
+  assert.equal(d.subagents.length, 1, 'the fan-out is joined from the subagent records, which are never pruned');
+  assert.equal(mod.turnDetail(dataDir, RUN_L, P3), null, 'a prompt on neither is still null');
+});
+
+test('families: a run whose marker has expired is still a member when its ledger is on disk', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, 'cc-fam-00000001', { updated_at: 1000 });
+  writeLedger(dataDir, 'cc-fam-00000001-c1', [
+    await ledgerRow(turnFixture({ prompt_id: P2, started_at: 5000, ended_at: 5500 }), 'cc-fam-00000001-c1'),
+  ]);
+  const fam = mod.familyOf(dataDir, 'cc-fam-00000001');
+  assert.ok(fam.runIds.includes('cc-fam-00000001-c1'), `the ledger-only run joins: ${JSON.stringify(fam.runIds)}`);
+  const rows = mod.turnRows(dataDir, 'cc-fam-00000001', { family: true });
+  assert.deepEqual(rows.map((r) => [r.promptId, r.runId, r.source]), [[P2, 'cc-fam-00000001-c1', 'ledger']]);
+  // A stray directory under runs/ that holds no ledger is not a run.
+  mkdirSync(join(dataDir, 'runs', 'cc-fam-00000001-c2'), { recursive: true });
+  assert.ok(!mod.familyOf(dataDir, 'cc-fam-00000001').runIds.includes('cc-fam-00000001-c2'));
+});
+
+test('injectionIndex: counts injections per id across ledger and live, deduped by prompt, with verdicts folded', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, RUN_L);
+  writeLedger(dataDir, RUN_L, [
+    await ledgerRow(turnFixture({ prompt_id: P1, started_at: 1000, ended_at: 1500, recalled: ['ref_a', 'ref_b'], used_evidence: { used: true, matched: 1, candidates: 2 } })),
+    await ledgerRow(turnFixture({ prompt_id: P2, started_at: 2000, ended_at: 2500, recalled: ['ref_a'], used_evidence: { used: true, matched: 1, candidates: 1 } })),
+  ]);
+  // The live file for P2 says the reply echoed nothing: it wins over the ledger row.
+  writeTurn(dataDir, RUN_L, turnFixture({ prompt_id: P2, started_at: 2000, ended_at: 2500, recalled: ['ref_a'], used_evidence: { used: false, matched: 0, candidates: 1 } }));
+  writeTurn(dataDir, RUN_L, turnFixture({ prompt_id: P3, started_at: 3000, ended_at: 3500, recalled: ['ref_b', 'ref_b'], used_evidence: { used: true, matched: 1, candidates: 1 } }));
+  mod.appendVerdict(dataDir, RUN_L, { at: 4000, run: RUN_L, prompt: P3, verdict: 'failed', entryIds: 1 });
+
+  const index = mod.injectionIndex(dataDir, RUN_L);
+  const a = index.get('ref_a');
+  assert.deepEqual(a, {
+    injectedCount: 2, usedInTurns: 1, lastInjectedAt: 2000,
+    outcomes: { success: 1, failure: 0, neutral: 1, none: 0 }, verdicts: { worked: 0, failed: 0 },
+  });
+  const b = index.get('ref_b');
+  assert.deepEqual(b, {
+    injectedCount: 2, usedInTurns: 2, lastInjectedAt: 3000,
+    outcomes: { success: 1, failure: 1, neutral: 0, none: 0 }, verdicts: { worked: 0, failed: 1 },
+  }, 'a repeated id inside one turn counts once; the verdict makes P3 a failure');
+  assert.equal(index.size, 2);
+  assert.equal(mod.injectionIndex(dataDir, 'cc-nothing-00000001').size, 0);
+});
+
+test('overview: an empty directory yields zeros rather than NaN, with one series entry per day', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  const o = mod.overview(dataDir, 'cc-empty-00000001', { days: 7 });
+  assert.equal(o.days, 7);
+  assert.equal(o.series.length, 7);
+  assert.equal(o.kpi.turns, 0);
+  assert.equal(o.firstLedgerAt, 0);
+  assert.deepEqual(o.topInjected, []);
+  assert.deepEqual(o.kpi.outcomes, { success: 0, failure: 0, neutral: 0, none: 0 });
+  assert.deepEqual(o.kpi.verdicts, { worked: 0, failed: 0 });
+  assert.ok(!JSON.stringify(o).includes('NaN'));
+  for (const day of o.series) assert.match(day.day, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(mod.overview(dataDir, 'cc-empty-00000001', { days: 900 }).days, 30, 'thirty days is the ceiling');
+});
+
+/** `YYYY-MM-DD` by the local calendar, the same key the page's day headers use. */
+function ymd(ms) {
+  const d = new Date(ms);
+  const p = (n) => (n < 10 ? '0' : '') + n;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+test('overview: counts the window by local calendar day, folds verdicts into the outcome, and reports the previous window', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, RUN_L);
+  const now = new Date(2026, 8, 9, 15, 0, 0).getTime();
+  const DAY = 24 * 3600e3;
+  const today = new Date(2026, 8, 9, 10, 0, 0).getTime();
+  const yesterday = new Date(2026, 8, 8, 23, 30, 0).getTime();
+  const lastWeek = new Date(2026, 8, 4, 12, 0, 0).getTime();
+  writeLedger(dataDir, RUN_L, [
+    await ledgerRow(turnFixture({ prompt_id: P1, started_at: today, ended_at: today + 5000, recalled: ['ref_a'], recall: { tokens: 100, chars: 400, sources: 1 }, used_evidence: { used: true, matched: 1, candidates: 1 } })),
+    await ledgerRow(turnFixture({ prompt_id: P2, started_at: yesterday, ended_at: yesterday + 5000, recalled: [], api_error: 'rate_limit' })),
+    await ledgerRow(turnFixture({ prompt_id: P3, started_at: lastWeek, ended_at: lastWeek + 5000, recalled: ['ref_a'], recall: { tokens: 50 } })),
+  ]);
+  mod.appendVerdict(dataDir, RUN_L, { at: now - 1000, run: RUN_L, prompt: P1, verdict: 'failed', entryIds: 1 });
+
+  const o = mod.overview(dataDir, RUN_L, { days: 3, now });
+  assert.equal(o.series.length, 3);
+  assert.deepEqual(o.series.map((d) => d.day), [ymd(now - 2 * DAY), ymd(now - DAY), ymd(now)]);
+  const [twoAgo, yday, tday] = o.series;
+  assert.equal(tday.turns, 1);
+  assert.deepEqual(tday.outcomes, { success: 0, failure: 1, neutral: 0, none: 0 }, 'the verdict wins over the automatic success');
+  assert.deepEqual(tday.verdicts, { worked: 0, failed: 1 });
+  assert.equal(tday.injected, 1);
+  assert.equal(tday.tokens, 100);
+  assert.equal(yday.turns, 1);
+  assert.deepEqual(yday.outcomes, { success: 0, failure: 0, neutral: 0, none: 1 });
+  assert.equal(yday.apiErrors, 1);
+  assert.equal(twoAgo.turns, 0);
+
+  assert.equal(o.kpi.turns, 2);
+  assert.equal(o.kpi.injectedTurns, 1);
+  assert.equal(o.kpi.injectedRefs, 1);
+  assert.equal(o.kpi.tokens, 100);
+  assert.equal(o.kpi.usedYes, 1);
+  assert.equal(o.kpi.usedUnmeasured, 1);
+  assert.equal(o.kpi.apiErrors, 1);
+  assert.deepEqual(o.kpi.outcomes, { success: 0, failure: 1, neutral: 0, none: 1 });
+  assert.deepEqual(o.kpi.verdicts, { worked: 0, failed: 1 });
+
+  assert.equal(o.previous.turns, 1, 'the three days before the window hold the last-week turn');
+  assert.equal(o.previous.tokens, 50);
+  assert.deepEqual(o.previous.outcomes, { success: 1, failure: 0, neutral: 0, none: 0 });
+
+  assert.deepEqual(o.topInjected.map((x) => [x.id, x.injectedCount]), [['ref_a', 1]], 'ranked over the window, not the previous one');
+  assert.ok(o.firstLedgerAt > 0 && o.firstLedgerAt <= lastWeek + 5000);
+  assert.deepEqual(o.runIds, [RUN_L]);
+  assert.equal(o.windowStart, new Date(2026, 8, 7).getTime(), 'local midnight, days-1 back');
+});
+
+test('verdicts: the only path written is under <dataDir>/dashboard/, and a ../ run id cannot escape', async (t) => {
+  const { dataDir, mod } = await setup(t);
+  writeMarker(dataDir, RUN_L);
+  const before = snapshot(dataDir);
+  assert.equal(mod.appendVerdict(dataDir, RUN_L, { at: 1, run: RUN_L, prompt: P1, verdict: 'worked' }), true);
+  const added = snapshot(dataDir).filter((p) => !before.includes(p));
+  assert.deepEqual(added, [join('dashboard', `verdicts-${RUN_L}.jsonl`)]);
+
+  const p = mod.verdictsPath(dataDir, '../../../../tmp/escape');
+  assert.equal(dirname(p), join(dataDir, 'dashboard'));
+  assert.ok(!basename(p).includes('/'));
+  assert.equal(mod.appendVerdict(dataDir, RUN_L, null), false);
+  assert.deepEqual(mod.readVerdicts(dataDir, 'cc-none-00000001'), []);
 });

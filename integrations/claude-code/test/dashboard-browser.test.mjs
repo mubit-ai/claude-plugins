@@ -22,6 +22,7 @@ import {
 const P1 = '11111111-2222-3333-4444-555555555555';
 const P2 = '22222222-2222-3333-4444-555555555555';
 const P3 = '33333333-2222-3333-4444-555555555555';
+const P4 = '44444444-2222-3333-4444-555555555555';
 
 /**
  * Three closed turns in one session, all today: one that injected a memory and echoed it, one
@@ -252,6 +253,26 @@ browserTest('browser: Enter opens a turn from the keyboard, the drawer traps foc
   await page.waitFor("document.querySelector('#drawer').hidden");
   assert.equal(await page.eval("document.activeElement.getAttribute('data-focus-id')"), `turn:${P3}`, 'focus returns to the row that opened it');
   assert.ok(!String(await page.eval('location.hash')).includes('turn='), 'the drawer left the hash too');
+  assert.deepEqual(page.errors(), []);
+});
+
+browserTest('browser: a turn that lands under a focused row keeps the keyboard on that row', async (t, page) => {
+  const { dataDir, launchUrl } = await serve(t);
+  await page.goto(launchUrl('#/turns'));
+  await page.waitFor(`${ROWS}.length === 3`);
+  await page.eval(`${ROWS}[1].focus()`);
+  assert.equal(await page.eval("document.activeElement.getAttribute('data-focus-id')"), `turn:${P2}`);
+  const now = Date.now();
+  writeTurn(dataDir, RUN, {
+    prompt: 'one more', prompt_id: P4, session_id: SESSION, turn_number: 4,
+    started_at: now - 10_000, ended_at: now - 5_000, recalled: [],
+    recall: { tokens: 0, chars: 0, sources: 0, pointers: 0, rung: 1, empty_reason: 'no_match' },
+  });
+  await page.waitFor(`${ROWS}.length === 4`, { label: 'the poll picked up the fourth turn' });
+  assert.equal(await page.eval("document.activeElement.getAttribute('data-focus-id')"), `turn:${P2}`, 'the rebuild handed focus back to the same row');
+  await page.press('Enter');
+  await page.waitFor("!document.querySelector('#drawer').hidden");
+  assert.equal(await page.eval("document.querySelector('#drawer-body').textContent.includes('ship it')"), true, 'and Enter opened that row');
   assert.deepEqual(page.errors(), []);
 });
 

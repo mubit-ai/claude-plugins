@@ -2669,6 +2669,7 @@ details.scope p { margin: var(--space-1) 0 0; }
 
   function renderRanked(table, rows, word) {
     const body = table.querySelector('tbody');
+    const keep = focusedRowId(body);
     clear(body);
     if (!rows.length) {
       const tr = el('tr');
@@ -2703,6 +2704,7 @@ details.scope p { margin: var(--space-1) 0 0; }
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
       body.appendChild(tr);
     });
+    restoreRowFocus(body, keep);
   }
 
   function setWindow(days) {
@@ -2800,6 +2802,21 @@ details.scope p { margin: var(--space-1) 0 0; }
     return tr;
   }
 
+  // A poll can rebuild a table under the keyboard: the row that had focus is detached, and the
+  // next Enter goes nowhere. Remember the row by id before the rebuild and hand focus back after.
+  function focusedRowId(body) {
+    const active = document.activeElement;
+    if (!active || !body.contains(active)) return '';
+    const row = active.closest('[data-focus-id]');
+    return row ? row.getAttribute('data-focus-id') : '';
+  }
+
+  function restoreRowFocus(body, id) {
+    if (!id) return;
+    const row = body.querySelector('[data-focus-id="' + cssEscape(id) + '"]');
+    if (row) row.focus();
+  }
+
   // -------------------------------------------------------------------------
   // Turns
   // -------------------------------------------------------------------------
@@ -2846,6 +2863,7 @@ details.scope p { margin: var(--space-1) 0 0; }
     $('nav-turns-n').textContent = state.turns.length ? String(state.turns.length) : '';
 
     const body = $('turn-rows');
+    const keep = focusedRowId(body);
     clear(body);
     if (!rows.length) {
       const f = state.turnFilters;
@@ -2877,6 +2895,7 @@ details.scope p { margin: var(--space-1) 0 0; }
       g.rows.forEach((t) => body.appendChild(turnRow(t, fam, open === t.promptId)));
     });
     applyColumns(table, state.turnCols);
+    restoreRowFocus(body, keep);
   }
 
   function turnRow(t, fam, current) {
@@ -3228,6 +3247,7 @@ details.scope p { margin: var(--space-1) 0 0; }
 
     const rows = sortLessons(filteredLessons(), state.lessonSort.key, state.lessonSort.dir);
     const body = $('lesson-rows');
+    const keep = focusedRowId(body);
     clear(body);
     const open = state.drawer && state.drawer.kind === 'lesson' ? state.drawer.id : '';
 
@@ -3242,6 +3262,7 @@ details.scope p { margin: var(--space-1) 0 0; }
     }
     rows.forEach((l) => body.appendChild(lessonRow(l, open === l.id)));
     applyColumns(table, state.lessonCols);
+    restoreRowFocus(body, keep);
 
     $('lesson-footer').textContent = countLine({
       error: state.lessonsError, loaded: state.loaded, shown: rows.length, total: currentLessons().length,
@@ -3539,6 +3560,7 @@ details.scope p { margin: var(--space-1) 0 0; }
 
   function renderFeed() {
     const body = $('feed-rows');
+    const keep = focusedRowId(body);
     clear(body);
     const rows = state.activity;
     $('feed-note').textContent = state.activityError
@@ -3558,6 +3580,7 @@ details.scope p { margin: var(--space-1) 0 0; }
       body.appendChild(tr);
       g.rows.forEach((e) => body.appendChild(feedRow(e, open === String(e.id))));
     });
+    restoreRowFocus(body, keep);
   }
 
   function feedRow(e, current) {

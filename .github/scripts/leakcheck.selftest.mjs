@@ -26,7 +26,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, cpSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, cpSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -159,6 +159,15 @@ const CASES = [
     quiet: ['dev-machine-path', 'personal-data', 'credential-material'],
   },
   {
+    // A symlink is published as a blob holding its target, and it is named after whatever it
+    // stands in for — so it carries no extension, and the content pass, which decides
+    // text-ness by extension, walked straight past it. One shipped to two public
+    // repositories pointing at a developer worktree, and both gates stayed green.
+    path: 'a/node_modules',
+    link: '/Users/somebody/Work/checkout/node_modules',
+    expect: ['dev-machine-path'],
+  },
+  {
     path: 'docs/manual-test-something.md',
     body: '# a runbook\n',
     expect: ['internal-runbook'],
@@ -262,7 +271,8 @@ try {
 
   for (const c of CASES) {
     mkdirSync(join(root, dirname(c.path)), { recursive: true });
-    writeFileSync(join(root, c.path), c.body);
+    if (c.link) symlinkSync(c.link, join(root, c.path));
+    else writeFileSync(join(root, c.path), c.body);
   }
   git('add', '-A');
 

@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href=".claude-plugin/marketplace.json"><img alt="Version 0.13.1" src="https://img.shields.io/badge/version-0.13.1-1f6feb"></a>
+  <a href=".claude-plugin/marketplace.json"><img alt="Version 0.13.2" src="https://img.shields.io/badge/version-0.13.2-1f6feb"></a>
   <a href="LICENSE"><img alt="Licence Apache-2.0" src="https://img.shields.io/badge/licence-Apache--2.0-3fb950"></a>
   <a href="https://nodejs.org"><img alt="Requires Node 20 or newer" src="https://img.shields.io/badge/node-%E2%89%A5%2020-6e7681"></a>
   <a href="https://docs.mubit.ai"><img alt="Runs on Claude Code and the Codex CLI" src="https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Codex%20CLI-8957e5"></a>

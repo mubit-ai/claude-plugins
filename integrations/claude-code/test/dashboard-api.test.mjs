@@ -1008,7 +1008,7 @@ test('lessons: the outcome counters are read off the census, absent counts are z
   assert.equal(stamped.reinforcementCount, 5);
   assert.equal(stamped.confidence, 0.83);
   assert.equal(stamped.lastOutcome, 'success');
-  assert.equal(stamped.lastOutcomeAt, '2025-08-24T02:26:40.000Z', 'epoch seconds become ISO');
+  assert.equal(stamped.lastOutcomeAt, '2025-08-24T01:46:40.000Z', 'epoch seconds become ISO');
   assert.equal(stamped.lastOutcomeActor, 'user:u_1');
   assert.equal(stamped.validationStatus, 'validated');
   assert.equal(stamped.validationScore, 0.7);

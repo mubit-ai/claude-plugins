@@ -30,7 +30,7 @@ no `CLAUDE_*` — because that is what a skill-run command gets. They never impo
 
 ```bash
 cd ../claude-code && npm test    # 1959
-cd ../codex       && npm test    # 434
+cd ../codex       && npm test    # 436
 ```
 
 ## The load-bearing trick

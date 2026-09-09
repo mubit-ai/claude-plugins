@@ -456,7 +456,7 @@ safe to attach to an issue.
 ## Development
 
 ```bash
-npm test                                    # 434 gates
+npm test                                    # 436 gates
 MUBIT_CC_TEST_TARGET=dist npm test          # the same, against the committed bundles
 npm run build                               # rebuild hooks/dist, bin/, mcp/dist
 node ../claude-code/scripts/verify-manifests.mjs

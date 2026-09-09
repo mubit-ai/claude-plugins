@@ -42,13 +42,15 @@ Requires Codex CLI **0.146.0 or newer** and Node **20 or newer**. There is no bu
 
 ### Add the marketplace and the plugin
 
-From a local checkout of the repository (the loop you want while changing the plugin itself),
-or from the Git source:
+From the Git source, which is what you want unless you are changing the plugin itself:
 
 ```bash
-codex plugin marketplace add ~/src/claude-plugins
+codex plugin marketplace add mubit-ai/plugins
 codex plugin add mubit-memory@mubit
 ```
+
+`--ref <tag>` pins a release rather than tracking `main`. To work against a local checkout,
+pass its path instead: `codex plugin marketplace add ~/src/claude-plugins`.
 
 The marketplace is named `mubit` by the repository's own `.agents/plugins/marketplace.json`,
 which points at `integrations/codex/`. The plugin lands under

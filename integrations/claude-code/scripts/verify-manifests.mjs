@@ -416,8 +416,8 @@ if (existsSync(P.readme)) {
     'README.md must state that `per-conversation` splits hook captures from MCP-tool writes, and that '
     + '`per-directory` — the default — does not');
 
-  ok(has('/plugin marketplace add mubit-ai/claude-plugins', '/plugin install mubit-memory@mubit'),
-    'README.md must give both install commands verbatim: `/plugin marketplace add mubit-ai/claude-plugins` then '
+  ok(has('/plugin marketplace add mubit-ai/plugins', '/plugin install mubit-memory@mubit'),
+    'README.md must give both install commands verbatim: `/plugin marketplace add mubit-ai/plugins` then '
     + '`/plugin install mubit-memory@mubit` (§13 "Done when")');
 
   for (const key of Object.keys(plugin?.userConfig ?? {})) {

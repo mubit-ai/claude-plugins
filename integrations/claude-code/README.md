@@ -21,7 +21,7 @@ it is in fact fine. Start a new session, then look again.
 ## Install
 
 ```
-/plugin marketplace add mubit-ai/claude-plugins
+/plugin marketplace add mubit-ai/plugins
 /plugin install mubit-memory@mubit
 /reload-plugins
 ```

@@ -1,456 +1,300 @@
-# Mubit Memory — Quickstart
+<h1 align="center">Mubit Memory</h1>
 
-Persistent memory for **Claude Code** and the **Codex CLI**. It captures your work
-automatically, injects the relevant past lessons before each prompt, and learns which
-memories actually helped.
+<p align="center">
+  Persistent memory for <strong>Claude Code</strong> and the <strong>Codex CLI</strong> — it records your
+  work as you do it, puts the lessons that matter in front of the model before every prompt,
+  and learns which ones actually helped.
+</p>
 
-It is one plugin built twice. A Codex session and a Claude Code session started in the
-**same directory are one Mubit run, sharing one memory** — that is the point, not a
-side effect.
+<p align="center">
+  <a href="https://docs.mubit.ai/integrations/claude-code">Documentation</a> ·
+  <a href="https://console.mubit.ai">Console</a> ·
+  <a href="integrations/claude-code/README.md">Claude&nbsp;Code guide</a> ·
+  <a href="integrations/codex/README.md">Codex guide</a> ·
+  <a href="#what-leaves-your-machine">Privacy</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
 
-**Requirements:** Node >= 20, and Codex CLI >= 0.146.0 if you use that side. No build step,
-no `npm install` — the bundles ship committed.
-
-| Plugin | Version | Built for |
-| --- | --- | --- |
-| [`mubit-memory`](integrations/claude-code/) | 0.13.1 | [Claude Code](integrations/claude-code/) · [Codex CLI](integrations/codex/) |
-
-You need two values before you start:
-
-| Value | Example |
-| --- | --- |
-| endpoint | `https://api.mubit.ai` — your Mubit instance URL |
-| API key | `mbt_...` — issued in the [Mubit console](https://console.mubit.ai) |
+<p align="center">
+  <a href=".claude-plugin/marketplace.json"><img alt="Version 0.13.1" src="https://img.shields.io/badge/version-0.13.1-1f6feb"></a>
+  <a href="LICENSE"><img alt="Licence Apache-2.0" src="https://img.shields.io/badge/licence-Apache--2.0-3fb950"></a>
+  <a href="https://nodejs.org"><img alt="Requires Node 20 or newer" src="https://img.shields.io/badge/node-%E2%89%A5%2020-6e7681"></a>
+  <a href="https://docs.mubit.ai"><img alt="Runs on Claude Code and the Codex CLI" src="https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Codex%20CLI-8957e5"></a>
+</p>
 
 ---
 
-## Part 1 — Claude Code
+An agent that forgets everything at `/clear` makes you the memory. You re-explain the same
+constraint, and it repeats the same mistake in a new file. Mubit Memory closes that loop
+without you managing it: nothing to write down, no notes file to curate, no tool the model has
+to remember to call.
 
-### Install
+```text
+● mubit: cc-acme-api-… · hosted · recall 4/380 tok · lessons 5g
 
+> the auth integration tests are failing again
+
+  <mubit-memory run="cc-acme-api-…" sources="2" tokens="180">
+
+  ### Active Rules
+  - [block] Integration tests run against a real Postgres, never a mock.
+    (why: a mocked suite went green while the production migration was broken)
+
+  ### Lessons Learned
+  - `make test-auth` needs SEED=1, or the fixture user is missing and every
+    assertion fails on a null session.
 ```
+
+You typed one line. The rule and the lesson were retrieved and injected before the model read
+it — no tool call, no extra model call, and 180 tokens of context.
+
+**Contents** — [Why](#why-mubit-memory) · [Quick start](#quick-start) · [What it does](#what-it-does) ·
+[Commands](#commands) · [Privacy](#what-leaves-your-machine) · [Configuration](#configuration) ·
+[Troubleshooting](#when-something-looks-wrong) · [Auditing it](#verifying-what-you-are-about-to-run)
+
+## Why Mubit Memory
+
+- **You never invoke it.** Memory arrives before your prompt does. There is no "search your
+  memory first" instruction to write, and no tool the model can forget to call.
+- **It captures involuntarily.** Every tool call, failure and turn is recorded as it happens,
+  including other MCP servers' output. Failures are the ones that produce the best lessons.
+- **It gets better with use.** Each turn is scored against the memories that were injected for
+  it, so what helped ranks higher next time and what did not stops appearing.
+- **One memory across two CLIs.** A Codex session and a Claude Code session in the same
+  directory are one run sharing one memory. That is the design, not a side effect.
+- **Secrets never leave the machine.** A three-stage scrub runs before anything reaches even
+  the local spool, and a `.env` is dropped whole rather than redacted.
+- **It cannot break your session.** Every hook exits 0 on every path. A dead endpoint costs
+  you a memory, never a turn.
+- **Your endpoint, your data.** Point it at the instance you were issued. There is no
+  telemetry channel and no second destination.
+
+## Quick start
+
+You need two values, both from the [Mubit console](https://console.mubit.ai): an **endpoint**
+like `https://api.mubit.ai`, and an **API key** that starts with `mbt_`.
+
+Requirements: **Node 20 or newer**. There is no build step and no `npm install` — the bundles
+ship committed.
+
+### Claude Code
+
+```text
 /plugin marketplace add mubit-ai/plugins
 /plugin install mubit-memory@mubit
 /reload-plugins
 ```
 
-Then **start a new Claude Code session.**
+Then set your credentials in `/plugin` → **Mubit Memory** → **configure**, and **start a new
+session**. `/reload-plugins` registers the hooks but does not fire `SessionStart`, so until a
+new session begins the plugin has never actually run. It looks broken; it is fine.
 
-`/reload-plugins` registers the hooks but does not fire `SessionStart`, so until a new
-session begins the plugin has never actually run — no run id, nothing on the status line.
-It looks broken and it is fine.
+You are done when a new session opens with `Mubit memory is active` and a run id.
 
-### Connect it — enter your API key directly
+<details>
+<summary><strong>Codex CLI</strong> — three commands and a setup step that is not optional</summary>
 
-Set the endpoint and key yourself, one of three ways.
-
-**A. Plugin settings — recommended.** `/plugin` → **Mubit Memory** → **configure**, then fill
-in `endpoint` and `apiKey`. The key field is marked sensitive, so it goes into your OS keychain
-rather than any file. Best home for a long-lived install, and it takes precedence over
-everything else.
-
-**B. Environment variables — good for CI, containers, SSH.**
-
-```bash
-export MUBIT_ENDPOINT='https://api.mubit.ai'
-export MUBIT_API_KEY='mbt_...'
-```
-
-Set these in your shell profile (or CI secrets) before starting Claude Code.
-
-**C. Per-project file.** `${CLAUDE_PROJECT_DIR}/.mubit-cc.json`:
-
-```json
-{
-  "endpoint": "https://api.mubit.ai",
-  "apiKey": "mbt_..."
-}
-```
-
-Lowest precedence of the three. Do not commit it — the key is a secret.
-
-**Precedence, highest first:** plugin settings → `MUBIT_*` env vars → a stored
-`credentials.json` → `.mubit-cc.json` → defaults.
-
----
-
-## Part 2 — Codex CLI
-
-### Install
-
-Same shape as Claude Code — the marketplace is fetched straight from GitHub, no clone:
+Requires **Codex CLI 0.146.0 or newer**, which is where Git marketplace sources landed.
 
 ```bash
 codex plugin marketplace add mubit-ai/plugins
 codex plugin add mubit-memory@mubit
-```
 
-Requires Codex CLI >= 0.146.0, which is where Git marketplace sources landed. Pin a ref with
-`--ref <tag>` if you want a specific release rather than `main`.
-
-### Then run setup — this step is not optional
-
-```bash
+# Register the hooks and the MCP server into your Codex config, then sign in.
 PLUGIN=$(ls -d ~/.codex/plugins/cache/mubit/mubit-memory/*/ | tail -1)
 node "$PLUGIN/scripts/setup.mjs" "$PLUGIN"
-```
-
-(`codex plugin add` printed that path as `Installed plugin root:` — the glob just saves you
-copying it. The version is whatever you installed, not a fixed number.)
-
-(Or just ask a Codex session to run `mubit-memory:setup`.)
-
-Skipping it gives you a plugin that installs perfectly and **captures nothing**. Two facts
-about Codex make it necessary: a plugin-bundled `hooks.json` is inert — Codex copies it and
-never reads it — and a plugin-declared MCP server cannot resolve its own entry point, since
-there is no `${VAR}` substitution and relative paths resolve against the *project* directory.
-
-So `hooks.json` and `.mcp.json` ship as **templates**, and `setup` installs them into the user
-layer with absolute paths substituted: registrations merge into `$CODEX_HOME/hooks.json`, and
-the server is registered with `codex mcp add mubit`. It merges rather than overwrites, backs up
-what it touches to `<name>.before-mubit`, and is idempotent — **re-run it after every upgrade.**
-
-**Trust the hooks.** A registered hook does not run until trusted, and under `codex exec` an
-untrusted hook is skipped *silently* — no prompt, no warning, exit 0. `setup` offers to record
-trust and asks first; otherwise run `/hooks` in the TUI and approve the Mubit entries. Trust
-must be re-granted after an upgrade, because editing a registration changes its content hash.
-
-### Connect it — enter your API key directly
-
-A fresh install has no credentials. `setup` says so, and it is not an error:
-
-```
-no credentials.json here yet.
-```
-
-If you also run the Claude Code plugin, it already wrote a key into the shared data dir and
-you are done. **From scratch, enter the key yourself.** Two ways.
-
-**A. Store it once, verified — recommended.** `login` asks for the key, checks it against your
-instance before writing anything, and puts it exactly where the hooks read:
-
-```bash
-PLUGIN=$(ls -d ~/.codex/plugins/cache/mubit/mubit-memory/*/ | tail -1)
 node "$PLUGIN/scripts/login.mjs"
 ```
 
-Paste your key at the prompt. Non-interactively, pass it instead:
+`Connected to https://api.mubit.ai.` means the key is valid and stored. Then start a new Codex
+session — hooks and MCP servers are read at session start.
 
-```bash
-node "$PLUGIN/scripts/login.mjs" --key=mbt_...
+**Do not skip `setup.mjs`.** Codex copies a plugin's bundled `hooks.json` and never reads it,
+and a plugin-declared MCP server cannot resolve its own entry point there. So both ship as
+templates, and `setup` installs them into your Codex config with real paths substituted.
+Without it you get a plugin that installs perfectly and captures nothing. It is idempotent,
+backs up what it touches, and **must be re-run after every upgrade** — editing a hook
+registration changes its content hash, which returns it to untrusted, and an untrusted hook is
+skipped silently under `codex exec`.
+
+Full walkthrough, including the sandbox and trust gotchas:
+[`integrations/codex/README.md`](integrations/codex/README.md).
+
+</details>
+
+Confirm either install with `/mubit-memory:setup` (Codex: `mubit-memory:setup`). A `ready`
+state plus your endpoint and a run id means you are finished.
+
+## What it does
+
+Three things happen on their own. None of them spends a model call of yours.
+
+```mermaid
+flowchart LR
+  P["Your prompt"] --> R["Recall<br/>inject what is relevant"]
+  R --> M["The model"]
+  M --> T["Tool calls and replies"]
+  T --> S["Redact, then spool<br/>no network per call"]
+  S -. "background" .-> E[("Your Mubit<br/>endpoint")]
+  E -.-> R
+  M --> X["Session ends"] --> F["Reflect<br/>extract lessons that outlive the run"]
+  F -.-> E
 ```
 
-`--endpoint=<url>` is only needed if you are not on the default `https://api.mubit.ai`.
+- **Capture** — every tool call, failure and turn is redacted and written to a local spool, then
+  sent in the background. A tool call makes no network request of its own.
+- **Recall** — relevant memory is injected before each prompt, inside a 1500-token budget you
+  control. A memory this conversation has already seen is repeated as a one-line pointer
+  instead of in full.
+- **Reflect** — at session end, lessons are extracted from what the run actually did. This is
+  the path that lets a lesson outlive the run that learned it.
 
-`Connected to https://api.mubit.ai.` means the key is valid and stored. Anything else is the
-key or the endpoint, not the plugin — see the table in Part 3.
+Runs are **per-directory** by default: one project is one memory, which is also what makes
+Claude Code and Codex in that directory share one. Change it with `runStrategy`
+(`git-branch`, `per-conversation`, `static`).
 
-`--status` reports what is stored and which directory it came from; add `--json` for
-machine-readable output. It reads the file and does **not** dial, so it tells you a key
-exists, never that it works. Only `login` and `setup` actually reach the instance.
+## Commands
 
-**Where it writes, and why that needed its own command.** Mubit state lives under
-`~/.claude/plugins/data/` on both harnesses, deliberately — one directory is what makes a
-Codex session and a Claude Code session in the same project one memory rather than two, so a
-Codex-only user ends up with a `~/.claude/` they never asked for. Which subdirectory is not a
-constant: the suffix varies with the install (`mubit-memory-<marketplace>`,
-`mubit-memory-inline`, …). `setup` resolved it and **pinned** it as `MUBIT_CC_DATA_DIR` in the
-registrations it wrote, so the hooks never guess — and `login` reads that same pin back out of
-`$CODEX_HOME/hooks.json` rather than guessing on its own. Override it with `--data-dir=<path>`
-if you must.
-
-The generic `bin/auth.mjs` has no such pin and falls back to the bare
-`~/.claude/plugins/data/mubit-memory`, which is often not the directory `setup` chose — the key
-then lands where nothing reads it, silently, with no error. That is the whole reason `login`
-exists; prefer it under Codex.
-
-**B. Environment variables — nothing stored on disk.** Good for CI and containers, and it
-outranks the stored file:
-
-```bash
-export MUBIT_ENDPOINT='https://api.mubit.ai'
-export MUBIT_API_KEY='mbt_...'
-```
-
-Codex runs hook commands through a **login shell**, so anything exported in `.zshrc` or
-`.bashrc` reaches the plugin. Convenient, and occasionally surprising: a stale
-`MUBIT_ENDPOINT` left over from a local-server session outranks the key you signed in with.
-
-Codex has no plugin settings UI, so configuration is three rungs, highest first:
-
-1. `MUBIT_*` environment variables
-2. `<data-dir>/credentials.json` — what option A writes
-3. `<project>/.mubit-cc.json`
-
-Either way, **start a new Codex session afterwards** — hooks and MCP servers are read at
-session start.
-
-### A few Codex-specific things
-
-- **An unapproved command has no network.** Codex runs it inside seatbelt with networking off,
-  where DNS fails first, so any plugin command you have not approved reports a connection
-  failure against an endpoint that is perfectly fine. Approve it and run it again. See
-  [`ENOTFOUND` under Codex](#enotfound-under-codex--usually-the-sandbox-not-the-endpoint).
-- **State lives under `~/.claude/plugins/data/`** — yes, `.claude`, deliberately: that shared
-  data dir is what makes one memory rather than two. Which subdirectory is not a constant
-  (`mubit-memory-<marketplace>`, `mubit-memory-inline`, …); `setup` resolves it and pins it as
-  `MUBIT_CC_DATA_DIR`. Getting it wrong is quiet and total — two half-memories, no error. Check
-  with `ls ~/.claude/plugins/data/` and pass `--data-dir=<path>` if it picked wrong.
-- **`SessionEnd` is clamped to three seconds** by Codex. The end-of-session flush is handed to a
-  detached process, which is why `MUBIT_CC_SESSION_END_DETACH` defaults on. On a long session,
-  run `mubit-memory:reflect` yourself rather than relying on the exit path.
-- The status line defaults **off** under Codex — its status line is a fixed list of built-in
-  items with nothing scriptable in it.
-
----
-
-## Part 3 — Confirm it works (both)
-
-Claude Code: `/mubit-memory:setup` · Codex: `mubit-memory:setup`
-
-A `ready` state plus your endpoint and a run id means you are done. Anything else:
-
-| Result | Meaning |
-| --- | --- |
-| `auth_failed` | Key missing, wrong, or revoked. Not a network problem. |
-| `unreachable` | Wrong endpoint, the instance is not running — or, under Codex, the sandbox. See below. |
-| `warming` | Instance still starting. Wait and retry — not a failure. |
-| `not_responding` | Timeouts, usually load. Retry before concluding anything. |
-
-Stuck? `mubit-memory:doctor` runs the full diagnosis, cheapest check first. Under Codex its
-step 0 is the Codex-specific one: hooks that were never trusted.
-
-### `ENOTFOUND` under Codex — usually the sandbox, not the endpoint
-
-```
-POST /v2/control/activity: this process has no network access — Codex ran it
-inside its sandbox. Approve the command and run it again; the endpoint is
-almost certainly fine
-```
-
-Codex runs a command you have not approved inside seatbelt with the network switched off, and
-DNS is the first thing that fails in there. So a plugin command dialling a perfectly healthy
-endpoint comes back `ENOTFOUND`, and the same command run again after you approve it succeeds.
-
-**Approve the command.** Nothing needs fixing. The giveaway that memory itself is fine is in
-the session you are already in: if `SessionStart` said `Mubit memory is active` and recall
-injected anything at all, the hooks are connected and only this one sandboxed process was not.
-
-Versions before 0.12.2 reported the same failure as `no such host — the endpoint name does not
-resolve; check it for a typo`, which sends you to fix a URL that was never wrong. If you see
-that wording against an endpoint you believe in, upgrade rather than editing your config.
-
-Outside the sandbox `ENOTFOUND` does mean the name is wrong. Only `api.mubit.ai` is
-provisioned — `eu.mubit.ai` and `us.mubit.ai` do not exist, so a stored endpoint naming one can
-never answer. Re-run `login` with no `--endpoint` to reset it to the default, and check for a
-stale `export MUBIT_ENDPOINT` in `.zshrc` or `.bashrc`: Codex runs hooks through a login shell,
-so that variable outranks anything `login` stores.
-
-### "no Mubit endpoint is configured"
-
-```
-POST /v2/control/activity: no Mubit endpoint is configured; nothing was dialed
-```
-
-The install worked and the key was never stored. Nothing reads an endpoint out of thin air:
-a plugin command finds it in `credentials.json` inside the pinned data directory, or in
-`MUBIT_*` env vars, and finds nothing otherwise. Go back to **Connect it** and run `login`.
-
-Under Codex this can surface as `(no output)`: these commands write failures to **stderr** and
-leave stdout empty, so a tool call that only surfaces stdout shows an empty result rather than
-the reason. Re-run with `2>&1` to see it.
-
-Confirm what is actually stored, and where it was read from:
-
-```bash
-node "$PLUGIN/scripts/login.mjs" --status
-```
-
-If your installed plugin predates `scripts/login.mjs`, upgrade it first — see below.
-
-### Upgrading, or installing on a second machine
-
-Claude Code:
-
-```
-/plugin marketplace add mubit-ai/plugins
-/plugin install mubit-memory@mubit
-/reload-plugins
-```
-
-Then start a **new** session, for the reason in Part 1.
-
-Codex:
-
-```bash
-codex plugin marketplace upgrade      # refreshes the Git snapshot — this is what fetches new commits
-codex plugin add mubit-memory@mubit
-
-PLUGIN=$(ls -d ~/.codex/plugins/cache/mubit/mubit-memory/*/ | tail -1)
-node "$PLUGIN/scripts/setup.mjs" "$PLUGIN"
-```
-
-Both hosts cache a plugin under its version, so an upgrade that did not change the version can
-keep the old files. If a fix you expect is missing, check the version actually on disk:
-`ls ~/.codex/plugins/cache/mubit/mubit-memory/`.
-
-**Re-run `setup` after every upgrade.** Editing a hook registration changes its content hash,
-which returns it to untrusted — and under `codex exec` an untrusted hook is skipped silently,
-exit 0, no warning. An upgrade that skips this step leaves a plugin that installs perfectly and
-captures nothing.
-
-You only need `login` again if the key or endpoint is wrong; an upgrade does not disturb them.
-
-### Sharing one run between Codex and Claude Code
-
-A run id is what memory is scoped to, and by default it is derived from the project, not from
-the harness: `cc-<directory-name>-<hash of the git root path>`. Codex and Claude Code opened on
-the same checkout therefore already land on the same run and see each other's pins and lessons.
-
-They diverge when the *path* diverges — a different clone, or the same repo on a second machine
-where your home directory has another name. If you want one run regardless of path or harness,
-pin it by name:
-
-```bash
-export MUBIT_CC_RUN_STRATEGY=static
-export MUBIT_CC_RUN_ID=team-<project>
-```
-
-Set both in the same place for both tools (your shell profile, or the `--env` flags `setup`
-writes), and re-run setup so the hooks inherit them. `static` will not fall back silently: with
-no `MUBIT_CC_RUN_ID` it refuses rather than quietly writing into a different run.
-
-Check which run either side is on with `/mubit-memory:doctor`, or `pin.mjs list --json`.
-
----
-
-## Part 4 — Daily use
-
-Most of it is automatic. After setup you should not have to think about memory:
-
-- **Capture** — every tool call and turn is redacted and spooled, then sent in the background.
-  Zero network per tool call.
-- **Recall** — relevant lessons are injected before each prompt, at zero LLM cost.
-- **Reflect** — at session end, lessons are extracted and promoted beyond the run.
-
-Secrets are scrubbed before anything leaves the machine, and a denylisted subject (`.env`, a
-key file) is dropped rather than scrubbed. No hook ever blocks, rewrites, or fails a tool call:
-a dead server costs you a memory, never a turn.
-
-### The commands you will actually use
-
-In Claude Code these are `/mubit-memory:<name>`; in Codex, `mubit-memory:<name>`.
+Fifteen skills, identical on both hosts. `/mubit-memory:<name>` in Claude Code,
+`mubit-memory:<name>` in Codex.
 
 | Command | Use it for |
 | --- | --- |
 | `remember` | Save a durable lesson, rule, or standing preference. |
 | `recall` | Search memory for detail beyond what was injected this turn. |
-| `pin` | Pin a constraint for the rest of this run ("don't touch the vendored server"). |
+| `pin` | Pin a constraint for the rest of this run — "don't touch the vendored server". |
 | `forget` | Delete a lesson, or down-weight one that is merely wrong. |
-| `dashboard` | Local page: browse lessons, recall cost per prompt, ingest health. Loopback only. |
-| `doctor` | Diagnose connectivity and memory health when something looks off. |
-| `setup` | Confirm endpoint and key are set and the instance answers. |
+| `dashboard` | A local page over everything: browse lessons, see recall cost per prompt, watch ingest health. Loopback only, bearer-token gated. |
+| `doctor` | Diagnose connectivity and memory health, cheapest check first. |
+| `setup` | Confirm the endpoint and key are set and the instance answers. |
+| `import` | Backfill memory from transcripts already on this machine, so an install made after the work still knows about it. Sends nothing without `--send`. |
+| `activity` | Audit what is stored, and export the record as JSONL. |
 
-Less often: `reflect` (extract lessons mid-session), `strategies` (the pattern across many
-lessons), `checkpoint` (named snapshot before risky work), `memory-health` (what is actually
-stored), `activity` (audit and export the record as JSONL).
-
-Claude Code only: `@mubit-memory:mubit-recall`, a subagent that searches memory in an isolated
-context. Codex has no plugin-defined agent types — point a generic sub-agent at the `recall`
-skill instead; the isolation is the part that mattered.
+Also: `auth`, `reflect`, `strategies`, `checkpoint`, `memory-health` and `handoff`. Claude Code
+additionally ships `@mubit-memory:mubit-recall`, a subagent that searches memory in an isolated
+context and returns a synthesis rather than raw evidence.
 
 ### The tools the model uses on its own
 
-You do not call these — the model does, mid-task. Thirteen registered by default, the same on
-both harnesses:
+You do not call these. Seven are registered by default, the same on both hosts:
 
-`mubit_recall` (search by topic) · `mubit_learned` (save a lesson) ·
-`mubit_outcome` (credit what helped) · `mubit_diagnose` (match a failure against past ones) ·
-`mubit_lessons` · `mubit_status` · `mubit_reflect` · `mubit_dereference` ·
-`mubit_forget` · `mubit_archive` · `mubit_strategies` · `mubit_checkpoint` ·
-`mubit_memory_health`
-
-The bundled server carries 21; the other eight cost nothing until you name them in
-`MUBIT_MCP_TOOLS` (a list you supply is used verbatim, not unioned with the default).
-
-### Status line (Claude Code)
-
-```
-● mubit: cc-my-project-9f2a11c4 · hosted · recall 6/1.2k tok · saved 12t/1q · lessons 3g
+```text
+mubit_recall          search memory by topic
+mubit_learned         save one durable lesson
+mubit_outcome         credit the memories that helped
+mubit_diagnose        match a failure against past ones
+mubit_dereference     expand a reference id it already holds
+mubit_status          is memory reachable
+mubit_memory_health   what is actually stored
 ```
 
-Run id, connection, what recall cost this prompt, what has been saved.
+The bundled server carries 21. The other fourteen cost nothing until you name them in
+`mcpTools` — a list you supply is used verbatim, not merged with the default.
 
----
+## What leaves your machine
 
-## Worth knowing
+Captured tool calls, their output, your prompts and the model's replies go to **your** Mubit
+endpoint and nowhere else. Before any of it reaches even the local spool it passes three
+stages, in this order.
 
-- **Runs are per-directory by default.** One project = one memory — and it is what makes a
-  Claude Code session and a Codex session in that directory share one. Change it with
-  `runStrategy` / `MUBIT_CC_RUN_STRATEGY` (`git-branch`, `per-conversation`, `static`).
-- **The recall token budget (default 1500)** is the largest recurring cost — the ceiling on
-  tokens injected per prompt. Lower it if context is tight.
-- **`recallAsync`** (Claude Code) makes recall never block a prompt, at the cost of one turn
-  of staleness.
-- **Which harness wrote an entry is recorded** as its agent role, `codex` or `claude-code`, so
-  the two stay distinguishable where it matters.
-- Full configuration and troubleshooting:
-  [`integrations/claude-code/README.md`](integrations/claude-code/README.md) ·
-  [`integrations/codex/README.md`](integrations/codex/README.md)
+1. **Pattern scrub.** Matches become `[REDACTED:<kind>]`, naming the rule that fired —
+   `assignment`, `pem`, `jwt`, `bearer`, `github-token`, `aws-access-key`, `openai-key`,
+   `stripe-key`, `url-credentials`, and a `high-entropy` catch-all. Hex-only strings cannot
+   trip it, so git SHAs survive.
+2. **Path denylist.** A capture whose subject matches is **dropped entirely, not scrubbed** — a
+   redacted `.env` is still a map of which secrets a project holds. The floor covers `.env*`,
+   `*.pem`, `*.key`, `*.p12`, `*.kdbx`, `id_rsa*`, `id_ed25519*`, `secrets/**`, `.ssh/**`,
+   `.aws/**`, `.gnupg/**`, `**/credentials`, `**/.netrc` — **plus everything git ignores**. Your
+   own globs append to that floor; they never replace it.
+3. **Byte caps.** 4 KiB per tool-input field, 8 KiB per tool output. The scrub runs *first*, so
+   truncation can never slice a secret in half and leave a usable prefix.
 
-## This is a generated repository — do not edit it here
+Turning redaction off disables stage 1 only. Stages 2 and 3 always run. The plugin suppresses
+its own traffic, the local log is scrubbed with the same rules so it is safe to attach to an
+issue, and the status line performs no network I/O at all. There is no telemetry channel: the
+endpoint you configure is the only destination.
 
-Contents are published from Mubit's source repository on release. Any commit made directly here
-is overwritten by the next publish.
+Full detail, including what local state is kept and for how long:
+[what leaves your machine](integrations/claude-code/README.md#what-leaves-your-machine-and-what-does-not).
 
-```
-source repository
-  ├── .claude-plugin/marketplace.json ──┐
-  ├── integrations/claude-code/ ────────┤ published on release
-  └── integrations/codex/ ──────────────┤
-                                        ▼
-mubit-ai/plugins (this repo)  →  fetched by Claude Code / Codex  →  a user's plugin dir
-```
+## Configuration
 
-Claude Code fetches a GitHub marketplace with `git clone --depth 1`, using your own git
-credentials — there is no separate plugin token. If your git is configured for SSH only, run
-`gh auth setup-git` first; the clone URL is always HTTPS, even for sources written as `git@`.
-Codex fetches the same repository as a Git snapshot, which is why `codex plugin marketplace
-upgrade` is the step that actually pulls new commits.
+Every option has a plugin setting and a `MUBIT_*` environment variable. Precedence, highest
+first: plugin settings → environment → stored credentials → a per-project `.mubit-cc.json` →
+the default. The ones worth knowing about:
 
-The `integrations/<host>` paths are preserved deliberately: each marketplace entry's `source`
-is a marketplace-relative path that resolves inside whichever repository served the catalog.
-Keeping the same paths means `marketplace.json` needs no rewriting when it is published here,
-so there is nothing that can drift between the two copies.
+| Option | Default | What it changes |
+| --- | --- | --- |
+| `recallTokenBudget` | `1500` | The ceiling on tokens injected per prompt. The largest recurring cost — lower it when context is tight. |
+| `runStrategy` | `per-directory` | How a session maps to a run. `static` plus a pinned id is how a team shares one memory across machines. |
+| `recallAsync` | `false` | Never make a prompt wait on recall, at the cost of one turn of staleness. |
+| `preToolWarnings` | `false` | Show the model a stored rule just before an `rm` or `git push`. It only ever warns. |
+| `capture` / `recall` | `true` | Turn either half off. |
 
-What is published is the plugin's tracked files, minus development-only scripts and QA
-transcripts written against a developer's own checkout. What runs on your machine is exactly
-what you see here — both hosts execute these directories as fetched, with no build step, which
-is why `hooks/dist/`, `mcp/dist/` and `bin/` are committed artifacts rather than build output.
+The [Claude Code guide](integrations/claude-code/README.md#configuration) documents all 25.
+
+## When something looks wrong
+
+Run `doctor` first — it diagnoses connectivity, memory health and stuck ingest, cheapest check
+first. The states `setup` and the status line report:
+
+| State | Meaning |
+| --- | --- |
+| `auth_failed` | Key missing, wrong, or revoked. Not a network problem. |
+| `unreachable` | Wrong endpoint, or the instance is not running. Under Codex, usually the sandbox. |
+| `warming` | The instance is still starting. Wait and retry — not a failure. |
+| `not_responding` | Timeouts, usually load. Retry before concluding anything. |
+
+Two that catch nearly everyone: under Codex, a command you have not approved runs with no
+network, so a perfectly healthy endpoint reports `ENOTFOUND` — approve it and run it again. And
+after any upgrade, re-run `setup.mjs`, or the hooks are silently untrusted.
 
 ## Verifying what you are about to run
 
 Everything here executes on your machine: the hooks run as Node processes on session events,
-and the MCP server runs as a long-lived subprocess. Two things make that auditable:
+and the MCP server as a long-lived subprocess. Two things make that auditable.
 
 - `integrations/claude-code/hooks/src/` and `lib/` are the readable source for every bundle in
-  `hooks/dist/` and `bin/`. Diff them rather than trusting the bundles — `npm run build` in
-  `integrations/claude-code` regenerates the bundles in place, so a clean `git diff` afterwards
-  is proof the committed artifacts match their source. The codex integration builds the same
-  sources; its `esbuild.config.mjs` names them.
-- `integrations/claude-code/test/` carries the full suite, including the redaction cases —
-  pattern scrub, path denylist, and byte caps applied after the scrub. Run it with `npm test`,
-  and again with `MUBIT_CC_TEST_TARGET=dist` to run it against the code that actually ships.
+  `hooks/dist/` and `bin/`. Rebuild rather than trusting them: the build regenerates the
+  bundles in place, so a clean `git diff` afterwards is proof the committed artifacts match
+  their source.
+- `integrations/claude-code/test/` carries the full suite, redaction cases included. Run it,
+  then run it again against the code that actually ships.
 
 ```bash
-claude plugin validate .
+claude plugin validate .                    # the manifests, from this directory
+
+cd integrations/claude-code
+npm test                                    # the suite
+MUBIT_CC_TEST_TARGET=dist npm test          # the same, against the committed bundles
+
+# Rebuild the bundles in place. A clean diff afterwards is proof they match their source.
+MUBIT_CC_BUILD_SKIP_SERVER=1 npm run build
+git diff --exit-code -- hooks/dist mcp/dist/index.js bin
 ```
+
+Both hosts execute these directories as fetched, with no build step, which is why
+`hooks/dist/`, `mcp/dist/` and `bin/` are committed artifacts rather than build output.
+
+## Documentation and support
+
+- **Guides** — [Claude Code](integrations/claude-code/README.md) ·
+  [Codex CLI](integrations/codex/README.md). Install, all 25 options, and troubleshooting.
+- **Reference** — [docs.mubit.ai](https://docs.mubit.ai/integrations/claude-code).
+- **Keys and instances** — the [Mubit console](https://console.mubit.ai).
+- **Bugs** — [open an issue](https://github.com/mubit-ai/claude-plugins/issues). What to put in
+  one is in [CONTRIBUTING.md](CONTRIBUTING.md). Attach `logs/mubit-cc.log` from the plugin's
+  data directory; it is scrubbed on the way out.
+- **Vulnerabilities** — report them privately, never in an issue. See
+  [SECURITY.md](SECURITY.md).
+
+Contents are published from Mubit's source repository on release, so a commit made directly
+here is overwritten by the next publish.
 
 ## License
 
 Apache-2.0. The plugins are licensed by
-[`integrations/claude-code/LICENSE`](integrations/claude-code/LICENSE), accompanied by
-[`integrations/claude-code/THIRD_PARTY_NOTICES.md`](integrations/claude-code/THIRD_PARTY_NOTICES.md)
-attributing the third-party code bundled into the MCP server. The root [`LICENSE`](LICENSE)
-covers everything else in this repository: this README, the marketplace manifest, and the
-publishing tooling.
+[`integrations/claude-code/LICENSE`](integrations/claude-code/LICENSE), with
+[`THIRD_PARTY_NOTICES.md`](integrations/claude-code/THIRD_PARTY_NOTICES.md) attributing the
+third-party code bundled into the MCP server. The root [`LICENSE`](LICENSE) covers everything
+else in this repository.

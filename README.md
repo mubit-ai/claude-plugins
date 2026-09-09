@@ -11,7 +11,8 @@
   <a href="https://console.mubit.ai">Console</a> ·
   <a href="integrations/claude-code/README.md">Claude&nbsp;Code guide</a> ·
   <a href="integrations/codex/README.md">Codex guide</a> ·
-  <a href="#what-leaves-your-machine">Privacy</a>
+  <a href="#what-leaves-your-machine">Privacy</a> ·
+  <a href="SECURITY.md">Security</a>
 </p>
 
 <p align="center">
@@ -281,8 +282,11 @@ Both hosts execute these directories as fetched, with no build step, which is wh
   [Codex CLI](integrations/codex/README.md). Install, all 25 options, and troubleshooting.
 - **Reference** — [docs.mubit.ai](https://docs.mubit.ai/integrations/claude-code).
 - **Keys and instances** — the [Mubit console](https://console.mubit.ai).
-- **Bugs** — [open an issue](https://github.com/mubit-ai/claude-plugins/issues). Attach
-  `logs/mubit-cc.log` from the plugin's data directory; it is scrubbed on the way out.
+- **Bugs** — [open an issue](https://github.com/mubit-ai/claude-plugins/issues). What to put in
+  one is in [CONTRIBUTING.md](CONTRIBUTING.md). Attach `logs/mubit-cc.log` from the plugin's
+  data directory; it is scrubbed on the way out.
+- **Vulnerabilities** — report them privately, never in an issue. See
+  [SECURITY.md](SECURITY.md).
 
 Contents are published from Mubit's source repository on release, so a commit made directly
 here is overwritten by the next publish.

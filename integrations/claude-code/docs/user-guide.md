@@ -29,7 +29,7 @@ Read these now and you will skip the three most common support questions.
 ### Option A — from GitHub (what everyone should use)
 
 ```
-/plugin marketplace add mubit-ai/claude-plugins
+/plugin marketplace add mubit-ai/plugins
 /plugin install mubit-memory@mubit
 /reload-plugins
 ```
@@ -804,6 +804,6 @@ shape of the on-disk status marker. Every expected-output block above is a trans
 
 Not verified: a fresh clone-and-install from GitHub. The transcripts above were produced from a
 local directory marketplace, so the install path most people take — `/plugin marketplace add
-mubit-ai/claude-plugins` — is exercised by its parts and not end to end here. Also unverified is
+mubit-ai/plugins` — is exercised by its parts and not end to end here. Also unverified is
 any behaviour that needs a running Mubit: recall content, reflection output, and lesson
 promotion — those need a live instance and are covered separately.

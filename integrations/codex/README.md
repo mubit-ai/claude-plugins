@@ -16,10 +16,15 @@ Requires Codex CLI **0.146.0 or newer** and Node **20 or newer**. Verified again
 
 ## Install
 
+0.146.0 is the floor because that is where Git marketplace sources landed.
+
 ```bash
-codex plugin marketplace add /path/to/this/repo
+codex plugin marketplace add mubit-ai/plugins
 codex plugin add mubit-memory@mubit
 ```
+
+Pin a release with `--ref <tag>` rather than tracking `main`. Working on the plugin itself?
+Point the marketplace at your checkout instead: `codex plugin marketplace add /path/to/repo`.
 
 Then either ask a Codex session to run `mubit-memory:setup`, or do it yourself:
 

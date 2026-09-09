@@ -451,6 +451,12 @@ metadata so a reader can tell the two apart. Three counts are findings, not deco
 incomplete` means a bound was hit and the import is a prefix of the history, not the whole of
 it.
 
+When a batch is refused, the counts line is followed by the reason — `ingest failed (<state>):
+<message>`, the same sentence the plugin logs — so `failed 1` never stands alone. One case is
+refused before a transcript is opened: a `--send` from a shell that says it has no network,
+which is what Codex's sandbox does to an unapproved command. A dry run only reads and goes
+ahead there; the send needs the command run with escalated permissions.
+
 ### Handing work to another agent
 
 A handoff is a note from one agent to another inside a run — "review this", "continue from

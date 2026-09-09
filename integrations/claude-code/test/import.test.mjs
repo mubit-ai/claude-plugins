@@ -660,6 +660,11 @@ describe('runImport', () => {
     assert.equal(failed.failed, 1);
     assert.equal(failed.items, 0);
     assert.match(failed.truncatedReason, /cursor was not advanced/);
+    // The reason travels in the report. It used to go only to the log, at a level a Codex
+    // shell does not keep, and `failed: 1` on its own told the reader nothing to act on.
+    assert.match(failed.error, /HTTP 500/);
+    assert.equal(failed.errorState, 'server_error');
+    assert.equal(failed.sources['claude-code'].error, failed.error);
     assert.equal(breakerFiles(dataDir).length, 0,
       'and a 5xx here still must not vote — a plain non-2xx is recorded unconditionally '
       + 'unless the caller declines');
@@ -674,6 +679,43 @@ describe('runImport', () => {
     }));
     const retry = await runImport(cfg2, { roots: [projectDir], root, paceMs: 0 });
     assert.ok(retry.items > 0, 'the work was still there to do');
+  });
+
+  /**
+   * Codex runs an unapproved command inside seatbelt with the network off, and marks the
+   * process with `CODEX_SANDBOX_NETWORK_DISABLED`. A send from there read the whole corpus and
+   * failed on its first batch with nothing but `failed 1` on the terminal. Refusing before the
+   * first file is opened puts the reason where the person is looking; a dry run only reads,
+   * and reading is allowed in there.
+   */
+  it('a send from inside the Codex sandbox is refused before anything is read, and says why', async (t) => {
+    const server = await fakeMubit();
+    t.after(() => server.close());
+    const projectDir = makeProjectDir({ git: true });
+    const { cfg, dataDir } = await setup({ projectDir, endpoint: server.url });
+    const { runImport } = await I();
+    const root = await corpus(projectDir);
+    const env = { CODEX_SANDBOX: 'seatbelt', CODEX_SANDBOX_NETWORK_DISABLED: '1' };
+
+    const refused = await runImport(cfg, { roots: [projectDir], root, paceMs: 0, env });
+    assert.equal(refused.failed, 1);
+    assert.equal(refused.files, 0, 'refused before the first transcript was opened');
+    assert.match(refused.error, /no network access/);
+    assert.match(refused.error, /sandbox/);
+    assert.equal(refused.errorState, 'unreachable');
+    assert.match(refused.truncatedReason, /refused before/);
+    assert.equal(server.requests.length, 0, 'and nothing was dialled');
+    assert.equal(existsSync(join(dataDir, 'import')), false, 'and no cursor was written');
+
+    const dry = await runImport(cfg, { roots: [projectDir], root, paceMs: 0, env, dryRun: true });
+    assert.equal(dry.failed, 0);
+    assert.ok(dry.items > 0, 'a dry run only reads, and reading is allowed in there');
+
+    // Seatbelt alone is not the verdict: it can be run with the network on, and refusing on
+    // that evidence would turn away a send that would have worked.
+    const sent = await runImport(cfg, { roots: [projectDir], root, paceMs: 0, env: { CODEX_SANDBOX: 'seatbelt' } });
+    assert.equal(sent.failed, 0);
+    assert.ok(sent.items > 0);
   });
 
   it('reports the item cap rather than stopping quietly', async (t) => {
@@ -840,6 +882,78 @@ describe('bin/import', () => {
     assert.match(out, /would send \d+ item/);
     assert.match(err, /nothing was sent/);
     assert.equal(server.requests.length, 0);
+  });
+
+  /**
+   * `failed 1` is a count. The reason was going only to the log, and the person at the prompt
+   * — or the model relaying the output — was left to guess between the sandbox, the key and
+   * the instance.
+   */
+  it('names the ingest failure on stderr, not only in the log', async (t) => {
+    const server = await fakeMubit({ 'POST /v2/control/ingest': { status: 500, json: { error: 'boom' } } });
+    t.after(() => server.close());
+    const projectDir = makeProjectDir({ git: true });
+    const { main } = await B();
+    const root = transcriptRoot({
+      [projectDir]: { records: [callLine('toolu_01A', 'Bash', { command: 'ls' }, projectDir), resultLine('toolu_01A', 'out', projectDir)] },
+    });
+    const env = baseEnv({
+      dataDir: makeDataDir(), endpoint: server.url, projectDir,
+      extra: { MUBIT_CC_TRANSCRIPT_ROOT: root, MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: 'cc-import-test' },
+    });
+
+    let err = '';
+    const code = await main(['--project', projectDir, '--pace', '0', '--send'], {
+      stdout: () => {}, stderr: (s) => { err += s; }, env,
+    });
+    assert.equal(code, 1);
+    assert.match(err, /failed 1/);
+    assert.match(err, /ingest failed \(server_error\): POST \/v2\/control\/ingest: HTTP 500/);
+    assert.match(err, /this answer is incomplete/);
+  });
+
+  /**
+   * Codex runs an unapproved command inside seatbelt with the network off and marks the
+   * process. A `--send` from there is refused before a transcript is opened, in both output
+   * modes; a dry run, which only reads, goes ahead.
+   */
+  it('refuses --send inside the Codex sandbox before reading, and says so in both modes', async (t) => {
+    const server = await fakeMubit();
+    t.after(() => server.close());
+    const projectDir = makeProjectDir({ git: true });
+    const { main } = await B();
+    const root = transcriptRoot({
+      [projectDir]: { records: [callLine('toolu_01A', 'Bash', { command: 'ls' }, projectDir), resultLine('toolu_01A', 'out', projectDir)] },
+    });
+    const env = {
+      ...baseEnv({
+        dataDir: makeDataDir(), endpoint: server.url, projectDir,
+        extra: { MUBIT_CC_TRANSCRIPT_ROOT: root, MUBIT_CC_RUN_STRATEGY: 'static', MUBIT_CC_RUN_ID: 'cc-import-test' },
+      }),
+      CODEX_SANDBOX: 'seatbelt', CODEX_SANDBOX_NETWORK_DISABLED: '1',
+    };
+    const capture = () => {
+      const o = { out: '', err: '' };
+      return { o, io: { stdout: (s) => { o.out += s; }, stderr: (s) => { o.err += s; }, env } };
+    };
+
+    const text = capture();
+    assert.equal(await main(['--project', projectDir, '--pace', '0', '--send'], text.io), 1);
+    assert.match(text.o.err, /ingest failed \(unreachable\): this process has no network access/);
+    assert.match(text.o.err, /sandbox/);
+    assert.match(text.o.err, /this answer is incomplete: refused before/);
+
+    const json = capture();
+    assert.equal(await main(['--project', projectDir, '--pace', '0', '--send', '--json'], json.io), 1);
+    const report = JSON.parse(json.o.out);
+    assert.equal(report.failed, 1);
+    assert.equal(report.files, 0);
+    assert.match(report.error, /sandbox/);
+    assert.equal(server.requests.length, 0, 'nothing was dialled from inside the sandbox');
+
+    const dry = capture();
+    assert.equal(await main(['--project', projectDir, '--pace', '0', '--json'], dry.io), 0);
+    assert.ok(JSON.parse(dry.o.out).items > 0, 'a dry run only reads, and reading is allowed in there');
   });
 
   it('refuses when nothing is configured', async () => {

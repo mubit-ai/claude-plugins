@@ -364,6 +364,23 @@ test('drain --with-outcome: posts one outcome carrying the turn\'s recalled entr
   // `session-end`, since that is what makes a concurrent flush a server-side no-op rather
   // than double reinforcement. `session-end.test.mjs` asserts the two agree end to end.
   assert.equal(body.idempotency_key, `cc-outcome-${RUN_ID}-${PROMPT_ID}`);
+
+  // A delivered post is recorded in the ledger — the durable record of what the turn earned
+  // and when the instance accepted it, which is what the dashboard reads once the turn file
+  // has been pruned.
+  const ledger = join(dataDir, 'runs', RUN_ID, 'ledger.jsonl');
+  assert.ok(existsSync(ledger), 'the drain appends an outcome row to the run ledger');
+  const rows = readFileSync(ledger, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const row = rows.find((r) => r.kind === 'outcome');
+  assert.ok(row, `no outcome row in ${JSON.stringify(rows)}`);
+  assert.equal(row.v, 1);
+  assert.equal(row.run_id, RUN_ID);
+  assert.equal(row.prompt_id, PROMPT_ID);
+  assert.equal(row.outcome, 'success');
+  assert.equal(row.signal, 0.2);
+  assert.equal(row.entry_ids_n, 2);
+  assert.equal(row.attempts, 1);
+  assert.ok(row.at > 0);
 });
 
 // §5.5 — no recalled ids means there is nothing to reinforce; the call is skipped entirely

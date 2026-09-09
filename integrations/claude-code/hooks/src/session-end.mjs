@@ -94,6 +94,7 @@ import { join } from 'node:path';
 
 import { readBreaker } from '../../lib/breaker.mjs';
 import { host, loadConfig } from '../../lib/config.mjs';
+import { appendLedger } from '../../lib/ledger.mjs';
 import { ROUTES, heartbeat, postIngest, postOutcome, request } from '../../lib/http.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { log } from '../../lib/log.mjs';
@@ -105,7 +106,7 @@ import {
   readBatch, releaseDrainLock, releaseFlushLease, spoolStats,
 } from '../../lib/spool.mjs';
 import {
-  pruneStale, readJson, runDir, safeSegment, writeJsonAtomic,
+  pruneStale, readJson, resolveDataDir, runDir, safeSegment, writeJsonAtomic,
 } from '../../lib/state.mjs';
 
 /**
@@ -588,6 +589,19 @@ async function flushOutcomes(cfg, o) {
         flushed++;
         writeJsonAtomic(p, {
           ...turn, outcome_attempts: attempts + 1, outcome_pending: false, outcome_sent_at: Date.now(),
+        });
+        // The same row the drain writes for a delivered post, so a turn attributed here reads
+        // the same on the dashboard as one the drain reached in time.
+        appendLedger(resolveDataDir(cfg), o.runId, {
+          v: 1,
+          kind: 'outcome',
+          at: Date.now(),
+          run_id: o.runId,
+          prompt_id: promptId,
+          outcome: String(decision.outcome ?? ''),
+          signal: numOr(decision.signal, 0),
+          entry_ids_n: Array.isArray(decision.entryIds) ? decision.entryIds.length : 0,
+          attempts: attempts + 1,
         });
       } else {
         // Left pending on purpose: the next session's drain re-posts it under the same key,

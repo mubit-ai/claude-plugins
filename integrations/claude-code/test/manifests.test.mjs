@@ -184,7 +184,7 @@ test('every manifest exists and parses as JSON', () => {
   readJson(P.settings, 'settings.json', 'The plugin settings, including the statusLine registration.');
   readJson(P.pkg, 'package.json', 'The npm manifest for the plugin package.');
   readJson(P.marketplace, '.claude-plugin/marketplace.json',
-    'Repo-root marketplace catalog. This is what `/plugin marketplace add mubit-ai/claude-plugins` reads.');
+    'Repo-root marketplace catalog. This is what `/plugin marketplace add mubit-ai/plugins` reads.');
 });
 
 // §3.1/§3.5 — identity is duplicated across manifests; it must agree.

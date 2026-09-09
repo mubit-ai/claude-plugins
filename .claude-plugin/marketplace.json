@@ -8,7 +8,7 @@
       "name": "mubit-memory",
       "displayName": "Mubit Memory",
       "version": "0.13.2",
-      "description": "Persistent, typed, self-improving memory for Claude Code, backed by Mubit.",
+      "description": "Persistent, typed, self-improving memory for Claude Code, backed by Mubit. Shares one memory with the Codex CLI plugin when both run in the same directory.",
       "author": { "name": "Mubit AI", "url": "https://mubit.ai" },
       "source": "./integrations/claude-code",
       "homepage": "https://docs.mubit.ai/integrations/claude-code",

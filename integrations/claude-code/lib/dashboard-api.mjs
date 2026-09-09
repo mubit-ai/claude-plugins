@@ -716,14 +716,32 @@ export async function runSearch(cfg, params = {}) {
 /**
  * `POST /v2/control/outcome`.
  *
+ * The body is the backend's `StateRecordOutcomePayload`: `outcome` (one of the four words
+ * below), `signal` in [-1, 1], `rationale`, `entry_ids` and `idempotency_key`. It has no
+ * `success` field. This function used to send one, and nothing else that named the outcome —
+ * so `outcome` defaulted to `""` server-side and `record_outcome` rejected every call with
+ * "outcome must be one of: success, failure, partial, neutral". The page's Worked / Did not
+ * work buttons were a 400 on every click, rendered as "failed" and never investigated,
+ * because a failed reinforcement looks exactly like a flaky instance.
+ *
+ * `success: bool` is kept as an *input* for the page's existing body and mapped here. `signal`
+ * defaults to ±1.0 — the vendored `mubit_outcome` default, and the strongest evidence the
+ * system accepts; the hooks' implicit 0.2 / -0.3 exist because a completed turn is not a
+ * verdict, and a person clicking a button is.
+ *
  * The `idempotency_key` is what makes the button safe to double-click: without one, two
  * clicks are two reinforcements and the confidence the page just showed becomes wrong because
- * the page showed it. `reference_id` must be non-empty — `"global"` is the documented value
- * for run-level attribution with no single primary lesson.
+ * the page showed it. The default key names the outcome, so Worked and Did not work on the
+ * same lesson are two records rather than one. `reference_id` must be non-empty —
+ * `"global"` is the documented value for run-level attribution with no single primary lesson.
+ *
+ * No `agent_id` is ever sent: the backend then records the authenticated user as the actor,
+ * which keeps a person's verdict distinguishable from a hook's inference.
  *
  * @param {Record<string, any>} cfg
- * @param {{run?: string, referenceId?: string, success?: boolean, entryIds?: string[],
- *          idempotencyKey?: string, notes?: string}} [params]
+ * @param {{run?: string, referenceId?: string, outcome?: string, success?: boolean,
+ *          signal?: number, rationale?: string, entryIds?: string[],
+ *          idempotencyKey?: string}} [params]
  * @returns {Promise<Record<string, any>>}
  */
 export async function sendOutcome(cfg, params = {}) {
@@ -735,16 +753,28 @@ export async function sendOutcome(cfg, params = {}) {
       'outcome requires a reference_id; pass "global" for run-level attribution');
   }
 
+  const outcome = str(params.outcome).toLowerCase()
+    || (params.success === false ? 'failure' : 'success');
+  if (!OUTCOME_WORDS.includes(outcome)) {
+    return fail(400, 'bad_request',
+      `outcome must be one of: ${OUTCOME_WORDS.join(', ')}; got "${outcome}"`);
+  }
+  const given = typeof params.signal === 'number' ? params.signal : Number(params.signal);
+  const signal = Number.isFinite(given)
+    ? Math.max(-1, Math.min(1, given))
+    : (outcome === 'failure' ? -1.0 : outcome === 'neutral' ? 0 : 1.0);
+
   const req = {
     run_id: run,
     reference_id: referenceId,
-    success: params.success !== false,
-    idempotency_key: str(params.idempotencyKey) || `dash-${run}-${referenceId}-${params.success !== false}`,
+    outcome,
+    signal,
+    idempotency_key: str(params.idempotencyKey) || `dash-${run}-${referenceId}-${outcome}`,
   };
+  if (str(params.rationale)) req.rationale = str(params.rationale);
   if (Array.isArray(params.entryIds) && params.entryIds.length) {
     req.entry_ids = params.entryIds.map(String);
   }
-  if (str(params.notes)) req.notes = str(params.notes);
 
   const res = await postOutcome(cfg, req, READ_ONLY);
   if (!res.ok) return mapError(cfg, res);
@@ -755,6 +785,9 @@ export async function sendOutcome(cfg, params = {}) {
     updatedConfidence: Number(body.updated_confidence) || 0,
   });
 }
+
+/** The four words `record_outcome` accepts; anything else is a 400 for the whole call. */
+const OUTCOME_WORDS = Object.freeze(['success', 'failure', 'partial', 'neutral']);
 
 /**
  * `POST /v2/control/archive`. `run_id`, `content` and `artifact_kind` are all required by the

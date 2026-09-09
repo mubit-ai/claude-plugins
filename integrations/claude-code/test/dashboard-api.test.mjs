@@ -560,6 +560,57 @@ test('outcome: an idempotency key is always sent, so a double click cannot doubl
   assert.equal(r.data.reinforcementCount, 1);
 });
 
+/**
+ * The backend's payload (`StateRecordOutcomePayload` in ricedb's control HTTP state handler)
+ * has no `success` field. `outcome` defaults to `""` and `record_outcome` rejects that with
+ * "outcome must be one of: success, failure, partial, neutral" — so a body carrying `success`
+ * was a 400 on every click, and the lesson-level Worked / Did not work buttons never counted.
+ */
+test('outcome: the wire body carries outcome and signal, never success', async (t) => {
+  const { server, cfg, mod } = await setup(t);
+
+  // The page's existing body: a boolean, and nothing else.
+  let r = await mod.sendOutcome(cfg, { run: 'cc-here-00000001', referenceId: 'ref_lesson_1', success: false, entryIds: ['ref_lesson_1'] });
+  assert.equal(r.ok, true);
+  let body = server.lastCall('POST', '/v2/control/outcome')?.body;
+  assert.ok(!('success' in body), `success is not a field the route reads: ${JSON.stringify(body)}`);
+  assert.ok(!('notes' in body), 'nor is notes');
+  assert.equal(body.outcome, 'failure');
+  assert.equal(body.signal, -1);
+  assert.deepEqual(body.entry_ids, ['ref_lesson_1']);
+  assert.equal(body.reference_id, 'ref_lesson_1');
+  assert.equal(body.run_id, 'cc-here-00000001');
+  assert.ok(!('agent_id' in body), 'the dashboard is not an agent; the backend records the user');
+
+  // The explicit form: outcome, signal and rationale as given, and a caller-chosen key.
+  r = await mod.sendOutcome(cfg, {
+    run: 'cc-here-00000001', referenceId: 'global', outcome: 'success', signal: 1.0,
+    rationale: 'Dashboard verdict', entryIds: ['a', 'b'], idempotencyKey: 'dash-verdict-x',
+  });
+  assert.equal(r.ok, true);
+  body = server.lastCall('POST', '/v2/control/outcome')?.body;
+  assert.equal(body.outcome, 'success');
+  assert.equal(body.signal, 1);
+  assert.equal(body.rationale, 'Dashboard verdict');
+  assert.equal(body.idempotency_key, 'dash-verdict-x');
+  assert.deepEqual(body.entry_ids, ['a', 'b']);
+
+  // A default key still names the outcome, so Worked and Did not work are two records.
+  await mod.sendOutcome(cfg, { run: 'r', referenceId: 'x', success: true });
+  const k1 = server.lastCall('POST', '/v2/control/outcome')?.body.idempotency_key;
+  await mod.sendOutcome(cfg, { run: 'r', referenceId: 'x', success: false });
+  const k2 = server.lastCall('POST', '/v2/control/outcome')?.body.idempotency_key;
+  assert.notEqual(k1, k2);
+  assert.match(k1, /success/);
+  assert.match(k2, /failure/);
+
+  // An outcome outside the route's vocabulary is refused here, before anything is dialled.
+  server.reset();
+  r = await mod.sendOutcome(cfg, { run: 'r', referenceId: 'x', outcome: 'meh' });
+  assert.equal(r.code, 'bad_request');
+  server.assertNotCalled('POST', '/v2/control/outcome');
+});
+
 // `reference_id` must be non-empty; `"global"` is the documented value for run-level
 // attribution with no single primary lesson, and `""` is never it.
 test('outcome: an empty reference id is refused with the fix in the message', async (t) => {

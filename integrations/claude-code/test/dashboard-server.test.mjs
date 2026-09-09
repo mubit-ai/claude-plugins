@@ -177,6 +177,45 @@ test('auth: the token is accepted from the query string, which is how the browse
   assert.equal(await res.text(), STUB_HTML);
 });
 
+/**
+ * The page rewrites its own URL to drop the token, so a reload of that URL carries nothing. The
+ * launch navigation therefore sets a session cookie — HttpOnly, SameSite=Strict — that the
+ * server accepts in place of the header, and a reload is the page rather than a 401 body.
+ */
+test('auth: the launch navigation sets an HttpOnly session cookie, and a reload without the query is still authorized', async (t) => {
+  const { started, dash } = await setup(t);
+  const first = await fetch(`http://127.0.0.1:${started.port}/?token=${encodeURIComponent(started.token)}`);
+  assert.equal(first.status, 200);
+  const cookie = first.headers.get('set-cookie') ?? '';
+  assert.match(cookie, /^mubit_dashboard=/);
+  assert.match(cookie, /HttpOnly/, 'the page script must not be able to read it');
+  assert.match(cookie, /SameSite=Strict/, 'no cross-site request may carry it');
+  assert.doesNotMatch(cookie, /Expires|Max-Age/, 'a session cookie, which dies with the tab');
+  const bare = cookie.split(';')[0];
+
+  // The reload: no query, no header, the cookie the browser kept.
+  const reload = await fetch(`http://127.0.0.1:${started.port}/`, { headers: { cookie: bare } });
+  assert.equal(reload.status, 200);
+  assert.equal(await reload.text(), STUB_HTML);
+  assert.equal(reload.headers.get('set-cookie'), null, 'only the tokened navigation sets it');
+  const api = await fetch(`http://127.0.0.1:${started.port}/api/meta`, { headers: { cookie: bare } });
+  assert.equal(api.status, 200, 'the API accepts the cookie too');
+
+  // A cookie for another launch, or a mangled one, is still nothing.
+  const wrong = await fetch(`http://127.0.0.1:${started.port}/api/meta`, { headers: { cookie: `mubit_dashboard=${dash.mintToken()}` } });
+  assert.equal(wrong.status, 401);
+  const other = await fetch(`http://127.0.0.1:${started.port}/api/meta`, { headers: { cookie: 'other=1; mubit_dashboardx=nope' } });
+  assert.equal(other.status, 401);
+  // A page navigation with no credential at all is a 401, not the page.
+  assert.equal((await fetch(`http://127.0.0.1:${started.port}/`)).status, 401);
+  // Cookies are per host, not per port: a launch after an earlier dashboard arrives with the
+  // earlier one's cookie. The launch URL's token outranks it, and the response replaces it.
+  const stale = await fetch(`http://127.0.0.1:${started.port}/?token=${encodeURIComponent(started.token)}`,
+    { headers: { cookie: `mubit_dashboard=${dash.mintToken()}` } });
+  assert.equal(stale.status, 200, 'the launch token wins over a stale cookie');
+  assert.equal((stale.headers.get('set-cookie') ?? '').split(';')[0], bare, 'and the cookie is replaced with this launch\'s token');
+});
+
 test('auth: the page is served with a content-security-policy that pins it to its own origin', async (t) => {
   const { started } = await setup(t);
   const res = await fetch(`http://127.0.0.1:${started.port}/?token=${encodeURIComponent(started.token)}`);

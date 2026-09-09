@@ -138,7 +138,44 @@ export function presentedToken(req, url) {
   const header = req && req.headers ? String(req.headers.authorization ?? '') : '';
   const m = /^Bearer\s+(.+)$/i.exec(header.trim());
   if (m) return m[1].trim();
-  return String(url.searchParams.get('token') ?? '').trim();
+  // The query outranks the cookie. Cookies are scoped to the host, not the port, so a launch
+  // made after an earlier dashboard on this machine arrives carrying the earlier one's cookie;
+  // the token in the launch URL is the newer credential, and the page response replaces the
+  // cookie with it.
+  const query = String(url.searchParams.get('token') ?? '').trim();
+  if (query) return query;
+  return cookieToken(req);
+}
+
+/**
+ * The cookie the first tokened navigation sets, so a reload still has a credential.
+ *
+ * The page rewrites its own URL to drop the token from the address bar, which is right — and
+ * it means the browser's reload of that URL carries nothing. Without this, every reload was a
+ * 401 body where the page should be. The cookie is `HttpOnly` (the page's script cannot read
+ * it; it holds the token from the launch URL already), `SameSite=Strict` (no cross-site
+ * request ever carries it), scoped to this loopback origin, and a session cookie that dies
+ * with the tab. A request that presents neither header, cookie nor query is still a 401
+ * before any work is done.
+ */
+const COOKIE_NAME = 'mubit_dashboard';
+
+/** @param {{headers?: Record<string, any>}} req @returns {string} */
+function cookieToken(req) {
+  const raw = req && req.headers ? String(req.headers.cookie ?? '') : '';
+  if (!raw) return '';
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() !== COOKIE_NAME) continue;
+    try { return decodeURIComponent(part.slice(eq + 1).trim()); } catch { return ''; }
+  }
+  return '';
+}
+
+/** @param {string} token */
+function sessionCookie(token) {
+  return `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/`;
 }
 
 /**
@@ -337,13 +374,18 @@ async function handle(ctx, req, res, token, html) {
   const path = url.pathname;
 
   if (method === 'GET' && (path === '/' || path === '/index.html')) {
-    res.writeHead(200, {
+    /** @type {Record<string, string>} */
+    const headers = {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
       'content-security-policy': CSP,
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
-    });
+    };
+    // Set on the launch navigation only — the one request that carries the token in its
+    // query — so a reload of the rewritten URL is still this launch's page.
+    if (url.searchParams.has('token')) headers['set-cookie'] = sessionCookie(token);
+    res.writeHead(200, headers);
     return res.end(html);
   }
 

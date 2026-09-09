@@ -561,10 +561,10 @@ test('outcome: an idempotency key is always sent, so a double click cannot doubl
 });
 
 /**
- * The backend's payload (`StateRecordOutcomePayload` in ricedb's control HTTP state handler)
- * has no `success` field. `outcome` defaults to `""` and `record_outcome` rejects that with
- * "outcome must be one of: success, failure, partial, neutral" — so a body carrying `success`
- * was a 400 on every click, and the lesson-level Worked / Did not work buttons never counted.
+ * `POST /v2/control/outcome` reads `outcome`, `signal`, `rationale`, `entry_ids` and
+ * `idempotency_key`; it has no `success` field. A body that names the outcome only through
+ * `success` is answered with a 400, "outcome must be one of: success, failure, partial,
+ * neutral" — so every lesson-level Worked / Did not work click failed and never counted.
  */
 test('outcome: the wire body carries outcome and signal, never success', async (t) => {
   const { server, cfg, mod } = await setup(t);

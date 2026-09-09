@@ -774,13 +774,12 @@ export async function runSearch(cfg, params = {}) {
 /**
  * `POST /v2/control/outcome`.
  *
- * The body is the backend's `StateRecordOutcomePayload`: `outcome` (one of the four words
- * below), `signal` in [-1, 1], `rationale`, `entry_ids` and `idempotency_key`. It has no
- * `success` field. This function used to send one, and nothing else that named the outcome —
- * so `outcome` defaulted to `""` server-side and `record_outcome` rejected every call with
- * "outcome must be one of: success, failure, partial, neutral". The page's Worked / Did not
- * work buttons were a 400 on every click, rendered as "failed" and never investigated,
- * because a failed reinforcement looks exactly like a flaky instance.
+ * The route reads `outcome` (one of the four words below), `signal` in [-1, 1], `rationale`,
+ * `entry_ids` and `idempotency_key`. It has no `success` field. This function used to send one,
+ * and nothing else that named the outcome — so the server saw no outcome at all and answered
+ * every call with a 400, "outcome must be one of: success, failure, partial, neutral". The
+ * page's Worked / Did not work buttons were a 400 on every click, rendered as "failed" and
+ * never investigated, because a failed reinforcement looks exactly like a flaky instance.
  *
  * `success: bool` is kept as an *input* for the page's existing body and mapped here. `signal`
  * defaults to ±1.0 — the vendored `mubit_outcome` default, and the strongest evidence the

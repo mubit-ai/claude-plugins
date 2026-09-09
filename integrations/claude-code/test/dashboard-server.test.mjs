@@ -35,6 +35,10 @@ import { join } from 'node:path';
 
 import { PLUGIN_ROOT, lib, mod, baseEnv, fakeMubit, makeDataDir } from './helpers/harness.mjs';
 import { SECRETS } from './helpers/fixtures.mjs';
+import {
+  PROJECT, PROMPT, PROMPT_C1, RUN, RUN_C1, SESSION, activityPage, lessonActivity, seedRun,
+  writeMarker, writeSession, writeSubagent, writeTurn,
+} from './helpers/dashboard-fixtures.mjs';
 
 /** A page body the suite owns, so no assertion here depends on the shipped markup. */
 const STUB_HTML = '<!doctype html><title>stub</title><p>stub page';
@@ -77,79 +81,6 @@ async function setup(t, o = {}) {
   };
 
   return { dataDir, cfg, env, dash, upstream, started, call };
-}
-
-function writeMarker(dataDir, runId, patch = {}) {
-  writeFileSync(join(dataDir, 'status', `${runId}.json`), JSON.stringify({
-    run_id: runId, mode: 'hosted', state: 'ready', updated_at: Date.now(), ...patch,
-  }));
-}
-
-function writeTurn(dataDir, runId, turn) {
-  const dir = join(dataDir, 'runs', runId, 'turns');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${turn.prompt_id}.json`), JSON.stringify(turn));
-}
-
-const RUN = 'cc-dash-00000001';
-const PROMPT = '11111111-2222-3333-4444-555555555555';
-const SESSION = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-
-/** The host session mapped to `RUN`. A placeholder home, because fixtures are tracked files. */
-const PROJECT = '/home/user/proj';
-
-function writeSession(dataDir, sid, patch = {}) {
-  mkdirSync(join(dataDir, 'sessions'), { recursive: true });
-  writeFileSync(join(dataDir, 'sessions', `${sid}.json`), JSON.stringify({
-    run_id: RUN, agent_id: 'claude-code', strategy: 'per-directory',
-    project_dir: PROJECT, project_root: PROJECT,
-    created_at: 1_700_000_000_000, last_seen_at: 1_700_000_000_000,
-    mode: 'hosted', clear_count: 0, endpoint_hash: 'abc', ...patch,
-  }));
-}
-
-/** One subagent record under `RUN`, in the shape `subagent-start.mjs` writes it. */
-function writeSubagent(dataDir, runId, subId, patch = {}) {
-  const dir = join(dataDir, 'runs', runId, 'subagents');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${runId}-sub-${subId}.json`), JSON.stringify({
-    sub_run_id: `${runId}-sub-${subId}`, parent_run_id: runId, agent_id: subId,
-    mubit_agent_id: `claude-code-sub-${subId}`, agent_type: 'Explore', session_id: SESSION,
-    prompt_id: PROMPT, at: 1_700_000_005_000,
-    recall: { rung: 1, sources: 1, tokens: 504, chars: 2013, dropped: 0, pointers: 0, empty_reason: '', ms: 384 },
-    recalled: ['ref_lesson_1'], linked: false, ...patch,
-  }));
-}
-
-/** The run `RUN` becomes after one `/clear`: same directory, a second id. */
-const RUN_C1 = `${RUN}-c1`;
-const PROMPT_C1 = '22222222-2222-3333-4444-555555555555';
-
-// Every sweep below runs over a run that has a session record, so a field added to the
-// session row is covered by the key sweep and the redaction sweep without a second fixture.
-// The seed also holds one subagent and one post-/clear sibling, so the family routes have
-// something to union; the sibling's marker is old, so `RUN` stays the newest run.
-function seedRun(dataDir, over = {}) {
-  writeMarker(dataDir, RUN);
-  writeSession(dataDir, SESSION);
-  writeTurn(dataDir, RUN, {
-    prompt: 'rebuild the bundle',
-    prompt_id: PROMPT,
-    session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-    started_at: 1_700_000_000_000,
-    recalled: ['ref_lesson_1'],
-    recall: { tokens: 120, chars: 480, sources: 3, pointers: 1, rung: 1 },
-    ...over,
-  });
-  writeSubagent(dataDir, RUN, 'abc');
-  writeMarker(dataDir, RUN_C1, { updated_at: 1_700_000_000_000 });
-  writeTurn(dataDir, RUN_C1, {
-    prompt: 'and again after the clear',
-    prompt_id: PROMPT_C1,
-    session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-    started_at: 1_700_000_100_000,
-    recalled: [],
-  });
 }
 
 /** Every GET route the server answers, for the cross-cutting sweeps. */
@@ -615,43 +546,6 @@ test('analytics: the payload carries no latency series, because none is recorded
 // Proxying
 // ---------------------------------------------------------------------------
 
-/**
- * One `ActivityEntry` carrying the metadata a lesson actually has.
- *
- * `projection: 'full'` is what keeps `metadata_json` intact. Under the compact projection the
- * server overwrites it with `{entry_type, created_at}`, and every field the lessons route
- * would have returned — scope included — is gone. That is the whole reason the census asks for
- * `full`, and a fixture that fakes a compact row cannot catch it going wrong.
- *
- * @param {Record<string, any>} [meta] merged into `metadata_json`
- * @param {Record<string, any>} [over] merged onto the entry itself
- */
-function lessonActivity(meta = {}, over = {}) {
-  return {
-    id: 'a3c1f0de-0000-4000-8000-000000000001',
-    run_id: 'cc-other-00000001',
-    entry_type: 'lesson',
-    content: 'Run the migration first.',
-    source: 'reflection',
-    created_at: '2026-08-19T15:03:18Z',
-    reference_id: 'ref_lesson_1',
-    referenceable: true,
-    ...over,
-    metadata_json: JSON.stringify({
-      entry_type: 'lesson',
-      lesson_type: 'rule',
-      scope: 'global',
-      importance: 'high',
-      source_run_id: 'cc-other-00000001',
-      ...meta,
-    }),
-  };
-}
-
-/** A page of the activity route, in the shape `fetchActivity` reads. */
-function activityPage(entries, next = '', total = entries.length) {
-  return { json: { entries, next_page_token: next, total_visible: total } };
-}
 
 /**
  * The headline bug, and the only route change that fixes it.

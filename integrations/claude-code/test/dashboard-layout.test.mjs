@@ -164,7 +164,9 @@ test('layout: the brand tokens are byte-for-byte the ones the plugin has always 
 // The CSP is `default-src 'self'`, so anything fetched from elsewhere silently fails: a webfont
 // that never arrives, a stylesheet that never applies. The page must carry everything it uses.
 test('layout: the page loads nothing from anywhere', () => {
-  const text = src();
+  // The one permitted <link>: an inline icon, which stops the browser requesting /favicon.ico
+  // from a server that answers every unauthenticated request with 401.
+  const text = src().replace('<link rel="icon" href="data:,">', '');
   for (const bad of ['@import', '@font-face', '<link', 'url(http', 'IBM Plex', 'JetBrains']) {
     assert.ok(!text.includes(bad), `the page must stay self-contained; found ${JSON.stringify(bad)}`);
   }

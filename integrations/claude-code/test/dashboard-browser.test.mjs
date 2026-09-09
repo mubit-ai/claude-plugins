@@ -127,7 +127,9 @@ browserTest('browser: a nav click switches the page and sets the hash, and a rel
   assert.equal(await page.eval("document.querySelector('#page-overview').hidden"), true);
   assert.equal(await page.eval("document.querySelector('#nav-turns').getAttribute('aria-current')"), 'page');
   assert.equal(await page.eval("document.querySelector('#page-title').textContent"), 'Turns');
-  const hash = await page.waitFor("location.hash.startsWith('#/turns') && location.hash");
+  // The run lands in the hash once the first fetch has resolved it; the click may come first.
+  const hash = await page.waitFor("/^#\\/turns\\?dir=.*&run=cc-dash-00000001$/.test(location.hash) && location.hash",
+    { label: 'the hash names the page, the directory and the run' });
   assert.match(String(hash), /^#\/turns\?dir=.*&run=cc-dash-00000001$/, hash);
 
   await page.reload();
@@ -223,7 +225,8 @@ browserTest('browser: the per-turn Worked posts one outcome crediting every inje
   assert.ok(body.idempotency_key.includes(P2), body.idempotency_key);
   // The row and the drawer now say so, and it is the verdict that wins over the failure signal.
   await page.waitFor(`${ROWS}[1].querySelector('td[data-k=outcome]').textContent === 'worked'`);
-  assert.equal(await page.eval("document.querySelector('#drawer-body .pill').textContent"), 'worked');
+  await page.waitFor("(document.querySelector('#drawer-body .pill') || {}).textContent === 'worked'",
+    { label: 'the drawer shows the verdict' });
 
   // A second turn's verdict is a second key.
   await page.click('#drawer-close');
@@ -449,5 +452,57 @@ browserTest('browser: the Feed lists every entry under day headers, and a row re
   assert.equal(upstream.lastCall('POST', '/v2/control/dereference').body.reference_id, 'a3c1f0de-0000-4000-8000-000000000001');
   assert.match(String(await page.eval('location.hash')), /entry=a3c1f0de-0000-4000-8000-000000000001/);
   assert.ok(await page.eval("Array.from(document.querySelectorAll('#drawer-body button')).some((b) => b.textContent === 'Open in Lessons')"), 'a lesson row links across');
+  assert.deepEqual(page.errors(), []);
+});
+
+// ---------------------------------------------------------------------------
+// Races the CI runner found: the first fetch and the drawer's detail are slower there
+// ---------------------------------------------------------------------------
+
+/** Hold every fetch whose URL contains `needle` back by `ms`, from before the page boots. */
+function delayFetch(page, needle, ms) {
+  return page.onNewDocument(`(() => {
+    const real = window.fetch;
+    window.fetch = (url, init) => String(url).includes(${JSON.stringify(needle)})
+      ? new Promise((r) => setTimeout(() => r(real(url, init)), ${ms}))
+      : real(url, init);
+  })();`);
+}
+
+browserTest('browser: a page change made before the runs arrive still ends with the run in the hash', async (t, page) => {
+  const { launchUrl } = await serve(t);
+  await delayFetch(page, '/api/runs?', 800);
+  await page.goto(launchUrl());
+  await page.click('#nav-turns');
+  assert.equal(await page.eval("document.querySelector('#page-turns').hidden"), false);
+  const early = String(await page.eval('location.hash'));
+  assert.ok(early.startsWith('#/turns'), early);
+  assert.ok(!early.includes('run=cc-dash-00000001'), `the runs were held back, yet the hash already names one: ${early}`);
+  await page.waitFor("/^#\\/turns\\?dir=.*&run=cc-dash-00000001$/.test(location.hash)",
+    { label: 'the hash gained the run once it resolved' });
+  await page.reload();
+  await page.waitFor("!document.querySelector('#page-turns').hidden");
+  assert.ok((await page.waitFor(`${ROWS}.length`)) >= 3, 'the reload landed on the same run');
+  assert.deepEqual(page.errors(), []);
+});
+
+browserTest('browser: a verdict given while the turn\'s detail is still loading is not undone when it arrives', async (t, page) => {
+  const { launchUrl, upstream } = await serve(t);
+  await delayFetch(page, '/api/turn?', 1200);
+  await page.goto(launchUrl('#/turns'));
+  await page.waitFor(`${ROWS}.length >= 3`);
+  await page.eval(`${ROWS}[1].click()`);
+  await page.waitFor("!document.querySelector('#drawer').hidden");
+  assert.equal(await page.eval("document.querySelector('#drawer-body').getAttribute('data-detail')"), 'loading',
+    'the button is pressed against the table row alone');
+  await page.eval("Array.from(document.querySelectorAll('#drawer-body button')).find((b) => b.textContent === 'Worked').click()");
+  await page.waitFor("!document.querySelector('#toast').hidden");
+  assert.equal(upstream.countOf('POST', '/v2/control/outcome'), 1, upstream.summary());
+  await page.waitFor("(document.querySelector('#drawer-body .pill') || {}).textContent === 'worked'");
+  // The detail lands after the verdict. It carries no verdict of its own, and must not win.
+  await page.waitFor("document.querySelector('#drawer-body').getAttribute('data-detail') === 'loaded'",
+    { label: 'the held-back detail arrived' });
+  assert.equal(await page.eval("document.querySelector('#drawer-body .pill').textContent"), 'worked');
+  assert.equal(await page.eval(`${ROWS}[1].querySelector('td[data-k=outcome]').textContent`), 'worked');
   assert.deepEqual(page.errors(), []);
 });

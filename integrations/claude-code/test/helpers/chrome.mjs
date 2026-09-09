@@ -271,6 +271,8 @@ function withTimeout(p, ms) {
  * @property {(key: string) => Promise<void>} press          one key down/up on the focused element
  * @property {(width: number, height: number) => Promise<void>} viewport  device-metrics emulation
  * @property {(path: string) => Promise<string>} screenshot  PNG to `path`; returns the path
+ * @property {(source: string) => Promise<() => Promise<void>>} onNewDocument
+ *   run `source` before every document this page loads from now on; returns the remover
  * @property {() => string[]} errors                        uncaught exceptions and console errors so far
  * @property {() => Promise<void>} close
  */
@@ -346,6 +348,10 @@ async function openPage(cdp) {
       await withTimeout(done, WAIT_MS);
     },
     eval: evaluate,
+    async onNewDocument(source) {
+      const { identifier } = await send('Page.addScriptToEvaluateOnNewDocument', { source });
+      return () => send('Page.removeScriptToEvaluateOnNewDocument', { identifier }).then(() => undefined);
+    },
     async waitFor(expr, opts = {}) {
       const deadline = Date.now() + (opts.timeoutMs ?? WAIT_MS);
       let last;

@@ -2333,6 +2333,7 @@ details.scope p { margin: var(--space-1) 0 0; }
     const d = state.drawer;
     const box = $('drawer-body');
     clear(box);
+    box.removeAttribute('data-detail');
     if (!d) return;
     if (d.kind === 'turn') renderTurnDrawer(box, d.id);
     else if (d.kind === 'lesson') renderLessonDrawer(box, d.id);
@@ -2960,8 +2961,10 @@ details.scope p { margin: var(--space-1) 0 0; }
     if (!(num(t.recalledCount) > 0)) { toast('Nothing was injected into this turn, so there is nothing to credit.', true); return; }
     try {
       const body = await post('/api/verdict', { dir: state.dir, run: t.runId || state.run, promptId: t.promptId, success: success });
-      t.verdict = body.verdict;
-      t.verdictAt = Date.now();
+      // The table row and its cached detail are two objects, and the button may hold either.
+      const at = Date.now();
+      [t, state.turns.find((x) => x.promptId === t.promptId), state.turnDetails.get(t.promptId)]
+        .forEach((x) => { if (x) { x.verdict = body.verdict; x.verdictAt = at; } });
       const n = Array.isArray(body.entryIds) ? body.entryIds.length : 0;
       toast('Recorded: ' + (success ? 'worked' : 'did not work') + ' · ' + n + (n === 1 ? ' memory credited' : ' memories credited'));
       // The counters on the instance moved; the next idle remote poll picks them up.
@@ -2981,6 +2984,8 @@ details.scope p { margin: var(--space-1) 0 0; }
     return api('/api/turn?dir=' + enc(state.dir) + '&run=' + enc(t.runId || state.run) + '&prompt=' + enc(key))
       .then((body) => {
         const detail = Object.assign({}, t, body.turn);
+        // A verdict given while this detail was in flight is newer than the snapshot it carries.
+        if (num(t.verdictAt) > num(detail.verdictAt)) { detail.verdict = t.verdict; detail.verdictAt = t.verdictAt; }
         state.turnDetails.set(key, detail);
         return detail;
       });
@@ -3038,6 +3043,7 @@ details.scope p { margin: var(--space-1) 0 0; }
   function renderTurnDrawer(box, promptId) {
     const row = state.turns.find((x) => x.promptId === promptId) || null;
     const t = state.turnDetails.get(promptId) || row;
+    box.setAttribute('data-detail', state.turnDetails.has(promptId) ? 'loaded' : 'loading');
     $('drawer-title').textContent = t ? 'Prompt ' + shortId(t.promptId, 8) + (t.turnNumber ? ' · turn ' + t.turnNumber : '') : 'Turn ' + shortId(promptId, 8);
     if (!t) {
       box.appendChild(el('p', 'empty', 'This turn is not on the page. It may have aged out of the ledger, or belong to another directory.'));
@@ -3814,6 +3820,9 @@ details.scope p { margin: var(--space-1) 0 0; }
 
       renderRail();
       renderContext();
+      // A page change made while the runs were still in flight wrote a hash with no run in
+      // it. The context has resolved now, so the address bar carries it and a reload keeps it.
+      syncHash();
 
       if (state.dir && state.run) {
         const turns = await api('/api/turns?' + q0 + '&run=' + enc(state.run) + '&family=1&limit=400');

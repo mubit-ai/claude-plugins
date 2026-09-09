@@ -12,12 +12,17 @@
  *      who set `redact: false` did so to let their own secrets reach their own Mubit instance
  *      over TLS; that is not consent to render them into an HTML page. `BROWSER_REDACTION` is
  *      frozen for the same reason.
- *   2. **One function writes.** `appendRollup` is the single exception to the read-only rule,
- *      and it is confined to `<dataDir>/dashboard/`. It exists because turn files are pruned
- *      at six hours, so the raw series cannot carry a trend line; the rollup is the dashboard
- *      keeping its own history of what it saw. Nothing else in the plugin reads or writes
- *      that directory, and it is outside `lib/state.mjs`'s TTL table, so the cap below is the
- *      only thing bounding it.
+ *   2. **Two functions write, both under `<dataDir>/dashboard/`.** `appendRollup` keeps the
+ *      recall-cost trend the dashboard saw, and `appendVerdict` records a person's Worked /
+ *      Did not work on a turn after the instance accepted it. Nothing else in the plugin reads
+ *      or writes that directory, and it is outside `lib/state.mjs`'s TTL table, so the cap
+ *      below is the only thing bounding either file.
+ *   3. **The ledger sits behind the live turn files.** `runs/<run_id>/turns/*.json` is pruned
+ *      at six hours; `runs/<run_id>/ledger.jsonl` (`lib/ledger.mjs`, appended by the Stop hook)
+ *      keeps one row per closed turn for a month. Every turn read here is the join of the two,
+ *      one row per prompt, the live file winning while it exists — so the Turns table, the
+ *      per-lesson injection counts and the Overview all outlive the pruning, whether or not
+ *      the dashboard was open when the turn happened.
  *
  * Everything else here is a pure read, and the choice of neighbour is deliberate in three
  * places where the obvious call mutates: `readMarker` not `updateMarker`, `readBreaker` not
@@ -34,7 +39,9 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 
 import { readBreaker } from './breaker.mjs';
+import { LEDGER_FILE, readLedger } from './ledger.mjs';
 import { readMarker } from './markers.mjs';
+import { decideOutcome } from './outcome.mjs';
 import { redactText } from './redact.mjs';
 import { spoolStats } from './spool.mjs';
 import { ensureDir, readJson, runDir, safeSegment } from './state.mjs';
@@ -483,6 +490,14 @@ export function familyOf(dir, runId) {
   if (!id || id !== String(runId)) return { base: '', projectRoot: '', runIds: [] };
 
   const known = new Map(runsIn(dir).map((r) => [String(r.runId), r]));
+  // A run whose marker has expired (12 h) still belongs to its directory while its ledger is
+  // on disk: that file is what the page reads for the month after the marker and the turns
+  // are gone, and a family that forgot the run would lose those rows with it.
+  for (const name of lsDir(join(dir, 'runs'))) {
+    if (known.has(name) || safeSegment(name) !== name) continue;
+    const ledger = join(dir, 'runs', name, LEDGER_FILE);
+    if (existsSync(ledger)) known.set(name, { runId: name, lastWrite: mtimeOf(ledger) });
+  }
   if (!known.has(id)) known.set(id, { runId: id, lastWrite: 0 });
   const byRun = groupSessions(readSessionMap(dir));
   const rootOf = (rid) => firstNonEmpty(byRun.get(rid) ?? [], 'projectRoot');
@@ -700,6 +715,7 @@ export function turnRow(turn, opts = {}) {
   const preview = redactForBrowser(t.prompt, opts.previewBytes ?? PREVIEW_BYTES);
   const startedAt = num(t.started_at);
   const endedAt = num(t.ended_at);
+  const decided = decidedOutcome(t);
   return {
     promptId: String(t.prompt_id || ''),
     sessionId: String(t.session_id || ''),
@@ -728,35 +744,203 @@ export function turnRow(turn, opts = {}) {
     outcomeState: outcomeState(t),
     outcomeAttempts: num(t.outcome_attempts),
     apiError: String(t.api_error || ''),
+    // What the turn earned under `lib/outcome.mjs`'s rule — the automatic signal, whether or
+    // not a post has happened yet. A verdict is reported beside it, never over it: the page
+    // and `overview` both apply "verdict wins" from these two fields.
+    outcome: decided.outcome,
+    signal: decided.signal,
+    source: 'live',
+    verdict: '',
+    verdictAt: 0,
+    outcomeSentAt: num(t.outcome_sent_at),
+  };
+}
+
+/** The four outcomes a row can carry. Anything else — a future `partial` included — reads as none. */
+const OUTCOME_WORDS = new Set(['success', 'failure', 'neutral', 'none']);
+
+/**
+ * The outcome a turn earns under `lib/outcome.mjs`'s rule, read off the record with the
+ * send-state keys removed. `outcome_sent_at` says whether a post happened; this says what
+ * was, or would be, posted — the same computation `lib/ledger.mjs` stores. `post: false` for
+ * any other reason (nothing injected, the API killed the turn) is `none`.
+ *
+ * @param {Record<string, any>} turn
+ * @returns {{outcome: string, signal: number}}
+ */
+function decidedOutcome(turn) {
+  const { outcome_sent_at: _sent, outcome_attempts: _tries, ...rest } = (turn && typeof turn === 'object') ? turn : {};
+  const d = decideOutcome(rest);
+  return d.post && OUTCOME_WORDS.has(String(d.outcome))
+    ? { outcome: String(d.outcome), signal: num(d.signal) }
+    : { outcome: 'none', signal: 0 };
+}
+
+/**
+ * The outcome a turn counts as once a person has spoken: a verdict wins over the automatic
+ * signal. This is the one rule the Turns table, the per-lesson counts and the Overview share,
+ * restated on the page for the row it renders.
+ *
+ * @param {Record<string, any>} row a turn row
+ * @returns {'success'|'failure'|'neutral'|'none'}
+ */
+export function effectiveOutcome(row) {
+  const r = (row && typeof row === 'object') ? row : {};
+  if (r.verdict === 'worked') return 'success';
+  if (r.verdict === 'failed') return 'failure';
+  const o = String(r.outcome || '');
+  return /** @type {any} */ (OUTCOME_WORDS.has(o) ? o : 'none');
+}
+
+/**
+ * One ledger `turn` row, flattened to exactly the keys `turnRow` produces — so the page reads
+ * one shape whichever record answered. What the ledger never carried is honest here rather
+ * than invented: `recalledAt` and `outcomeAttempts` are zero, `used` has no counts behind its
+ * yes or no, and `outcomeState` is empty rather than "pending" for a turn whose delivery this
+ * file did not record.
+ *
+ * @param {Record<string, any>} row
+ * @param {{previewBytes?: number}} [opts]
+ * @returns {Record<string, any>}
+ */
+export function ledgerTurnRow(row, opts = {}) {
+  const r = (row && typeof row === 'object') ? row : {};
+  const rc = (r.recall && typeof r.recall === 'object') ? r.recall : {};
+  // Already scrubbed under the ledger's own policy; scrubbed again under the browser's, which
+  // is cheap and keeps invariant 4 a property of this module rather than of the writer.
+  const preview = redactForBrowser(r.prompt, opts.previewBytes ?? PREVIEW_BYTES);
+  const startedAt = num(r.started_at);
+  const endedAt = num(r.ended_at);
+  const recalled = Array.isArray(r.recalled) ? r.recalled.map(String) : [];
+  const apiError = String(r.api_error || '');
+  const outcome = OUTCOME_WORDS.has(String(r.outcome)) ? String(r.outcome) : 'none';
+  return {
+    promptId: String(r.prompt_id || ''),
+    sessionId: String(r.session_id || ''),
+    turnNumber: num(r.turn_number),
+    startedAt,
+    endedAt,
+    turnMs: startedAt && endedAt ? endedAt - startedAt : 0,
+    promptPreview: preview.text,
+    promptTruncated: preview.truncated || r.prompt_truncated === true,
+    promptRedactions: preview.redactions + num(r.prompt_redactions),
+    rung: num(rc.rung),
+    sources: num(rc.sources),
+    tok: num(rc.tokens),
+    chars: num(rc.chars),
+    dropped: num(rc.dropped),
+    ptr: num(rc.pointers),
+    emptyReason: String(rc.empty_reason || ''),
+    recalledAt: 0,
+    recalled,
+    recalledCount: recalled.length,
+    used: usedSignal(r.used === true || r.used === false ? { used_evidence: { used: r.used } } : {}),
+    outcomeState: apiError ? `api:${apiError}` : outcome === 'none' ? 'none' : '',
+    outcomeAttempts: 0,
+    apiError,
+    outcome,
+    signal: num(r.signal),
+    source: 'ledger',
+    verdict: '',
+    verdictAt: 0,
+    outcomeSentAt: 0,
   };
 }
 
 /**
- * Turn rows for one run — or, with `family`, for every run of its directory — newest first.
+ * Every turn of a run — or, with `family`, of its directory — one row per prompt, from the
+ * ledger and the live files together. Unsorted and unsliced; the callers sort, bound and join.
  *
- * Each row says which run it came from and which subagents fanned out under its prompt. The
- * subagent read is bounded to the window of turns returned, never the whole directory.
+ * The join order is the rule: ledger rows first (oldest first, so a prompt closed twice keeps
+ * its newest row), live files last, so a turn that has both is read from the file the drain
+ * is still updating. Then the delivered-outcome rows and the verdicts are folded onto
+ * whichever row won, matched by prompt id — a prompt id is a UUID, so a verdict recorded
+ * under a sibling run of the family still finds its turn.
+ *
+ * `since` is applied on `startedAt` at the end; on the ledger read it is applied on `at` as a
+ * cheap pre-filter, and `at` is the close time, so nothing that should pass is dropped early.
  *
  * @param {string} dir
  * @param {string} runId
- * @param {{limit?: number, family?: boolean}} [opts]
+ * @param {{family?: boolean, since?: number, want?: number}} [opts] `want` bounds the live read
+ *   the way `rawTurns` does; 0 reads every file
+ * @returns {Array<Record<string, any>>}
+ */
+function gatherTurns(dir, runId, opts = {}) {
+  const ids = opts.family === true
+    ? familyOf(dir, runId).runIds
+    : [safeSegment(runId)].filter(Boolean);
+  const since = num(opts.since);
+  const want = num(opts.want);
+
+  /** @type {Map<string, Record<string, any>>} */
+  const byPrompt = new Map();
+  for (const id of ids) {
+    for (const r of readLedger(dir, id, { since, kinds: ['turn'] })) {
+      const pid = String(r.prompt_id || '');
+      if (pid) byPrompt.set(pid, { ...ledgerTurnRow(r), runId: id });
+    }
+  }
+  for (const id of ids) {
+    for (const t of rawTurns(dir, id, want)) {
+      const pid = String(t.prompt_id || '');
+      if (pid) byPrompt.set(pid, { ...turnRow(t), runId: id });
+    }
+  }
+  for (const id of ids) {
+    for (const o of readLedger(dir, id, { kinds: ['outcome'] })) {
+      const row = byPrompt.get(String(o.prompt_id || ''));
+      if (!row) continue;
+      if (num(o.at) > row.outcomeSentAt) row.outcomeSentAt = num(o.at);
+      // A ledger-only row did not know whether its post landed; now it does.
+      if (row.source === 'ledger') {
+        row.outcomeState = 'sent';
+        if (row.outcome === 'none' && OUTCOME_WORDS.has(String(o.outcome))) {
+          row.outcome = String(o.outcome);
+          row.signal = num(o.signal);
+        }
+      }
+    }
+    for (const v of readVerdicts(dir, id)) {
+      const row = byPrompt.get(String(v.prompt || ''));
+      if (!row || num(v.at) < row.verdictAt) continue;
+      const word = v.verdict === 'worked' ? 'worked' : v.verdict === 'failed' ? 'failed' : '';
+      if (!word) continue;
+      row.verdict = word;
+      row.verdictAt = num(v.at);
+    }
+  }
+
+  /** @type {Array<Record<string, any>>} */
+  const out = [];
+  for (const row of byPrompt.values()) {
+    if (since > 0 && row.startedAt > 0 && row.startedAt < since) continue;
+    out.push(row);
+  }
+  return out;
+}
+
+/**
+ * Turn rows for one run — or, with `family`, for every run of its directory — newest first,
+ * from the ledger and the live files together (`gatherTurns`).
+ *
+ * Each row says which run it came from, which record answered (`source`), and which subagents
+ * fanned out under its prompt. The subagent read is bounded to the window of turns returned,
+ * never the whole directory.
+ *
+ * @param {string} dir
+ * @param {string} runId
+ * @param {{limit?: number, family?: boolean, since?: number}} [opts]
  * @returns {Array<Record<string, any>>}
  */
 export function turnRows(dir, runId, opts = {}) {
   const limit = clampInt(opts.limit, 1, 1000, 100);
-  const ids = opts.family === true
-    ? familyOf(dir, runId).runIds
-    : [safeSegment(runId)].filter(Boolean);
-
-  /** @type {Array<{id: string, t: Record<string, any>}>} */
-  const raw = [];
-  for (const id of ids) for (const t of rawTurns(dir, id, limit)) raw.push({ id, t });
-  const kept = raw
-    .sort((a, b) => num(b.t.started_at) - num(a.t.started_at))
+  const kept = gatherTurns(dir, runId, { family: opts.family === true, since: num(opts.since), want: limit })
+    .sort((a, b) => b.startedAt - a.startedAt)
     .slice(0, limit);
 
   let oldest = Infinity;
-  for (const k of kept) if (num(k.t.started_at) > 0) oldest = Math.min(oldest, num(k.t.started_at));
+  for (const k of kept) if (k.startedAt > 0) oldest = Math.min(oldest, k.startedAt);
   const since = Number.isFinite(oldest) ? oldest - SUBAGENT_SLACK_MS : 0;
   /** @type {Map<string, Array<Record<string, any>>>} */
   const subs = new Map();
@@ -765,12 +949,10 @@ export function turnRows(dir, runId, opts = {}) {
     return subs.get(id) ?? [];
   };
 
-  return kept.map(({ id, t }) => {
-    const row = turnRow(t);
-    const mine = subsOf(id).filter((s) => s.promptId === row.promptId);
+  return kept.map((row) => {
+    const mine = subsOf(row.runId).filter((s) => s.promptId === row.promptId);
     return {
       ...row,
-      runId: id,
       subagentCount: mine.length,
       subagentTypes: mine.map((s) => s.agentType),
     };
@@ -818,8 +1000,11 @@ function rawTurns(dir, runId, want = 0) {
 /**
  * One turn in full, with every prompt-derived string scrubbed.
  *
- * `recall.terms` and `used_evidence.terms` are extracted from the prompt, so they carry
- * whatever the prompt carried and are redacted on the same policy as the prompt itself.
+ * The live file answers while it exists: `recall.terms` and `used_evidence.terms` are
+ * extracted from the prompt, so they carry whatever the prompt carried and are redacted on the
+ * same policy as the prompt itself. Once it is pruned the ledger row answers instead, with
+ * `source: 'ledger'` and the fields the ledger never carried — the staged terms, the evidence
+ * record — reported as `null` rather than reconstructed.
  *
  * @param {string} dir
  * @param {string} runId
@@ -829,27 +1014,235 @@ function rawTurns(dir, runId, want = 0) {
 export function turnDetail(dir, runId, promptId) {
   const id = safeSegment(promptId);
   if (!id) return null;
-  const p = join(runDir({ dataDir: dir }, runId), 'turns', `${id}.json`);
+  const run = safeSegment(runId);
+  const p = join(runDir({ dataDir: dir }, run), 'turns', `${id}.json`);
   const t = readJson(p, null);
-  if (!t || typeof t !== 'object' || Array.isArray(t)) return null;
 
-  const prompt = redactForBrowser(t.prompt, DETAIL_BYTES);
-  const recall = (t.recall && typeof t.recall === 'object') ? t.recall : null;
-  const used = (t.used_evidence && typeof t.used_evidence === 'object') ? t.used_evidence : null;
+  /** @type {Record<string, any>|null} */
+  let detail = null;
+  if (t && typeof t === 'object' && !Array.isArray(t)) {
+    const prompt = redactForBrowser(t.prompt, DETAIL_BYTES);
+    const recall = (t.recall && typeof t.recall === 'object') ? t.recall : null;
+    const used = (t.used_evidence && typeof t.used_evidence === 'object') ? t.used_evidence : null;
+    detail = {
+      ...turnRow(t, { previewBytes: DETAIL_BYTES }),
+      prompt: prompt.text,
+      promptTruncated: prompt.truncated || t.prompt_truncated === true,
+      recall: recall ? { ...recall, terms: redactTerms(recall.terms) } : null,
+      usedEvidence: used ? { ...used, terms: redactTerms(used.terms) } : null,
+      outcomeSentAt: num(t.outcome_sent_at),
+      outcomePending: t.outcome_pending === true,
+      outcomeAbandoned: t.outcome_abandoned === true,
+    };
+  } else {
+    const rows = readLedger(dir, run, { kinds: ['turn'] }).filter((r) => String(r.prompt_id || '') === id);
+    if (!rows.length) return null;
+    const r = rows[rows.length - 1];
+    const prompt = redactForBrowser(r.prompt, DETAIL_BYTES);
+    const rc = (r.recall && typeof r.recall === 'object') ? r.recall : null;
+    detail = {
+      ...ledgerTurnRow(r, { previewBytes: DETAIL_BYTES }),
+      prompt: prompt.text,
+      promptTruncated: prompt.truncated || r.prompt_truncated === true,
+      recall: rc ? { ...rc, terms: null } : null,
+      usedEvidence: null,
+      outcomePending: false,
+      outcomeAbandoned: false,
+    };
+  }
 
-  const startedAt = num(t.started_at);
+  for (const o of readLedger(dir, run, { kinds: ['outcome'] })) {
+    if (String(o.prompt_id || '') !== id) continue;
+    if (num(o.at) > detail.outcomeSentAt) detail.outcomeSentAt = num(o.at);
+    if (detail.source === 'ledger') detail.outcomeState = 'sent';
+  }
+  for (const v of readVerdicts(dir, run)) {
+    if (String(v.prompt || '') !== id || num(v.at) < detail.verdictAt) continue;
+    const word = v.verdict === 'worked' ? 'worked' : v.verdict === 'failed' ? 'failed' : '';
+    if (!word) continue;
+    detail.verdict = word;
+    detail.verdictAt = num(v.at);
+  }
+
+  const startedAt = detail.startedAt;
   return {
-    ...turnRow(t, { previewBytes: DETAIL_BYTES }),
-    runId: safeSegment(runId),
-    subagents: readSubagents(dir, runId, { since: startedAt > 0 ? startedAt - SUBAGENT_SLACK_MS : 0 })
+    ...detail,
+    runId: run,
+    subagents: readSubagents(dir, run, { since: startedAt > 0 ? startedAt - SUBAGENT_SLACK_MS : 0 })
       .filter((s) => s.promptId === id),
-    prompt: prompt.text,
-    promptTruncated: prompt.truncated || t.prompt_truncated === true,
-    recall: recall ? { ...recall, terms: redactTerms(recall.terms) } : null,
-    usedEvidence: used ? { ...used, terms: redactTerms(used.terms) } : null,
-    outcomeSentAt: num(t.outcome_sent_at),
-    outcomePending: t.outcome_pending === true,
-    outcomeAbandoned: t.outcome_abandoned === true,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// What memory did — per lesson, and per day
+// ---------------------------------------------------------------------------
+
+/** One empty tally: every counter present, so a consumer never meets an absent key. */
+function emptyTally() {
+  return {
+    turns: 0, injectedTurns: 0, injectedRefs: 0, tokens: 0, chars: 0,
+    usedYes: 0, usedNo: 0, usedUnmeasured: 0,
+    outcomes: { success: 0, failure: 0, neutral: 0, none: 0 },
+    verdicts: { worked: 0, failed: 0 },
+    apiErrors: 0,
+  };
+}
+
+/** @param {ReturnType<typeof emptyTally>} k @param {Record<string, any>} row */
+function tallyRow(k, row) {
+  k.turns += 1;
+  if (row.recalledCount > 0) k.injectedTurns += 1;
+  k.injectedRefs += num(row.recalledCount);
+  k.tokens += num(row.tok);
+  k.chars += num(row.chars);
+  const u = row.used && typeof row.used === 'object' ? row.used.used : null;
+  if (u === true) k.usedYes += 1; else if (u === false) k.usedNo += 1; else k.usedUnmeasured += 1;
+  k.outcomes[effectiveOutcome(row)] += 1;
+  if (row.verdict === 'worked') k.verdicts.worked += 1;
+  else if (row.verdict === 'failed') k.verdicts.failed += 1;
+  if (row.apiError) k.apiErrors += 1;
+}
+
+/**
+ * Per-lesson counts over a set of turn rows. Each id counts once per turn however many times
+ * the block repeated it; the outcome counted is the effective one, so a verdict on a turn
+ * credits — or debits — every lesson injected into it, which is what the verdict means.
+ *
+ * @param {Array<Record<string, any>>} rows
+ * @returns {Map<string, {injectedCount: number, usedInTurns: number, lastInjectedAt: number,
+ *   outcomes: {success: number, failure: number, neutral: number, none: number},
+ *   verdicts: {worked: number, failed: number}}>}
+ */
+function indexRows(rows) {
+  /** @type {Map<string, any>} */
+  const out = new Map();
+  for (const row of rows) {
+    const eff = effectiveOutcome(row);
+    const used = row.used && typeof row.used === 'object' && row.used.used === true;
+    for (const id of new Set(Array.isArray(row.recalled) ? row.recalled : [])) {
+      if (!id) continue;
+      let e = out.get(id);
+      if (!e) {
+        e = {
+          injectedCount: 0, usedInTurns: 0, lastInjectedAt: 0,
+          outcomes: { success: 0, failure: 0, neutral: 0, none: 0 },
+          verdicts: { worked: 0, failed: 0 },
+        };
+        out.set(id, e);
+      }
+      e.injectedCount += 1;
+      if (used) e.usedInTurns += 1;
+      if (num(row.startedAt) > e.lastInjectedAt) e.lastInjectedAt = num(row.startedAt);
+      e.outcomes[eff] += 1;
+      if (row.verdict === 'worked') e.verdicts.worked += 1;
+      else if (row.verdict === 'failed') e.verdicts.failed += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * How often each memory id was injected into a turn of this run — or, with `family`, of its
+ * directory — and what those turns came to. Durable, unlike the six-hour seen-set: it reads
+ * the ledger and the live files together, one row per prompt.
+ *
+ * @param {string} dir
+ * @param {string} runId
+ * @param {{family?: boolean, since?: number}} [opts]
+ * @returns {ReturnType<typeof indexRows>}
+ */
+export function injectionIndex(dir, runId, opts = {}) {
+  return indexRows(gatherTurns(dir, runId, { family: opts.family === true, since: num(opts.since), want: 0 }));
+}
+
+/** `YYYY-MM-DD` by the local calendar — the same key the page's day headers use. */
+function localDay(ms) {
+  const d = new Date(ms);
+  const two = (n) => (n < 10 ? '0' : '') + n;
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
+}
+
+/** Local midnight `daysBack` calendar days before the day `ms` falls on. DST-safe: date arithmetic, not 24 h steps. */
+function localDayStart(ms, daysBack = 0) {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - daysBack).getTime();
+}
+
+/**
+ * The Overview: what memory did over the last `days` calendar days, by day and in total, and
+ * the same totals for the equal window before it, so a tile can carry a delta.
+ *
+ * Days are **local calendar days** on the machine serving the page — which is the machine the
+ * turns happened on — and every day in the window is present, zero-filled, so a chart has one
+ * bar per day rather than one per day something happened. Outcomes are the *effective* ones:
+ * a verdict wins over the automatic signal, so this agrees with the Turns table row by row.
+ * `verdicts` counts turns that carried one at all.
+ *
+ * Local only: nothing here reaches the instance.
+ *
+ * @param {string} dir
+ * @param {string} runId
+ * @param {{family?: boolean, days?: number, now?: number}} [opts] `days` is clamped to 1..30
+ * @returns {Record<string, any>}
+ */
+export function overview(dir, runId, opts = {}) {
+  const days = clampInt(opts.days, 1, 30, 30);
+  const now = num(opts.now) || Date.now();
+  const family = opts.family === true;
+  const ids = family ? familyOf(dir, runId).runIds : [safeSegment(runId)].filter(Boolean);
+  const windowStart = localDayStart(now, days - 1);
+  const previousStart = localDayStart(now, 2 * days - 1);
+
+  const rows = gatherTurns(dir, runId, { family, since: previousStart, want: 0 });
+  const current = rows.filter((r) => r.startedAt >= windowStart);
+  const previous = rows.filter((r) => r.startedAt < windowStart);
+
+  /** @type {Map<string, any>} */
+  const byDay = new Map();
+  for (let i = days - 1; i >= 0; i -= 1) {
+    const day = localDay(localDayStart(now, i));
+    byDay.set(day, { day, injected: 0, ...emptyTally() });
+  }
+  const kpi = emptyTally();
+  for (const row of current) {
+    tallyRow(kpi, row);
+    const bucket = byDay.get(localDay(row.startedAt));
+    if (!bucket) continue;
+    tallyRow(bucket, row);
+    bucket.injected = bucket.injectedRefs;
+  }
+  const prev = emptyTally();
+  for (const row of previous) tallyRow(prev, row);
+
+  const topInjected = [...indexRows(current).entries()]
+    .map(([id, e]) => ({ id, ...e }))
+    .sort((x, y) => y.injectedCount - x.injectedCount || y.lastInjectedAt - x.lastInjectedAt)
+    .slice(0, 10);
+
+  // The oldest close time on any ledger of the family, whatever order the rows landed in.
+  let firstLedgerAt = 0;
+  for (const id of ids) {
+    for (const r of readLedger(dir, id, { kinds: ['turn'] })) {
+      const at = num(r.at);
+      if (at > 0 && (!firstLedgerAt || at < firstLedgerAt)) firstLedgerAt = at;
+    }
+  }
+
+  return {
+    dir,
+    runId: safeSegment(runId),
+    runIds: ids,
+    days,
+    now,
+    windowStart,
+    previousStart,
+    // Stated rather than implied: the ledger accrues from the first Stop after it existed
+    // and cannot reconstruct anything before that.
+    firstLedgerAt,
+    kpi,
+    previous: prev,
+    series: [...byDay.values()],
+    topInjected,
   };
 }
 
@@ -1078,7 +1471,18 @@ function capRollup(p, approxRows) {
  * @returns {Array<Record<string, any>>}
  */
 export function readRollup(dir, runId, since = 0) {
-  const p = rollupPath(dir, runId);
+  return readJsonl(rollupPath(dir, runId), since);
+}
+
+/**
+ * One JSONL file under `dashboard/`, oldest first. A row torn by a crash mid-append is normal
+ * and costs exactly itself.
+ *
+ * @param {string} p
+ * @param {number} [since] epoch ms on `at`; rows older than this are dropped
+ * @returns {Array<Record<string, any>>}
+ */
+function readJsonl(p, since = 0) {
   if (!existsSync(p)) return [];
   let raw = '';
   try { raw = readFileSync(p, 'utf8'); } catch { return []; }
@@ -1088,13 +1492,68 @@ export function readRollup(dir, runId, since = 0) {
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let row;
-    // A row torn by a crash mid-append is normal and costs exactly itself.
     try { row = JSON.parse(line); } catch { continue; }
     if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
     if (from > 0 && num(row.at) < from) continue;
     out.push(row);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Verdicts — the other thing the dashboard writes
+// ---------------------------------------------------------------------------
+
+/**
+ * `<dataDir>/dashboard/verdicts-<run_id>.jsonl`: one row per Worked / Did not work a person
+ * gave a turn, appended by the server after the instance accepted the outcome post.
+ *
+ * Beside the rollup rather than on the ledger, on purpose. The ledger is appended by the Stop
+ * hook, and rewriting one of its rows from a server process would race that append; and the
+ * "dashboard writes only under `dashboard/`" invariant is worth more than one file fewer.
+ * The reader folds the newest verdict per prompt onto its turn row (`gatherTurns`).
+ *
+ * @param {string} dir
+ * @param {string} runId
+ * @returns {string}
+ */
+export function verdictsPath(dir, runId) {
+  return join(dir, ROLLUP_DIR, `verdicts-${safeSegment(runId) || 'unknown'}.jsonl`);
+}
+
+/**
+ * Append one verdict row: `{at, run, prompt, verdict: 'worked'|'failed', entryIds, …}`.
+ * Capped like the rollup, by the same function.
+ *
+ * @param {string} dir
+ * @param {string} runId
+ * @param {Record<string, any>|null} row
+ * @returns {boolean} whether a row was written
+ */
+export function appendVerdict(dir, runId, row) {
+  try {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+    const p = verdictsPath(dir, runId);
+    const rows = readVerdicts(dir, runId);
+    if (!ensureDir(join(dir, ROLLUP_DIR))) return false;
+    appendFileSync(p, `${JSON.stringify(row)}\n`, 'utf8');
+    capRollup(p, rows.length + 1);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Every verdict recorded for a run, oldest first.
+ *
+ * @param {string} dir
+ * @param {string} runId
+ * @param {number} [since]
+ * @returns {Array<Record<string, any>>}
+ */
+export function readVerdicts(dir, runId, since = 0) {
+  return readJsonl(verdictsPath(dir, runId), since);
 }
 
 /**

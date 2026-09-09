@@ -122,6 +122,10 @@ function source(rev) {
         { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\0').filter(Boolean),
       size: (p) => { try { return statSync(join(REPO, p)).size; } catch { return -1; } },
       read: (p) => { try { return readFileSync(join(REPO, p), 'utf8'); } catch { return null; } },
+      links: () => symlinkRows(
+        execFileSync('git', ['-C', REPO, 'ls-files', '-s', '-z'],
+          { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }), 1,
+        (sha) => execFileSync('git', ['-C', REPO, 'cat-file', 'blob', sha], { encoding: 'utf8' })),
     };
   }
   const git = (args, enc) => execFileSync('git', ['-C', REPO, ...args],
@@ -130,7 +134,33 @@ function source(rev) {
     list: () => git(['ls-tree', '-r', '-z', '--name-only', rev], 'utf8').split('\0').filter(Boolean),
     size: (p) => { try { return Number(git(['cat-file', '-s', `${rev}:${p}`], 'utf8').trim()); } catch { return -1; } },
     read: (p) => { try { return git(['show', `${rev}:${p}`], 'utf8'); } catch { return null; } },
+    links: () => symlinkRows(git(['ls-tree', '-r', '-z', rev], 'utf8'), 2,
+      (sha) => git(['cat-file', 'blob', sha], 'utf8')),
   };
+}
+
+/**
+ * The symlinks in a listing, paired with the path each one points at.
+ *
+ * A symlink is published as a blob whose whole content is that path, so a link into a
+ * developer worktree publishes an absolute home path with no file to notice it in. The
+ * content pass cannot reach it: that pass decides text-ness by extension, and a symlink is
+ * named after whatever it stands in for. Mode 120000 is the only marker there is.
+ *
+ * @param {string} listing NUL-separated `ls-files -s` or `ls-tree -r` output
+ * @param {number} shaAt index of the object id once the row before the tab is split on spaces
+ * @param {(sha:string)=>string} blob
+ */
+function symlinkRows(listing, shaAt, blob) {
+  const out = [];
+  for (const row of listing.split('\0')) {
+    if (!row.startsWith('120000 ')) continue;
+    const tab = row.indexOf('\t');
+    if (tab < 0) continue;
+    const sha = row.slice(0, tab).split(/\s+/)[shaAt];
+    try { out.push({ path: row.slice(tab + 1), target: blob(sha) }); } catch { /* unreadable */ }
+  }
+  return out;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -368,6 +398,15 @@ function scan(paths, allTracked, src) {
   const findings = [];
   const contentRules = RULES.filter((r) => r.kind === 'content');
   const pathRules = RULES.filter((r) => r.kind === 'path');
+
+  /* --- symlinks: the blob IS a path, and no extension makes it look like text --- */
+  for (const { path, target } of src.links()) {
+    if (matchesAny(path, CONFIG.excludePaths)) continue;
+    const applicable = contentRules.filter((r) => ruleApplies(r, path));
+    if (applicable.length === 0) continue;
+    matchContent(applicable.map((rule) => ({ rule, re: compile(rule) })),
+      [target], path, findings, new Set());
+  }
 
   for (const path of paths) {
     if (matchesAny(path, CONFIG.excludePaths)) continue;

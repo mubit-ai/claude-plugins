@@ -36,8 +36,8 @@ import { join } from 'node:path';
 import { PLUGIN_ROOT, lib, mod, baseEnv, fakeMubit, makeDataDir } from './helpers/harness.mjs';
 import { SECRETS } from './helpers/fixtures.mjs';
 import {
-  PROJECT, PROMPT, PROMPT_C1, RUN, RUN_C1, SESSION, activityPage, lessonActivity, seedRun,
-  writeMarker, writeSession, writeSubagent, writeTurn,
+  PROJECT, PROMPT, PROMPT_C1, RUN, RUN_C1, SESSION, activityPage, lessonActivity, lessonsRoute, seedRun,
+  writeLedger, writeMarker, writeSession, writeSubagent, writeTurn,
 } from './helpers/dashboard-fixtures.mjs';
 
 /** A page body the suite owns, so no assertion here depends on the shipped markup. */
@@ -88,7 +88,7 @@ const GET_ROUTES = [
   '/', '/api/ping', '/api/meta', '/api/datadirs', '/api/runs', '/api/turns',
   `/api/turn?run=${RUN}&prompt=${PROMPT}`, '/api/health/local', '/api/analytics',
   '/api/lessons', '/api/activity', `/api/health/remote?run=${RUN}`, '/api/remote-runs',
-  `/api/entry?run=${RUN}&id=ref_lesson_1`,
+  `/api/entry?run=${RUN}&id=ref_lesson_1`, `/api/overview?run=${RUN}&family=1&days=7`,
 ];
 
 /** Every POST route, with a body that is valid enough to get past the guards. */
@@ -97,6 +97,7 @@ const POST_ROUTES = [
   ['/api/outcome', { run: RUN, referenceId: 'ref_lesson_1', success: true }],
   ['/api/archive', { run: RUN, content: 'a decision' }],
   ['/api/forget', { lessonId: 'les_1', confirm: 'les_1' }],
+  ['/api/verdict', { run: RUN, promptId: PROMPT, success: true }],
 ];
 
 // ---------------------------------------------------------------------------
@@ -210,7 +211,8 @@ test('offline: every local route answers 200 with no instance reachable, and the
   seedRun(dataDir);
 
   for (const path of ['/api/meta', '/api/datadirs', '/api/runs', '/api/turns',
-    `/api/turn?run=${RUN}&prompt=${PROMPT}`, '/api/health/local', '/api/analytics']) {
+    `/api/turn?run=${RUN}&prompt=${PROMPT}`, '/api/health/local', '/api/analytics',
+    `/api/overview?run=${RUN}&family=1`]) {
     const res = await call(path);
     assert.equal(res.status, 200, `local route ${path} answered ${res.status} with the network down`);
   }
@@ -983,3 +985,205 @@ async function waitFor(pred, timeoutMs, message) {
   }
   assert.fail(`${message} (waited ${timeoutMs}ms)`);
 }
+
+// ---------------------------------------------------------------------------
+// The lesson flow — overview, verdicts, and the ledger behind the lessons
+// ---------------------------------------------------------------------------
+
+/** A prompt whose turn file has been pruned and only its ledger row remains. */
+const PRUNED = '55555555-2222-3333-4444-555555555555';
+
+/** One ledger `turn` row, the way `capture --stop` builds it. */
+async function ledgerTurn(over = {}) {
+  const L = await lib('ledger.mjs');
+  const startedAt = over.started_at ?? Date.now() - 60_000;
+  return L.turnLedgerRow({
+    prompt: 'the pruned one', prompt_id: PRUNED, session_id: SESSION, started_at: startedAt,
+    ended_at: startedAt + 5000, recalled: ['ref_lesson_1', 'ref_lesson_2'],
+    recall: { tokens: 90, chars: 300, sources: 2, rung: 1 },
+    used_evidence: { used: true, matched: 1, candidates: 2 },
+    ...over,
+  }, RUN, startedAt + 5000);
+}
+
+test('overview: /api/overview answers from the ledger alone, local, with the documented shape', async (t) => {
+  const { dataDir, call, upstream } = await setup(t, { endpoint: 'http://127.0.0.1:1' });
+  writeMarker(dataDir, RUN);
+  writeSession(dataDir, SESSION);
+  writeLedger(dataDir, RUN, [await ledgerTurn()]);
+
+  const res = await call(`/api/overview?run=${RUN}&family=1&days=7`);
+  assert.equal(res.status, 200);
+  const o = await res.json();
+  assert.equal(o.runId, RUN);
+  assert.ok(o.runIds.includes(RUN));
+  assert.equal(o.days, 7);
+  assert.equal(o.series.length, 7, 'one entry per local calendar day, zero-filled');
+  assert.equal(o.kpi.turns, 1);
+  assert.equal(o.kpi.injectedTurns, 1);
+  assert.equal(o.kpi.injectedRefs, 2);
+  assert.equal(o.kpi.tokens, 90);
+  assert.deepEqual(o.kpi.outcomes, { success: 1, failure: 0, neutral: 0, none: 0 });
+  assert.deepEqual(o.kpi.verdicts, { worked: 0, failed: 0 });
+  assert.equal(typeof o.previous.turns, 'number');
+  assert.ok(o.firstLedgerAt > 0);
+  assert.deepEqual(o.topInjected.map((x) => x.id).sort(), ['ref_lesson_1', 'ref_lesson_2']);
+  assert.equal(o.topInjected[0].injectedCount, 1);
+  assert.ok(!JSON.stringify(o).includes('NaN'));
+  assert.equal(upstream.requests.length, 0, 'the overview is local');
+
+  // Days is clamped; an unknown run is an empty overview, never an error.
+  assert.equal((await (await call(`/api/overview?run=${RUN}&days=400`)).json()).days, 30);
+  const none = await (await call('/api/overview?run=cc-none-00000001')).json();
+  assert.equal(none.kpi.turns, 0);
+  assert.equal(none.series.length, 30);
+});
+
+/**
+ * The per-turn verdict: one click credits every memory injected into the turn, with the
+ * strongest signal the system accepts, as the authenticated user rather than as an agent.
+ */
+test('verdict: POST /api/verdict posts one outcome for the turn\'s recalled ids and records it', async (t) => {
+  const { dataDir, call, upstream } = await setup(t);
+  seedRun(dataDir);
+
+  const res = await call('/api/verdict', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dir: dataDir, run: RUN, promptId: PROMPT, success: true }),
+  });
+  const text = await res.text();
+  assert.equal(res.status, 200, text);
+  assert.deepEqual(JSON.parse(text), {
+    verdict: 'worked', promptId: PROMPT, entryIds: ['ref_lesson_1'], reinforcementCount: 1, updatedConfidence: 0.7,
+  });
+
+  upstream.assertCalled('POST', '/v2/control/outcome', 1);
+  const wire = upstream.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(wire.run_id, RUN);
+  assert.equal(wire.reference_id, 'global');
+  assert.equal(wire.outcome, 'success');
+  assert.equal(wire.signal, 1);
+  assert.deepEqual(wire.entry_ids, ['ref_lesson_1']);
+  assert.equal(wire.idempotency_key, `dash-verdict-${RUN}-${PROMPT}-success`);
+  assert.ok(!('agent_id' in wire), 'no agent_id: the backend records the user as the actor');
+  assert.ok(!('success' in wire));
+  assert.match(wire.rationale, /Dashboard verdict/);
+  assert.match(wire.rationale, /worked/);
+  assert.match(wire.rationale, /1 memor/);
+
+  // Recorded, and visible on the turn row and the detail.
+  const turns = (await (await call(`/api/turns?run=${RUN}&family=1`)).json()).turns;
+  const row = turns.find((x) => x.promptId === PROMPT);
+  assert.equal(row.verdict, 'worked');
+  assert.ok(row.verdictAt > 0);
+  assert.equal(row.outcome, 'success', 'the automatic signal is still reported as itself');
+  const detail = (await (await call(`/api/turn?run=${RUN}&prompt=${PROMPT}`)).json()).turn;
+  assert.equal(detail.verdict, 'worked');
+  assert.ok(existsSync(join(dataDir, 'dashboard', `verdicts-${RUN}.jsonl`)), 'verdicts live under dashboard/');
+
+  // The other verdict is a different record with a different key, and the newest wins.
+  const again = await call('/api/verdict', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dir: dataDir, run: RUN, promptId: PROMPT, success: false }),
+  });
+  assert.equal(again.status, 200);
+  assert.equal((await again.json()).verdict, 'failed');
+  const w2 = upstream.lastCall('POST', '/v2/control/outcome').body;
+  assert.equal(w2.outcome, 'failure');
+  assert.equal(w2.signal, -1);
+  assert.equal(w2.idempotency_key, `dash-verdict-${RUN}-${PROMPT}-failure`);
+  assert.match(w2.rationale, /did not work/);
+  const after = (await (await call(`/api/turns?run=${RUN}`)).json()).turns.find((x) => x.promptId === PROMPT);
+  assert.equal(after.verdict, 'failed');
+});
+
+test('verdict: an unknown turn is 404, a turn that injected nothing is 400, and neither dials the instance', async (t) => {
+  const { dataDir, call, upstream } = await setup(t);
+  seedRun(dataDir);
+  const post = (payload) => call('/api/verdict', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+  });
+
+  let res = await post({ dir: dataDir, run: RUN, promptId: '99999999-0000-0000-0000-000000000000', success: true });
+  assert.equal(res.status, 404);
+  assert.equal((await res.json()).error.code, 'not_found');
+
+  res = await post({ dir: dataDir, run: RUN_C1, promptId: PROMPT_C1, success: true });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.error.code, 'bad_request');
+  assert.match(body.error.message, /nothing was injected/i);
+
+  res = await post({ dir: dataDir, run: RUN, success: true });
+  assert.equal(res.status, 400, 'a missing prompt id is refused');
+
+  res = await post({ dir: dataDir, run: '../../etc', promptId: '../passwd', success: true });
+  assert.equal(res.status, 404, 'a traversal id resolves to nothing rather than to a file');
+
+  upstream.assertNotCalled('POST', '/v2/control/outcome');
+  assert.ok(!existsSync(join(dataDir, 'dashboard', `verdicts-${RUN}.jsonl`)), 'nothing was recorded');
+});
+
+test('verdict: a turn whose file was pruned is judged from its ledger row', async (t) => {
+  const { dataDir, call, upstream } = await setup(t);
+  writeMarker(dataDir, RUN);
+  writeLedger(dataDir, RUN, [await ledgerTurn()]);
+
+  const res = await call('/api/verdict', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dir: dataDir, run: RUN, promptId: PRUNED, success: true }),
+  });
+  const text = await res.text();
+  assert.equal(res.status, 200, text);
+  assert.deepEqual(JSON.parse(text).entryIds, ['ref_lesson_1', 'ref_lesson_2']);
+  assert.deepEqual(upstream.lastCall('POST', '/v2/control/outcome').body.entry_ids, ['ref_lesson_1', 'ref_lesson_2']);
+  const row = (await (await call(`/api/turns?run=${RUN}`)).json()).turns.find((x) => x.promptId === PRUNED);
+  assert.equal(row.source, 'ledger');
+  assert.equal(row.verdict, 'worked');
+});
+
+test('verdict: an upstream failure is the instance\'s error, and nothing is recorded', async (t) => {
+  const { dataDir, call } = await setup(t, {
+    routes: { 'POST /v2/control/outcome': { status: 500, json: { error: 'boom' } } },
+  });
+  seedRun(dataDir);
+  const res = await call('/api/verdict', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dir: dataDir, run: RUN, promptId: PROMPT, success: true }),
+  });
+  assert.equal(res.status, 503);
+  assert.equal((await res.json()).error.code, 'upstream_unreachable');
+  assert.ok(!existsSync(join(dataDir, 'dashboard', `verdicts-${RUN}.jsonl`)));
+  const row = (await (await call(`/api/turns?run=${RUN}`)).json()).turns.find((x) => x.promptId === PROMPT);
+  assert.equal(row.verdict, '');
+});
+
+test('lessons: with dir and family, each lesson carries how often the ledger says it was injected', async (t) => {
+  const { dataDir, call } = await setup(t, { routes: lessonsRoute([lessonActivity()]) });
+  seedRun(dataDir);
+  writeLedger(dataDir, RUN, [await ledgerTurn()]);
+  // A verdict on the pruned turn: it credits both lessons injected into it.
+  const verdict = await call('/api/verdict', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dir: dataDir, run: RUN, promptId: PRUNED, success: false }),
+  });
+  assert.equal(verdict.status, 200);
+
+  const body = await (await call(`/api/lessons?run=&currentRun=${RUN}&dir=${encodeURIComponent(dataDir)}&family=1`)).json();
+  assert.equal(body.lessons.length, 1);
+  const l = body.lessons[0];
+  assert.equal(l.id, 'ref_lesson_1');
+  assert.equal(l.injectedCount, 2, 'once from the live turn, once from the ledger row');
+  assert.equal(l.usedInTurns, 1);
+  assert.ok(l.lastInjectedAt > 0);
+  assert.deepEqual(l.injectedOutcomes, { success: 1, failure: 1, neutral: 0, none: 0 });
+  assert.deepEqual(l.injectedVerdicts, { worked: 0, failed: 1 });
+
+  // Without a directory the keys are present and zero, never an error.
+  const bare = (await (await call(`/api/lessons?run=&currentRun=${RUN}`)).json()).lessons[0];
+  assert.equal(bare.injectedCount, 0);
+  assert.equal(bare.usedInTurns, 0);
+  assert.equal(bare.lastInjectedAt, 0);
+  assert.deepEqual(bare.injectedOutcomes, { success: 0, failure: 0, neutral: 0, none: 0 });
+  assert.deepEqual(bare.injectedVerdicts, { worked: 0, failed: 0 });
+});

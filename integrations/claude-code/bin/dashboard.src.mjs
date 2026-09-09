@@ -52,12 +52,13 @@ import { fileURLToPath } from 'node:url';
 import { lessonCensus } from '../lib/activity.mjs';
 import { isConfigured, loadConfig } from '../lib/config.mjs';
 import {
-  deleteLesson, fetchActivity, fetchEntry, fetchLessons, fetchMemoryHealth, fetchRemoteRuns,
+  deleteLesson, fail, fetchActivity, fetchEntry, fetchLessons, fetchMemoryHealth, fetchRemoteRuns,
   normalizeActivityLesson, ok, runSearch, sendArchive, sendOutcome,
 } from '../lib/dashboard-api.mjs';
 import {
-  analytics, appendRollup, describeRunScope, launchRunFor, listDataDirs, listRuns, localHealth,
-  newestRun, resolveDirParam, runsIn, sampleFor, turnDetail, turnRows,
+  analytics, appendRollup, appendVerdict, describeRunScope, injectionIndex, launchRunFor,
+  listDataDirs, listRuns, localHealth, newestRun, overview, resolveDirParam, runsIn, sampleFor,
+  turnDetail, turnRows,
 } from '../lib/dashboard-data.mjs';
 import { ensureDir, readJson, resolveDataDir, safeSegment, writeJsonAtomic } from '../lib/state.mjs';
 
@@ -581,6 +582,113 @@ function decorateScope(entry, currentRun) {
 }
 
 // ---------------------------------------------------------------------------
+// The lesson flow — what the ledger says about each lesson, and a person's verdict
+// ---------------------------------------------------------------------------
+
+/** The five decoration keys, empty: present on every row so a page never meets `undefined`. */
+const NO_INJECTIONS = Object.freeze({
+  injectedCount: 0, usedInTurns: 0, lastInjectedAt: 0,
+  outcomes: Object.freeze({ success: 0, failure: 0, neutral: 0, none: 0 }),
+  verdicts: Object.freeze({ worked: 0, failed: 0 }),
+});
+
+/**
+ * Stamp each lesson with how often the selected directory injected it and what those turns
+ * came to, from `injectionIndex` over the ledger and the live turns.
+ *
+ * Needs `?dir=` (resolved by equality, like every other dir) and `?currentRun=` as the anchor;
+ * `?family=1` widens to the directory. With either missing the decoration is zeros, never an
+ * error — the census answered, and a local join must not be what makes it fail.
+ *
+ * @param {Record<string, any>} ctx @param {URL} url @param {any[]} lessons
+ */
+function decorateInjections(ctx, url, lessons) {
+  const dirParam = String(url.searchParams.get('dir') ?? '');
+  const anchor = safeSegment(String(url.searchParams.get('currentRun') ?? ''));
+  let index = new Map();
+  if (dirParam && anchor) {
+    const dir = resolveDirParam(dirParam, dirsOf(ctx));
+    if (dir) {
+      try { index = injectionIndex(dir, anchor, { family: familyParam(url) }); } catch { index = new Map(); }
+    }
+  }
+  return (Array.isArray(lessons) ? lessons : []).map((l) => {
+    const e = (l && l.id && index.get(String(l.id))) || NO_INJECTIONS;
+    return {
+      ...l,
+      injectedCount: e.injectedCount,
+      usedInTurns: e.usedInTurns,
+      lastInjectedAt: e.lastInjectedAt,
+      injectedOutcomes: { ...e.outcomes },
+      injectedVerdicts: { ...e.verdicts },
+    };
+  });
+}
+
+/**
+ * `POST /api/verdict {dir, run, promptId, success}` — one click credits every memory injected
+ * into a turn.
+ *
+ * The turn is found live, else on the ledger (`turnDetail` does both), so a turn whose file
+ * was pruned can still be judged; a turn that injected nothing has nothing to credit and is
+ * a 400 before anything is dialled. The post is `reference_id: 'global'` with the turn's
+ * `recalled[]` as `entry_ids`, at ±1.0 — the vendored `mubit_outcome` default and the
+ * strongest evidence the system accepts; the hooks' implicit 0.2 / -0.3 exist because a
+ * completed turn is not proof, and a person clicking is. No `agent_id`, so the backend
+ * records the authenticated user as the actor, distinct from the hooks' posts.
+ *
+ * Only an accepted post is recorded, under `dashboard/verdicts-<run>.jsonl`; the reader
+ * folds it onto the turn row. Rewriting the ledger row instead would race the Stop hook's
+ * append.
+ *
+ * @param {Record<string, any>} ctx
+ * @param {any} body
+ * @returns {Promise<Record<string, any>>}
+ */
+async function verdictPayload(ctx, body) {
+  const cfg = ctx.cfg;
+  const b = (body && typeof body === 'object') ? body : {};
+  const dir = resolveDirParam(String(b.dir ?? ''), dirsOf(ctx));
+  const run = safeSegment(String(b.run ?? ''));
+  const promptId = safeSegment(String(b.promptId ?? ''));
+  if (!dir || !run) return fail(400, 'bad_request', 'verdict requires a run id');
+  if (!promptId) return fail(400, 'bad_request', 'verdict requires a promptId');
+
+  const turn = turnDetail(dir, run, promptId);
+  if (!turn) return fail(404, 'not_found', 'no such turn on disk or in the ledger');
+  const entryIds = Array.isArray(turn.recalled) ? turn.recalled.map(String).filter(Boolean) : [];
+  if (!entryIds.length) {
+    return fail(400, 'bad_request', 'nothing was injected into this turn, so there is nothing to credit');
+  }
+
+  const success = b.success !== false;
+  const outcome = success ? 'success' : 'failure';
+  const n = entryIds.length;
+  const r = await sendOutcome(cfg, {
+    run,
+    referenceId: 'global',
+    outcome,
+    signal: success ? 1.0 : -1.0,
+    rationale: `Dashboard verdict: the user marked this turn as ${success ? 'worked' : 'did not work'}; `
+      + `${n} ${n === 1 ? 'memory was' : 'memories were'} injected.`,
+    entryIds,
+    idempotencyKey: `dash-verdict-${run}-${promptId}-${outcome}`,
+  });
+  if (!r.ok) return r;
+
+  const verdict = success ? 'worked' : 'failed';
+  appendVerdict(dir, run, {
+    at: Date.now(), run, prompt: promptId, verdict, entryIds: n, source: String(turn.source || ''),
+    reinforcementCount: r.data.reinforcementCount, updatedConfidence: r.data.updatedConfidence,
+  });
+  return ok({
+    verdict, promptId, entryIds,
+    reinforcementCount: r.data.reinforcementCount,
+    updatedConfidence: r.data.updatedConfidence,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // GET routes
 // ---------------------------------------------------------------------------
 
@@ -674,10 +782,21 @@ async function getRoute(ctx, res, path, url) {
       : { dir, runId: run, runIds: [], series: [], points: 0 }, cfg);
   }
 
+  // What memory did over the last N local calendar days, from the ledger and the live turns:
+  // the Overview's tiles, its chart and its ranked lessons, all local.
+  if (path === '/api/overview') {
+    const { dir, run } = scope(ctx, url);
+    const days = Number(url.searchParams.get('days') ?? 30);
+    const family = familyParam(url);
+    return sendJson(res, 200, dir && run
+      ? overview(dir, run, { days, family })
+      : { dir, runId: run, runIds: [], days: 0, series: [], kpi: null, previous: null, topInjected: [], firstLedgerAt: 0 }, cfg);
+  }
+
   // --- proxied. These need the instance, and degrade with a banner. --------
 
   if (path === '/api/lessons') {
-    return upstream(res, cfg, await lessonsPayload(cfg, {
+    const payload = await lessonsPayload(cfg, {
       // An empty `run` means every run, and that is the only spelling it gets. A second
       // `allRuns` parameter would just be a second way to pin this tab back to one run, which
       // is the bug that made a global lesson from another run structurally invisible.
@@ -689,7 +808,11 @@ async function getRoute(ctx, res, path, url) {
       project: String(url.searchParams.get('project') ?? ''),
       limit: Number(url.searchParams.get('limit') ?? 100),
       source: String(url.searchParams.get('source') ?? 'auto'),
-    }));
+    });
+    if (!payload.ok) return upstream(res, cfg, payload);
+    // Joined against the ledger: how often this directory injected each lesson, and what
+    // those turns came to. Local, so it cannot make the route fail.
+    return upstream(res, cfg, ok({ ...payload.data, lessons: decorateInjections(ctx, url, payload.data.lessons) }));
   }
 
   if (path === '/api/activity') {
@@ -753,6 +876,7 @@ async function postRoute(ctx, req, res, path) {
     '/api/outcome': (b) => sendOutcome(cfg, b),
     '/api/archive': (b) => sendArchive(cfg, b),
     '/api/forget': (b) => deleteLesson(cfg, b),
+    '/api/verdict': (b) => verdictPayload(ctx, b),
   };
   const fn = routes[path];
   if (!fn) return sendError(res, 404, 'not_found', `POST ${path} is not a dashboard route`, cfg);

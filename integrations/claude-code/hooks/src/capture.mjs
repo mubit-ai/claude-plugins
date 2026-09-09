@@ -40,6 +40,7 @@ import { envTags, host } from '../../lib/config.mjs';
 import { firstUserText, toolCallRecord } from '../../lib/codex-rollout.mjs';
 import { runHook, spawnDetached, stashPayload } from '../../lib/hook.mjs';
 import { classifyTool, classifyTurn } from '../../lib/classify.mjs';
+import { appendLedger, turnLedgerRow } from '../../lib/ledger.mjs';
 import { fileChanges, recordFileChanges } from '../../lib/filechange.mjs';
 import { isDeniedPath, isSelfReference, redactParams, redactText } from '../../lib/redact.mjs';
 import { deriveAgentId, deriveRunId, resolveProjectDir, turnKey, turnNumber } from '../../lib/runid.mjs';
@@ -864,7 +865,7 @@ function closeTurn(cfg, runId, payload, apiError = '') {
   // `decideOutcome` reads as "the model ignored the memory". Unmeasurable is not unused, and
   // this is the one place that distinction can still be made honestly.
   const evidence = apiError ? null : attempt(() => usedEvidence(base, payload), null);
-  writeJsonAtomic(p, {
+  const closed = {
     ...base,
     // Absent when nothing was staged to look for. An absent key means "unmeasured" and the
     // drain falls back to the old turn-completed reading; `used: false` means "measured, and
@@ -874,7 +875,15 @@ function closeTurn(cfg, runId, payload, apiError = '') {
     ...(apiError ? { [API_ERROR_KEY]: apiError } : {}),
     ended_at: Date.now(),
     outcome_pending: true,
-  });
+  };
+  writeJsonAtomic(p, closed);
+  // The durable copy. The turn file above is pruned six hours from now; the ledger row is
+  // what the dashboard reads after that, and it is the last step here, inside its own
+  // `attempt`, so a full disk costs the row and never the turn file or the drain that
+  // follows. One redaction, one stat, one append — single-digit milliseconds against the
+  // five-second Stop budget. Subagent stops arrive through `--subagent`, never here, so they
+  // write no row.
+  attempt(() => appendLedger(resolveDataDir(cfg), runId, turnLedgerRow(closed, runId, Date.now())));
 }
 
 /**

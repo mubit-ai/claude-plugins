@@ -824,7 +824,7 @@ var RULES = [
   { kind: "bearer", re: /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/g },
   { kind: "high-entropy", scrub: scrubHighEntropy }
 ];
-function scrubAssignments(text, count) {
+function scrubAssignments(text, count2) {
   ASSIGNMENT_RE.lastIndex = 0;
   let out = "";
   let copied = 0;
@@ -845,33 +845,33 @@ function scrubAssignments(text, count) {
     out += text.slice(copied, m.index) + pre + PH("assignment");
     copied = VALUE_RE.lastIndex;
     ASSIGNMENT_RE.lastIndex = copied;
-    count.n += 1;
+    count2.n += 1;
   }
   return out + text.slice(copied);
 }
 function isSecretName(lower) {
   return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
-function scrubUrlCredentials(text, count) {
+function scrubUrlCredentials(text, count2) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
-    count.n += 1;
+    count2.n += 1;
     return `${pre}${scheme}${PH("url-credentials")}@`;
   });
 }
-function scrubHighEntropy(text, count) {
+function scrubHighEntropy(text, count2) {
   return text.replace(ENTROPY_RUN_RE, (run) => {
     if (run.length < ENTROPY_MIN_LEN) return run;
     if (EXEMPT_RE.test(run)) return run;
     if (entropy(run) < ENTROPY_THRESHOLD) return run;
-    count.n += 1;
+    count2.n += 1;
     return PH("high-entropy");
   });
 }
-function scrub(text, count) {
+function scrub(text, count2) {
   let out = text;
   for (const rule of RULES) {
     if (rule.scrub) {
-      out = rule.scrub(out, count);
+      out = rule.scrub(out, count2);
       continue;
     }
     const re = rule.re;
@@ -879,7 +879,7 @@ function scrub(text, count) {
     re.lastIndex = 0;
     out = out.replace(re, (m) => {
       if (EXEMPT_RE.test(m)) return m;
-      count.n += 1;
+      count2.n += 1;
       return PH(rule.kind);
     });
   }
@@ -933,14 +933,14 @@ function redactText(text, cfg = {}, kind = "output") {
       s = "";
     }
   }
-  const count = { n: 0 };
+  const count2 = { n: 0 };
   if (!cfg || cfg.redact !== false) {
     try {
-      s = scrub(s, count);
+      s = scrub(s, count2);
     } catch {
     }
   }
-  out.redactions = count.n;
+  out.redactions = count2.n;
   const cap = kind === "param" ? numberOr(cfg?.maxParamBytes, 4096) : numberOr(cfg?.maxOutputBytes, 8192);
   const capped = capBytes(s, cap);
   out.text = capped.text;
@@ -1802,7 +1802,8 @@ var EXTRA_ROUTES = Object.freeze({
   memoryHealth: "/v2/control/memory_health",
   archive: "/v2/control/archive",
   deleteLesson: "/v2/control/lessons/delete",
-  runs: "/v2/control/runs"
+  runs: "/v2/control/runs",
+  dereference: "/v2/control/dereference"
 });
 var DEFAULT_SCOPE = "run";
 var REPO_TAG = "repo:";
@@ -1874,7 +1875,12 @@ function normalizeActivityLesson(entry, ctx = {}) {
     promotionStamped: PROMOTION_KEYS.some((k) => meta[k] !== void 0),
     promotionCandidate: meta.promotion_candidate ?? null,
     promotionQuarantined: meta.promotion_quarantined ?? null,
-    promotionShadowStats: meta.promotion_shadow_stats ?? null
+    promotionShadowStats: meta.promotion_shadow_stats ?? null,
+    ...provenanceOf(meta),
+    ...countersOf(meta),
+    timestamp: timestampOf(e, meta),
+    origin: originOf(e.source, meta, e.entry_type),
+    autoReflection: meta.auto_reflection === true
   };
 }
 var PROMOTION_KEYS = Object.freeze([
@@ -1882,6 +1888,75 @@ var PROMOTION_KEYS = Object.freeze([
   "promotion_quarantined",
   "promotion_shadow_stats"
 ]);
+function provenanceOf(meta) {
+  const m = meta && typeof meta === "object" ? meta : {};
+  return {
+    sessionId: str2(m.session_id),
+    promptId: str2(m.prompt_id),
+    turnNumber: Math.max(0, Math.trunc(Number(m.turn_number) || 0))
+  };
+}
+var COUNTER_KEYS = Object.freeze(["success_count", "failure_count", "partial_count", "neutral_count"]);
+function countersOf(meta) {
+  const m = meta && typeof meta === "object" ? meta : {};
+  return {
+    successCount: count(m.success_count),
+    failureCount: count(m.failure_count),
+    partialCount: count(m.partial_count),
+    neutralCount: count(m.neutral_count),
+    countersStamped: COUNTER_KEYS.some((k) => m[k] !== void 0 && m[k] !== null),
+    reinforcementCount: count(m.reinforcement_count),
+    confidence: fraction(m.confidence),
+    lastOutcome: str2(m.last_outcome),
+    lastOutcomeAt: isoOf(m.last_outcome_at),
+    lastOutcomeActor: str2(m.last_outcome_actor),
+    validationStatus: str2(m.validation_status),
+    validationScore: fraction(m.validation_score),
+    recurrenceCount: count(m.recurrence_count),
+    projectKey: str2(m.project_key)
+  };
+}
+function count(v) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+}
+function fraction(v) {
+  if (v === null || v === void 0 || v === "") return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function originOf(source, meta, entryType) {
+  const s = str2(source);
+  const m = meta && typeof meta === "object" ? meta : {};
+  const t = str2(entryType);
+  if (t === "trace" || t === "tool_output" || t === "capture") return "hook";
+  if (m.auto_reflection === true || /^auto[-_]?reflect/i.test(s)) return "auto-reflection";
+  if (/^reflect/i.test(s)) return "reflection";
+  if (s === "agent" || s === "mcp-agent") return "agent";
+  if (/hook/i.test(s)) return "hook";
+  return "";
+}
+function timestampOf(e, meta) {
+  const own = str2(e && e.created_at);
+  if (own) return own;
+  const m = meta && typeof meta === "object" ? meta : {};
+  return isoOf(m.timestamp) || isoOf(m.ingested_at);
+}
+function isoOf(v) {
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return "";
+    if (!/^\d+(\.\d+)?$/.test(s)) return s;
+    v = Number(s);
+  }
+  if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return "";
+  const ms = v < 1e12 ? v * 1e3 : v;
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return "";
+  }
+}
 function projectTag(tags) {
   if (!Array.isArray(tags)) return "";
   const hit = tags.map(str2).find((t) => t.startsWith(REPO_TAG));
@@ -1927,6 +2002,7 @@ async function fetchActivity(cfg, params2 = {}, opts = {}) {
     totalVisible: Number(body.total_visible) || 0
   });
 }
+var OUTCOME_WORDS = Object.freeze(["success", "failure", "partial", "neutral"]);
 function str2(v) {
   return typeof v === "string" ? v.trim() : "";
 }

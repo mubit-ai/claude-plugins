@@ -10,7 +10,8 @@
 
 # Dependencies. The plugin ships its bundles committed (see integrations/claude-code/.gitignore,
 # which re-includes hooks/dist and mcp/dist for that reason), but never its node_modules.
-node_modules/
+# No trailing slash: a worktree often symlinks this path, and `node_modules/` matches directories only.
+node_modules
 
 # Editor / OS noise
 .DS_Store

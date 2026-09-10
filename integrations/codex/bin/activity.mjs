@@ -1388,7 +1388,7 @@ function clamp(v, lo, hi, dflt) {
   if (!Number.isFinite(n)) return dflt;
   return Math.min(hi, Math.max(lo, Math.trunc(n)));
 }
-var TIMEOUT_MS, READ_ONLY, EXTRA_ROUTES, ERROR_CODES, STATE_MAP, PROMOTION_KEYS;
+var TIMEOUT_MS, READ_ONLY, EXTRA_ROUTES, ERROR_CODES, STATE_MAP, PROMOTION_KEYS, COUNTER_KEYS, OUTCOME_WORDS;
 var init_dashboard_api = __esm({
   "../claude-code/lib/dashboard-api.mjs"() {
     init_http();
@@ -1399,7 +1399,8 @@ var init_dashboard_api = __esm({
       memoryHealth: "/v2/control/memory_health",
       archive: "/v2/control/archive",
       deleteLesson: "/v2/control/lessons/delete",
-      runs: "/v2/control/runs"
+      runs: "/v2/control/runs",
+      dereference: "/v2/control/dereference"
     });
     ERROR_CODES = Object.freeze([
       "unauthorized",
@@ -1421,6 +1422,8 @@ var init_dashboard_api = __esm({
       "promotion_quarantined",
       "promotion_shadow_stats"
     ]);
+    COUNTER_KEYS = Object.freeze(["success_count", "failure_count", "partial_count", "neutral_count"]);
+    OUTCOME_WORDS = Object.freeze(["success", "failure", "partial", "neutral"]);
   }
 });
 

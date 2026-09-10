@@ -1282,7 +1282,8 @@ var EXTRA_ROUTES = Object.freeze({
   memoryHealth: "/v2/control/memory_health",
   archive: "/v2/control/archive",
   deleteLesson: "/v2/control/lessons/delete",
-  runs: "/v2/control/runs"
+  runs: "/v2/control/runs",
+  dereference: "/v2/control/dereference"
 });
 var ERROR_CODES = Object.freeze([
   "unauthorized",
@@ -1323,6 +1324,7 @@ var PROMOTION_KEYS = Object.freeze([
   "promotion_quarantined",
   "promotion_shadow_stats"
 ]);
+var COUNTER_KEYS = Object.freeze(["success_count", "failure_count", "partial_count", "neutral_count"]);
 function parseMetadata(raw) {
   let v = raw;
   for (let i = 0; i < 2; i += 1) {
@@ -1363,6 +1365,7 @@ async function fetchActivity(cfg, params2 = {}, opts = {}) {
     totalVisible: Number(body.total_visible) || 0
   });
 }
+var OUTCOME_WORDS = Object.freeze(["success", "failure", "partial", "neutral"]);
 function str2(v) {
   return typeof v === "string" ? v.trim() : "";
 }

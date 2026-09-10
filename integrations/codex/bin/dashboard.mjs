@@ -793,7 +793,7 @@ var init_config = __esm({
 });
 
 // ../claude-code/lib/redact.mjs
-function scrubAssignments(text, count) {
+function scrubAssignments(text, count2) {
   ASSIGNMENT_RE.lastIndex = 0;
   let out = "";
   let copied = 0;
@@ -814,33 +814,33 @@ function scrubAssignments(text, count) {
     out += text.slice(copied, m.index) + pre + PH("assignment");
     copied = VALUE_RE.lastIndex;
     ASSIGNMENT_RE.lastIndex = copied;
-    count.n += 1;
+    count2.n += 1;
   }
   return out + text.slice(copied);
 }
 function isSecretName(lower) {
   return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
-function scrubUrlCredentials(text, count) {
+function scrubUrlCredentials(text, count2) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
-    count.n += 1;
+    count2.n += 1;
     return `${pre}${scheme}${PH("url-credentials")}@`;
   });
 }
-function scrubHighEntropy(text, count) {
+function scrubHighEntropy(text, count2) {
   return text.replace(ENTROPY_RUN_RE, (run) => {
     if (run.length < ENTROPY_MIN_LEN) return run;
     if (EXEMPT_RE.test(run)) return run;
     if (entropy(run) < ENTROPY_THRESHOLD) return run;
-    count.n += 1;
+    count2.n += 1;
     return PH("high-entropy");
   });
 }
-function scrub(text, count) {
+function scrub(text, count2) {
   let out = text;
   for (const rule of RULES) {
     if (rule.scrub) {
-      out = rule.scrub(out, count);
+      out = rule.scrub(out, count2);
       continue;
     }
     const re = rule.re;
@@ -848,7 +848,7 @@ function scrub(text, count) {
     re.lastIndex = 0;
     out = out.replace(re, (m) => {
       if (EXEMPT_RE.test(m)) return m;
-      count.n += 1;
+      count2.n += 1;
       return PH(rule.kind);
     });
   }
@@ -856,9 +856,9 @@ function scrub(text, count) {
 }
 function entropy(s) {
   if (s === null || s === void 0) return 0;
-  const str4 = typeof s === "string" ? s : String(s);
-  if (str4.length === 0) return 0;
-  const buf = Buffer.from(str4, "utf8");
+  const str5 = typeof s === "string" ? s : String(s);
+  if (str5.length === 0) return 0;
+  const buf = Buffer.from(str5, "utf8");
   const n = buf.length;
   if (n === 0) return 0;
   const counts = new Uint32Array(256);
@@ -900,14 +900,14 @@ function redactText(text, cfg = {}, kind = "output") {
       s = "";
     }
   }
-  const count = { n: 0 };
+  const count2 = { n: 0 };
   if (!cfg || cfg.redact !== false) {
     try {
-      s = scrub(s, count);
+      s = scrub(s, count2);
     } catch {
     }
   }
-  out.redactions = count.n;
+  out.redactions = count2.n;
   const cap = kind === "param" ? numberOr(cfg?.maxParamBytes, 4096) : numberOr(cfg?.maxOutputBytes, 8192);
   const capped = capBytes(s, cap);
   out.text = capped.text;
@@ -1432,7 +1432,14 @@ function normalizeLesson(raw, ctx = {}) {
     // Anything above `run` scope reaches other runs by design; whether that was intended is
     // the question the column exists to let a human answer.
     leaksScope: scope2 !== DEFAULT_SCOPE,
-    fromOtherRun: !!(ctx.currentRun && sourceRun && sourceRun !== ctx.currentRun)
+    fromOtherRun: !!(ctx.currentRun && sourceRun && sourceRun !== ctx.currentRun),
+    // This route carries no metadata, so the provenance keys are empty here and only here:
+    // the same keys, so a page reading either shape reads one shape.
+    ...provenanceOf(null),
+    ...countersOf(null),
+    timestamp: String(ctx.createdAt || ""),
+    origin: originOf(l.source, null, "lesson"),
+    autoReflection: false
   };
 }
 function normalizeActivityLesson(entry, ctx = {}) {
@@ -1464,8 +1471,135 @@ function normalizeActivityLesson(entry, ctx = {}) {
     promotionStamped: PROMOTION_KEYS.some((k) => meta[k] !== void 0),
     promotionCandidate: meta.promotion_candidate ?? null,
     promotionQuarantined: meta.promotion_quarantined ?? null,
-    promotionShadowStats: meta.promotion_shadow_stats ?? null
+    promotionShadowStats: meta.promotion_shadow_stats ?? null,
+    ...provenanceOf(meta),
+    ...countersOf(meta),
+    timestamp: timestampOf(e, meta),
+    origin: originOf(e.source, meta, e.entry_type),
+    autoReflection: meta.auto_reflection === true
   };
+}
+function provenanceOf(meta) {
+  const m = meta && typeof meta === "object" ? meta : {};
+  return {
+    sessionId: str2(m.session_id),
+    promptId: str2(m.prompt_id),
+    turnNumber: Math.max(0, Math.trunc(Number(m.turn_number) || 0))
+  };
+}
+function countersOf(meta) {
+  const m = meta && typeof meta === "object" ? meta : {};
+  return {
+    successCount: count(m.success_count),
+    failureCount: count(m.failure_count),
+    partialCount: count(m.partial_count),
+    neutralCount: count(m.neutral_count),
+    countersStamped: COUNTER_KEYS.some((k) => m[k] !== void 0 && m[k] !== null),
+    reinforcementCount: count(m.reinforcement_count),
+    confidence: fraction(m.confidence),
+    lastOutcome: str2(m.last_outcome),
+    lastOutcomeAt: isoOf(m.last_outcome_at),
+    lastOutcomeActor: str2(m.last_outcome_actor),
+    validationStatus: str2(m.validation_status),
+    validationScore: fraction(m.validation_score),
+    recurrenceCount: count(m.recurrence_count),
+    projectKey: str2(m.project_key)
+  };
+}
+function count(v) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+}
+function fraction(v) {
+  if (v === null || v === void 0 || v === "") return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function originOf(source, meta, entryType) {
+  const s = str2(source);
+  const m = meta && typeof meta === "object" ? meta : {};
+  const t = str2(entryType);
+  if (t === "trace" || t === "tool_output" || t === "capture") return "hook";
+  if (m.auto_reflection === true || /^auto[-_]?reflect/i.test(s)) return "auto-reflection";
+  if (/^reflect/i.test(s)) return "reflection";
+  if (s === "agent" || s === "mcp-agent") return "agent";
+  if (/hook/i.test(s)) return "hook";
+  return "";
+}
+function timestampOf(e, meta) {
+  const own = str2(e && e.created_at);
+  if (own) return own;
+  const m = meta && typeof meta === "object" ? meta : {};
+  return isoOf(m.timestamp) || isoOf(m.ingested_at);
+}
+function isoOf(v) {
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return "";
+    if (!/^\d+(\.\d+)?$/.test(s)) return s;
+    v = Number(s);
+  }
+  if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return "";
+  const ms = v < 1e12 ? v * 1e3 : v;
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return "";
+  }
+}
+function normalizeEvidence(raw) {
+  const e = raw && typeof raw === "object" ? raw : {};
+  const meta = parseMetadata(e.metadata_json ?? e.metadata) || {};
+  const stated = str2(meta.scope) || str2(meta.lesson_scope);
+  const scope2 = stated || DEFAULT_SCOPE;
+  const conditions = meta.conditions || meta.lesson_conditions;
+  return {
+    id: lessonId(e),
+    entryType: str2(e.entry_type) || str2(meta.entry_type),
+    content: String(e.content || ""),
+    lessonType: String(meta.lesson_type || ""),
+    scope: scope2,
+    scopeKnown: stated !== "",
+    importance: String(meta.importance || meta.lesson_importance || e.importance || ""),
+    conditions: Array.isArray(conditions) ? conditions.map(String) : [],
+    rationale: String(meta.rationale || ""),
+    sourceRunId: String(meta.source_run_id || e.run_id || ""),
+    source: String(e.source || ""),
+    createdAt: String(e.created_at || ""),
+    runId: String(e.run_id || ""),
+    project: projectTag(meta.env_tags),
+    leaksScope: scope2 !== DEFAULT_SCOPE,
+    ...provenanceOf(meta),
+    ...countersOf(meta),
+    timestamp: timestampOf(e, meta),
+    origin: originOf(e.source, meta, e.entry_type),
+    autoReflection: meta.auto_reflection === true,
+    hookEvent: str2(meta.hook_event),
+    tool: str2(meta.tool),
+    agentType: str2(meta.agent_type),
+    mubitAgentId: str2(meta.mubit_agent_id),
+    occurrenceAt: str2(meta.occurrence_time)
+  };
+}
+async function fetchEntry(cfg, params2 = {}) {
+  const run = str2(params2.run);
+  const id = str2(params2.id);
+  if (!run) return fail(400, "bad_request", "entry lookup requires a run id");
+  if (!id) return fail(400, "bad_request", "entry lookup requires an id");
+  const res = await request(
+    cfg,
+    "POST",
+    EXTRA_ROUTES.dereference,
+    { run_id: run, reference_id: id },
+    READ_ONLY
+  );
+  if (!res.ok) return mapError(cfg, res);
+  const body = res.body && typeof res.body === "object" ? res.body : {};
+  const evidence = body.evidence;
+  if (body.found === false || !evidence || typeof evidence !== "object") {
+    return fail(404, "not_found", `no entry with id ${scrubKey(cfg, id)} is on this instance`);
+  }
+  return ok({ entry: normalizeEvidence(evidence), found: true });
 }
 function projectTag(tags) {
   if (!Array.isArray(tags)) return "";
@@ -1602,16 +1736,27 @@ async function sendOutcome(cfg, params2 = {}) {
       'outcome requires a reference_id; pass "global" for run-level attribution'
     );
   }
+  const outcome = str2(params2.outcome).toLowerCase() || (params2.success === false ? "failure" : "success");
+  if (!OUTCOME_WORDS.includes(outcome)) {
+    return fail(
+      400,
+      "bad_request",
+      `outcome must be one of: ${OUTCOME_WORDS.join(", ")}; got "${outcome}"`
+    );
+  }
+  const given = typeof params2.signal === "number" ? params2.signal : Number(params2.signal);
+  const signal = Number.isFinite(given) ? Math.max(-1, Math.min(1, given)) : outcome === "failure" ? -1 : outcome === "neutral" ? 0 : 1;
   const req = {
     run_id: run,
     reference_id: referenceId,
-    success: params2.success !== false,
-    idempotency_key: str2(params2.idempotencyKey) || `dash-${run}-${referenceId}-${params2.success !== false}`
+    outcome,
+    signal,
+    idempotency_key: str2(params2.idempotencyKey) || `dash-${run}-${referenceId}-${outcome}`
   };
+  if (str2(params2.rationale)) req.rationale = str2(params2.rationale);
   if (Array.isArray(params2.entryIds) && params2.entryIds.length) {
     req.entry_ids = params2.entryIds.map(String);
   }
-  if (str2(params2.notes)) req.notes = str2(params2.notes);
   const res = await postOutcome(cfg, req, READ_ONLY);
   if (!res.ok) return mapError(cfg, res);
   const body = res.body && typeof res.body === "object" ? res.body : {};
@@ -1659,7 +1804,7 @@ function clamp(v, lo, hi, dflt) {
   if (!Number.isFinite(n)) return dflt;
   return Math.min(hi, Math.max(lo, Math.trunc(n)));
 }
-var TIMEOUT_MS, READ_ONLY, EXTRA_ROUTES, DEFAULT_SCOPE, REPO_TAG, ERROR_CODES, STATE_MAP, PROMOTION_KEYS;
+var TIMEOUT_MS, READ_ONLY, EXTRA_ROUTES, DEFAULT_SCOPE, REPO_TAG, ERROR_CODES, STATE_MAP, PROMOTION_KEYS, COUNTER_KEYS, OUTCOME_WORDS;
 var init_dashboard_api = __esm({
   "../claude-code/lib/dashboard-api.mjs"() {
     init_http();
@@ -1670,7 +1815,8 @@ var init_dashboard_api = __esm({
       memoryHealth: "/v2/control/memory_health",
       archive: "/v2/control/archive",
       deleteLesson: "/v2/control/lessons/delete",
-      runs: "/v2/control/runs"
+      runs: "/v2/control/runs",
+      dereference: "/v2/control/dereference"
     });
     DEFAULT_SCOPE = "run";
     REPO_TAG = "repo:";
@@ -1694,6 +1840,8 @@ var init_dashboard_api = __esm({
       "promotion_quarantined",
       "promotion_shadow_stats"
     ]);
+    COUNTER_KEYS = Object.freeze(["success_count", "failure_count", "partial_count", "neutral_count"]);
+    OUTCOME_WORDS = Object.freeze(["success", "failure", "partial", "neutral"]);
   }
 });
 
@@ -1951,8 +2099,136 @@ var init_activity = __esm({
   }
 });
 
+// ../claude-code/lib/outcome.mjs
+function decideOutcome(turn) {
+  if (!isObject(turn)) return { post: false, reason: "not_a_turn" };
+  if (numOr(turn.outcome_sent_at, 0) > 0) return { post: false, reason: "already_sent" };
+  if (str4(turn[API_ERROR_KEY])) return { post: false, reason: "api_failed" };
+  if (numOr(turn.outcome_attempts, 0) >= MAX_OUTCOME_ATTEMPTS) {
+    return { post: false, reason: "attempts_exhausted" };
+  }
+  const entryIds = Array.isArray(turn.recalled) ? turn.recalled.filter((v) => typeof v === "string" && v.trim()) : [];
+  if (entryIds.length === 0) return { post: false, reason: "nothing_injected" };
+  const failed = str4(turn.outcome).toLowerCase() === "failure";
+  const ev = isObject(turn.used_evidence) ? turn.used_evidence : {};
+  const unused = ev.used === false;
+  return {
+    post: true,
+    outcome: unused ? OUTCOME_UNUSED : failed ? OUTCOME_FAILURE : OUTCOME_SUCCESS,
+    signal: unused ? SIGNAL_UNUSED : failed ? SIGNAL_FAILURE : SIGNAL_SUCCESS,
+    // Empty on the neutral record only: naming entries here would credit exactly the
+    // memories nothing showed were read, which is the opposite of what attribution is for.
+    // The cost is that the record says a turn was injected-and-unused
+    // without saying which entries were ignored — a real limitation, and the honest side of
+    // the trade.
+    entryIds: unused ? [] : entryIds,
+    rationale: rationaleFor(ev, unused, failed, entryIds.length)
+  };
+}
+function rationaleFor(ev, unused, failed, n) {
+  const method = str4(ev.method);
+  const by = method ? ` (${method})` : "";
+  const counts = `${numOr(ev.matched, 0)} of ${numOr(ev.candidates, 0)} injected memory terms`;
+  if (unused) {
+    return `Claude Code injected ${n} ${n === 1 ? "memory" : "memories"} and the reply carried none of their vocabulary \u2014 ${counts}${by}. Recorded, not penalised: this method cannot see memory the model followed without quoting it.`;
+  }
+  if (ev.used === true) {
+    return failed ? `Claude Code turn ended in failure; the reply carried ${counts}${by}.` : `Claude Code turn completed and the reply carried ${counts}${by}.`;
+  }
+  return failed ? "Claude Code turn ended in failure after these memories were injected." : "Claude Code turn completed after these memories were injected.";
+}
+function isObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function str4(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+function numOr(v, d) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : d;
+}
+var SIGNAL_SUCCESS, SIGNAL_FAILURE, OUTCOME_UNUSED, SIGNAL_UNUSED, OUTCOME_SUCCESS, OUTCOME_FAILURE, MAX_OUTCOME_ATTEMPTS, API_ERROR_KEY;
+var init_outcome = __esm({
+  "../claude-code/lib/outcome.mjs"() {
+    SIGNAL_SUCCESS = 0.2;
+    SIGNAL_FAILURE = -0.3;
+    OUTCOME_UNUSED = "neutral";
+    SIGNAL_UNUSED = 0;
+    OUTCOME_SUCCESS = "success";
+    OUTCOME_FAILURE = "failure";
+    MAX_OUTCOME_ATTEMPTS = 3;
+    API_ERROR_KEY = "api_error";
+  }
+});
+
+// ../claude-code/lib/ledger.mjs
+import {
+  closeSync as closeSync2,
+  fstatSync,
+  openSync as openSync2,
+  readFileSync as readFileSync5,
+  readSync,
+  renameSync as renameSync3,
+  statSync as statSync5,
+  writeFileSync as writeFileSync2,
+  writeSync as writeSync2
+} from "node:fs";
+import { dirname as dirname4, join as join7 } from "node:path";
+function ledgerPath(dir, runId) {
+  return join7(runDir({ dataDir: dir }, safeSegment(runId) || "unknown"), LEDGER_FILE);
+}
+function readLedger(dir, runId, opts = {}) {
+  const p = ledgerPath(dir, runId);
+  let raw = "";
+  try {
+    raw = readFileSync5(p, "utf8");
+  } catch {
+    return [];
+  }
+  const o = isObject2(opts) ? opts : {};
+  const since = num2(o.since);
+  const kinds = Array.isArray(o.kinds) && o.kinds.length ? new Set(o.kinds.map(String)) : null;
+  const limit = Math.trunc(num2(o.limit));
+  const out = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isObject2(row)) continue;
+    if (kinds && !kinds.has(String(row.kind))) continue;
+    if (since > 0 && num2(row.at) < since) continue;
+    out.push(row);
+  }
+  return limit > 0 && out.length > limit ? out.slice(-limit) : out;
+}
+function isObject2(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function num2(v) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+var LEDGER_FILE, LEDGER_MAX_BYTES, LEDGER_KEEP_BYTES, LEDGER_ROW_TTL_MS, LEDGER_PREVIEW_BYTES, LEDGER_REDACTION;
+var init_ledger = __esm({
+  "../claude-code/lib/ledger.mjs"() {
+    init_outcome();
+    init_redact();
+    init_state();
+    LEDGER_FILE = "ledger.jsonl";
+    LEDGER_MAX_BYTES = 1024 * 1024;
+    LEDGER_KEEP_BYTES = 512 * 1024;
+    LEDGER_ROW_TTL_MS = 30 * 24 * 36e5;
+    LEDGER_PREVIEW_BYTES = 240;
+    LEDGER_REDACTION = Object.freeze({ redact: true, maxOutputBytes: LEDGER_PREVIEW_BYTES });
+  }
+});
+
 // ../claude-code/lib/markers.mjs
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 function defaultMarker(runId = "") {
   return {
     run_id: runId,
@@ -1990,7 +2266,7 @@ function defaultMarker(runId = "") {
   };
 }
 function markerPath(cfg, runId) {
-  return join7(resolveDataDir(cfg), "status", `${runId}.json`);
+  return join8(resolveDataDir(cfg), "status", `${runId}.json`);
 }
 function isPlainObject2(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
@@ -2028,21 +2304,21 @@ var init_markers = __esm({
 
 // ../claude-code/lib/spool.mjs
 import {
-  closeSync as closeSync2,
+  closeSync as closeSync3,
   existsSync as existsSync5,
   linkSync,
-  openSync as openSync2,
+  openSync as openSync3,
   readdirSync as readdirSync3,
-  readFileSync as readFileSync5,
-  renameSync as renameSync3,
-  statSync as statSync5,
+  readFileSync as readFileSync6,
+  renameSync as renameSync4,
+  statSync as statSync6,
   unlinkSync as unlinkSync3,
-  writeFileSync as writeFileSync2,
-  writeSync as writeSync2
+  writeFileSync as writeFileSync3,
+  writeSync as writeSync3
 } from "node:fs";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 function spoolDir(cfg, runId) {
-  return join8(runDir(cfg, runId), "spool");
+  return join9(runDir(cfg, runId), "spool");
 }
 function stampOf(dir, name) {
   const m = /^(\d{10,})-/.exec(name);
@@ -2051,7 +2327,7 @@ function stampOf(dir, name) {
     if (Number.isFinite(n)) return n;
   }
   try {
-    return statSync5(join8(dir, name)).mtimeMs;
+    return statSync6(join9(dir, name)).mtimeMs;
   } catch {
     return 0;
   }
@@ -2065,16 +2341,16 @@ function spoolStats(cfg, runId) {
     } catch {
       return { count: 0, oldestMs: 0 };
     }
-    let count = 0;
+    let count2 = 0;
     let oldest = Infinity;
     for (const e of entries) {
       if (!e.isFile() || !e.name.endsWith(".json")) continue;
-      count++;
+      count2++;
       const ts = stampOf(dir, e.name);
       if (ts > 0 && ts < oldest) oldest = ts;
     }
-    if (count === 0 || !Number.isFinite(oldest)) return { count, oldestMs: 0 };
-    return { count, oldestMs: Math.max(0, Date.now() - oldest) };
+    if (count2 === 0 || !Number.isFinite(oldest)) return { count: count2, oldestMs: 0 };
+    return { count: count2, oldestMs: Math.max(0, Date.now() - oldest) };
   } catch {
     return { count: 0, oldestMs: 0 };
   }
@@ -2090,13 +2366,13 @@ import {
   appendFileSync as appendFileSync2,
   existsSync as existsSync6,
   readdirSync as readdirSync4,
-  readFileSync as readFileSync6,
-  renameSync as renameSync4,
-  statSync as statSync6,
-  writeFileSync as writeFileSync3
+  readFileSync as readFileSync7,
+  renameSync as renameSync5,
+  statSync as statSync7,
+  writeFileSync as writeFileSync4
 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { basename as basename2, join as join9 } from "node:path";
+import { basename as basename2, join as join10 } from "node:path";
 function redactForBrowser(text, maxBytes = PREVIEW_BYTES) {
   const cap = Number.isFinite(maxBytes) && Number(maxBytes) > 0 ? Math.trunc(Number(maxBytes)) : PREVIEW_BYTES;
   const r = redactText(text, { ...BROWSER_REDACTION, maxOutputBytes: cap }, "output");
@@ -2115,25 +2391,25 @@ function lsDir(path) {
 }
 function mtimeOf(path) {
   try {
-    return statSync6(path).mtimeMs;
+    return statSync7(path).mtimeMs;
   } catch {
     return 0;
   }
 }
 function isDir(path) {
   try {
-    return statSync6(path).isDirectory();
+    return statSync7(path).isDirectory();
   } catch {
     return false;
   }
 }
-function num2(v) {
+function num3(v) {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : 0;
 }
 function dataRoot(env = process.env) {
   const home = env && typeof env.HOME === "string" && env.HOME ? env.HOME : safeHome3();
-  return join9(home, ".claude", "plugins", "data");
+  return join10(home, ".claude", "plugins", "data");
 }
 function safeHome3() {
   try {
@@ -2143,11 +2419,11 @@ function safeHome3() {
   }
 }
 function describeDataDir(path) {
-  const markers = lsDir(join9(path, "status")).filter(isRunMarker);
+  const markers = lsDir(join10(path, "status")).filter(isRunMarker);
   let lastWrite = 0;
   for (const f of markers) {
-    const m = readJson(join9(path, "status", f), null);
-    const at = num2(m && m.updated_at);
+    const m = readJson(join10(path, "status", f), null);
+    const at = num3(m && m.updated_at);
     if (at > lastWrite) lastWrite = at;
   }
   if (!lastWrite) lastWrite = mtimeOf(path);
@@ -2166,7 +2442,7 @@ function listDataDirs(opts = {}) {
     if (live2) candidates.push(live2);
     const root = dataRoot(env);
     for (const name of lsDir(root)) {
-      if (name.startsWith("mubit-memory")) candidates.push(join9(root, name));
+      if (name.startsWith("mubit-memory")) candidates.push(join10(root, name));
     }
   }
   const seen = /* @__PURE__ */ new Map();
@@ -2189,19 +2465,34 @@ function resolveDirParam(wanted, dirs) {
   }
   return (list2.find((d) => d.isDefault) ?? list2[0]).path;
 }
+function plainRunId(id) {
+  return String(id || "").replace(FEED_PREFIX, "");
+}
+function baseRunId(id) {
+  const s = plainRunId(id).replace(SUB_SUFFIX, "");
+  const m = CLEAR_SUFFIX.exec(s);
+  if (!m) return s;
+  const head = s.slice(0, m.index);
+  return DIRECTORY_KEY.test(head) ? head : s;
+}
+function clearIndexOf(id) {
+  const s = plainRunId(id).replace(SUB_SUFFIX, "");
+  const m = CLEAR_SUFFIX.exec(s);
+  return m && baseRunId(id) === s.slice(0, m.index) ? Number(m[1]) : 0;
+}
 function runsIn(dir, opts = {}) {
   const byRun = opts && opts.sessions === true ? groupSessions(readSessionMap(dir)) : null;
-  return lsDir(join9(dir, "status")).filter(isRunMarker).map((f) => {
+  return lsDir(join10(dir, "status")).filter(isRunMarker).map((f) => {
     const runId = f.slice(0, -5);
     const cfg = { dataDir: dir };
     const marker = readMarker(cfg, runId);
     const rd = runDir(cfg, runId);
-    const turns = lsDir(join9(rd, "turns")).filter((n) => n.endsWith(".json"));
+    const turns = lsDir(join10(rd, "turns")).filter((n) => n.endsWith(".json"));
     const row = {
       runId,
       dir,
       dirName: basename2(dir),
-      lastWrite: num2(marker.updated_at) || mtimeOf(join9(dir, "status", f)),
+      lastWrite: num3(marker.updated_at) || mtimeOf(join10(dir, "status", f)),
       turnCount: turns.length,
       spoolDepth: spoolStats(cfg, runId).count,
       state: String(marker.state || "unknown"),
@@ -2213,7 +2504,10 @@ function runsIn(dir, opts = {}) {
         sessions,
         sessionCount: sessions.length,
         projectDir: firstNonEmpty2(sessions, "projectDir"),
-        projectRoot: firstNonEmpty2(sessions, "projectRoot")
+        projectRoot: firstNonEmpty2(sessions, "projectRoot"),
+        baseRunId: baseRunId(runId),
+        clearIndex: clearIndexOf(runId),
+        subagentCount: lsDir(join10(rd, "subagents")).filter((n) => n.endsWith(".json")).length
       });
     }
     return row;
@@ -2227,11 +2521,11 @@ function newestRun(dir) {
   return runs.length ? String(runs[0].runId) : "";
 }
 function readSessionMap(dir) {
-  const sdir = join9(dir, "sessions");
+  const sdir = join10(dir, "sessions");
   const out = [];
   for (const f of lsDir(sdir)) {
     if (!f.endsWith(".json")) continue;
-    const rec = readJson(join9(sdir, f), null);
+    const rec = readJson(join10(sdir, f), null);
     if (!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
     out.push({
       sessionId: f.slice(0, -5),
@@ -2240,10 +2534,10 @@ function readSessionMap(dir) {
       strategy: String(rec.strategy || ""),
       projectDir: String(rec.project_dir || ""),
       projectRoot: String(rec.project_root || ""),
-      createdAt: num2(rec.created_at),
-      lastSeenAt: num2(rec.last_seen_at),
+      createdAt: num3(rec.created_at),
+      lastSeenAt: num3(rec.last_seen_at),
       mode: String(rec.mode || ""),
-      clearCount: num2(rec.clear_count),
+      clearCount: num3(rec.clear_count),
       endpointHash: String(rec.endpoint_hash || "")
     });
   }
@@ -2269,6 +2563,74 @@ function firstNonEmpty2(rows, key) {
   for (const r of rows) if (r[key]) return r[key];
   return "";
 }
+function familyOf(dir, runId) {
+  const id = safeSegment(runId);
+  if (!id || id !== String(runId)) return { base: "", projectRoot: "", runIds: [] };
+  const known = new Map(runsIn(dir).map((r) => [String(r.runId), r]));
+  for (const name of lsDir(join10(dir, "runs"))) {
+    if (known.has(name) || safeSegment(name) !== name) continue;
+    const ledger = join10(dir, "runs", name, LEDGER_FILE);
+    if (existsSync6(ledger)) known.set(name, { runId: name, lastWrite: mtimeOf(ledger) });
+  }
+  if (!known.has(id)) known.set(id, { runId: id, lastWrite: 0 });
+  const byRun = groupSessions(readSessionMap(dir));
+  const rootOf = (rid) => firstNonEmpty2(byRun.get(rid) ?? [], "projectRoot");
+  const members = /* @__PURE__ */ new Set([id]);
+  const bases = /* @__PURE__ */ new Set([baseRunId(id)]);
+  const roots = new Set([rootOf(id)].filter(Boolean));
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const rid of known.keys()) {
+      if (members.has(rid)) continue;
+      const root = rootOf(rid);
+      if (!bases.has(baseRunId(rid)) && !(root && roots.has(root))) continue;
+      members.add(rid);
+      bases.add(baseRunId(rid));
+      if (root) roots.add(root);
+      grew = true;
+    }
+  }
+  const runIds = [...members].map((rid) => known.get(rid)).sort((a, b) => num3(b.lastWrite) - num3(a.lastWrite)).map((r) => String(r.runId));
+  return { base: baseRunId(id), projectRoot: [...roots][0] ?? "", runIds };
+}
+function readSubagents(dir, runId, opts = {}) {
+  const id = safeSegment(runId);
+  if (!id) return [];
+  const sdir = join10(runDir({ dataDir: dir }, id), "subagents");
+  const since = num3(opts && opts.since);
+  const out = [];
+  for (const f of lsDir(sdir)) {
+    if (!f.endsWith(".json")) continue;
+    const p = join10(sdir, f);
+    if (since > 0 && mtimeOf(p) < since) continue;
+    const rec = readJson(p, null);
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
+    const r = rec.recall && typeof rec.recall === "object" ? rec.recall : {};
+    const recalled = Array.isArray(rec.recalled) ? rec.recalled.map(String) : [];
+    out.push({
+      subRunId: String(rec.sub_run_id || f.slice(0, -5)),
+      parentRunId: String(rec.parent_run_id || id),
+      agentId: String(rec.agent_id || ""),
+      mubitAgentId: String(rec.mubit_agent_id || ""),
+      agentType: String(rec.agent_type || ""),
+      sessionId: String(rec.session_id || ""),
+      promptId: String(rec.prompt_id || ""),
+      at: num3(rec.at),
+      recall: {
+        rung: num3(r.rung),
+        sources: num3(r.sources),
+        tokens: num3(r.tokens),
+        chars: num3(r.chars),
+        pointers: num3(r.pointers),
+        ms: num3(r.ms)
+      },
+      recalled,
+      recalledCount: recalled.length
+    });
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
 function describeRunScope(cfg) {
   const c = cfg && typeof cfg === "object" ? cfg : {};
   const strategy = String(c.runStrategy || "per-directory");
@@ -2285,7 +2647,7 @@ function describeRunScope(cfg) {
 }
 function outcomeState(turn) {
   if (turn.outcome_abandoned === true) return "dropped";
-  if (num2(turn.outcome_sent_at) > 0) return "sent";
+  if (num3(turn.outcome_sent_at) > 0) return "sent";
   if (typeof turn.api_error === "string" && turn.api_error) return `api:${turn.api_error}`;
   if (turn.outcome_pending === true) return "pending";
   if (turn.ended_at) return "none";
@@ -2296,8 +2658,8 @@ function usedSignal(turn) {
   if (!u) {
     return { measured: false, used: null, matched: 0, candidates: 0, method: "", reason: "", label: "" };
   }
-  const matched = num2(u.matched);
-  const candidates = num2(u.candidates);
+  const matched = num3(u.matched);
+  const candidates = num3(u.candidates);
   const used = u.used === true ? true : u.used === false ? false : null;
   return {
     measured: used !== null,
@@ -2313,67 +2675,352 @@ function turnRow(turn, opts = {}) {
   const t = turn && typeof turn === "object" ? turn : {};
   const r = t.recall && typeof t.recall === "object" ? t.recall : {};
   const preview = redactForBrowser(t.prompt, opts.previewBytes ?? PREVIEW_BYTES);
-  const startedAt = num2(t.started_at);
-  const endedAt = num2(t.ended_at);
+  const startedAt = num3(t.started_at);
+  const endedAt = num3(t.ended_at);
+  const decided = decidedOutcome(t);
   return {
     promptId: String(t.prompt_id || ""),
     sessionId: String(t.session_id || ""),
+    turnNumber: num3(t.turn_number),
     startedAt,
     endedAt,
     turnMs: startedAt && endedAt ? endedAt - startedAt : 0,
     promptPreview: preview.text,
     promptTruncated: preview.truncated || t.prompt_truncated === true,
     promptRedactions: preview.redactions,
-    rung: num2(r.rung),
-    sources: num2(r.sources),
-    tok: num2(r.tokens),
-    chars: num2(r.chars),
-    dropped: num2(r.dropped),
+    rung: num3(r.rung),
+    sources: num3(r.sources),
+    tok: num3(r.tokens),
+    chars: num3(r.chars),
+    dropped: num3(r.dropped),
     // How many of `sources` were repeats rendered as a one-line pointer because this run had
     // already injected them. Without it a falling `tok` is unattributable: a block that shrank
     // because the seen-set worked reads exactly like one that shrank because recall found half
     // as much.
-    ptr: num2(r.pointers),
+    ptr: num3(r.pointers),
     emptyReason: String(r.empty_reason || ""),
-    recalledAt: num2(r.at),
+    recalledAt: num3(r.at),
     recalled: Array.isArray(t.recalled) ? t.recalled.map(String) : [],
     recalledCount: Array.isArray(t.recalled) ? t.recalled.length : 0,
     used: usedSignal(t),
     outcomeState: outcomeState(t),
-    outcomeAttempts: num2(t.outcome_attempts),
-    apiError: String(t.api_error || "")
+    outcomeAttempts: num3(t.outcome_attempts),
+    apiError: String(t.api_error || ""),
+    // What the turn earned under `lib/outcome.mjs`'s rule — the automatic signal, whether or
+    // not a post has happened yet. A verdict is reported beside it, never over it: the page
+    // and `overview` both apply "verdict wins" from these two fields.
+    outcome: decided.outcome,
+    signal: decided.signal,
+    source: "live",
+    verdict: "",
+    verdictAt: 0,
+    outcomeSentAt: num3(t.outcome_sent_at)
   };
+}
+function decidedOutcome(turn) {
+  const { outcome_sent_at: _sent, outcome_attempts: _tries, ...rest } = turn && typeof turn === "object" ? turn : {};
+  const d = decideOutcome(rest);
+  return d.post && OUTCOME_WORDS2.has(String(d.outcome)) ? { outcome: String(d.outcome), signal: num3(d.signal) } : { outcome: "none", signal: 0 };
+}
+function effectiveOutcome(row) {
+  const r = row && typeof row === "object" ? row : {};
+  if (r.verdict === "worked") return "success";
+  if (r.verdict === "failed") return "failure";
+  const o = String(r.outcome || "");
+  return (
+    /** @type {any} */
+    OUTCOME_WORDS2.has(o) ? o : "none"
+  );
+}
+function ledgerTurnRow(row, opts = {}) {
+  const r = row && typeof row === "object" ? row : {};
+  const rc = r.recall && typeof r.recall === "object" ? r.recall : {};
+  const preview = redactForBrowser(r.prompt, opts.previewBytes ?? PREVIEW_BYTES);
+  const startedAt = num3(r.started_at);
+  const endedAt = num3(r.ended_at);
+  const recalled = Array.isArray(r.recalled) ? r.recalled.map(String) : [];
+  const apiError = String(r.api_error || "");
+  const outcome = OUTCOME_WORDS2.has(String(r.outcome)) ? String(r.outcome) : "none";
+  return {
+    promptId: String(r.prompt_id || ""),
+    sessionId: String(r.session_id || ""),
+    turnNumber: num3(r.turn_number),
+    startedAt,
+    endedAt,
+    turnMs: startedAt && endedAt ? endedAt - startedAt : 0,
+    promptPreview: preview.text,
+    promptTruncated: preview.truncated || r.prompt_truncated === true,
+    promptRedactions: preview.redactions + num3(r.prompt_redactions),
+    rung: num3(rc.rung),
+    sources: num3(rc.sources),
+    tok: num3(rc.tokens),
+    chars: num3(rc.chars),
+    dropped: num3(rc.dropped),
+    ptr: num3(rc.pointers),
+    emptyReason: String(rc.empty_reason || ""),
+    recalledAt: 0,
+    recalled,
+    recalledCount: recalled.length,
+    used: usedSignal(r.used === true || r.used === false ? { used_evidence: { used: r.used } } : {}),
+    outcomeState: apiError ? `api:${apiError}` : outcome === "none" ? "none" : "",
+    outcomeAttempts: 0,
+    apiError,
+    outcome,
+    signal: num3(r.signal),
+    source: "ledger",
+    verdict: "",
+    verdictAt: 0,
+    outcomeSentAt: 0
+  };
+}
+function gatherTurns(dir, runId, opts = {}) {
+  const ids = opts.family === true ? familyOf(dir, runId).runIds : [safeSegment(runId)].filter(Boolean);
+  const since = num3(opts.since);
+  const want = num3(opts.want);
+  const byPrompt = /* @__PURE__ */ new Map();
+  for (const id of ids) {
+    for (const r of readLedger(dir, id, { since, kinds: ["turn"] })) {
+      const pid = String(r.prompt_id || "");
+      if (pid) byPrompt.set(pid, { ...ledgerTurnRow(r), runId: id });
+    }
+  }
+  for (const id of ids) {
+    for (const t of rawTurns(dir, id, want)) {
+      const pid = String(t.prompt_id || "");
+      if (pid) byPrompt.set(pid, { ...turnRow(t), runId: id });
+    }
+  }
+  for (const id of ids) {
+    for (const o of readLedger(dir, id, { kinds: ["outcome"] })) {
+      const row = byPrompt.get(String(o.prompt_id || ""));
+      if (!row) continue;
+      if (num3(o.at) > row.outcomeSentAt) row.outcomeSentAt = num3(o.at);
+      if (row.source === "ledger") {
+        row.outcomeState = "sent";
+        if (row.outcome === "none" && OUTCOME_WORDS2.has(String(o.outcome))) {
+          row.outcome = String(o.outcome);
+          row.signal = num3(o.signal);
+        }
+      }
+    }
+    for (const v of readVerdicts(dir, id)) {
+      const row = byPrompt.get(String(v.prompt || ""));
+      if (!row || num3(v.at) < row.verdictAt) continue;
+      const word = v.verdict === "worked" ? "worked" : v.verdict === "failed" ? "failed" : "";
+      if (!word) continue;
+      row.verdict = word;
+      row.verdictAt = num3(v.at);
+    }
+  }
+  const out = [];
+  for (const row of byPrompt.values()) {
+    if (since > 0 && row.startedAt > 0 && row.startedAt < since) continue;
+    out.push(row);
+  }
+  return out;
 }
 function turnRows(dir, runId, opts = {}) {
   const limit = clampInt(opts.limit, 1, 1e3, 100);
-  return rawTurns(dir, runId, limit).sort((a, b) => num2(b.started_at) - num2(a.started_at)).slice(0, limit).map((t) => turnRow(t));
+  const kept = gatherTurns(dir, runId, { family: opts.family === true, since: num3(opts.since), want: limit }).sort((a, b) => b.startedAt - a.startedAt).slice(0, limit);
+  let oldest = Infinity;
+  for (const k of kept) if (k.startedAt > 0) oldest = Math.min(oldest, k.startedAt);
+  const since = Number.isFinite(oldest) ? oldest - SUBAGENT_SLACK_MS : 0;
+  const subs = /* @__PURE__ */ new Map();
+  const subsOf = (id) => {
+    if (!subs.has(id)) subs.set(id, readSubagents(dir, id, { since }));
+    return subs.get(id) ?? [];
+  };
+  return kept.map((row) => {
+    const mine = subsOf(row.runId).filter((s) => s.promptId === row.promptId);
+    return {
+      ...row,
+      subagentCount: mine.length,
+      subagentTypes: mine.map((s) => s.agentType)
+    };
+  });
 }
 function rawTurns(dir, runId, want = 0) {
-  const tdir = join9(runDir({ dataDir: dir }, runId), "turns");
+  const tdir = join10(runDir({ dataDir: dir }, runId), "turns");
   let names = lsDir(tdir).filter((f) => f.endsWith(".json"));
   if (want > 0 && names.length > want * 3) {
-    names = names.map((f) => ({ f, at: mtimeOf(join9(tdir, f)) })).sort((x, y) => y.at - x.at).slice(0, want * 2).map((e) => e.f);
+    names = names.map((f) => ({ f, at: mtimeOf(join10(tdir, f)) })).sort((x, y) => y.at - x.at).slice(0, want * 2).map((e) => e.f);
   }
-  return names.map((f) => readJson(join9(tdir, f), null)).filter((t) => t && typeof t === "object" && !Array.isArray(t));
+  return names.map((f) => readJson(join10(tdir, f), null)).filter((t) => t && typeof t === "object" && !Array.isArray(t));
 }
 function turnDetail(dir, runId, promptId) {
   const id = safeSegment(promptId);
   if (!id) return null;
-  const p = join9(runDir({ dataDir: dir }, runId), "turns", `${id}.json`);
+  const run = safeSegment(runId);
+  const p = join10(runDir({ dataDir: dir }, run), "turns", `${id}.json`);
   const t = readJson(p, null);
-  if (!t || typeof t !== "object" || Array.isArray(t)) return null;
-  const prompt = redactForBrowser(t.prompt, DETAIL_BYTES);
-  const recall = t.recall && typeof t.recall === "object" ? t.recall : null;
-  const used = t.used_evidence && typeof t.used_evidence === "object" ? t.used_evidence : null;
+  let detail = null;
+  if (t && typeof t === "object" && !Array.isArray(t)) {
+    const prompt = redactForBrowser(t.prompt, DETAIL_BYTES);
+    const recall = t.recall && typeof t.recall === "object" ? t.recall : null;
+    const used = t.used_evidence && typeof t.used_evidence === "object" ? t.used_evidence : null;
+    detail = {
+      ...turnRow(t, { previewBytes: DETAIL_BYTES }),
+      prompt: prompt.text,
+      promptTruncated: prompt.truncated || t.prompt_truncated === true,
+      recall: recall ? { ...recall, terms: redactTerms(recall.terms) } : null,
+      usedEvidence: used ? { ...used, terms: redactTerms(used.terms) } : null,
+      outcomeSentAt: num3(t.outcome_sent_at),
+      outcomePending: t.outcome_pending === true,
+      outcomeAbandoned: t.outcome_abandoned === true
+    };
+  } else {
+    const rows = readLedger(dir, run, { kinds: ["turn"] }).filter((r2) => String(r2.prompt_id || "") === id);
+    if (!rows.length) return null;
+    const r = rows[rows.length - 1];
+    const prompt = redactForBrowser(r.prompt, DETAIL_BYTES);
+    const rc = r.recall && typeof r.recall === "object" ? r.recall : null;
+    detail = {
+      ...ledgerTurnRow(r, { previewBytes: DETAIL_BYTES }),
+      prompt: prompt.text,
+      promptTruncated: prompt.truncated || r.prompt_truncated === true,
+      recall: rc ? { ...rc, terms: null } : null,
+      usedEvidence: null,
+      outcomePending: false,
+      outcomeAbandoned: false
+    };
+  }
+  for (const o of readLedger(dir, run, { kinds: ["outcome"] })) {
+    if (String(o.prompt_id || "") !== id) continue;
+    if (num3(o.at) > detail.outcomeSentAt) detail.outcomeSentAt = num3(o.at);
+    if (detail.source === "ledger") detail.outcomeState = "sent";
+  }
+  for (const v of readVerdicts(dir, run)) {
+    if (String(v.prompt || "") !== id || num3(v.at) < detail.verdictAt) continue;
+    const word = v.verdict === "worked" ? "worked" : v.verdict === "failed" ? "failed" : "";
+    if (!word) continue;
+    detail.verdict = word;
+    detail.verdictAt = num3(v.at);
+  }
+  const startedAt = detail.startedAt;
   return {
-    ...turnRow(t, { previewBytes: DETAIL_BYTES }),
-    prompt: prompt.text,
-    promptTruncated: prompt.truncated || t.prompt_truncated === true,
-    recall: recall ? { ...recall, terms: redactTerms(recall.terms) } : null,
-    usedEvidence: used ? { ...used, terms: redactTerms(used.terms) } : null,
-    outcomeSentAt: num2(t.outcome_sent_at),
-    outcomePending: t.outcome_pending === true,
-    outcomeAbandoned: t.outcome_abandoned === true
+    ...detail,
+    runId: run,
+    subagents: readSubagents(dir, run, { since: startedAt > 0 ? startedAt - SUBAGENT_SLACK_MS : 0 }).filter((s) => s.promptId === id)
+  };
+}
+function emptyTally() {
+  return {
+    turns: 0,
+    injectedTurns: 0,
+    injectedRefs: 0,
+    tokens: 0,
+    chars: 0,
+    usedYes: 0,
+    usedNo: 0,
+    usedUnmeasured: 0,
+    outcomes: { success: 0, failure: 0, neutral: 0, none: 0 },
+    verdicts: { worked: 0, failed: 0 },
+    apiErrors: 0
+  };
+}
+function tallyRow(k, row) {
+  k.turns += 1;
+  if (row.recalledCount > 0) k.injectedTurns += 1;
+  k.injectedRefs += num3(row.recalledCount);
+  k.tokens += num3(row.tok);
+  k.chars += num3(row.chars);
+  const u = row.used && typeof row.used === "object" ? row.used.used : null;
+  if (u === true) k.usedYes += 1;
+  else if (u === false) k.usedNo += 1;
+  else k.usedUnmeasured += 1;
+  k.outcomes[effectiveOutcome(row)] += 1;
+  if (row.verdict === "worked") k.verdicts.worked += 1;
+  else if (row.verdict === "failed") k.verdicts.failed += 1;
+  if (row.apiError) k.apiErrors += 1;
+}
+function indexRows(rows) {
+  const out = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const eff = effectiveOutcome(row);
+    const used = row.used && typeof row.used === "object" && row.used.used === true;
+    for (const id of new Set(Array.isArray(row.recalled) ? row.recalled : [])) {
+      if (!id) continue;
+      let e = out.get(id);
+      if (!e) {
+        e = {
+          injectedCount: 0,
+          usedInTurns: 0,
+          lastInjectedAt: 0,
+          outcomes: { success: 0, failure: 0, neutral: 0, none: 0 },
+          verdicts: { worked: 0, failed: 0 }
+        };
+        out.set(id, e);
+      }
+      e.injectedCount += 1;
+      if (used) e.usedInTurns += 1;
+      if (num3(row.startedAt) > e.lastInjectedAt) e.lastInjectedAt = num3(row.startedAt);
+      e.outcomes[eff] += 1;
+      if (row.verdict === "worked") e.verdicts.worked += 1;
+      else if (row.verdict === "failed") e.verdicts.failed += 1;
+    }
+  }
+  return out;
+}
+function injectionIndex(dir, runId, opts = {}) {
+  return indexRows(gatherTurns(dir, runId, { family: opts.family === true, since: num3(opts.since), want: 0 }));
+}
+function localDay(ms) {
+  const d = new Date(ms);
+  const two = (n) => (n < 10 ? "0" : "") + n;
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
+}
+function localDayStart(ms, daysBack = 0) {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - daysBack).getTime();
+}
+function overview(dir, runId, opts = {}) {
+  const days = clampInt(opts.days, 1, 30, 30);
+  const now = num3(opts.now) || Date.now();
+  const family = opts.family === true;
+  const ids = family ? familyOf(dir, runId).runIds : [safeSegment(runId)].filter(Boolean);
+  const windowStart = localDayStart(now, days - 1);
+  const previousStart = localDayStart(now, 2 * days - 1);
+  const rows = gatherTurns(dir, runId, { family, since: previousStart, want: 0 });
+  const current = rows.filter((r) => r.startedAt >= windowStart);
+  const previous = rows.filter((r) => r.startedAt < windowStart);
+  const byDay = /* @__PURE__ */ new Map();
+  for (let i = days - 1; i >= 0; i -= 1) {
+    const day = localDay(localDayStart(now, i));
+    byDay.set(day, { day, injected: 0, ...emptyTally() });
+  }
+  const kpi = emptyTally();
+  for (const row of current) {
+    tallyRow(kpi, row);
+    const bucket = byDay.get(localDay(row.startedAt));
+    if (!bucket) continue;
+    tallyRow(bucket, row);
+    bucket.injected = bucket.injectedRefs;
+  }
+  const prev = emptyTally();
+  for (const row of previous) tallyRow(prev, row);
+  const topInjected = [...indexRows(current).entries()].map(([id, e]) => ({ id, ...e })).sort((x, y) => y.injectedCount - x.injectedCount || y.lastInjectedAt - x.lastInjectedAt).slice(0, 10);
+  let firstLedgerAt = 0;
+  for (const id of ids) {
+    for (const r of readLedger(dir, id, { kinds: ["turn"] })) {
+      const at = num3(r.at);
+      if (at > 0 && (!firstLedgerAt || at < firstLedgerAt)) firstLedgerAt = at;
+    }
+  }
+  return {
+    dir,
+    runId: safeSegment(runId),
+    runIds: ids,
+    days,
+    now,
+    windowStart,
+    previousStart,
+    // Stated rather than implied: the ledger accrues from the first Stop after it existed
+    // and cannot reconstruct anything before that.
+    firstLedgerAt,
+    kpi,
+    previous: prev,
+    series: [...byDay.values()],
+    topInjected
   };
 }
 function localHealth(cfg, dir, runId) {
@@ -2381,7 +3028,7 @@ function localHealth(cfg, dir, runId) {
   const id = safeSegment(runId);
   const marker = id ? readMarker(scoped, id) : readMarker(scoped, "");
   const rd = runDir(scoped, id);
-  const coldStartUntil = num2(marker.cold_start_until);
+  const coldStartUntil = num3(marker.cold_start_until);
   const breaker = readBreaker(scoped, { coldStartUntil });
   const spool = id ? spoolStats(scoped, id) : { count: 0, oldestMs: 0 };
   return {
@@ -2391,7 +3038,7 @@ function localHealth(cfg, dir, runId) {
     marker,
     spoolDepth: spool.count,
     spoolOldestMs: spool.oldestMs,
-    rejectedCount: lsDir(join9(rd, "spool", "rejected")).filter((f) => f.endsWith(".json")).length,
+    rejectedCount: lsDir(join10(rd, "spool", "rejected")).filter((f) => f.endsWith(".json")).length,
     jobs: jobsFor(dir, id),
     breaker: { ...breaker, ...breakerPhase(breaker, cfg) },
     // Every breaker file in the directory, because the state is keyed by endpoint: a machine
@@ -2403,28 +3050,28 @@ function localHealth(cfg, dir, runId) {
       active: coldStartUntil > 0 && Date.now() < coldStartUntil
     },
     // The endpoint probe cache, read rather than refreshed. Calling `health()` would rewrite it.
-    healthCache: readJson(join9(dir, "status", "health.json"), null)
+    healthCache: readJson(join10(dir, "status", "health.json"), null)
   };
 }
 function breakerPhase(breaker, cfg) {
   const cooldownMs = positive(cfg && cfg.breaker && cfg.breaker.cooldownMs, DEFAULT_COOLDOWN_MS2);
-  const openedAt = num2(breaker && breaker.openedAt);
+  const openedAt = num3(breaker && breaker.openedAt);
   if (!(openedAt > 0)) return { open: false, phase: "closed", cooldownLeftMs: 0 };
-  const since = Math.max(openedAt, num2(breaker && breaker.probeAt));
+  const since = Math.max(openedAt, num3(breaker && breaker.probeAt));
   const left = cooldownMs - (Date.now() - since);
   return left > 0 ? { open: true, phase: "open", cooldownLeftMs: left } : { open: false, phase: "half-open", cooldownLeftMs: 0 };
 }
 function breakersIn(dir) {
-  return lsDir(join9(dir, "breaker")).filter((f) => f.endsWith(".json")).map((f) => {
-    const b = readJson(join9(dir, "breaker", f), null);
+  return lsDir(join10(dir, "breaker")).filter((f) => f.endsWith(".json")).map((f) => {
+    const b = readJson(join10(dir, "breaker", f), null);
     if (!b || typeof b !== "object") return null;
     return {
       file: f,
       state: String(b.state || "ready"),
       failures: Array.isArray(b.failures) ? b.failures.length : 0,
-      openedAt: num2(b.openedAt),
-      probeAt: num2(b.probeAt),
-      lastOkAt: num2(b.lastOkAt),
+      openedAt: num3(b.openedAt),
+      probeAt: num3(b.probeAt),
+      lastOkAt: num3(b.lastOkAt),
       // `endpoint` is carried in the file purely so a directory of hash-named files is
       // readable by a human; it is the only place the dashboard can learn which instance a
       // non-current breaker belongs to.
@@ -2434,17 +3081,17 @@ function breakersIn(dir) {
 }
 function jobsFor(dir, runId) {
   if (!runId) return [];
-  const j = readJson(join9(runDir({ dataDir: dir }, runId), "jobs.json"), []);
+  const j = readJson(join10(runDir({ dataDir: dir }, runId), "jobs.json"), []);
   return Array.isArray(j) ? j.slice(-25) : [];
 }
 function rollupPath(dir, runId) {
-  return join9(dir, ROLLUP_DIR, `rollup-${safeSegment(runId) || "unknown"}.jsonl`);
+  return join10(dir, ROLLUP_DIR, `rollup-${safeSegment(runId) || "unknown"}.jsonl`);
 }
 function sampleFor(dir, runId, now = Date.now()) {
   const turns = rawTurns(dir, runId, 1);
   if (!turns.length) return null;
   let newest = turns[0];
-  for (const t of turns) if (num2(t.started_at) > num2(newest.started_at)) newest = t;
+  for (const t of turns) if (num3(t.started_at) > num3(newest.started_at)) newest = t;
   const r = newest.recall && typeof newest.recall === "object" ? newest.recall : {};
   return {
     at: now,
@@ -2453,12 +3100,12 @@ function sampleFor(dir, runId, now = Date.now()) {
     // The prompt *id*, never its text: it is what makes the series one row per prompt rather
     // than one row per poll, and an opaque id carries nothing to redact.
     prompt: String(newest.prompt_id || ""),
-    startedAt: num2(newest.started_at),
-    tok: num2(r.tokens),
-    chars: num2(r.chars),
-    ptr: num2(r.pointers),
-    rung: num2(r.rung),
-    sources: num2(r.sources)
+    startedAt: num3(newest.started_at),
+    tok: num3(r.tokens),
+    chars: num3(r.chars),
+    ptr: num3(r.pointers),
+    rung: num3(r.rung),
+    sources: num3(r.sources)
   };
 }
 function appendRollup(dir, runId, sample) {
@@ -2468,7 +3115,7 @@ function appendRollup(dir, runId, sample) {
     const rows = readRollup(dir, runId);
     const last = rows.length ? rows[rows.length - 1] : null;
     if (last && sameSample(last, sample)) return false;
-    if (!ensureDir(join9(dir, ROLLUP_DIR))) return false;
+    if (!ensureDir(join10(dir, ROLLUP_DIR))) return false;
     appendFileSync2(p, `${JSON.stringify(sample)}
 `, "utf8");
     capRollup(p, rows.length + 1);
@@ -2484,30 +3131,32 @@ function capRollup(p, approxRows) {
   try {
     let size = 0;
     try {
-      size = statSync6(p).size;
+      size = statSync7(p).size;
     } catch {
       size = 0;
     }
     if (approxRows <= ROLLUP_MAX_ROWS && size <= ROLLUP_MAX_BYTES) return;
-    const lines = readFileSync6(p, "utf8").split("\n").filter((l) => l.trim());
+    const lines = readFileSync7(p, "utf8").split("\n").filter((l) => l.trim());
     const kept = lines.slice(-Math.floor(ROLLUP_MAX_ROWS / 2));
     const tmp = `${p}.tmp-${process.pid}`;
-    writeFileSync3(tmp, kept.length ? `${kept.join("\n")}
+    writeFileSync4(tmp, kept.length ? `${kept.join("\n")}
 ` : "", "utf8");
-    renameSync4(tmp, p);
+    renameSync5(tmp, p);
   } catch {
   }
 }
 function readRollup(dir, runId, since = 0) {
-  const p = rollupPath(dir, runId);
+  return readJsonl(rollupPath(dir, runId), since);
+}
+function readJsonl(p, since = 0) {
   if (!existsSync6(p)) return [];
   let raw = "";
   try {
-    raw = readFileSync6(p, "utf8");
+    raw = readFileSync7(p, "utf8");
   } catch {
     return [];
   }
-  const from = num2(since);
+  const from = num3(since);
   const out = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
@@ -2518,20 +3167,42 @@ function readRollup(dir, runId, since = 0) {
       continue;
     }
     if (!row || typeof row !== "object" || Array.isArray(row)) continue;
-    if (from > 0 && num2(row.at) < from) continue;
+    if (from > 0 && num3(row.at) < from) continue;
     out.push(row);
   }
   return out;
 }
+function verdictsPath(dir, runId) {
+  return join10(dir, ROLLUP_DIR, `verdicts-${safeSegment(runId) || "unknown"}.jsonl`);
+}
+function appendVerdict(dir, runId, row) {
+  try {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+    const p = verdictsPath(dir, runId);
+    const rows = readVerdicts(dir, runId);
+    if (!ensureDir(join10(dir, ROLLUP_DIR))) return false;
+    appendFileSync2(p, `${JSON.stringify(row)}
+`, "utf8");
+    capRollup(p, rows.length + 1);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function readVerdicts(dir, runId, since = 0) {
+  return readJsonl(verdictsPath(dir, runId), since);
+}
 function analytics(dir, runId, opts = {}) {
-  const series = readRollup(dir, runId, num2(opts.since));
+  const ids = opts.family === true ? familyOf(dir, runId).runIds : [safeSegment(runId)].filter(Boolean);
+  const series = ids.flatMap((id) => readRollup(dir, id, num3(opts.since))).sort((a, b) => num3(a.at) - num3(b.at));
   const n = series.length;
-  const sum = (k) => series.reduce((acc, row) => acc + num2(row[k]), 0);
+  const sum = (k) => series.reduce((acc, row) => acc + num3(row[k]), 0);
   const last = n ? series[n - 1] : null;
   const sources = sum("sources");
   return {
     dir,
     runId: safeSegment(runId),
+    runIds: ids,
     series,
     points: n,
     totals: {
@@ -2552,7 +3223,7 @@ function analytics(dir, runId, opts = {}) {
     latest: last,
     // Stated rather than implied, because the rollup starts empty: it accrues from the first
     // launch and cannot reconstruct anything that happened before it.
-    firstSampleAt: n ? num2(series[0].at) : 0
+    firstSampleAt: n ? num3(series[0].at) : 0
   };
 }
 function clampInt(v, lo, hi, dflt) {
@@ -2564,11 +3235,13 @@ function positive(v, dflt) {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) && n > 0 ? n : dflt;
 }
-var PREVIEW_BYTES, DETAIL_BYTES, ROLLUP_DIR, ROLLUP_MAX_ROWS, ROLLUP_MAX_BYTES, BROWSER_REDACTION, DEFAULT_COOLDOWN_MS2, STRATEGY_TEXT, WRITES_AT_TEXT, READS_ACROSS_TEXT;
+var PREVIEW_BYTES, DETAIL_BYTES, ROLLUP_DIR, ROLLUP_MAX_ROWS, ROLLUP_MAX_BYTES, BROWSER_REDACTION, DEFAULT_COOLDOWN_MS2, FEED_PREFIX, SUB_SUFFIX, CLEAR_SUFFIX, DIRECTORY_KEY, SUBAGENT_SLACK_MS, STRATEGY_TEXT, WRITES_AT_TEXT, READS_ACROSS_TEXT, OUTCOME_WORDS2;
 var init_dashboard_data = __esm({
   "../claude-code/lib/dashboard-data.mjs"() {
     init_breaker();
+    init_ledger();
     init_markers();
+    init_outcome();
     init_redact();
     init_spool();
     init_state();
@@ -2579,6 +3252,11 @@ var init_dashboard_data = __esm({
     ROLLUP_MAX_BYTES = 512 * 1024;
     BROWSER_REDACTION = Object.freeze({ redact: true, maxOutputBytes: PREVIEW_BYTES });
     DEFAULT_COOLDOWN_MS2 = 12e4;
+    FEED_PREFIX = /^state::[^:]*::/;
+    SUB_SUFFIX = /-sub-[a-z0-9]+$/;
+    CLEAR_SUFFIX = /-c(\d+)$/;
+    DIRECTORY_KEY = /^cc-.+-[0-9a-f]{8}$/;
+    SUBAGENT_SLACK_MS = 6e4;
     STRATEGY_TEXT = {
       "per-directory": "one run per directory; every session opened here shares it",
       "git-branch": "one run per git branch",
@@ -2595,6 +3273,7 @@ var init_dashboard_data = __esm({
       on: "every recall consults other runs",
       off: "recall never consults other runs; only the session-start briefing does"
     };
+    OUTCOME_WORDS2 = /* @__PURE__ */ new Set(["success", "failure", "neutral", "none"]);
   }
 });
 
@@ -2620,14 +3299,14 @@ __export(dashboard_src_exports, {
 });
 import { spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync as readFileSync7, realpathSync, unlinkSync as unlinkSync4 } from "node:fs";
+import { readFileSync as readFileSync8, realpathSync, unlinkSync as unlinkSync4 } from "node:fs";
 import { createServer } from "node:http";
-import { join as join10, resolve as resolve3 } from "node:path";
+import { join as join11, resolve as resolve3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function pageHtml(override) {
   if (typeof override === "string" && override) return override;
   try {
-    return readFileSync7(HTML_URL, "utf8");
+    return readFileSync8(HTML_URL, "utf8");
   } catch {
     return FALLBACK_HTML;
   }
@@ -2639,7 +3318,27 @@ function presentedToken(req, url) {
   const header = req && req.headers ? String(req.headers.authorization ?? "") : "";
   const m = /^Bearer\s+(.+)$/i.exec(header.trim());
   if (m) return m[1].trim();
-  return String(url.searchParams.get("token") ?? "").trim();
+  const query = String(url.searchParams.get("token") ?? "").trim();
+  if (query) return query;
+  return cookieToken(req);
+}
+function cookieToken(req) {
+  const raw = req && req.headers ? String(req.headers.cookie ?? "") : "";
+  if (!raw) return "";
+  for (const part of raw.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() !== COOKIE_NAME) continue;
+    try {
+      return decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+function sessionCookie(token) {
+  return `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/`;
 }
 function tokenEquals(a, b) {
   const x = Buffer.from(String(a ?? ""), "utf8");
@@ -2657,7 +3356,7 @@ function tokenEquals(a, b) {
   }
 }
 function statePath(cfg) {
-  return join10(resolveDataDir(cfg), ...STATE_FILE);
+  return join11(resolveDataDir(cfg), ...STATE_FILE);
 }
 function readState(cfg) {
   const s = readJson(statePath(cfg), null);
@@ -2674,7 +3373,7 @@ function readState(cfg) {
   };
 }
 function writeState(cfg, state) {
-  ensureDir(join10(resolveDataDir(cfg), STATE_FILE[0]));
+  ensureDir(join11(resolveDataDir(cfg), STATE_FILE[0]));
   return writeJsonAtomic(statePath(cfg), state, { mode: STATE_MODE });
 }
 function clearState(cfg) {
@@ -2772,13 +3471,15 @@ async function handle(ctx, req, res, token, html) {
   const method = String(req.method ?? "GET").toUpperCase();
   const path = url.pathname;
   if (method === "GET" && (path === "/" || path === "/index.html")) {
-    res.writeHead(200, {
+    const headers = {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
       "content-security-policy": CSP,
       "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer"
-    });
+    };
+    if (url.searchParams.has("token")) headers["set-cookie"] = sessionCookie(token);
+    res.writeHead(200, headers);
     return res.end(html);
   }
   if (method === "GET" && path === "/api/ping") {
@@ -2816,6 +3517,9 @@ function scope(ctx, url) {
   const asked = safeSegment(String(url.searchParams.get("run") ?? ""));
   const run = asked || (dir ? newestRun(dir) : "");
   return { dir, run, dirs };
+}
+function familyParam(url) {
+  return String(url.searchParams.get("family") ?? "") === "1";
 }
 function scopeMatches(row, want) {
   if (!want) return true;
@@ -2900,6 +3604,78 @@ function decorateScope(entry, currentRun) {
     fromOtherRun: n.fromOtherRun
   };
 }
+function decorateInjections(ctx, url, lessons) {
+  const dirParam = String(url.searchParams.get("dir") ?? "");
+  const anchor = safeSegment(String(url.searchParams.get("currentRun") ?? ""));
+  let index = /* @__PURE__ */ new Map();
+  if (dirParam && anchor) {
+    const dir = resolveDirParam(dirParam, dirsOf(ctx));
+    if (dir) {
+      try {
+        index = injectionIndex(dir, anchor, { family: familyParam(url) });
+      } catch {
+        index = /* @__PURE__ */ new Map();
+      }
+    }
+  }
+  return (Array.isArray(lessons) ? lessons : []).map((l) => {
+    const e = l && l.id && index.get(String(l.id)) || NO_INJECTIONS;
+    return {
+      ...l,
+      injectedCount: e.injectedCount,
+      usedInTurns: e.usedInTurns,
+      lastInjectedAt: e.lastInjectedAt,
+      injectedOutcomes: { ...e.outcomes },
+      injectedVerdicts: { ...e.verdicts }
+    };
+  });
+}
+async function verdictPayload(ctx, body) {
+  const cfg = ctx.cfg;
+  const b = body && typeof body === "object" ? body : {};
+  const dir = resolveDirParam(String(b.dir ?? ""), dirsOf(ctx));
+  const run = safeSegment(String(b.run ?? ""));
+  const promptId = safeSegment(String(b.promptId ?? ""));
+  if (!dir || !run) return fail(400, "bad_request", "verdict requires a run id");
+  if (!promptId) return fail(400, "bad_request", "verdict requires a promptId");
+  const turn = turnDetail(dir, run, promptId);
+  if (!turn) return fail(404, "not_found", "no such turn on disk or in the ledger");
+  const entryIds = Array.isArray(turn.recalled) ? turn.recalled.map(String).filter(Boolean) : [];
+  if (!entryIds.length) {
+    return fail(400, "bad_request", "nothing was injected into this turn, so there is nothing to credit");
+  }
+  const success = b.success !== false;
+  const outcome = success ? "success" : "failure";
+  const n = entryIds.length;
+  const r = await sendOutcome(cfg, {
+    run,
+    referenceId: "global",
+    outcome,
+    signal: success ? 1 : -1,
+    rationale: `Dashboard verdict: the user marked this turn as ${success ? "worked" : "did not work"}; ${n} ${n === 1 ? "memory was" : "memories were"} injected.`,
+    entryIds,
+    idempotencyKey: `dash-verdict-${run}-${promptId}-${outcome}`
+  });
+  if (!r.ok) return r;
+  const verdict = success ? "worked" : "failed";
+  appendVerdict(dir, run, {
+    at: Date.now(),
+    run,
+    prompt: promptId,
+    verdict,
+    entryIds: n,
+    source: String(turn.source || ""),
+    reinforcementCount: r.data.reinforcementCount,
+    updatedConfidence: r.data.updatedConfidence
+  });
+  return ok({
+    verdict,
+    promptId,
+    entryIds,
+    reinforcementCount: r.data.reinforcementCount,
+    updatedConfidence: r.data.updatedConfidence
+  });
+}
 async function getRoute(ctx, res, path, url) {
   const cfg = ctx.cfg;
   if (path === "/api/meta") {
@@ -2943,11 +3719,13 @@ async function getRoute(ctx, res, path, url) {
   if (path === "/api/turns") {
     const { dir, run } = scope(ctx, url);
     const limit = Number(url.searchParams.get("limit") ?? 100);
+    const family = familyParam(url);
     if (dir && run) appendRollup(dir, run, sampleFor(dir, run));
     return sendJson(res, 200, {
       dir,
       run,
-      turns: dir && run ? turnRows(dir, run, { limit }) : []
+      family,
+      turns: dir && run ? turnRows(dir, run, { limit, family }) : []
     }, cfg);
   }
   if (path === "/api/turn") {
@@ -2964,11 +3742,18 @@ async function getRoute(ctx, res, path, url) {
   if (path === "/api/analytics") {
     const { dir, run } = scope(ctx, url);
     const since = Number(url.searchParams.get("since") ?? 0);
+    const family = familyParam(url);
     if (dir && run) appendRollup(dir, run, sampleFor(dir, run));
-    return sendJson(res, 200, dir && run ? analytics(dir, run, { since }) : { dir, runId: run, series: [], points: 0 }, cfg);
+    return sendJson(res, 200, dir && run ? analytics(dir, run, { since, family }) : { dir, runId: run, runIds: [], series: [], points: 0 }, cfg);
+  }
+  if (path === "/api/overview") {
+    const { dir, run } = scope(ctx, url);
+    const days = Number(url.searchParams.get("days") ?? 30);
+    const family = familyParam(url);
+    return sendJson(res, 200, dir && run ? overview(dir, run, { days, family }) : { dir, runId: run, runIds: [], days: 0, series: [], kpi: null, previous: null, topInjected: [], firstLedgerAt: 0 }, cfg);
   }
   if (path === "/api/lessons") {
-    return upstream(res, cfg, await lessonsPayload(cfg, {
+    const payload = await lessonsPayload(cfg, {
       // An empty `run` means every run, and that is the only spelling it gets. A second
       // `allRuns` parameter would just be a second way to pin this tab back to one run, which
       // is the bug that made a global lesson from another run structurally invisible.
@@ -2980,7 +3765,9 @@ async function getRoute(ctx, res, path, url) {
       project: String(url.searchParams.get("project") ?? ""),
       limit: Number(url.searchParams.get("limit") ?? 100),
       source: String(url.searchParams.get("source") ?? "auto")
-    }));
+    });
+    if (!payload.ok) return upstream(res, cfg, payload);
+    return upstream(res, cfg, ok({ ...payload.data, lessons: decorateInjections(ctx, url, payload.data.lessons) }));
   }
   if (path === "/api/activity") {
     const entryTypes = String(url.searchParams.get("entryTypes") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -3009,6 +3796,12 @@ async function getRoute(ctx, res, path, url) {
       limit: Number(url.searchParams.get("limit") ?? 25)
     }));
   }
+  if (path === "/api/entry") {
+    const { run } = scope(ctx, url);
+    const id = String(url.searchParams.get("id") ?? "").trim();
+    if (!id) return sendError(res, 400, "bad_request", "entry requires an id", cfg);
+    return upstream(res, cfg, await fetchEntry(cfg, { run, id }));
+  }
   return sendError(res, 404, "not_found", `GET ${path} is not a dashboard route`, cfg);
 }
 async function postRoute(ctx, req, res, path) {
@@ -3017,7 +3810,8 @@ async function postRoute(ctx, req, res, path) {
     "/api/search": (b) => runSearch(cfg, b),
     "/api/outcome": (b) => sendOutcome(cfg, b),
     "/api/archive": (b) => sendArchive(cfg, b),
-    "/api/forget": (b) => deleteLesson(cfg, b)
+    "/api/forget": (b) => deleteLesson(cfg, b),
+    "/api/verdict": (b) => verdictPayload(ctx, b)
   };
   const fn = routes[path];
   if (!fn) return sendError(res, 404, "not_found", `POST ${path} is not a dashboard route`, cfg);
@@ -3278,7 +4072,7 @@ function describe(url, cfg, reused) {
   lines.push("", 'Stop it with:  node "$CLAUDE_PLUGIN_ROOT/bin/dashboard.mjs" --stop');
   return lines.join("\n");
 }
-var STATE_FILE, STATE_MODE, IDLE_MS, POLL_MS, MAX_BODY_BYTES2, LAUNCH_TIMEOUT_MS, CSP, HTML_URL, FALLBACK_HTML, UNTAGGED_PROJECT, selfPath, selfReal, entryPath;
+var STATE_FILE, STATE_MODE, IDLE_MS, POLL_MS, MAX_BODY_BYTES2, LAUNCH_TIMEOUT_MS, CSP, HTML_URL, FALLBACK_HTML, COOKIE_NAME, UNTAGGED_PROJECT, NO_INJECTIONS, selfPath, selfReal, entryPath;
 var init_dashboard_src = __esm({
   async "../claude-code/bin/dashboard.src.mjs"() {
     init_activity();
@@ -3304,7 +4098,15 @@ var init_dashboard_src = __esm({
     ].join("; ");
     HTML_URL = new URL("./dashboard.html", import.meta.url);
     FALLBACK_HTML = '<!doctype html><meta charset="utf-8"><title>Mubit dashboard</title><body style="font:13px system-ui;padding:2rem"><h1>bin/dashboard.html is missing</h1><p>The server is running, but the page it serves is not on disk. Reinstall the plugin.</p>';
+    COOKIE_NAME = "mubit_dashboard";
     UNTAGGED_PROJECT = "__untagged__";
+    NO_INJECTIONS = Object.freeze({
+      injectedCount: 0,
+      usedInTurns: 0,
+      lastInjectedAt: 0,
+      outcomes: Object.freeze({ success: 0, failure: 0, neutral: 0, none: 0 }),
+      verdicts: Object.freeze({ worked: 0, failed: 0 })
+    });
     selfPath = fileURLToPath2(import.meta.url);
     selfReal = realPath(selfPath);
     entryPath = process.argv[1] ? realPath(resolve3(process.argv[1])) : "";

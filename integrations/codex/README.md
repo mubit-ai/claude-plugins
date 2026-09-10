@@ -16,10 +16,15 @@ Requires Codex CLI **0.146.0 or newer** and Node **20 or newer**. Verified again
 
 ## Install
 
+0.146.0 is the floor because that is where Git marketplace sources landed.
+
 ```bash
-codex plugin marketplace add /path/to/this/repo
+codex plugin marketplace add mubit-ai/plugins
 codex plugin add mubit-memory@mubit
 ```
+
+Pin a release with `--ref <tag>` rather than tracking `main`. Working on the plugin itself?
+Point the marketplace at your checkout instead: `codex plugin marketplace add /path/to/repo`.
 
 Then either ask a Codex session to run `mubit-memory:setup`, or do it yourself:
 
@@ -456,7 +461,7 @@ safe to attach to an issue.
 ## Development
 
 ```bash
-npm test                                    # 434 gates
+npm test                                    # 436 gates
 MUBIT_CC_TEST_TARGET=dist npm test          # the same, against the committed bundles
 npm run build                               # rebuild hooks/dist, bin/, mcp/dist
 node ../claude-code/scripts/verify-manifests.mjs
@@ -469,7 +474,7 @@ bundle — two independently installable plugins cannot share a path, and the bu
 rather than regenerating it.
 
 Every change to `../claude-code/lib` or `../claude-code/hooks/src` changes both plugins. Run
-both suites: this one, and the 1847 next door.
+both suites: this one, and the 1961 next door.
 
 [`test/fixtures/observed/`](test/fixtures/observed/README.md) is the record of what Codex
 actually does — payloads the host wrote to a recorder hook during a real session, and its

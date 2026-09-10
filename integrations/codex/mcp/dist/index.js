@@ -553,7 +553,7 @@ var RULES = [
   { kind: "bearer", re: /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/g },
   { kind: "high-entropy", scrub: scrubHighEntropy }
 ];
-function scrubAssignments(text, count) {
+function scrubAssignments(text, count2) {
   ASSIGNMENT_RE.lastIndex = 0;
   let out = "";
   let copied = 0;
@@ -574,33 +574,33 @@ function scrubAssignments(text, count) {
     out += text.slice(copied, m.index) + pre + PH("assignment");
     copied = VALUE_RE.lastIndex;
     ASSIGNMENT_RE.lastIndex = copied;
-    count.n += 1;
+    count2.n += 1;
   }
   return out + text.slice(copied);
 }
 function isSecretName(lower) {
   return ASSIGNMENT_KEYWORDS.some((k) => lower.includes(k)) || ASSIGNMENT_NAME_SUFFIXES.some((k) => lower.endsWith(k));
 }
-function scrubUrlCredentials(text, count) {
+function scrubUrlCredentials(text, count2) {
   return text.replace(URL_CREDENTIALS_RE, (_m, pre, scheme) => {
-    count.n += 1;
+    count2.n += 1;
     return `${pre}${scheme}${PH("url-credentials")}@`;
   });
 }
-function scrubHighEntropy(text, count) {
+function scrubHighEntropy(text, count2) {
   return text.replace(ENTROPY_RUN_RE, (run) => {
     if (run.length < ENTROPY_MIN_LEN) return run;
     if (EXEMPT_RE.test(run)) return run;
     if (entropy(run) < ENTROPY_THRESHOLD) return run;
-    count.n += 1;
+    count2.n += 1;
     return PH("high-entropy");
   });
 }
-function scrub(text, count) {
+function scrub(text, count2) {
   let out = text;
   for (const rule of RULES) {
     if (rule.scrub) {
-      out = rule.scrub(out, count);
+      out = rule.scrub(out, count2);
       continue;
     }
     const re = rule.re;
@@ -608,7 +608,7 @@ function scrub(text, count) {
     re.lastIndex = 0;
     out = out.replace(re, (m) => {
       if (EXEMPT_RE.test(m)) return m;
-      count.n += 1;
+      count2.n += 1;
       return PH(rule.kind);
     });
   }
@@ -662,14 +662,14 @@ function redactText(text, cfg = {}, kind = "output") {
       s = "";
     }
   }
-  const count = { n: 0 };
+  const count2 = { n: 0 };
   if (!cfg || cfg.redact !== false) {
     try {
-      s = scrub(s, count);
+      s = scrub(s, count2);
     } catch {
     }
   }
-  out.redactions = count.n;
+  out.redactions = count2.n;
   const cap2 = kind === "param" ? numberOr(cfg?.maxParamBytes, 4096) : numberOr(cfg?.maxOutputBytes, 8192);
   const capped = capBytes(s, cap2);
   out.text = capped.text;
@@ -1043,6 +1043,10 @@ function safeCwd2() {
     return ".";
   }
 }
+
+// ../claude-code/mcp/src/egress.mjs
+import { readdirSync as readdirSync3, statSync as statSync5 } from "node:fs";
+import { join as join8 } from "node:path";
 
 // ../claude-code/lib/breaker.mjs
 import { createHash as createHash3 } from "node:crypto";
@@ -1581,7 +1585,8 @@ var EXTRA_ROUTES = Object.freeze({
   memoryHealth: "/v2/control/memory_health",
   archive: "/v2/control/archive",
   deleteLesson: "/v2/control/lessons/delete",
-  runs: "/v2/control/runs"
+  runs: "/v2/control/runs",
+  dereference: "/v2/control/dereference"
 });
 var DEFAULT_SCOPE = "run";
 var REPO_TAG = "repo:";
@@ -1653,7 +1658,12 @@ function normalizeActivityLesson(entry, ctx = {}) {
     promotionStamped: PROMOTION_KEYS.some((k) => meta[k] !== void 0),
     promotionCandidate: meta.promotion_candidate ?? null,
     promotionQuarantined: meta.promotion_quarantined ?? null,
-    promotionShadowStats: meta.promotion_shadow_stats ?? null
+    promotionShadowStats: meta.promotion_shadow_stats ?? null,
+    ...provenanceOf(meta),
+    ...countersOf(meta),
+    timestamp: timestampOf(e, meta),
+    origin: originOf(e.source, meta, e.entry_type),
+    autoReflection: meta.auto_reflection === true
   };
 }
 var PROMOTION_KEYS = Object.freeze([
@@ -1661,6 +1671,75 @@ var PROMOTION_KEYS = Object.freeze([
   "promotion_quarantined",
   "promotion_shadow_stats"
 ]);
+function provenanceOf(meta) {
+  const m = meta && typeof meta === "object" ? meta : {};
+  return {
+    sessionId: str2(m.session_id),
+    promptId: str2(m.prompt_id),
+    turnNumber: Math.max(0, Math.trunc(Number(m.turn_number) || 0))
+  };
+}
+var COUNTER_KEYS = Object.freeze(["success_count", "failure_count", "partial_count", "neutral_count"]);
+function countersOf(meta) {
+  const m = meta && typeof meta === "object" ? meta : {};
+  return {
+    successCount: count(m.success_count),
+    failureCount: count(m.failure_count),
+    partialCount: count(m.partial_count),
+    neutralCount: count(m.neutral_count),
+    countersStamped: COUNTER_KEYS.some((k) => m[k] !== void 0 && m[k] !== null),
+    reinforcementCount: count(m.reinforcement_count),
+    confidence: fraction(m.confidence),
+    lastOutcome: str2(m.last_outcome),
+    lastOutcomeAt: isoOf(m.last_outcome_at),
+    lastOutcomeActor: str2(m.last_outcome_actor),
+    validationStatus: str2(m.validation_status),
+    validationScore: fraction(m.validation_score),
+    recurrenceCount: count(m.recurrence_count),
+    projectKey: str2(m.project_key)
+  };
+}
+function count(v) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+}
+function fraction(v) {
+  if (v === null || v === void 0 || v === "") return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function originOf(source, meta, entryType) {
+  const s = str2(source);
+  const m = meta && typeof meta === "object" ? meta : {};
+  const t = str2(entryType);
+  if (t === "trace" || t === "tool_output" || t === "capture") return "hook";
+  if (m.auto_reflection === true || /^auto[-_]?reflect/i.test(s)) return "auto-reflection";
+  if (/^reflect/i.test(s)) return "reflection";
+  if (s === "agent" || s === "mcp-agent") return "agent";
+  if (/hook/i.test(s)) return "hook";
+  return "";
+}
+function timestampOf(e, meta) {
+  const own = str2(e && e.created_at);
+  if (own) return own;
+  const m = meta && typeof meta === "object" ? meta : {};
+  return isoOf(m.timestamp) || isoOf(m.ingested_at);
+}
+function isoOf(v) {
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return "";
+    if (!/^\d+(\.\d+)?$/.test(s)) return s;
+    v = Number(s);
+  }
+  if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return "";
+  const ms = v < 1e12 ? v * 1e3 : v;
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return "";
+  }
+}
 function projectTag(tags) {
   if (!Array.isArray(tags)) return "";
   const hit = tags.map(str2).find((t) => t.startsWith(REPO_TAG));
@@ -1706,6 +1785,7 @@ async function fetchActivity(cfg, params2 = {}, opts = {}) {
     totalVisible: Number(body.total_visible) || 0
   });
 }
+var OUTCOME_WORDS = Object.freeze(["success", "failure", "partial", "neutral"]);
 function str2(v) {
   return typeof v === "string" ? v.trim() : "";
 }
@@ -2048,6 +2128,9 @@ function updateMarker(cfg, runId, patch = {}) {
 var LATTICE = ["run", "session", "global", "org"];
 var CEILINGS = ["run", "session", "global"];
 var INGEST_PATH = "/v2/control/ingest";
+var ARCHIVE_PATH = "/v2/control/archive";
+var OPEN_TURN_GRACE_MS = 6e4;
+var TURN_FILES_TO_READ = 16;
 var LESSONS_PATH = "/v2/control/lessons";
 var LESSONS_DEFAULT_LIMIT = 20;
 var LESSONS_MAX_LIMIT = 200;
@@ -2069,7 +2152,7 @@ function rank(scope) {
   return i < 0 ? Number.POSITIVE_INFINITY : i;
 }
 function guardIngest(body, opts) {
-  const noop = { body, changed: false, note: null };
+  const noop = { body, changed: false, note: null, stamped: false };
   try {
     const ceiling = resolveCeiling(opts?.ceiling);
     const ceilingRank = rank(ceiling);
@@ -2094,27 +2177,130 @@ function guardIngest(body, opts) {
     }
     const priorRun = typeof body.run_id === "string" ? body.run_id : "";
     const movesRun = pinRun && body.run_id !== runId;
-    if (!clamped.length && !movesRun) return noop;
-    const next = { ...body };
-    if (movesRun) next.run_id = runId;
-    if (clamped.length) {
-      next.items = items.slice();
-      for (const i of clamped) next.items[i] = { ...items[i], lesson_scope: ceiling };
+    const changed = clamped.length > 0 || movesRun;
+    let next = body;
+    let note2 = null;
+    if (changed) {
+      next = { ...body };
+      if (movesRun) next.run_id = runId;
+      if (clamped.length) {
+        next.items = items.slice();
+        for (const i of clamped) next.items[i] = { ...items[i], lesson_scope: ceiling };
+      }
+      note2 = { ceiling };
+      if (clamped.length) {
+        note2.lesson_scope = {
+          requested: requested.join(", "),
+          written: ceiling,
+          items: clamped.length
+        };
+      }
+      if (movesRun) note2.run_id = { requested: priorRun, written: runId };
+      note2.raise_with = RAISE_WITH;
     }
-    const note2 = { ceiling };
-    if (clamped.length) {
-      note2.lesson_scope = {
-        requested: requested.join(", "),
-        written: ceiling,
-        items: clamped.length
-      };
-    }
-    if (movesRun) note2.run_id = { requested: priorRun, written: runId };
-    note2.raise_with = RAISE_WITH;
-    return { body: next, changed: true, note: note2 };
+    const stamped = stampProvenance(next, opts?.stamp);
+    if (!changed && !stamped.stamped) return noop;
+    return { body: stamped.body, changed, note: note2, stamped: stamped.stamped };
   } catch {
     return noop;
   }
+}
+function stampProvenance(body, stamp, where = {}) {
+  const noop = { body, stamped: false };
+  try {
+    if (!isPlainObject3(body) || !isPlainObject3(stamp)) return noop;
+    const add = {};
+    for (const [k, v] of Object.entries(stamp)) {
+      if (v !== void 0 && v !== null && v !== "") add[k] = v;
+    }
+    if (!Object.keys(add).length) return noop;
+    if (Array.isArray(body.items) && where.at !== "body") {
+      let any = false;
+      const items = body.items.map((item) => {
+        if (!isPlainObject3(item)) return item;
+        const merged2 = mergeMetadata(item.metadata_json, add);
+        if (merged2 === null) return item;
+        any = true;
+        return { ...item, metadata_json: merged2 };
+      });
+      return any ? { body: { ...body, items }, stamped: true } : noop;
+    }
+    if (where.at !== "body" && !("metadata_json" in body)) return noop;
+    const merged = mergeMetadata(body.metadata_json, add);
+    if (merged === null) return noop;
+    return { body: { ...body, metadata_json: merged }, stamped: true };
+  } catch {
+    return noop;
+  }
+}
+function mergeMetadata(raw, add) {
+  if (raw === void 0 || raw === null || raw === "") return JSON.stringify(add);
+  if (isPlainObject3(raw)) return { ...add, ...raw };
+  if (typeof raw !== "string") return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isPlainObject3(parsed)) return null;
+  return JSON.stringify({ ...add, ...parsed });
+}
+function provenanceStamp(cfg, runId, sessionId, now = Date.now()) {
+  const sid = typeof sessionId === "string" ? sessionId.trim() : "";
+  if (!sid) return null;
+  const stamp = { session_id: sid };
+  try {
+    const mapped = loadSessionMap(sid);
+    const mappedRun = mapped && typeof mapped.run_id === "string" ? mapped.run_id.trim() : "";
+    const turn = openTurn(cfg ?? {}, mappedRun || runId, sid, now);
+    if (turn) {
+      stamp.prompt_id = turn.prompt_id;
+      if (turn.turn_number > 0) stamp.turn_number = turn.turn_number;
+      if (turn.started_at > 0) stamp.prompt_started_at = turn.started_at;
+    }
+  } catch {
+  }
+  return stamp;
+}
+function openTurn(cfg, runId, sessionId, now) {
+  const dir = join8(runDir(cfg, runId), "turns");
+  let names;
+  try {
+    names = readdirSync3(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return null;
+  }
+  if (names.length > TURN_FILES_TO_READ) {
+    names = names.map((f) => ({ f, at: mtimeOf(join8(dir, f)) })).sort((a, b) => b.at - a.at).slice(0, TURN_FILES_TO_READ).map((e) => e.f);
+  }
+  let best = null;
+  for (const f of names) {
+    const t = readJson(join8(dir, f), null);
+    if (!isPlainObject3(t)) continue;
+    if (String(t.session_id ?? "") !== sessionId) continue;
+    if (!best || num2(t.started_at) > num2(best.started_at)) best = t;
+  }
+  if (!best) return null;
+  const ended = num2(best.ended_at);
+  if (ended > 0 && now - ended > OPEN_TURN_GRACE_MS) return null;
+  const promptId = typeof best.prompt_id === "string" ? best.prompt_id.trim() : "";
+  if (!promptId) return null;
+  return { prompt_id: promptId, turn_number: num2(best.turn_number), started_at: num2(best.started_at) };
+}
+function mtimeOf(p) {
+  try {
+    return statSync5(p).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+function num2(v) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+function isPlainObject3(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
 }
 function guardLessonsRead(body, opts) {
   const noop = { body, changed: false, note: null };
@@ -2247,6 +2433,8 @@ function installFetchGuard(opts) {
   const runId = typeof opts?.runId === "string" ? opts.runId : "";
   const pinRun = opts?.pinRun === true;
   const census = censusOnce(opts?.cfg);
+  const sessionId = typeof opts?.sessionId === "string" ? opts.sessionId.trim() : "";
+  const stampNow = () => sessionId ? provenanceStamp(opts?.cfg, runId, sessionId) : null;
   const current = (
     /** @type {any} */
     globalThis.fetch
@@ -2282,14 +2470,19 @@ function installFetchGuard(opts) {
             ceiling,
             runId,
             pinRun,
-            sdkDefaultScope: SDK_DEFAULT_SCOPE
+            sdkDefaultScope: SDK_DEFAULT_SCOPE,
+            stamp: stampNow()
           });
-          if (out.changed) {
-            sendInit = { ...init, body: JSON.stringify(out.body) };
-            note2 = out.note;
-          }
+          if (out.changed || out.stamped) sendInit = { ...init, body: JSON.stringify(out.body) };
+          if (out.changed) note2 = out.note;
           ingestedItems = countItems(out.body);
           ingestedRun = typeof out.body?.run_id === "string" ? out.body.run_id : "";
+        }
+      } else if (isArchive(input, init)) {
+        const parsed = parseBody(init);
+        if (parsed.ok) {
+          const out = stampProvenance(parsed.value, stampNow(), { at: "body" });
+          if (out.stamped) sendInit = { ...init, body: JSON.stringify(out.body) };
         }
       } else if (isLessonsRead(input, init)) {
         const plan = await planLessons(init);
@@ -2316,7 +2509,7 @@ function installFetchGuard(opts) {
     configurable: true,
     enumerable: false
   });
-  wrapped.mubitEgressGuard = { ceiling, pinRun, runId, census: census !== null };
+  wrapped.mubitEgressGuard = { ceiling, pinRun, runId, census: census !== null, stamp: sessionId !== "" };
   globalThis.fetch = /** @type {any} */
   wrapped;
 }
@@ -2328,11 +2521,17 @@ function jsonResponse(payload) {
   });
 }
 function isIngest(input, init) {
+  return isPostTo(input, init, INGEST_PATH);
+}
+function isArchive(input, init) {
+  return isPostTo(input, init, ARCHIVE_PATH);
+}
+function isPostTo(input, init, path) {
   if (String(init?.method ?? "GET").toUpperCase() !== "POST") return false;
   if (typeof input !== "string" && !(input instanceof URL)) return false;
   try {
     const { pathname } = input instanceof URL ? input : new URL(input);
-    return pathname.replace(/\/+$/, "").endsWith(INGEST_PATH);
+    return pathname.replace(/\/+$/, "").endsWith(path);
   } catch {
     return false;
   }
@@ -2455,7 +2654,7 @@ function fill(chunk, instructions) {
 
 // ../claude-code/mcp/src/results.mjs
 import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 
 // ../claude-code/lib/assemble.mjs
 var SECTION_KEYS = Object.freeze([
@@ -2541,7 +2740,7 @@ function firstClause(text) {
 }
 
 // ../claude-code/lib/seen.mjs
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 var SEEN_TTL_MS = 6 * 60 * 60 * 1e3;
 var MAX_SEEN_REFS = 512;
 var SEEN_DIR = "seen";
@@ -2553,7 +2752,7 @@ function seenPath(cfg, runId, sessionId) {
   if (!safeSegment(runId)) return "";
   const session = safeSegment(hostSessionId({ session_id: sessionId }), MAX_SESSION_SEGMENT);
   if (!session) return "";
-  return join8(runDir(cfg, runId), SEEN_DIR, `${session}.json`);
+  return join9(runDir(cfg, runId), SEEN_DIR, `${session}.json`);
 }
 function readSeen(cfg, runId, sessionId = "") {
   try {
@@ -2563,16 +2762,16 @@ function readSeen(cfg, runId, sessionId = "") {
     if (!isObject2(raw) || !isObject2(raw.refs)) return emptySeen();
     const cutoff = Date.now() - SEEN_TTL_MS;
     const out = emptySeen();
-    out.updatedAt = num2(raw.updated_at, 0);
+    out.updatedAt = num3(raw.updated_at, 0);
     for (const [id, v] of Object.entries(raw.refs)) {
       if (!id || !id.trim() || !isObject2(v)) continue;
-      const last = num2(v.last, 0);
+      const last = num3(v.last, 0);
       if (!(last > 0) || last < cutoff) continue;
-      const first = num2(v.first, 0);
+      const first = num3(v.first, 0);
       out.entries[id] = {
         first: first > 0 ? first : last,
         last,
-        count: Math.max(1, Math.trunc(num2(v.count, 1)))
+        count: Math.max(1, Math.trunc(num3(v.count, 1)))
       };
       out.ids.add(id);
     }
@@ -2632,7 +2831,7 @@ function usableIds(refIds) {
 function isObject2(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
-function num2(v, d) {
+function num3(v, d) {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : d;
 }
@@ -2872,10 +3071,10 @@ function spillWriter(cfg, runId) {
   return (text, shape) => {
     try {
       if (!safeSegment(runId)) return "";
-      const dir = join9(runDir(cfg, runId), SPILL_DIR);
+      const dir = join10(runDir(cfg, runId), SPILL_DIR);
       mkdirSync3(dir, { recursive: true });
       const ext = shape === "text" || shape === "error" ? "txt" : "json";
-      const p = join9(dir, `${Date.now()}-${safeSegment(shape) || "result"}-${n++}.${ext}`);
+      const p = join10(dir, `${Date.now()}-${safeSegment(shape) || "result"}-${n++}.${ext}`);
       writeFileSync2(p, text, { encoding: "utf8", mode: 384 });
       return p;
     } catch {
@@ -2941,7 +3140,7 @@ var BRIDGED = [
   ["MUBIT_CC_DATA_DIR", "CLAUDE_PLUGIN_DATA"]
 ];
 var UNEXPANDED = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
-var SERVER_VERSION = true ? "0.13.1" : "";
+var SERVER_VERSION = true ? "0.13.2" : "";
 if (prepare(process.env)) {
   await import("./server.js");
 }
@@ -2969,10 +3168,10 @@ function prepare(env) {
   env.MUBIT_DEFAULT_USER_ID = String(cfg.userId ?? "");
   env.MUBIT_MCP_TOOLS = tools.join(",");
   if (SERVER_VERSION) env.MUBIT_MCP_VERSION = SERVER_VERSION;
-  const ceiling = resolveCeiling(cfg.mcpLessonScope);
-  installFetchGuard({ ceiling, runId, pinRun: true, cfg });
-  installInstructionsGuard({ instructions: INSTRUCTIONS });
   const sessionId = hostPayload(env).session_id ?? "";
+  const ceiling = resolveCeiling(cfg.mcpLessonScope);
+  installFetchGuard({ ceiling, runId, pinRun: true, cfg, sessionId });
+  installInstructionsGuard({ instructions: INSTRUCTIONS });
   installResultsGuard({
     cfg,
     runId,
@@ -2990,7 +3189,8 @@ function prepare(env) {
     instruction_chars: INSTRUCTIONS.length,
     result_tokens: cfg.mcpResultTokenBudget,
     seen: sessionId ? "session" : "off",
-    repeat_mode: cfg.recallRepeatMode
+    repeat_mode: cfg.recallRepeatMode,
+    provenance: sessionId ? "stamped" : "off"
   });
   return true;
 }

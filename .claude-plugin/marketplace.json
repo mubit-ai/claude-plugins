@@ -1,18 +1,18 @@
 {
   "name": "mubit",
   "owner": { "name": "Mubit AI", "url": "https://mubit.ai" },
-  "description": "Official Mubit marketplace: persistent, typed, self-improving memory for Claude Code.",
+  "description": "MOVED to github.com/mubit-ai/plugins. This copy is frozen at 0.13.2 and will not update. Official Mubit marketplace: persistent, typed, self-improving memory for Claude Code.",
   "version": "1.0.0",
   "plugins": [
     {
       "name": "mubit-memory",
       "displayName": "Mubit Memory",
       "version": "0.13.2",
-      "description": "Persistent, typed, self-improving memory for Claude Code, backed by Mubit. Shares one memory with the Codex CLI plugin when both run in the same directory.",
+      "description": "MOVED to github.com/mubit-ai/plugins. This copy is frozen at 0.13.2 and will not update. Persistent, typed, self-improving memory for Claude Code, backed by Mubit. Shares one memory with the Codex CLI plugin when both run in the same directory.",
       "author": { "name": "Mubit AI", "url": "https://mubit.ai" },
       "source": "./integrations/claude-code",
       "homepage": "https://docs.mubit.ai/integrations/claude-code",
-      "repository": "https://github.com/mubit-ai/claude-plugins",
+      "repository": "https://github.com/mubit-ai/plugins",
       "license": "Apache-2.0",
       "keywords": ["memory", "mubit", "long-term-memory", "lessons", "recall"],
       "contextCost": { "value": 3125, "cached": 0 }
